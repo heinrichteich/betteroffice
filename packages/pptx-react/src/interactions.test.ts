@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'bun:test';
-import type { DeckSnapshot, ShapeSnapshot, SlideDisplayList } from '@betteroffice/pptx';
+import type {
+  DeckSnapshot,
+  ShapeSnapshot,
+  SlideDisplayList,
+  TextBoxPrimitive,
+} from '@betteroffice/pptx';
 import {
   canMoveShape,
   findShape,
   findTopLevelShape,
   frameBoundsForShape,
+  hoverTargetAtPoint,
   indexShapes,
   movedShapePosition,
   passedDragThreshold,
@@ -130,6 +136,30 @@ describe('pptx interactions', () => {
     expect(passedDragThreshold(10, 10, 12, 12)).toBe(false);
     expect(passedDragThreshold(10, 10, 14, 10)).toBe(true);
     expect(passedDragThreshold(10, 10, 16, 10, 8)).toBe(false);
+  });
+
+  it('reports the hovered primitive for cursor feedback', () => {
+    expect(hoverTargetAtPoint(frame, { x: 300, y: 150 })).toBe('text');
+    expect(hoverTargetAtPoint(frame, { x: 50, y: 60 })).toBe('shape');
+    expect(hoverTargetAtPoint(frame, { x: 600, y: 600 })).toBeNull();
+  });
+
+  it('prefers the topmost primitive where they overlap', () => {
+    expect(hoverTargetAtPoint(frame, { x: 110, y: 120 })).toBe('text');
+  });
+
+  it('respects primitive rotation when hovering', () => {
+    expect(hoverTargetAtPoint(frame, { x: 198, y: 275 })).toBe('shape');
+    expect(hoverTargetAtPoint(frame, { x: 260, y: 338 })).toBeNull();
+  });
+
+  it('treats a text box without a story as a movable shape', () => {
+    const textBox = frame.primitives[2] as TextBoxPrimitive;
+    const storyless: SlideDisplayList = {
+      ...frame,
+      primitives: [{ ...textBox, storyId: undefined }],
+    };
+    expect(hoverTargetAtPoint(storyless, { x: 300, y: 150 })).toBe('shape');
   });
 
   it('clamps captured text dragging to the nearest caret', () => {

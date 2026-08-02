@@ -2,6 +2,7 @@ import type {
   DeckSnapshot,
   ShapeSnapshot,
   SlideDisplayList,
+  SlidePrimitive,
   SlideSnapshot,
   TextBoxPrimitive,
 } from '@betteroffice/pptx';
@@ -10,6 +11,10 @@ export interface SlidePoint {
   x: number;
   y: number;
 }
+
+/** What the pointer is over, for cursor feedback only — the engine's
+ *  `hitTest` remains the authority for what a click actually selects. */
+export type HoverTarget = 'text' | 'shape';
 
 export interface FrameBounds {
   x: number;
@@ -146,6 +151,28 @@ export function textPositionAtPoint(
     firstCaret
   );
   return caret.position;
+}
+
+export function hoverTargetAtPoint(
+  frame: SlideDisplayList,
+  point: SlidePoint
+): HoverTarget | null {
+  for (let index = frame.primitives.length - 1; index >= 0; index -= 1) {
+    const primitive = frame.primitives[index];
+    if (!primitive.shapeId || !primitiveContains(primitive, point)) continue;
+    return primitive.kind === 'textBox' && primitive.storyId ? 'text' : 'shape';
+  }
+  return null;
+}
+
+function primitiveContains(primitive: SlidePrimitive, point: SlidePoint): boolean {
+  if (primitive.w <= 0 || primitive.h <= 0) return false;
+  const angle = ((primitive.transform?.rotationDeg ?? 0) * Math.PI) / 180;
+  const dx = point.x - (primitive.x + primitive.w / 2);
+  const dy = point.y - (primitive.y + primitive.h / 2);
+  const localX = dx * Math.cos(angle) + dy * Math.sin(angle);
+  const localY = dy * Math.cos(angle) - dx * Math.sin(angle);
+  return Math.abs(localX) <= primitive.w / 2 && Math.abs(localY) <= primitive.h / 2;
 }
 
 export function movedShapePosition(
