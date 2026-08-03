@@ -404,6 +404,10 @@ function PptxEditorContent({
     return () => collaborationOnReplica(null);
   }, [collaborationOnReplica, collaborationReplica]);
 
+  // hover goes untracked under a non-select tool, so drop it rather than let a
+  // stale target paint the cursor when the tool switches back
+  useEffect(() => setHoverTarget(null), [activeTool]);
+
   useEffect(() => {
     if (!collaborationPresence) {
       setRemotePeers([]);
@@ -969,6 +973,8 @@ function PptxEditorContent({
       event.preventDefault();
       return;
     }
+    // a non-select tool paints its own cursor, and a live gesture holds the one it started with
+    if (pointerGestureRef.current || activeTool !== 'select') return;
     const current = modelRef.current;
     if (!current?.frame) return;
     const point = slidePoint(

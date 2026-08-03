@@ -274,6 +274,7 @@ impl RenderedSlide {
             return None;
         }
         for region in self.hit_regions.iter().rev() {
+            let (x, y) = region.local_point(x, y);
             if !region.rect.contains(x, y) {
                 continue;
             }
@@ -458,6 +459,7 @@ impl<'a> LayoutBuilder<'a> {
         self.hit_regions.push(HitRegion {
             shape_id: stable_id,
             rect,
+            transform,
             text: text_hit,
         });
         Ok(())
@@ -568,6 +570,7 @@ impl<'a> LayoutBuilder<'a> {
         self.hit_regions.push(HitRegion {
             shape_id: stable_id.to_owned(),
             rect,
+            transform,
             text: text_hit,
         });
         Ok(())
@@ -1626,7 +1629,32 @@ impl Space {
 struct HitRegion {
     shape_id: String,
     rect: PxRect,
+    transform: Transform,
     text: Option<TextHit>,
+}
+
+impl HitRegion {
+    /// Undoes the rotate-then-flip the shape paints with, so `rect` and the text
+    /// lines can both be read in their unrotated frame.
+    fn local_point(&self, x: f32, y: f32) -> (f32, f32) {
+        if self.transform.is_identity() {
+            return (x, y);
+        }
+        let center_x = self.rect.x + self.rect.w / 2.0;
+        let center_y = self.rect.y + self.rect.h / 2.0;
+        let (sin, cos) = self.transform.rotation_deg.to_radians().sin_cos();
+        let dx = x - center_x;
+        let dy = y - center_y;
+        let mut local_x = dx * cos + dy * sin;
+        let mut local_y = dy * cos - dx * sin;
+        if self.transform.flip_h {
+            local_x = -local_x;
+        }
+        if self.transform.flip_v {
+            local_y = -local_y;
+        }
+        (center_x + local_x, center_y + local_y)
+    }
 }
 
 struct TextHit {
@@ -1980,6 +2008,109 @@ mod tests {
             renderer.register_font("Arial", bold, false, FONT).unwrap();
         }
         renderer
+    }
+
+    #[test]
+    fn hit_testing_a_rotated_shape_follows_its_painted_frame() {
+        let slide = |transform| RenderedSlide {
+            display_list: SurfaceDisplayList {
+                contract_version: CONTRACT_VERSION,
+                width: 400.0,
+                height: 400.0,
+                background: None,
+                primitives: Vec::new(),
+            },
+            hit_regions: vec![HitRegion {
+                shape_id: "rotated".to_owned(),
+                rect: PxRect {
+                    x: 100.0,
+                    y: 100.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
+                transform,
+                text: None,
+            }],
+        };
+        let turned = |rotation_deg| Transform {
+            rotation_deg,
+            ..Transform::default()
+        };
+
+        // turned 45°, the square's corners point along the axes: its bounding box
+        // corners fall outside it and the axis midpoints fall inside
+        assert!(slide(turned(0.0)).hit_test(105.0, 105.0).is_some());
+        assert!(slide(turned(45.0)).hit_test(105.0, 105.0).is_none());
+        assert!(slide(turned(0.0)).hit_test(150.0, 90.0).is_none());
+        assert!(slide(turned(45.0)).hit_test(150.0, 90.0).is_some());
+
+        // a flip maps the square onto itself, so membership is unchanged
+        let flipped = Transform {
+            rotation_deg: 45.0,
+            flip_h: true,
+            flip_v: false,
+        };
+        assert!(slide(flipped).hit_test(150.0, 90.0).is_some());
+        assert!(slide(flipped).hit_test(105.0, 105.0).is_none());
+    }
+
+    #[test]
+    fn hit_testing_flipped_text_reads_the_mirrored_caret() {
+        // membership cannot catch a flip — the rect maps onto itself — so pin it
+        // on the caret, where the sign of the local point decides the answer
+        let slide = |flip_h| RenderedSlide {
+            display_list: SurfaceDisplayList {
+                contract_version: CONTRACT_VERSION,
+                width: 400.0,
+                height: 400.0,
+                background: None,
+                primitives: Vec::new(),
+            },
+            hit_regions: vec![HitRegion {
+                shape_id: "mirrored".to_owned(),
+                rect: PxRect {
+                    x: 100.0,
+                    y: 100.0,
+                    w: 120.0,
+                    h: 40.0,
+                },
+                transform: Transform {
+                    rotation_deg: 0.0,
+                    flip_h,
+                    flip_v: false,
+                },
+                text: Some(TextHit {
+                    story_id: "story".to_owned(),
+                    lines: vec![PositionedTextLine {
+                        x: 110.0,
+                        y: 110.0,
+                        width: 100.0,
+                        height: 20.0,
+                        baseline: 125.0,
+                        start: 0,
+                        end: 5,
+                        runs: Vec::new(),
+                        caret_stops: vec![
+                            CaretStop {
+                                position: 0,
+                                x: 110.0,
+                            },
+                            CaretStop {
+                                position: 5,
+                                x: 210.0,
+                            },
+                        ],
+                    }],
+                }),
+            }],
+        };
+        let position = |flip_h| match slide(flip_h).hit_test(120.0, 120.0) {
+            Some(HitTestResult::Text { position, .. }) => position,
+            other => panic!("expected a text hit, got {other:?}"),
+        };
+
+        assert_eq!(position(false), 0);
+        assert_eq!(position(true), 5);
     }
 
     #[test]
