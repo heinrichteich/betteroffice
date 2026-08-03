@@ -1,1 +1,10 @@
-{"signedContributors":[]}
+{
+  "signedContributors": [
+    {
+      "name": "heinrichteich",
+      "id": 179254786,
+      "signed_at": "2026-08-03T12:53:10Z",
+      "pull_request_no": 147
+    }
+  ]
+}
