@@ -23,9 +23,17 @@ struct RichParagraph {
     after: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TabStop {
+    position: f32,
+    alignment: i32,
+    default_interval: Option<f32>,
+}
+
 fn rich_paragraphs(
     renderer: &Renderer,
     package: &VsdxPackage,
+    resolved: &ResolvedShape,
     tokens: &[vsdx_resolve::ResolvedTextToken],
 ) -> Vec<RichParagraph> {
     let mut character = TextRun {
@@ -36,6 +44,7 @@ fn rich_paragraphs(
         italic: false,
         color: "#000000".into(),
         diagnostic: None,
+        tab: None,
     };
     let mut paragraphs = vec![RichParagraph {
         runs: Vec::new(),
@@ -64,24 +73,32 @@ fn rich_paragraphs(
                 paragraphs.push(paragraph);
             }
             vsdx_resolve::ResolvedTextToken::Tab { properties, .. } => {
-                let width = property_number(properties, "Position").unwrap_or(0.5);
                 append_run(&mut paragraphs, &character, "\t".into());
                 if let Some(run) = paragraphs
                     .last_mut()
                     .and_then(|paragraph| paragraph.runs.last_mut())
                 {
-                    run.diagnostic = Some(format!("tab stop {width}"));
+                    let position = property_number(properties, "Position");
+                    let alignment = property_number(properties, "Alignment").unwrap_or(0.0) as i32;
+                    run.diagnostic = position.is_none().then(|| {
+                        "tab stop missing Position; used documented DefaultTabStop 0.5 in".into()
+                    });
+                    run.tab = Some(TabStop {
+                        position: position.unwrap_or(0.0) as f32,
+                        alignment,
+                        default_interval: position.is_none().then(|| {
+                            property_number(&resolved.cells, "DefaultTabStop").unwrap_or(0.5) as f32
+                        }),
+                    });
                 }
             }
             vsdx_resolve::ResolvedTextToken::Field { properties, .. } => {
-                let value = property_value(properties, "Value")
-                    .or_else(|| property_value(properties, "Format"));
                 let mut run = character.clone();
-                match value {
-                    Some(value) if !value.is_empty() => run.text = value.into(),
-                    _ => {
+                match field_value(package, resolved, properties) {
+                    Ok(value) => run.text = value,
+                    Err(reason) => {
                         run.text = "[unresolved field]".into();
-                        run.diagnostic = Some("unresolvable field".into());
+                        run.diagnostic = Some(reason);
                     }
                 }
                 paragraphs
@@ -95,9 +112,47 @@ fn rich_paragraphs(
     paragraphs
 }
 
+fn field_value(
+    package: &VsdxPackage,
+    resolved: &ResolvedShape,
+    properties: &std::collections::BTreeMap<String, Lookup>,
+) -> Result<String, String> {
+    let Some(Lookup::Found(value)) = properties.get("Value") else {
+        return Err("unresolvable field: no Value cell".into());
+    };
+    if let Some(display) = value
+        .cell
+        .value
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(display.into());
+    }
+    let Some(formula) = value.cell.formula.as_deref() else {
+        return Err("unresolvable field: no cached Value".into());
+    };
+    match evaluate_cell_with_shape_package_theme(
+        "Field.Value",
+        formula,
+        resolved,
+        &ParseLimits::default(),
+        resolved,
+        package,
+    ) {
+        Evaluation::Evaluated(result) => match result.value {
+            Value::Number(value) if value.number.is_finite() => Ok(value.number.to_string()),
+            Value::Number(_) => Err("unresolvable field: non-finite Value".into()),
+            Value::Color(_) => Err("unresolvable field: Value is a colour".into()),
+        },
+        Evaluation::Unsupported(reason) => Err(format!("unresolvable field: {reason}")),
+        Evaluation::Error(error) => Err(format!("unresolvable field: {}", error.message)),
+    }
+}
+
 fn append_run(paragraphs: &mut [RichParagraph], character: &TextRun, text: String) {
     let mut run = character.clone();
     run.text = text;
+    run.tab = None;
     paragraphs
         .last_mut()
         .expect("paragraph exists")
@@ -521,7 +576,7 @@ impl Renderer {
             .get(page_part)
             .ok_or_else(|| RenderError::MissingPage(page_part.into()))?;
         let tokens = resolver.resolve_text(shape, page)?;
-        let mut paragraphs = rich_paragraphs(self, package, &tokens);
+        let mut paragraphs = rich_paragraphs(self, package, resolved, &tokens);
         if paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()) {
             return Ok(());
         }
@@ -662,9 +717,35 @@ impl Renderer {
                     Some((*end > index).then_some(run))
                 })
                 .find_map(|run| run);
-            let (width, line_height) = run
+            let (mut width, line_height) = run
                 .map(|run| (self.measure(run, &ch.to_string()), run.size_px * 1.2))
                 .unwrap_or((0.0, 0.2));
+            if ch == '\t'
+                && let Some(tab) = run.and_then(|run| run.tab)
+            {
+                let cursor = widths.iter().map(|(_, _, width)| *width).sum::<f32>();
+                let position = tab.default_interval.map_or(tab.position, |interval| {
+                    ((cursor / interval).floor() + 1.0) * interval
+                });
+                let following = text[index + ch.len_utf8()..]
+                    .split('\t')
+                    .next()
+                    .unwrap_or_default();
+                let following_width =
+                    self.measure_text(paragraph, index + ch.len_utf8(), following);
+                let before_decimal = following
+                    .split_once('.')
+                    .map_or(following, |(before, _)| before);
+                let decimal_width =
+                    self.measure_text(paragraph, index + ch.len_utf8(), before_decimal);
+                let aligned = match tab.alignment {
+                    1 => position - following_width * 0.5,
+                    2 => position - following_width,
+                    3 => position - decimal_width,
+                    _ => position,
+                };
+                width = (aligned - cursor).max(0.0);
+            }
             widths.push((index, ch.len_utf8(), width));
             height = height.max(line_height);
         }
@@ -813,6 +894,22 @@ impl Renderer {
             .and_then(|font| ooxml_text::shape(&self.fonts, font, text, run.size_px, &[]).ok())
             .map(|glyphs| glyphs.iter().map(|glyph| glyph.x_advance).sum())
             .unwrap_or(text.chars().count() as f32 * run.size_px * 0.5)
+    }
+    fn measure_text(&self, paragraph: &RichParagraph, start: usize, text: &str) -> f32 {
+        text.char_indices()
+            .map(|(relative, ch)| {
+                let index = start + relative;
+                paragraph
+                    .runs
+                    .iter()
+                    .scan(0usize, |end, run| {
+                        *end += run.text.len();
+                        Some((*end > index).then_some(run))
+                    })
+                    .find_map(|run| run)
+                    .map_or(0.0, |run| self.measure(run, &ch.to_string()))
+            })
+            .sum()
     }
     fn placeholder(
         &self,
@@ -1626,6 +1723,16 @@ mod tests {
             .unwrap()
     }
 
+    fn text_section(name: &str, rows: Vec<Row>) -> ShapeChild {
+        ShapeChild::Section(Section {
+            name: name.into(),
+            index: None,
+            del: false,
+            children: rows.into_iter().map(SectionChild::Row).collect(),
+            other_attrs: vec![],
+        })
+    }
+
     fn shape_primitive(list: &VsdxDisplayList, id: u32) -> &Primitive {
         list.primitives.iter().find(|primitive| matches!(primitive, Primitive::Shape { id: actual, .. } if actual == &format!("page:{id}"))).unwrap()
     }
@@ -1677,6 +1784,106 @@ mod tests {
             path[0],
             GeometryPathCommand::Move { x: 2.0, y: 3.0 }
         ));
+    }
+
+    #[test]
+    fn tabs_advance_to_effective_stops_and_align_following_text() {
+        for (alignment, expected_start) in [(0, 4.0), (1, 3.0), (2, 2.0)] {
+            let mut shape = text_shape(vec![
+                TextToken::CharacterRun(0),
+                TextToken::Literal("a".into()),
+                TextToken::Tab(0),
+                TextToken::Literal("bc".into()),
+            ]);
+            shape.children.push(text_section(
+                "Character",
+                vec![row(0, "", vec![cell("Size", "2")])],
+            ));
+            shape.children.push(text_section(
+                "Tabs",
+                vec![row(
+                    0,
+                    "",
+                    vec![
+                        cell("Position", "4"),
+                        cell("Alignment", &alignment.to_string()),
+                    ],
+                )],
+            ));
+            with_cell(&mut shape, "Width", "10");
+            let list = render(vec![shape]);
+            let Primitive::TextBox { lines, .. } = text_box(&list) else {
+                unreachable!()
+            };
+            let start = lines[0]
+                .caret_stops
+                .iter()
+                .find(|stop| stop.position == 2)
+                .unwrap();
+            assert!((start.x - (1.0 + expected_start)).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn undefined_tab_uses_documented_default_interval_with_diagnostic() {
+        let mut shape = text_shape(vec![
+            TextToken::CharacterRun(0),
+            TextToken::Literal("a".into()),
+            TextToken::Tab(3),
+            TextToken::Literal("b".into()),
+        ]);
+        shape.children.push(text_section(
+            "Tabs",
+            vec![row(0, "", vec![cell("Position", "0.25")])],
+        ));
+        let list = render(vec![shape]);
+        let Primitive::TextBox {
+            paragraphs, lines, ..
+        } = text_box(&list)
+        else {
+            unreachable!()
+        };
+        assert!(
+            paragraphs[0].runs[1]
+                .diagnostic
+                .as_deref()
+                .is_some_and(|diagnostic| diagnostic.contains("DefaultTabStop 0.5 in"))
+        );
+        assert!((lines[0].caret_stops[2].x - 1.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn fields_render_cached_values_or_diagnostic_runs_in_order() {
+        let mut shape = text_shape(vec![
+            TextToken::Literal(" before ".into()),
+            TextToken::Field(0),
+            TextToken::Literal(" middle ".into()),
+            TextToken::Field(1),
+            TextToken::Literal(" after ".into()),
+        ]);
+        shape.children.push(text_section(
+            "Field",
+            vec![
+                row(0, "", vec![cell("Value", "resolved")]),
+                row(1, "", vec![cell("Format", "not a value")]),
+            ],
+        ));
+        let list = render(vec![shape]);
+        let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        let runs = &paragraphs[0].runs;
+        assert_eq!(
+            runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+            " before resolved middle [unresolved field] after "
+        );
+        assert_eq!(runs[1].diagnostic, None);
+        assert!(
+            runs[3]
+                .diagnostic
+                .as_deref()
+                .is_some_and(|reason| reason.contains("no Value cell"))
+        );
     }
 
     #[test]

@@ -750,6 +750,95 @@ fn section_rows_inherit_by_name_or_ix_and_preserve_duplicate_occurrences() {
 }
 
 #[test]
+fn unequal_duplicate_and_anonymous_rows_preserve_each_occurrence() {
+    for anonymous in [false, true] {
+        let mut first_package = package();
+        let mut local_row = row(0, vec![cell("X", "local-first")]);
+        let mut master_second = row(0, vec![cell("X", "master-second")]);
+        if anonymous {
+            local_row.index = None;
+            master_second.index = None;
+        }
+        let mut local = shape(
+            1,
+            vec![ShapeChild::Section(section("Geometry", vec![local_row]))],
+        );
+        local.master = Some(1);
+        add_page(&mut first_package, local);
+        let mut master_first = row(0, vec![cell("X", "master-first")]);
+        if anonymous {
+            master_first.index = None;
+        }
+        add_master(
+            &mut first_package,
+            1,
+            shape(
+                1,
+                vec![ShapeChild::Section(section(
+                    "Geometry",
+                    vec![master_first, master_second],
+                ))],
+            ),
+        );
+        let first_section = &Resolver::new(&first_package)
+            .resolve_shape("page", 1)
+            .unwrap()
+            .sections["Geometry"];
+        assert_eq!(first_section.row_order.len(), 2);
+        assert_eq!(
+            found_row(first_section, &first_section.row_order[0], "X").0,
+            "local-first"
+        );
+        assert_eq!(
+            found_row(first_section, &first_section.row_order[1], "X").0,
+            "master-second"
+        );
+
+        let mut package = package();
+        let mut first = row(0, vec![cell("X", "local-first")]);
+        let mut second = row(0, vec![cell("X", "local-second")]);
+        if anonymous {
+            first.index = None;
+            second.index = None;
+        }
+        let mut local = shape(
+            1,
+            vec![ShapeChild::Section(section(
+                "Geometry",
+                vec![first, second],
+            ))],
+        );
+        local.master = Some(1);
+        add_page(&mut package, local);
+        let mut master = row(0, vec![cell("X", "master-first")]);
+        if anonymous {
+            master.index = None;
+        }
+        add_master(
+            &mut package,
+            1,
+            shape(
+                1,
+                vec![ShapeChild::Section(section("Geometry", vec![master]))],
+            ),
+        );
+        let section = &Resolver::new(&package)
+            .resolve_shape("page", 1)
+            .unwrap()
+            .sections["Geometry"];
+        assert_eq!(section.row_order.len(), 2);
+        assert_eq!(
+            found_row(section, &section.row_order[0], "X").0,
+            "local-first"
+        );
+        assert_eq!(
+            found_row(section, &section.row_order[1], "X").0,
+            "local-second"
+        );
+    }
+}
+
+#[test]
 fn inh_section_cells_skip_to_master_and_text_style() {
     let mut package = package();
     let mut local = shape(
