@@ -606,4 +606,19 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[test]
+    fn wasm_media_bytes_returns_a_known_media_part() {
+        let Ok(corpus) = std::env::var("VSDX_CORPUS_DIR") else {
+            return;
+        };
+        let bytes = std::fs::read(std::path::Path::new(&corpus).join("lichtsysteme.vsdx")).unwrap();
+        let document = VsdxDocument::open_collaborative(&bytes, 1.0).unwrap();
+        assert!(
+            !document
+                .media_bytes_result("visio/media/image1.png")
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
