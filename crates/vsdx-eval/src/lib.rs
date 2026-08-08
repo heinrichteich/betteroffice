@@ -924,11 +924,13 @@ impl<'a> Parser<'a> {
             }
             x if x.is_ascii_digit() || x == '.' => {
                 let mut s = x.to_string();
-                while self
-                    .chars
-                    .peek()
-                    .is_some_and(|x| x.is_ascii_digit() || *x == '.' || *x == 'e' || *x == 'E')
-                {
+                while self.chars.peek().is_some_and(|x| {
+                    x.is_ascii_digit()
+                        || *x == '.'
+                        || *x == 'e'
+                        || *x == 'E'
+                        || matches!(*x, '+' | '-') && s.ends_with(['e', 'E'])
+                }) {
                     s.push(self.chars.next().unwrap());
                 }
                 let mut n = s.parse().unwrap_or(f64::NAN);
@@ -1099,6 +1101,7 @@ mod tests {
         assert_eq!(number("1 + 2 * 3").number, 7.0);
         assert_eq!(number("2^3^2").number, 512.0);
         assert_eq!(number("-(1 + 2)").number, -3.0);
+        assert_eq!(number("1.5E-6").number, 1.5E-6);
         assert!(matches!(
             parse("Geometry1.X2", &limits()),
             Ok(Expr::Reference(_))
