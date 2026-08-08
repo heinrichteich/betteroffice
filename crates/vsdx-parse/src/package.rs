@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::model::{PackagePart, VsdxPackage};
 use crate::patch::{
-    CellEdit, MAX_PATCH_BYTES, MAX_PATCH_EDITS, SpanEdit, apply_span_edits, escape_attribute_value,
-    scan_element_spans,
+    AttributeSpan, CellEdit, MAX_PATCH_BYTES, MAX_PATCH_EDITS, SpanEdit, apply_span_edits,
+    escape_attribute_value, scan_element_spans,
 };
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
 use crate::sheet::{parse_records, parse_sheet};
@@ -597,9 +597,16 @@ fn contains(parent: crate::SourceSpan, child: crate::SourceSpan) -> bool {
 
 fn attribute_equals(source: &[u8], span: &crate::ElementSpan, name: &str, expected: &str) -> bool {
     span.attributes.get(name).is_some_and(|attribute| {
-        source.get(attribute.value.offset..attribute.value.end().unwrap_or(0))
-            == Some(expected.as_bytes())
+        attribute_value(source, attribute).is_some_and(|value| value == expected)
     })
+}
+
+fn attribute_value<'a>(
+    source: &'a [u8],
+    attribute: &AttributeSpan,
+) -> Option<std::borrow::Cow<'a, str>> {
+    let value = source.get(attribute.value.offset..attribute.value.end()?)?;
+    quick_xml::escape::unescape(std::str::from_utf8(value).ok()?).ok()
 }
 
 fn is_shapesheet_part(package: &VsdxPackage, path: &str) -> bool {
@@ -841,6 +848,84 @@ mod tests {
                 .values()
                 .any(|sheet| sheet_has_value(sheet, "patched"))
         );
+    }
+
+    #[test]
+    fn resolves_semantic_locators_with_escaped_attributes() {
+        let (package, path) = package_with_page_xml(
+            b"<PageContents><Shapes><Shape ID='&#49;'><Cell N='A&amp;B' V='direct'/><Section N='A&#x26;B'><Row IX='0'><Cell N='SectionCell' V='section'/></Row></Section><Cell N='IdCell' V='id'/></Shape></Shapes></PageContents>",
+        );
+        let cases = [
+            (
+                CellLocator {
+                    sheet: CellSheet::Page(*package.page_part_ids.get(&path).unwrap()),
+                    shape_id: Some(1),
+                    section: None,
+                    row: None,
+                    cell_name: "A&B".to_owned(),
+                },
+                "A&B",
+                "patched-direct",
+            ),
+            (
+                CellLocator {
+                    sheet: CellSheet::Page(*package.page_part_ids.get(&path).unwrap()),
+                    shape_id: Some(1),
+                    section: Some("A&B".to_owned()),
+                    row: Some(CellRow::Index(0)),
+                    cell_name: "SectionCell".to_owned(),
+                },
+                "SectionCell",
+                "patched-section",
+            ),
+            (
+                CellLocator {
+                    sheet: CellSheet::Page(*package.page_part_ids.get(&path).unwrap()),
+                    shape_id: Some(1),
+                    section: None,
+                    row: None,
+                    cell_name: "IdCell".to_owned(),
+                },
+                "IdCell",
+                "patched-id",
+            ),
+        ];
+        for (locator, cell_name, new_value) in cases {
+            let before = package.part_bytes(&path).unwrap();
+            let cell = package
+                .element_spans(&path)
+                .unwrap()
+                .iter()
+                .find(|span| {
+                    local_name(&span.name) == "Cell"
+                        && attribute_value(before, &span.attributes["N"])
+                            .is_some_and(|value| value == cell_name)
+                })
+                .unwrap();
+            let saved = save_semantic_cell_edits(
+                &package,
+                &[SemanticCellEdit {
+                    locator,
+                    formula: None,
+                    value: Some(new_value.to_owned()),
+                }],
+            )
+            .unwrap();
+            let after = unzip_parts(&saved)
+                .unwrap()
+                .into_iter()
+                .find(|(candidate, _)| candidate == &path)
+                .unwrap()
+                .1;
+            assert_only_span_changed(before, &after, cell.attributes["V"].value, new_value.len());
+            let reparsed = parse_vsdx(&saved).unwrap();
+            assert!(
+                reparsed
+                    .page_contents
+                    .values()
+                    .any(|sheet| sheet_has_value(sheet, new_value))
+            );
+        }
     }
 
     #[test]

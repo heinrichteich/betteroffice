@@ -253,8 +253,23 @@ fn terminated_token(source: &[u8], index: usize, terminator: &[u8]) -> Option<To
 
 fn doctype_token(source: &[u8], mut index: usize) -> Option<Token> {
     let mut quote = None;
+    let mut comment = false;
     let mut subset_depth = 0;
     while index < source.len() {
+        if comment {
+            if source[index..].starts_with(b"-->") {
+                comment = false;
+                index += 3;
+                continue;
+            }
+            index += 1;
+            continue;
+        }
+        if quote.is_none() && source[index..].starts_with(b"<!--") {
+            comment = true;
+            index += 4;
+            continue;
+        }
         match (quote, source[index]) {
             (Some(active), byte) if byte == active => quote = None,
             (Some(_), _) => {}
@@ -442,6 +457,18 @@ mod tests {
         assert!(spans.iter().any(|span| span.name == "Inner"));
         assert!(spans.iter().any(|span| span.name == "Deep"));
         assert!(spans.iter().any(|span| span.name == "Root"));
+    }
+
+    #[test]
+    fn scanner_ignores_doctype_comments() {
+        let source = b"<!DOCTYPE Root [<!-- ]> <Cell V='fake'/> -->]><Root><Cell V='real'/></Root>";
+        let spans = scan_element_spans(source).unwrap();
+        let cells: Vec<_> = spans.iter().filter(|span| span.name == "Cell").collect();
+        assert_eq!(cells.len(), 1);
+        assert_eq!(
+            &source[cells[0].span.offset..cells[0].span.end().unwrap()],
+            b"<Cell V='real'/>"
+        );
     }
 
     #[test]
