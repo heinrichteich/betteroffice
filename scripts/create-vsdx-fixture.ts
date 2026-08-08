@@ -39,3 +39,15 @@ const nestedParts: Record<string, string | Uint8Array> = {
 const nestedZip = new JSZip();
 for (const [name, contents] of Object.entries(nestedParts)) nestedZip.file(name, contents, { date: zipDate, createFolders: false });
 fs.writeFileSync(nestedOutput, await nestedZip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', platform: 'DOS' }));
+
+for (const [name, rows] of [
+  ['geometry-anonymous-rows', "<Row T='MoveTo'><Cell N='X' V='1'/><Cell N='Y' V='2'/></Row><Row T='LineTo'><Cell N='X' V='3'/><Cell N='Y' V='4'/></Row>"],
+  ['geometry-duplicate-ix-rows', "<Row IX='0' T='MoveTo'><Cell N='X' V='1'/><Cell N='Y' V='2'/></Row><Row IX='0' T='LineTo'><Cell N='X' V='3'/><Cell N='Y' V='4'/></Row>"],
+] as const) {
+  const fixture = new JSZip();
+  for (const [part, contents] of Object.entries({
+    ...parts,
+    'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Shape'><Section N='Geometry'>${rows}</Section></Shape></Shapes></PageContents>`,
+  })) fixture.file(part, contents, { date: zipDate, createFolders: false });
+  fs.writeFileSync(path.join(root, `crates/vsdx-parse/tests/fixtures/${name}.vsdx`), await fixture.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', platform: 'DOS' }));
+}

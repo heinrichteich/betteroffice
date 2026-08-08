@@ -404,10 +404,14 @@ impl<'a> Resolver<'a> {
             }
             sources.truncate(position);
         }
-        let mut keys = HashSet::new();
+        let mut keys = Vec::new();
         for (_, section) in &sources {
-            if let Some(section) = section {
-                keys.extend(section.rows().map(row_key));
+            let Some(section) = section else { continue };
+            for (ordinal, row) in section.rows().enumerate() {
+                let key = row_key(row, ordinal);
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
             }
         }
         let mut out = ResolvedSection {
@@ -420,21 +424,28 @@ impl<'a> Resolver<'a> {
                 .map(|(p, section)| {
                     (
                         *p,
-                        section.and_then(|s| s.rows().find(|r| row_key(r) == key)),
+                        section.and_then(|s| {
+                            s.rows()
+                                .enumerate()
+                                .find(|(ordinal, row)| row_key(row, *ordinal) == key)
+                                .map(|(_, row)| row)
+                        }),
                     )
                 })
                 .collect();
             let row = rows.iter().find_map(|(_, row)| *row);
             let Some(row) = row else { continue };
+            let resolved_key = resolved_row_key(&key, &out.rows);
             if row.del {
                 out.rows.insert(
-                    key.clone(),
+                    resolved_key.clone(),
                     ResolvedRow {
-                        key,
+                        key: resolved_key.clone(),
                         deleted: true,
                         ..Default::default()
                     },
                 );
+                out.row_order.push(resolved_key);
                 continue;
             }
             let mut names = HashSet::new();
@@ -474,14 +485,15 @@ impl<'a> Resolver<'a> {
                 cells.insert(cell_name, lookup.unwrap_or(Lookup::Absent));
             }
             out.rows.insert(
-                key.clone(),
+                resolved_key.clone(),
                 ResolvedRow {
-                    key,
+                    key: resolved_key.clone(),
                     deleted: false,
                     row_type: row.row_type.clone(),
                     cells,
                 },
             );
+            out.row_order.push(resolved_key);
         }
         out
     }
@@ -675,10 +687,20 @@ impl HasSections for Sheet {
         Box::new(self.sections())
     }
 }
-fn row_key(row: &Row) -> String {
-    row.name
+fn row_key(row: &Row, ordinal: usize) -> String {
+    let key = row
+        .name
         .clone()
         .map(|name| format!("N:{name}"))
         .or_else(|| row.index.map(|index| format!("IX:{index}")))
-        .unwrap_or_default()
+        .unwrap_or_else(|| "row".into());
+    format!("{key}\u{1f}{ordinal}")
+}
+fn resolved_row_key(identity: &str, rows: &BTreeMap<String, ResolvedRow>) -> String {
+    let (key, ordinal) = identity.rsplit_once('\u{1f}').unwrap_or((identity, "0"));
+    if !rows.contains_key(key) {
+        key.into()
+    } else {
+        format!("{key}\u{1f}{ordinal}")
+    }
 }

@@ -47,6 +47,7 @@ pub struct ResolvedSection {
     pub name: String,
     pub deleted: bool,
     pub rows: BTreeMap<String, ResolvedRow>,
+    pub row_order: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

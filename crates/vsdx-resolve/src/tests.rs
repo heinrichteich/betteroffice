@@ -599,6 +599,34 @@ fn inherited_master_cell_beats_documented_default() {
 }
 
 #[test]
+fn geometry_rows_without_ix_all_realize_in_source_order() {
+    let package = parse_vsdx(include_bytes!(
+        "../../vsdx-parse/tests/fixtures/geometry-anonymous-rows.vsdx"
+    ))
+    .unwrap();
+    let page = &package.page_part_paths[0];
+    let resolved = Resolver::new(&package).resolve_shape(page, 1).unwrap();
+    let section = &resolved.sections["Geometry"];
+    assert_eq!(section.row_order.len(), 2);
+    let geometry = crate::realize_geometry(section);
+    assert_eq!(geometry.commands.len(), 2);
+}
+
+#[test]
+fn geometry_rows_with_duplicate_ix_all_realize_in_source_order() {
+    let package = parse_vsdx(include_bytes!(
+        "../../vsdx-parse/tests/fixtures/geometry-duplicate-ix-rows.vsdx"
+    ))
+    .unwrap();
+    let page = &package.page_part_paths[0];
+    let resolved = Resolver::new(&package).resolve_shape(page, 1).unwrap();
+    let section = &resolved.sections["Geometry"];
+    assert_eq!(section.row_order.len(), 2);
+    let geometry = crate::realize_geometry(section);
+    assert_eq!(geometry.commands.len(), 2);
+}
+
+#[test]
 fn inh_section_cells_skip_to_master_and_text_style() {
     let mut package = package();
     let mut local = shape(
