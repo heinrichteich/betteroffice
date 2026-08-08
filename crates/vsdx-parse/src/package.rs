@@ -186,6 +186,8 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         })
         .collect::<Result<_, VsdxError>>()?;
     let sheet_part_paths: HashSet<&str> = std::iter::once(document_path.as_str())
+        .chain(pages_part_path.iter().map(String::as_str))
+        .chain(masters_part_path.iter().map(String::as_str))
         .chain(page_part_paths.iter().map(String::as_str))
         .chain(master_part_paths.iter().map(String::as_str))
         .collect();
@@ -525,11 +527,30 @@ fn save_cell_edits_with_new_cells(
                 message: "local cell owner has no attribute quote style".to_owned(),
             })?;
         let end = owner.span.end().ok_or(VsdxError::InvalidSpan)?;
-        let closing = part.bytes[..end]
-            .iter()
-            .rposition(|byte| *byte == b'<')
-            .ok_or(VsdxError::InvalidSpan)?;
+        let (span, closes_owner) = if end >= 2 && part.bytes[end - 2..end] == *b"/>" {
+            (
+                crate::SourceSpan {
+                    offset: end - 2,
+                    length: 2,
+                },
+                true,
+            )
+        } else {
+            (
+                crate::SourceSpan {
+                    offset: part.bytes[..end]
+                        .iter()
+                        .rposition(|byte| *byte == b'<')
+                        .ok_or(VsdxError::InvalidSpan)?,
+                    length: 0,
+                },
+                false,
+            )
+        };
         let mut replacement = b"<Cell N=".to_vec();
+        if closes_owner {
+            replacement.insert(0, b'>');
+        }
         replacement.push(quote);
         replacement.extend_from_slice(&escape_attribute_value(&new_cell.name, quote)?);
         replacement.push(quote);
@@ -542,19 +563,13 @@ fn save_cell_edits_with_new_cells(
             replacement.push(quote);
         }
         replacement.extend_from_slice(b"/>");
+        if closes_owner {
+            replacement.extend_from_slice(format!("</{}>", local_name(&owner.name)).as_bytes());
+        }
         replacement_bytes = replacement_bytes
             .checked_add(replacement.len())
             .ok_or(VsdxError::PatchLimit { kind: "editBytes" })?;
-        validated.push((
-            part.path.as_str(),
-            SpanEdit {
-                span: crate::SourceSpan {
-                    offset: closing,
-                    length: 0,
-                },
-                replacement,
-            },
-        ));
+        validated.push((part.path.as_str(), SpanEdit { span, replacement }));
     }
     if replacement_bytes > MAX_PATCH_BYTES {
         return Err(VsdxError::PatchLimit { kind: "editBytes" });
@@ -633,10 +648,26 @@ fn resolve_cell_locator(
 ) -> Result<LocalCell, VsdxError> {
     let path = match locator.sheet {
         CellSheet::Document => Some(package.document_part_path.clone()),
-        CellSheet::Page(id) => package
+        CellSheet::Page(id) if locator.shape_id.is_some() => package
             .page_part_ids
             .iter()
             .find_map(|(path, candidate)| (*candidate == id).then(|| path.clone())),
+        CellSheet::Page(id) => package.parts.iter().find_map(|part| {
+            part.spans.iter().find_map(|page| {
+                (local_name(&page.name) == "Page"
+                    && attribute_equals(&part.bytes, page, "ID", &id.to_string()))
+                .then(|| {
+                    part.spans
+                        .iter()
+                        .any(|sheet| {
+                            local_name(&sheet.name) == "PageSheet"
+                                && contains(page.span, sheet.span)
+                        })
+                        .then(|| part.path.clone())
+                })
+                .flatten()
+            })
+        }),
         CellSheet::Master(id) => package
             .master_part_ids
             .iter()
@@ -698,6 +729,8 @@ fn resolve_cell_locator(
         "Row"
     } else if locator.shape_id.is_some() {
         "Shape"
+    } else if matches!(locator.sheet, CellSheet::Page(_)) {
+        "PageSheet"
     } else {
         "DocumentSheet"
     };
@@ -781,6 +814,8 @@ fn attribute_value<'a>(
 
 fn is_shapesheet_part(package: &VsdxPackage, path: &str) -> bool {
     path == package.document_part_path
+        || package.pages_part_path.as_deref() == Some(path)
+        || package.masters_part_path.as_deref() == Some(path)
         || package
             .page_part_paths
             .iter()

@@ -1,5 +1,6 @@
 use betteroffice_vsdx::{CellLocator, CellSheet, Diagram, MutationGesture, SemanticCellEdit};
 use ooxml_opc::{rezip_parts, unzip_parts};
+use std::collections::BTreeMap;
 
 fn diagram_with_page(xml: &str) -> (Vec<u8>, Diagram, u32) {
     let source = include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx");
@@ -15,6 +16,40 @@ fn diagram_with_page(xml: &str) -> (Vec<u8>, Diagram, u32) {
     let source = rezip_parts(&parts).unwrap();
     let diagram = Diagram::open(&source).unwrap();
     (source, diagram, page_id)
+}
+
+fn diagram_with_parts(replacements: &[(&str, &str)]) -> (Vec<u8>, Diagram, u32) {
+    let source = include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx");
+    let package = vsdx_parse::parse_vsdx(source).unwrap();
+    let page_id = *package.page_part_ids.values().next().unwrap();
+    let mut parts = unzip_parts(source).unwrap();
+    for (path, xml) in replacements {
+        parts
+            .iter_mut()
+            .find(|(candidate, _)| candidate == path)
+            .unwrap()
+            .1 = xml.as_bytes().to_vec();
+    }
+    let source = rezip_parts(&parts).unwrap();
+    let diagram = Diagram::open(&source).unwrap();
+    (source, diagram, page_id)
+}
+
+fn parts(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+    unzip_parts(bytes).unwrap().into_iter().collect()
+}
+
+fn assert_only_part_changed(before: &[u8], after: &[u8], changed: &str) {
+    let before = parts(before);
+    let after = parts(after);
+    assert_eq!(before.len(), after.len());
+    for (path, bytes) in before {
+        if path == changed {
+            assert_ne!(after[&path], bytes, "{path} must change");
+        } else {
+            assert_eq!(after[&path], bytes, "{path}");
+        }
+    }
 }
 
 fn edit(
@@ -219,20 +254,125 @@ fn a_refused_edit_aborts_the_entire_set() {
 }
 
 #[test]
-fn writing_an_inherited_cell_creates_a_local_formula_override() {
-    let (_, diagram, page_id) = diagram_with_page(
-        "<PageContents><Shapes><Shape ID='1'><Cell N='Width' F='Inh' V='1'/></Shape></Shapes></PageContents>",
-    );
+fn writing_a_master_only_cell_creates_a_local_formula_override() {
+    let (source, diagram, page_id) = diagram_with_parts(&[
+        (
+            "visio/pages/page1.xml",
+            "<PageContents><Shapes><Shape ID='1' Master='1' MasterShape='10'/></Shapes></PageContents>",
+        ),
+        (
+            "visio/masters/master1.xml",
+            "<MasterContents><Shapes><Shape ID='10'><Cell N='LineWeight' V='1'/></Shape></Shapes></MasterContents>",
+        ),
+    ]);
     let saved = diagram
-        .save_cell_edits(&[edit(page_id, 1, "Width", "4", MutationGesture::ResizeWidth)])
+        .save_cell_edits(&[edit(
+            page_id,
+            1,
+            "LineWeight",
+            "4",
+            MutationGesture::CellEdit,
+        )])
         .unwrap();
+    assert_only_part_changed(&source, &saved, "visio/pages/page1.xml");
+    let before = parts(&source);
+    let after = parts(&saved);
+    let before_page = std::str::from_utf8(&before["visio/pages/page1.xml"]).unwrap();
+    assert_eq!(
+        after["visio/pages/page1.xml"],
+        before_page
+            .replacen("/>", "><Cell N='LineWeight' F='4' V='4'/></Shape>", 1,)
+            .as_bytes()
+    );
     let reopened = Diagram::open(&saved).unwrap();
     let page = reopened.pages().next().unwrap();
     let shape = page.shapes().next().unwrap();
-    let cell = shape.resolved().unwrap().cells["Width"].clone();
+    let cell = shape.resolved().unwrap().cells["LineWeight"].clone();
     assert!(
         matches!(cell, vsdx_resolve::Lookup::Found(ref cell) if cell.provenance == vsdx_resolve::Provenance::Local && cell.cell.formula.as_deref() == Some("4"))
     );
+}
+
+#[test]
+fn writing_a_style_only_cell_creates_a_local_formula_override() {
+    let (source, diagram, page_id) = diagram_with_parts(&[
+        (
+            "visio/document.xml",
+            "<VisioDocument><StyleSheets><StyleSheet ID='2'><Cell N='LineWeight' V='1'/></StyleSheet></StyleSheets><DocumentSheet><Cell N='PageWidth' V='8.5'/></DocumentSheet></VisioDocument>",
+        ),
+        (
+            "visio/pages/page1.xml",
+            "<PageContents><Shapes><Shape ID='1' LineStyle='2'/></Shapes></PageContents>",
+        ),
+    ]);
+    let saved = diagram
+        .save_cell_edits(&[edit(
+            page_id,
+            1,
+            "LineWeight",
+            "4",
+            MutationGesture::CellEdit,
+        )])
+        .unwrap();
+    assert_only_part_changed(&source, &saved, "visio/pages/page1.xml");
+    let reopened = Diagram::open(&saved).unwrap();
+    let page = reopened.pages().next().unwrap();
+    let shape = page.shapes().next().unwrap();
+    assert!(matches!(
+        shape.resolved().unwrap().cells["LineWeight"],
+        vsdx_resolve::Lookup::Found(ref cell)
+            if cell.provenance == vsdx_resolve::Provenance::Local
+                && cell.cell.formula.as_deref() == Some("4")
+    ));
+}
+
+#[test]
+fn setatref_redirects_to_page_and_document_sheets_without_touching_the_source() {
+    for (reference, target_part) in [
+        ("ThePage!PageWidth", "visio/pages/pages.xml"),
+        ("TheDoc!PageWidth", "visio/document.xml"),
+    ] {
+        let (source, diagram, page_id) = diagram_with_page(&format!(
+            "<PageContents><Shapes><Shape ID='1'><Cell N='Width' F='SETATREF({reference})' V='1'/></Shape></Shapes></PageContents>"
+        ));
+        let saved = diagram
+            .save_cell_edits(&[edit(page_id, 1, "Width", "7", MutationGesture::ResizeWidth)])
+            .unwrap();
+        assert_only_part_changed(&source, &saved, target_part);
+        let after = parts(&saved);
+        let target = std::str::from_utf8(&after[target_part]).unwrap();
+        assert!(target.contains("F='7'") && target.contains("V='7'"));
+    }
+}
+
+#[test]
+fn mixed_mutation_failures_never_produce_a_partial_package() {
+    for (failing, formula) in [
+        ("<Cell N='PinX' F='GUARD(1)' V='1'/>", "4"),
+        ("<Cell N='PinX' V='1'/>", "Unknown(1)"),
+        ("<Cell N='PinX' F='SETATREF(Target,1)' V='1'/>", "4"),
+    ] {
+        let (source, diagram, page_id) = diagram_with_page(&format!(
+            "<PageContents><Shapes><Shape ID='1'><Cell N='Width' V='1'/><Cell N='Height' F='SETATREF(Target)' V='1'/><Cell N='Target' V='1'/>{failing}</Shape></Shapes></PageContents>"
+        ));
+        assert!(
+            diagram
+                .save_cell_edits(&[
+                    edit(page_id, 1, "Width", "2", MutationGesture::ResizeWidth),
+                    edit(page_id, 1, "Height", "3", MutationGesture::ResizeHeight),
+                    edit(page_id, 1, "PinX", formula, MutationGesture::MoveX),
+                ])
+                .is_err()
+        );
+        let original = parts(&source);
+        for (path, bytes) in original {
+            assert_eq!(
+                diagram.package().part_bytes(&path).unwrap(),
+                bytes,
+                "{path}"
+            );
+        }
+    }
 }
 
 #[test]
