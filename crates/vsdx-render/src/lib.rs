@@ -25,6 +25,7 @@ pub struct RenderLimits {
     pub max_text_runs: usize,
     pub max_fonts: usize,
     pub max_font_bytes: usize,
+    pub max_display_list_bytes: usize,
 }
 impl Default for RenderLimits {
     fn default() -> Self {
@@ -36,6 +37,7 @@ impl Default for RenderLimits {
             max_text_runs: 1_000_000,
             max_fonts: 256,
             max_font_bytes: 64 * 1024 * 1024,
+            max_display_list_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -49,6 +51,8 @@ pub enum RenderError {
     Font(String),
     #[error("resolve failed: {0}")]
     Resolve(#[from] vsdx_resolve::ResolveError),
+    #[error("invalid page dimensions: {0}")]
+    PageDimensions(String),
 }
 
 pub struct Renderer {
@@ -78,21 +82,24 @@ impl Renderer {
         italic: bool,
         bytes: Vec<u8>,
     ) -> Result<(), RenderError> {
-        if self.registered_fonts.len() >= self.limits.max_fonts {
+        let key = (family.into(), bold, italic);
+        if !self.registered_fonts.contains_key(&key)
+            && self.registered_fonts.len() >= self.limits.max_fonts
+        {
             return Err(RenderError::Budget("fonts"));
         }
-        self.font_bytes = self
+        let font_bytes = self
             .font_bytes
             .checked_add(bytes.len())
             .ok_or(RenderError::Budget("font bytes"))?;
-        if self.font_bytes > self.limits.max_font_bytes {
+        if font_bytes > self.limits.max_font_bytes {
             return Err(RenderError::Budget("font bytes"));
         }
-        let key = (family.into(), bold, italic);
         let id = self
             .fonts
             .register(bytes)
             .map_err(|error| RenderError::Font(error.to_string()))?;
+        self.font_bytes = font_bytes;
         self.registered_fonts.insert(key, id);
         Ok(())
     }
@@ -107,13 +114,17 @@ impl Renderer {
             .ok_or_else(|| RenderError::MissingPage(page_part.into()))?;
         let resolver = Resolver::new(package);
         let references = PageShapeReferences::new(&resolver, page_part).ok();
-        let page_height =
-            page_dimension(&resolver, package, page_part, "PageHeight").unwrap_or(11.0);
-        let page_width = page_dimension(&resolver, package, page_part, "PageWidth").unwrap_or(8.5);
+        let page_height = page_dimension(&resolver, package, page_part, "PageHeight")
+            .ok_or_else(|| RenderError::PageDimensions("PageHeight is unavailable".into()))?;
+        let page_width = page_dimension(&resolver, package, page_part, "PageWidth")
+            .ok_or_else(|| RenderError::PageDimensions("PageWidth is unavailable".into()))?;
         let mut state = State {
             count: 0,
             z_order: 0,
             text_bytes: 0,
+            text_paragraphs: 0,
+            text_lines: 0,
+            text_runs: 0,
             primitives: Vec::new(),
         };
         for shape in page.shapes() {
@@ -127,13 +138,24 @@ impl Renderer {
                 &mut state,
             )?;
         }
-        Ok(VsdxDisplayList {
+        let list = VsdxDisplayList {
             contract_version: CONTRACT_VERSION,
             width: page_width as f32 * PIXELS_PER_INCH,
             height: page_height as f32 * PIXELS_PER_INCH,
             paint_transform: final_paint_transform(page_height as f32),
             primitives: state.primitives,
-        })
+        };
+        if !display_list_finite(&list) {
+            return Err(RenderError::PageDimensions(
+                "non-finite display list".into(),
+            ));
+        }
+        if serde_json::to_vec(&list).map_or(true, |bytes| {
+            bytes.len() > self.limits.max_display_list_bytes
+        }) {
+            return Err(RenderError::Budget("display-list bytes"));
+        }
+        Ok(list)
     }
     #[allow(clippy::too_many_arguments)]
     fn layout_shape(
@@ -177,7 +199,11 @@ impl Renderer {
                     state,
                 )?;
             }
-            let children = state.primitives.split_off(start);
+            let mut children = state.primitives.split_off(start);
+            for primitive in &mut children {
+                bake_group_transform(primitive, bounds);
+            }
+            let z_order = state.next_z();
             state.primitives.push(Primitive::Group {
                 id,
                 z_order,
@@ -185,6 +211,43 @@ impl Renderer {
                 transform: Transform::default(),
             });
             return Ok(());
+        }
+        if let Some(data) = shape.foreign_data() {
+            let asset_id = data.relationship_id.as_deref().and_then(|relationship_id| {
+                package
+                    .relationships
+                    .get(page_part)?
+                    .iter()
+                    .find_map(|relationship| {
+                        (relationship.id == relationship_id)
+                            .then_some(relationship.resolved_target.as_deref())
+                            .flatten()
+                    })
+            });
+            if let Some(asset_id) = asset_id {
+                state.primitives.push(Primitive::Image {
+                    id,
+                    z_order,
+                    asset_id: asset_id.into(),
+                    x: bounds.x as f32,
+                    y: bounds.y as f32,
+                    width: bounds.width as f32,
+                    height: bounds.height as f32,
+                    transform: Transform {
+                        rotation_deg: bounds.angle.to_degrees() as f32,
+                        flip_x: bounds.flip_x,
+                        flip_y: bounds.flip_y,
+                    },
+                });
+                return Ok(());
+            }
+            return self.placeholder_at(
+                id,
+                z_order,
+                bounds,
+                state,
+                "unsupported ForeignData image",
+            );
         }
         let Some(geometry) = geometry else {
             return self.placeholder_at(
@@ -209,7 +272,9 @@ impl Renderer {
             .into_iter()
             .map(|command| place_command(command, bounds))
             .collect();
-        let (fill, stroke) = paint::paint(&resolved);
+        let Ok((fill, stroke)) = paint::paint(package, references, &resolved, shape.id) else {
+            return self.placeholder_at(id, z_order, bounds, state, "unresolvable colour");
+        };
         state.primitives.push(Primitive::Shape {
             id: id.clone(),
             z_order,
@@ -222,7 +287,7 @@ impl Renderer {
                 flip_y: bounds.flip_y,
             },
         });
-        self.text(shape, &resolved, id, z_order, bounds, state)?;
+        self.text(shape, &resolved, id, bounds, state)?;
         Ok(())
     }
     fn text(
@@ -230,7 +295,6 @@ impl Renderer {
         shape: &Shape,
         resolved: &ResolvedShape,
         id: String,
-        z_order: u32,
         bounds: Bounds,
         state: &mut State,
     ) -> Result<(), RenderError> {
@@ -250,10 +314,26 @@ impl Renderer {
         if text.is_empty() {
             return Ok(());
         }
-        state.text_bytes += text.len();
-        if state.text_bytes > self.limits.max_text_bytes {
+        let text_bytes = state
+            .text_bytes
+            .checked_add(text.len())
+            .ok_or(RenderError::Budget("text bytes"))?;
+        if text_bytes > self.limits.max_text_bytes {
             return Err(RenderError::Budget("text bytes"));
         }
+        if state.text_paragraphs >= self.limits.max_text_paragraphs {
+            return Err(RenderError::Budget("text paragraphs"));
+        }
+        if state.text_lines >= self.limits.max_text_lines {
+            return Err(RenderError::Budget("text lines"));
+        }
+        if state.text_runs >= self.limits.max_text_runs {
+            return Err(RenderError::Budget("text runs"));
+        }
+        state.text_bytes = text_bytes;
+        state.text_paragraphs += 1;
+        state.text_lines += 1;
+        state.text_runs += 1;
         let size =
             paint::number(resolved, "Char.Size").unwrap_or(0.166_666_67) as f32 * PIXELS_PER_INCH;
         let family = "Arial".to_owned();
@@ -275,6 +355,7 @@ impl Renderer {
                 x: bounds.x as f32 + width,
             }))
             .collect();
+        let z_order = state.next_z();
         state.primitives.push(Primitive::TextBox {
             id,
             z_order,
@@ -338,10 +419,108 @@ impl Renderer {
         Ok(())
     }
 }
+fn bake_group_transform(primitive: &mut Primitive, group: Bounds) {
+    match primitive {
+        Primitive::Shape {
+            path, transform, ..
+        } => {
+            for command in path {
+                transform_command(command, group);
+            }
+            *transform = Transform::default();
+        }
+        Primitive::Image {
+            x,
+            y,
+            width,
+            height,
+            ..
+        }
+        | Primitive::TextBox {
+            x,
+            y,
+            width,
+            height,
+            ..
+        }
+        | Primitive::Placeholder {
+            x,
+            y,
+            width,
+            height,
+            ..
+        } => {
+            let (x0, y0) = group_point(*x as f64, *y as f64, group);
+            let (x1, y1) = group_point((*x + *width) as f64, (*y + *height) as f64, group);
+            *x = x0.min(x1) as f32;
+            *y = y0.min(y1) as f32;
+            *width = (x1 - x0).abs() as f32;
+            *height = (y1 - y0).abs() as f32;
+            if let Primitive::Image { transform, .. } = primitive {
+                *transform = Transform::default();
+            }
+        }
+        Primitive::Group {
+            primitives,
+            transform,
+            ..
+        } => {
+            for child in primitives {
+                bake_group_transform(child, group);
+            }
+            *transform = Transform::default();
+        }
+    }
+}
+fn transform_command(command: &mut ooxml_drawingml::GeometryPathCommand, group: Bounds) {
+    use ooxml_drawingml::GeometryPathCommand::*;
+    let point = |x: &mut f64, y: &mut f64| {
+        (*x, *y) = group_point(*x, *y, group);
+    };
+    match command {
+        Move { x, y } | Line { x, y } => point(x, y),
+        Quad { cpx, cpy, x, y } => {
+            point(cpx, cpy);
+            point(x, y);
+        }
+        Cubic {
+            cp1x,
+            cp1y,
+            cp2x,
+            cp2y,
+            x,
+            y,
+        } => {
+            point(cp1x, cp1y);
+            point(cp2x, cp2y);
+            point(x, y);
+        }
+        Close => {}
+    }
+}
+fn group_point(x: f64, y: f64, group: Bounds) -> (f64, f64) {
+    let loc_x = group.loc_pin_x;
+    let loc_y = group.loc_pin_y;
+    let pin_x = group.x + group.loc_pin_x;
+    let pin_y = group.y + group.loc_pin_y;
+    let mut x = x - loc_x;
+    let mut y = y - loc_y;
+    if group.flip_x {
+        x = -x;
+    }
+    if group.flip_y {
+        y = -y;
+    }
+    let (sin, cos) = group.angle.sin_cos();
+    (pin_x + x * cos - y * sin, pin_y + x * sin + y * cos)
+}
 struct State {
     count: usize,
     z_order: u32,
     text_bytes: usize,
+    text_paragraphs: usize,
+    text_lines: usize,
+    text_runs: usize,
     primitives: Vec<Primitive>,
 }
 impl State {
@@ -357,6 +536,8 @@ struct Bounds {
     y: f64,
     width: f64,
     height: f64,
+    loc_pin_x: f64,
+    loc_pin_y: f64,
     angle: f64,
     flip_x: bool,
     flip_y: bool,
@@ -369,7 +550,30 @@ fn page_dimension(
 ) -> Option<f64> {
     let page_id = package.page_part_ids.get(page)?;
     let sheet = package.page_sheets.get(page_id)?;
-    paint::number(&resolver.resolve_sheet(sheet).ok()?, name)
+    let resolved = resolver.resolve_sheet(sheet).ok()?;
+    let Lookup::Found(cell) = resolved.cell(name)? else {
+        return None;
+    };
+    if let Some(formula) = cell.cell.formula.as_deref()
+        && let Evaluation::Evaluated(result) = evaluate_cell_with_shape_package_theme(
+            name,
+            formula,
+            &resolved,
+            &ParseLimits::default(),
+            &resolved,
+            package,
+        )
+        && let Value::Number(number) = result.value
+        && number.number.is_finite()
+    {
+        return Some(number.number);
+    }
+    cell.cell
+        .value
+        .as_deref()?
+        .parse()
+        .ok()
+        .filter(|value: &f64| value.is_finite())
 }
 fn bounds(
     package: &VsdxPackage,
@@ -382,11 +586,15 @@ fn bounds(
     let height = value("Height")?;
     let pin_x = value("PinX")?;
     let pin_y = value("PinY")?;
+    let loc_pin_x = value("LocPinX").unwrap_or(width / 2.0);
+    let loc_pin_y = value("LocPinY").unwrap_or(height / 2.0);
     Some(Bounds {
-        x: pin_x - value("LocPinX").unwrap_or(width / 2.0),
-        y: pin_y - value("LocPinY").unwrap_or(height / 2.0),
+        x: pin_x - loc_pin_x,
+        y: pin_y - loc_pin_y,
         width,
         height,
+        loc_pin_x,
+        loc_pin_y,
         angle: value("Angle").unwrap_or(0.0),
         flip_x: value("FlipX").unwrap_or(0.0) != 0.0,
         flip_y: value("FlipY").unwrap_or(0.0) != 0.0,
@@ -467,6 +675,87 @@ fn place_command(
     }
 }
 
+fn display_list_finite(list: &VsdxDisplayList) -> bool {
+    list.width.is_finite()
+        && list.height.is_finite()
+        && [
+            list.paint_transform.a,
+            list.paint_transform.b,
+            list.paint_transform.c,
+            list.paint_transform.d,
+            list.paint_transform.e,
+            list.paint_transform.f,
+        ]
+        .into_iter()
+        .all(f32::is_finite)
+        && primitives_finite(&list.primitives)
+}
+fn primitives_finite(primitives: &[Primitive]) -> bool {
+    primitives.iter().all(|primitive| match primitive {
+        Primitive::Shape {
+            path, transform, ..
+        } => transform.rotation_deg.is_finite() && path.iter().all(command_finite),
+        Primitive::Image {
+            x,
+            y,
+            width,
+            height,
+            transform,
+            ..
+        } => [*x, *y, *width, *height, transform.rotation_deg]
+            .into_iter()
+            .all(f32::is_finite),
+        Primitive::TextBox {
+            x,
+            y,
+            width,
+            height,
+            lines,
+            ..
+        } => {
+            [*x, *y, *width, *height].into_iter().all(f32::is_finite)
+                && lines.iter().all(|line| {
+                    [line.x, line.y, line.width, line.height]
+                        .into_iter()
+                        .all(f32::is_finite)
+                        && line.caret_stops.iter().all(|stop| stop.x.is_finite())
+                })
+        }
+        Primitive::Placeholder {
+            x,
+            y,
+            width,
+            height,
+            ..
+        } => [*x, *y, *width, *height].into_iter().all(f32::is_finite),
+        Primitive::Group {
+            transform,
+            primitives,
+            ..
+        } => transform.rotation_deg.is_finite() && primitives_finite(primitives),
+    })
+}
+fn command_finite(command: &ooxml_drawingml::GeometryPathCommand) -> bool {
+    use ooxml_drawingml::GeometryPathCommand::*;
+    match command {
+        Move { x, y } | Line { x, y } => x.is_finite() && y.is_finite(),
+        Quad { cpx, cpy, x, y } => {
+            cpx.is_finite() && cpy.is_finite() && x.is_finite() && y.is_finite()
+        }
+        Cubic {
+            cp1x,
+            cp1y,
+            cp2x,
+            cp2y,
+            x,
+            y,
+        } => [*cp1x, *cp1y, *cp2x, *cp2y, *x, *y]
+            .into_iter()
+            .all(f64::is_finite),
+        Close => true,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum HitTestResult {
     Shape { shape_id: String },
@@ -501,9 +790,37 @@ pub fn hit_test(list: &VsdxDisplayList, x: f32, y: f32) -> Option<HitTestResult>
                         position: stop.position,
                     });
                 }
-                Primitive::Shape { id, .. }
-                | Primitive::Image { id, .. }
-                | Primitive::Placeholder { id, .. } => {
+                Primitive::Shape {
+                    id,
+                    path,
+                    transform,
+                    ..
+                } if path_hit(path, *transform, x as f64, y as f64) => {
+                    return Some(HitTestResult::Shape {
+                        shape_id: id.clone(),
+                    });
+                }
+                Primitive::Image {
+                    id,
+                    x: left,
+                    y: top,
+                    width,
+                    height,
+                    transform,
+                    ..
+                } if point_in_transformed_rect(*left, *top, *width, *height, *transform, x, y) => {
+                    return Some(HitTestResult::Shape {
+                        shape_id: id.clone(),
+                    });
+                }
+                Primitive::Placeholder {
+                    id,
+                    x: left,
+                    y: top,
+                    width,
+                    height,
+                    ..
+                } if x >= *left && x <= left + width && y >= *top && y <= top + height => {
                     return Some(HitTestResult::Shape {
                         shape_id: id.clone(),
                     });
@@ -519,6 +836,79 @@ pub fn hit_test(list: &VsdxDisplayList, x: f32, y: f32) -> Option<HitTestResult>
         None
     }
     visit(&list.primitives, x, y)
+}
+
+fn point_in_transformed_rect(
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    transform: Transform,
+    x: f32,
+    y: f32,
+) -> bool {
+    let (x, y) = inverse_transform(
+        x as f64,
+        y as f64,
+        left as f64 + width as f64 / 2.0,
+        top as f64 + height as f64 / 2.0,
+        transform,
+    );
+    x >= left as f64 && x <= (left + width) as f64 && y >= top as f64 && y <= (top + height) as f64
+}
+fn path_hit(
+    path: &[ooxml_drawingml::GeometryPathCommand],
+    transform: Transform,
+    x: f64,
+    y: f64,
+) -> bool {
+    let points = path
+        .iter()
+        .filter_map(|command| match command {
+            ooxml_drawingml::GeometryPathCommand::Move { x, y }
+            | ooxml_drawingml::GeometryPathCommand::Line { x, y } => Some((*x, *y)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some((&min_x, &max_x, &min_y, &max_y)) = points
+        .iter()
+        .map(|(x, _)| x)
+        .min_by(|a, b| a.total_cmp(b))
+        .zip(points.iter().map(|(x, _)| x).max_by(|a, b| a.total_cmp(b)))
+        .zip(points.iter().map(|(_, y)| y).min_by(|a, b| a.total_cmp(b)))
+        .zip(points.iter().map(|(_, y)| y).max_by(|a, b| a.total_cmp(b)))
+        .map(|(((a, b), c), d)| (a, b, c, d))
+    else {
+        return false;
+    };
+    let (x, y) = inverse_transform(
+        x,
+        y,
+        (min_x + max_x) / 2.0,
+        (min_y + max_y) / 2.0,
+        transform,
+    );
+    let mut inside = false;
+    for index in 0..points.len() {
+        let (ax, ay) = points[index];
+        let (bx, by) = points[(index + 1) % points.len()];
+        if (ay > y) != (by > y) && x < (bx - ax) * (y - ay) / (by - ay) + ax {
+            inside = !inside;
+        }
+    }
+    inside
+}
+fn inverse_transform(x: f64, y: f64, cx: f64, cy: f64, transform: Transform) -> (f64, f64) {
+    let radians = -(transform.rotation_deg as f64).to_radians();
+    let (sin, cos) = radians.sin_cos();
+    let x = x - cx;
+    let y = y - cy;
+    let x = x * cos - y * sin;
+    let y = x * sin + y * cos;
+    (
+        if transform.flip_x { -x } else { x } + cx,
+        if transform.flip_y { -y } else { y } + cy,
+    )
 }
 
 #[cfg(test)]

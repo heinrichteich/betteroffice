@@ -1,20 +1,29 @@
 use crate::display_list::{Paint, Stroke};
+use vsdx_eval::{Evaluation, PageShapeReferences, Value, evaluate_cell_with_shape_package_theme};
+use vsdx_parse::{ParseLimits, VsdxPackage};
 use vsdx_resolve::{Lookup, ResolvedShape};
 
-pub fn paint(shape: &ResolvedShape) -> (Option<Paint>, Option<Stroke>) {
+pub fn paint(
+    package: &VsdxPackage,
+    references: Option<&PageShapeReferences>,
+    shape: &ResolvedShape,
+    shape_id: u32,
+) -> Result<(Option<Paint>, Option<Stroke>), String> {
     let fill = value(shape, "FillPattern")
         .filter(|v| *v != "0")
-        .and_then(|_| colour(shape, "FillForegnd"))
+        .map(|_| colour(package, references, shape, shape_id, "FillForegnd"))
+        .transpose()?
         .map(|color| Paint::Solid { color });
     let stroke = value(shape, "LinePattern")
         .filter(|v| *v != "0")
-        .and_then(|_| colour(shape, "LineColor"))
+        .map(|_| colour(package, references, shape, shape_id, "LineColor"))
+        .transpose()?
         .map(|color| Stroke {
             color,
             width: number(shape, "LineWeight").unwrap_or(0.01) as f32,
             dashed: value(shape, "LinePattern").is_some_and(|v| v != "1"),
         });
-    (fill, stroke)
+    Ok((fill, stroke))
 }
 pub fn number(shape: &ResolvedShape, name: &str) -> Option<f64> {
     value(shape, name)?
@@ -28,18 +37,39 @@ fn value<'a>(shape: &'a ResolvedShape, name: &str) -> Option<&'a str> {
         Lookup::Deleted | Lookup::Absent => None,
     }
 }
-fn colour(shape: &ResolvedShape, name: &str) -> Option<String> {
-    let value = value(shape, name)?;
-    if value.starts_with('#') {
-        return Some(value.to_owned());
+fn colour(
+    package: &VsdxPackage,
+    references: Option<&PageShapeReferences>,
+    shape: &ResolvedShape,
+    shape_id: u32,
+    name: &str,
+) -> Result<String, String> {
+    let cell = match shape.cell(name) {
+        Some(Lookup::Found(cell)) => &cell.cell,
+        _ => return Err(format!("missing colour cell {name}")),
+    };
+    let formula = cell
+        .formula
+        .as_deref()
+        .or(cell.value.as_deref())
+        .ok_or_else(|| format!("missing colour value {name}"))?;
+    let refs = references.ok_or_else(|| format!("unavailable colour references for {name}"))?;
+    match evaluate_cell_with_shape_package_theme(
+        name,
+        formula,
+        &refs.for_shape(shape_id),
+        &ParseLimits::default(),
+        shape,
+        package,
+    ) {
+        Evaluation::Evaluated(result) => match result.value {
+            Value::Color(color) => Ok(format!(
+                "#{:02X}{:02X}{:02X}",
+                color.red, color.green, color.blue
+            )),
+            _ => Err(format!("colour cell {name} evaluated to a number")),
+        },
+        Evaluation::Unsupported(reason) => Err(reason),
+        Evaluation::Error(error) => Err(error.message),
     }
-    let value = value.trim_start_matches("RGB(").trim_end_matches(')');
-    let channels = value
-        .split(',')
-        .map(str::trim)
-        .map(str::parse::<u8>)
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
-    (channels.len() == 3)
-        .then(|| format!("#{:02X}{:02X}{:02X}", channels[0], channels[1], channels[2]))
 }
