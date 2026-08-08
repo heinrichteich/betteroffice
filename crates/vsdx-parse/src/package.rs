@@ -628,27 +628,12 @@ fn save_cell_edits_with_new_cells(
                 part: new_cell.part_path.clone(),
                 message: "local container owner has no attribute quote style".to_owned(),
             })?;
-        let end = owner.span.end().ok_or(VsdxError::InvalidSpan)?;
-        let (span, closes_owner) = if end >= 2 && part.bytes[end - 2..end] == *b"/>" {
-            (
-                crate::SourceSpan {
-                    offset: end - 2,
-                    length: 2,
-                },
-                true,
-            )
-        } else {
-            (
-                crate::SourceSpan {
-                    offset: part.bytes[..end]
-                        .iter()
-                        .rposition(|byte| *byte == b'<')
-                        .ok_or(VsdxError::InvalidSpan)?,
-                    length: 0,
-                },
-                false,
-            )
-        };
+        let (span, closes_owner) = container_insertion_point(
+            part,
+            owner,
+            new_cell.section.as_deref(),
+            new_cell.row.as_ref(),
+        )?;
         let mut replacement = Vec::new();
         if closes_owner {
             replacement.push(b'>');
@@ -1059,6 +1044,69 @@ fn direct_child<'a>(
                     .is_some_and(|owner| local_name(&owner.name) == "PageContents"),
             }
     })
+}
+
+/// Inserts Sections before Text, ForeignData, or nested Shapes; indexed Rows
+/// precede the first direct Row with a greater IX, and all other children append.
+fn container_insertion_point(
+    part: &PackagePart,
+    owner: &crate::ElementSpan,
+    section: Option<&str>,
+    row: Option<&CellRow>,
+) -> Result<(crate::SourceSpan, bool), VsdxError> {
+    let anchor = part
+        .spans
+        .iter()
+        .filter(|candidate| {
+            immediate_parent(part, candidate.span).is_some_and(|parent| parent.span == owner.span)
+                && match (section, row) {
+                    (Some(_), _) => matches!(
+                        local_name(&candidate.name),
+                        "Text" | "ForeignData" | "Shapes"
+                    ),
+                    (None, Some(CellRow::Index(index))) => {
+                        local_name(&candidate.name) == "Row"
+                            && candidate
+                                .attributes
+                                .get("IX")
+                                .and_then(|attribute| attribute_value(&part.bytes, attribute))
+                                .and_then(|value| value.parse::<u32>().ok())
+                                .is_some_and(|existing| existing > *index)
+                    }
+                    _ => false,
+                }
+        })
+        .min_by_key(|candidate| candidate.span.offset);
+    if let Some(anchor) = anchor {
+        return Ok((
+            crate::SourceSpan {
+                offset: anchor.span.offset,
+                length: 0,
+            },
+            false,
+        ));
+    }
+    let end = owner.span.end().ok_or(VsdxError::InvalidSpan)?;
+    if end >= 2 && part.bytes[end - 2..end] == *b"/>" {
+        Ok((
+            crate::SourceSpan {
+                offset: end - 2,
+                length: 2,
+            },
+            true,
+        ))
+    } else {
+        Ok((
+            crate::SourceSpan {
+                offset: part.bytes[..end]
+                    .iter()
+                    .rposition(|byte| *byte == b'<')
+                    .ok_or(VsdxError::InvalidSpan)?,
+                length: 0,
+            },
+            false,
+        ))
+    }
 }
 
 fn page_shapes(part: &PackagePart) -> Option<&crate::ElementSpan> {
@@ -1576,6 +1624,34 @@ mod tests {
             .unwrap()
             .to_vec();
         assert_eq!(after, b"<PageContents><Shapes><Shape ID='1'><Cell N='Keep' V='old'/><Section N='User'><Row N='New'><Cell N='Value' F='4' V='4'/></Row></Section></Shape></Shapes></PageContents>");
+    }
+
+    #[test]
+    fn inserts_sections_and_indexed_rows_at_shapesheet_anchors() {
+        let source = b"<PageContents><Shapes><Shape ID=\"1\"><Cell N=\"Keep\"/><Text>text</Text><ForeignData/><Shapes><Shape ID=\"2\"/></Shapes></Shape></Shapes></PageContents>";
+        let (package, path) = package_with_page_xml(source);
+        let page_id = package.page_part_ids[&path];
+        let saved = save_semantic_cell_edits(
+            &package,
+            &[semantic_edit(page_id, "User", CellRow::Index(0))],
+        )
+        .unwrap();
+        let after = parse_vsdx(&saved)
+            .unwrap()
+            .part_bytes(&path)
+            .unwrap()
+            .to_vec();
+        assert_eq!(after, b"<PageContents><Shapes><Shape ID=\"1\"><Cell N=\"Keep\"/><Section N=\"User\"><Row IX=\"0\"><Cell N=\"Value\" F=\"4\" V=\"4\"/></Row></Section><Text>text</Text><ForeignData/><Shapes><Shape ID=\"2\"/></Shapes></Shape></Shapes></PageContents>");
+
+        let source = b"<PageContents><Shapes><Shape ID='1'><Section N='User'><Row IX='1'/><Row IX='3'/></Section></Shape></Shapes></PageContents>";
+        let (package, path) = package_with_page_xml(source);
+        let page_id = package.page_part_ids[&path];
+        let saved = save_semantic_cell_edits(
+            &package,
+            &[semantic_edit(page_id, "User", CellRow::Index(2))],
+        )
+        .unwrap();
+        assert_eq!(parse_vsdx(&saved).unwrap().part_bytes(&path).unwrap(), b"<PageContents><Shapes><Shape ID='1'><Section N='User'><Row IX='1'/><Row IX='2'><Cell N='Value' F='4' V='4'/></Row><Row IX='3'/></Section></Shape></Shapes></PageContents>");
     }
 
     #[test]
