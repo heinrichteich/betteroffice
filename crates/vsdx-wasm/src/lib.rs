@@ -8,6 +8,7 @@ pub use vsdx_edit::wasm::VsdxDocument;
 pub struct VsdxRenderer {
     renderer: vsdx_render::Renderer,
     rendered: Option<vsdx_render::VsdxDisplayList>,
+    font_count: u32,
 }
 
 #[wasm_bindgen]
@@ -17,6 +18,7 @@ impl VsdxRenderer {
         Self {
             renderer: vsdx_render::Renderer::default(),
             rendered: None,
+            font_count: 0,
         }
     }
 
@@ -28,10 +30,16 @@ impl VsdxRenderer {
         italic: bool,
         bytes: &[u8],
     ) -> Result<u32, JsValue> {
+        let handle = self.font_count;
+        let next_font_count = self
+            .font_count
+            .checked_add(1)
+            .ok_or_else(|| JsValue::from_str("font handle limit exceeded"))?;
         self.renderer
             .register_font(family, bold, italic, bytes.to_vec())
             .map_err(js_error)?;
-        Ok(0)
+        self.font_count = next_font_count;
+        Ok(handle)
     }
 
     #[wasm_bindgen(js_name = layoutPageJson)]
