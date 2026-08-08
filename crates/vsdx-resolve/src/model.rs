@@ -167,6 +167,8 @@ pub enum ResolveError {
     MissingPage(String),
     #[error("shape not found: {0}")]
     MissingShape(u32),
+    #[error("master not found: {0}")]
+    MissingMaster(u32),
     #[error("inheritance cycle: {0}")]
     Cycle(String),
 }

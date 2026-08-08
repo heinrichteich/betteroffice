@@ -190,18 +190,24 @@ impl<'a> Resolver<'a> {
                 .iter()
                 .find_map(|(path, id)| (*id == master_id).then_some(path))
             else {
-                return Ok(out);
+                return Err(ResolveError::MissingMaster(master_id));
             };
             let Some(sheet) = self.package.master_contents.get(path) else {
-                return Ok(out);
+                return Err(ResolveError::MissingMaster(master_id));
             };
-            let id = current.master_shape.unwrap_or(master_id);
-            if !seen.insert((master_id, id)) {
-                return Err(ResolveError::Cycle(format!("master {master_id}/{id}")));
+            let next = match current.master_shape {
+                Some(id) => find_shape(sheet, id).or_else(|| find_shape(sheet, master_id)),
+                None => sheet.shapes().next(),
+            };
+            let Some(next) = next else {
+                return Err(ResolveError::MissingMaster(master_id));
+            };
+            if !seen.insert((master_id, next.id)) {
+                return Err(ResolveError::Cycle(format!(
+                    "master {master_id}/{}",
+                    next.id
+                )));
             }
-            let Some(next) = find_shape(sheet, id).or_else(|| find_shape(sheet, master_id)) else {
-                return Ok(out);
-            };
             out.push((
                 if current.master_shape.is_some() {
                     Provenance::MasterShape

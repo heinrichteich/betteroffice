@@ -192,11 +192,13 @@ fn catalog_part_ids(
         .filter_map(|element| {
             let id = element.attribute("ID")?.parse().ok()?;
             let relationship_id = element
-                .attributes
-                .iter()
-                .find(|(name, _)| name == "r:id" || name == "id")?
-                .1
-                .as_str();
+                .children_named("Rel")
+                .find_map(|rel| rel.attribute("r:id").or_else(|| rel.attribute("id")))
+                .or_else(|| {
+                    element
+                        .attribute("r:id")
+                        .or_else(|| element.attribute("id"))
+                })?;
             let path = relationships?
                 .iter()
                 .find(|relationship| relationship.id == relationship_id)?
@@ -379,6 +381,30 @@ mod tests {
             parse_theme(&root, part),
             Err(VsdxError::MalformedXml { message, .. }) if message == "theme is missing themeElements/clrScheme"
         ));
+    }
+
+    #[test]
+    fn maps_catalog_ids_through_child_relationships() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<Masters><Master ID='15'><Rel r:id='rId2'/></Master></Masters>"#,
+            "visio/masters/masters.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let relationships = [Relationship {
+            id: "rId2".into(),
+            relationship_type: relationship_types::MASTER.into(),
+            target: "master2.xml".into(),
+            target_mode: crate::TargetMode::Internal,
+            resolved_target: Some("visio/masters/master2.xml".into()),
+        }];
+
+        assert_eq!(
+            catalog_part_ids(Some(&root), "Master", Some(&relationships)),
+            [("visio/masters/master2.xml".into(), 15)].into()
+        );
     }
     use std::path::PathBuf;
 

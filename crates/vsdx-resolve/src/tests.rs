@@ -304,6 +304,78 @@ fn add_master(package: &mut VsdxPackage, id: u32, value: Shape) {
     );
 }
 
+fn add_master_shapes(package: &mut VsdxPackage, id: u32, values: Vec<Shape>) {
+    let path = format!("master{id}");
+    package.master_part_ids.insert(path.clone(), id);
+    package.master_contents.insert(
+        path,
+        sheet(
+            None,
+            vec![SheetChild::Shapes(
+                values
+                    .into_iter()
+                    .map(vsdx_parse::ShapesChild::Shape)
+                    .collect(),
+            )],
+        ),
+    );
+}
+
+#[test]
+fn master_without_master_shape_inherits_from_master_root() {
+    let mut package = package();
+    let mut local = shape(10, vec![]);
+    local.master = Some(5);
+    add_page(&mut package, local);
+    add_master_shapes(
+        &mut package,
+        5,
+        vec![
+            shape(50, vec![ShapeChild::Cell(cell("PinX", "root"))]),
+            shape(51, vec![ShapeChild::Cell(cell("PinX", "other"))]),
+        ],
+    );
+
+    let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+    assert_eq!(found(&resolved, "PinX"), ("root", Provenance::Master));
+}
+
+#[test]
+fn master_shape_inherits_from_the_specified_shape_not_the_root() {
+    let mut package = package();
+    let mut local = shape(10, vec![]);
+    local.master = Some(5);
+    local.master_shape = Some(51);
+    add_page(&mut package, local);
+    add_master_shapes(
+        &mut package,
+        5,
+        vec![
+            shape(50, vec![ShapeChild::Cell(cell("PinX", "root"))]),
+            shape(51, vec![ShapeChild::Cell(cell("PinX", "specified"))]),
+        ],
+    );
+
+    let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+    assert_eq!(
+        found(&resolved, "PinX"),
+        ("specified", Provenance::MasterShape)
+    );
+}
+
+#[test]
+fn missing_master_reports_a_diagnostic() {
+    let mut package = package();
+    let mut local = shape(10, vec![]);
+    local.master = Some(5);
+    add_page(&mut package, local);
+
+    assert_eq!(
+        Resolver::new(&package).resolve_shape("page", 10),
+        Err(ResolveError::MissingMaster(5))
+    );
+}
+
 #[test]
 fn master_inheritance_walks_deeply_and_local_overrides() {
     let mut package = package();
@@ -551,14 +623,14 @@ fn inh_section_cells_skip_to_master_and_text_style() {
 fn deletions_block_inheritance_while_absence_inherits() {
     let mut package = package();
     let mut master = shape(
-        1,
+        100,
         vec![
             ShapeChild::Cell(cell("PinX", "master")),
             ShapeChild::Section(section("Geometry", vec![row(0, vec![cell("X", "1")])])),
         ],
     );
     master.master = None;
-    add_master(&mut package, 1, master);
+    add_master_shapes(&mut package, 1, vec![master]);
     for (id, local) in [
         (1, shape(1, vec![ShapeChild::Cell(deleted_cell("PinX"))])),
         (
