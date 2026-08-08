@@ -1690,6 +1690,14 @@ mod tests {
         top_unsupported
             .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
         eprintln!("VSDX corpus top unsupported constructs: {top_unsupported:?}");
+        let mut top_unsupported_other = measurement
+            .unsupported_other_kinds
+            .into_iter()
+            .collect::<Vec<_>>();
+        top_unsupported_other
+            .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        top_unsupported_other.truncate(20);
+        eprintln!("VSDX corpus top other unsupported kinds: {top_unsupported_other:?}");
         let mut top_errors = measurement.error_kinds.into_iter().collect::<Vec<_>>();
         top_errors.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
         top_errors.truncate(20);
@@ -1725,6 +1733,7 @@ mod tests {
         error: usize,
         total: usize,
         unsupported_names: BTreeMap<String, usize>,
+        unsupported_other_kinds: BTreeMap<String, usize>,
         error_kinds: BTreeMap<String, usize>,
         unresolved_references: BTreeMap<String, usize>,
     }
@@ -1748,7 +1757,10 @@ mod tests {
             }
             match evaluation {
                 Evaluation::Evaluated(_) => self.evaluated += 1,
-                Evaluation::Unsupported(_) => self.unsupported_other += 1,
+                Evaluation::Unsupported(reason) => {
+                    self.unsupported_other += 1;
+                    *self.unsupported_other_kinds.entry(reason).or_default() += 1;
+                }
                 Evaluation::Error(error) => {
                     self.error += 1;
                     let kind = classify_error(&error.message, &mut self.unresolved_references);
