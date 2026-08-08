@@ -14,6 +14,7 @@ pub struct VsdxPackage {
     pub page_part_paths: Vec<String>,
     pub master_part_paths: Vec<String>,
     pub theme_part_paths: Vec<String>,
+    #[serde(default)]
     pub themes: BTreeMap<u32, Theme>,
     pub windows_part_path: Option<String>,
     pub relationships: BTreeMap<String, Vec<Relationship>>,
