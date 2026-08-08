@@ -249,6 +249,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-vsdx-resolve"
+version = "0.0.4"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-vsdx-parse",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "betteroffice-xlsx"
 version = "0.0.4"
 dependencies = [

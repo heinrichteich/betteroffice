@@ -603,6 +603,42 @@ mod tests {
     }
 
     #[test]
+    fn enforces_exact_package_wide_sheet_budgets() {
+        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        let limits_for = |kind: &str, value: usize| match kind {
+            "cells" => ParseLimits {
+                max_cells: value,
+                ..ParseLimits::default()
+            },
+            "sections" => ParseLimits {
+                max_sections: value,
+                ..ParseLimits::default()
+            },
+            "rows" => ParseLimits {
+                max_rows: value,
+                ..ParseLimits::default()
+            },
+            "shapes" => ParseLimits {
+                max_shapes: value,
+                ..ParseLimits::default()
+            },
+            _ => unreachable!(),
+        };
+        for kind in ["cells", "sections", "rows", "shapes"] {
+            let mut minimum = 0;
+            while parse_vsdx_with_limits(source, &limits_for(kind, minimum)).is_err() {
+                minimum += 1;
+            }
+            assert!(minimum > 0, "fixture must exercise {kind}");
+            assert!(parse_vsdx_with_limits(source, &limits_for(kind, minimum)).is_ok());
+            assert!(matches!(
+                parse_vsdx_with_limits(source, &limits_for(kind, minimum - 1)),
+                Err(VsdxError::ResourceLimit { kind: actual, .. }) if actual == kind
+            ));
+        }
+    }
+
+    #[test]
     fn models_namespaced_deleted_sheet_content() {
         let source = include_bytes!("../tests/fixtures/foundation.vsdx");
         let mut parts = unzip_parts(source).unwrap();
