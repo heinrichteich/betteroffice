@@ -455,6 +455,32 @@ fn mixed_cell_and_structural_edits_are_atomic() {
 }
 
 #[test]
+fn mixed_edits_reject_invalid_structure_without_changing_the_source() {
+    let (source, diagram, page_id) = diagram_with_page(
+        "<PageContents><Shapes><Shape ID='1'><Cell N='Width' V='1'/></Shape><Shape ID='1'/></Shapes></PageContents>",
+    );
+    assert!(
+        diagram
+            .save_edits(
+                &[edit(page_id, 1, "Width", "2", MutationGesture::ResizeWidth)],
+                &[StructuralEdit::ReorderShape {
+                    page_id,
+                    shape_id: 1,
+                    before_shape_id: None,
+                }],
+            )
+            .is_err()
+    );
+    for (path, bytes) in parts(&source) {
+        assert_eq!(
+            diagram.package().part_bytes(&path).unwrap(),
+            bytes,
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn lock_delete_refusals_leave_the_facade_package_unchanged() {
     let local = "<PageContents><Shapes><Shape ID='1'><Cell N='LockDelete' F='1' V='1'/></Shape></Shapes></PageContents>";
     let (_, diagram, page_id) = diagram_with_page(local);
