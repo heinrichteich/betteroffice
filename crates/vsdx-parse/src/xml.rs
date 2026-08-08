@@ -18,6 +18,7 @@ pub struct ParseLimits {
     pub max_sections: usize,
     pub max_rows: usize,
     pub max_shapes: usize,
+    pub max_formula_depth: usize,
 }
 
 impl Default for ParseLimits {
@@ -34,6 +35,7 @@ impl Default for ParseLimits {
             max_sections: 500_000,
             max_rows: 2_000_000,
             max_shapes: 100_000,
+            max_formula_depth: 256,
         }
     }
 }
@@ -278,7 +280,7 @@ fn decode_element(
         .map_err(|error| malformed(reader, part, error.to_string()))?
         .into_owned();
     let mut attributes = BTreeMap::new();
-    let mut bytes = 0;
+    let mut bytes = 0_usize;
     for (index, attribute) in start.attributes().enumerate() {
         if index >= budget.limits.max_attributes_per_element {
             return Err(VsdxError::ResourceLimit {
@@ -297,13 +299,32 @@ fn decode_element(
             .decode_and_unescape_value(reader.decoder())
             .map_err(|error| malformed(reader, part, error.to_string()))?
             .into_owned();
-        bytes += key.len() + value.len();
+        let amount =
+            key.len()
+                .checked_add(value.len())
+                .ok_or_else(|| VsdxError::ResourceLimit {
+                    part: part.to_owned(),
+                    kind: "attributeBytes",
+                })?;
+        bytes = bytes
+            .checked_add(amount)
+            .ok_or_else(|| VsdxError::ResourceLimit {
+                part: part.to_owned(),
+                kind: "attributeBytes",
+            })?;
         if bytes > budget.limits.max_attribute_bytes {
             return Err(VsdxError::ResourceLimit {
                 part: part.to_owned(),
                 kind: "attributeBytes",
             });
         }
+        charge(
+            &mut budget.xml_text_bytes,
+            amount,
+            budget.limits.max_xml_text_bytes,
+            "xmlTextBytes",
+            part,
+        )?;
         if attributes.insert(key.clone(), value).is_some() {
             return Err(malformed(
                 reader,
@@ -370,4 +391,40 @@ fn legal(character: char) -> bool {
         || ('\u{20}'..='\u{d7ff}').contains(&character)
         || ('\u{e000}'..='\u{fffd}').contains(&character)
         || ('\u{10000}'..='\u{10ffff}').contains(&character)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attributes_count_toward_xml_text_limit() {
+        let limits = ParseLimits {
+            max_xml_text_bytes: 3,
+            ..ParseLimits::default()
+        };
+        let mut budget = ParseBudget::new(&limits);
+        assert!(matches!(
+            parse_xml(b"<Root a='123'/>", "attributes.xml", &mut budget),
+            Err(VsdxError::ResourceLimit {
+                kind: "xmlTextBytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_dtd_and_unknown_entities() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        assert!(matches!(
+            parse_xml(b"<!DOCTYPE Root><Root/>", "dtd.xml", &mut budget),
+            Err(VsdxError::UnsafeXml { .. })
+        ));
+        let mut budget = ParseBudget::new(&limits);
+        assert!(matches!(
+            parse_xml(b"<Root>&unknown;</Root>", "entity.xml", &mut budget),
+            Err(VsdxError::UnsafeXml { .. })
+        ));
+    }
 }

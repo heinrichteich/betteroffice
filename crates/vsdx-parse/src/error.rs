@@ -6,6 +6,10 @@ pub enum VsdxError {
     Container(String),
     #[error("missing required VSDX part {0}")]
     MissingPart(String),
+    #[error("unsupported VSDX document kind {0:?}")]
+    UnsupportedDocumentKind(ooxml_opc::DocumentKind),
+    #[error("conflicting document kinds: {0:?}")]
+    ConflictingDocumentKinds(Vec<ooxml_opc::DocumentKind>),
     #[error("malformed XML in {part} at byte {offset}: {message}")]
     MalformedXml {
         part: String,

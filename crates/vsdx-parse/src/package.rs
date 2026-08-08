@@ -11,6 +11,14 @@ pub fn parse_vsdx(data: &[u8]) -> Result<VsdxPackage, VsdxError> {
 
 pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxPackage, VsdxError> {
     let source_parts = ooxml_opc::unzip_parts(data).map_err(VsdxError::Container)?;
+    match ooxml_opc::detect_package_kind(&source_parts) {
+        Ok(ooxml_opc::DocumentKind::Vsdx) => {}
+        Ok(kind) => return Err(VsdxError::UnsupportedDocumentKind(kind)),
+        Err(ooxml_opc::DocumentKindError::ConflictingDocumentKinds(kinds)) => {
+            return Err(VsdxError::ConflictingDocumentKinds(kinds));
+        }
+        Err(error) => return Err(VsdxError::Container(error.to_string())),
+    }
     let parts: HashMap<&str, &[u8]> = source_parts
         .iter()
         .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
@@ -57,6 +65,7 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         require_part(&parts, path)?;
         validate_xml_part(&parts, path, &mut budget)?;
     }
+    load_reachable_relationships(&parts, &mut relationships, &mut budget)?;
     Ok(VsdxPackage {
         document_part_path: document_path,
         pages_part_path,
@@ -71,6 +80,30 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
             .map(|(path, bytes)| PackagePart { path, bytes })
             .collect(),
     })
+}
+
+fn load_reachable_relationships(
+    parts: &HashMap<&str, &[u8]>,
+    relationships: &mut BTreeMap<String, Vec<Relationship>>,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), VsdxError> {
+    let mut pending: Vec<String> = relationships.keys().cloned().collect();
+    let mut index = 0;
+    while let Some(source) = pending.get(index).cloned() {
+        index += 1;
+        let targets: Vec<String> = relationships[&source]
+            .iter()
+            .filter_map(|relationship| relationship.resolved_target.clone())
+            .collect();
+        for target in targets {
+            let path = relationship_path(&target);
+            if parts.contains_key(path.as_str()) && !relationships.contains_key(&target) {
+                load_relationships(&target, parts, relationships, budget)?;
+                pending.push(target);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn write_vsdx(package: &VsdxPackage) -> Result<Vec<u8>, VsdxError> {
@@ -157,8 +190,16 @@ mod tests {
 
     #[test]
     fn preserves_every_corpus_part_byte_for_byte() {
-        let directory = std::env::var_os("VSDX_CORPUS_DIR")
-            .expect("VSDX_CORPUS_DIR must point to the VSDX round-trip corpus");
+        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        let written = write_vsdx(&parse_vsdx(source).unwrap()).unwrap();
+        assert_eq!(unzip_parts(&written).unwrap(), unzip_parts(source).unwrap());
+    }
+
+    #[test]
+    fn preserves_external_corpus_parts_when_available() {
+        let Some(directory) = std::env::var_os("VSDX_CORPUS_DIR") else {
+            return;
+        };
         for file in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
             let path = PathBuf::from(&directory).join(file);
             assert!(path.is_file(), "missing corpus file: {}", path.display());
@@ -176,6 +217,7 @@ mod tests {
     #[test]
     fn discovers_parts_only_through_relationships() {
         let package = rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
             ("_rels/.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec()),
             ("visio/document.xml".to_owned(), b"<VisioDocument/>".to_vec()),
             ("visio/_rels/document.xml.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='x/pages' Target='pages/pages.xml'/></Relationships>"#.to_vec()),
@@ -190,6 +232,7 @@ mod tests {
     #[test]
     fn rejects_dangling_relationship_targets() {
         let package = rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
             (
                 "_rels/.rels".to_owned(),
                 br#"<Relationships><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec(),
@@ -199,6 +242,68 @@ mod tests {
         assert!(matches!(
             parse_vsdx(&package),
             Err(VsdxError::MissingPart(_))
+        ));
+    }
+
+    #[test]
+    fn validates_reachable_page_relationship_parts() {
+        let package = rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec()),
+            ("visio/document.xml".to_owned(), b"<VisioDocument/>".to_vec()),
+            ("visio/_rels/document.xml.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='x/pages' Target='pages/pages.xml'/></Relationships>"#.to_vec()),
+            ("visio/pages/pages.xml".to_owned(), b"<Pages/>".to_vec()),
+            ("visio/pages/_rels/pages.xml.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='x/page' Target='page1.xml'/></Relationships>"#.to_vec()),
+            ("visio/pages/page1.xml".to_owned(), b"<PageContents/>".to_vec()),
+            ("visio/pages/_rels/page1.xml.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='x/image' Target='javascript:x'/></Relationships>"#.to_vec()),
+        ]).unwrap();
+        assert!(matches!(
+            parse_vsdx(&package),
+            Err(VsdxError::InvalidRelationship { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_or_conflicting_document_kinds() {
+        for content_type in [
+            "application/vnd.ms-visio.drawing.macroEnabled.main+xml",
+            "application/vnd.ms-visio.stencil.main+xml",
+            "application/vnd.ms-visio.template.main+xml",
+        ] {
+            let package = rezip_parts(&[(
+                "[Content_Types].xml".to_owned(),
+                format!("<Types><Override PartName='/visio/document.xml' ContentType='{content_type}'/></Types>").into_bytes(),
+            )]).unwrap();
+            assert!(matches!(
+                parse_vsdx(&package),
+                Err(VsdxError::UnsupportedDocumentKind(_))
+            ));
+        }
+        let package = rezip_parts(&[(
+            "[Content_Types].xml".to_owned(),
+            br#"<Types><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/><Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/></Types>"#.to_vec(),
+        )]).unwrap();
+        assert!(matches!(
+            parse_vsdx(&package),
+            Err(VsdxError::ConflictingDocumentKinds(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_or_wrong_content_types() {
+        let missing = rezip_parts(&[(
+            "visio/document.xml".to_owned(),
+            b"<VisioDocument/>".to_vec(),
+        )])
+        .unwrap();
+        assert!(parse_vsdx(&missing).is_err());
+        let wrong = rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types><Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/></Types>"#.to_vec()),
+            ("visio/document.xml".to_owned(), b"<VisioDocument/>".to_vec()),
+        ]).unwrap();
+        assert!(matches!(
+            parse_vsdx(&wrong),
+            Err(VsdxError::UnsupportedDocumentKind(_))
         ));
     }
 }

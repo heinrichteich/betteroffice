@@ -75,8 +75,11 @@ fn parse_relationship(element: &XmlElement, source: &str) -> Result<Relationship
 }
 
 pub(crate) fn resolve_target(source: &str, target: &str) -> Result<String, VsdxError> {
-    let lower = target.to_ascii_lowercase();
-    if lower.contains("://") || lower.starts_with("mailto:") || lower.starts_with("data:") {
+    if target.starts_with("\\\\")
+        || target.starts_with("//")
+        || target.as_bytes().get(1) == Some(&b':')
+        || has_uri_scheme(target)
+    {
         return Err(invalid(source, target));
     }
     let target = target
@@ -106,6 +109,15 @@ pub(crate) fn resolve_target(source: &str, target: &str) -> Result<String, VsdxE
     }
     Ok(segments.join("/"))
 }
+
+fn has_uri_scheme(target: &str) -> bool {
+    let Some((scheme, _)) = target.split_once(':') else {
+        return false;
+    };
+    let mut characters = scheme.bytes();
+    matches!(characters.next(), Some(byte) if byte.is_ascii_alphabetic())
+        && characters.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+}
 fn invalid(source: &str, target: &str) -> VsdxError {
     VsdxError::InvalidRelationship {
         source_part: source.to_owned(),
@@ -118,8 +130,25 @@ mod tests {
     use super::*;
     #[test]
     fn rejects_unsafe_targets() {
-        for target in ["https://x", "mailto:a@b", "data:x", "../../x"] {
+        for target in [
+            "https://x",
+            "mailto:a@b",
+            "data:x",
+            "javascript:x",
+            "file:/x",
+            "C:\\x",
+            "\\\\server\\share",
+            "../../x",
+        ] {
             assert!(resolve_target("visio/document.xml", target).is_err());
         }
+    }
+
+    #[test]
+    fn accepts_opc_root_relative_targets() {
+        assert_eq!(
+            resolve_target("visio/document.xml", "/visio/pages/pages.xml").unwrap(),
+            "visio/pages/pages.xml"
+        );
     }
 }
