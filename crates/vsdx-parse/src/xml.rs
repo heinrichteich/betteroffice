@@ -18,7 +18,7 @@ pub struct ParseLimits {
     pub max_sections: usize,
     pub max_rows: usize,
     pub max_shapes: usize,
-    /// Reserved for the phase-8 formula parser; no formulas are evaluated in this crate yet.
+    /// Maximum nesting accepted by the bounded ShapeSheet formula parser.
     pub max_formula_depth: usize,
 }
 

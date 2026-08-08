@@ -396,7 +396,10 @@ fn based_on(sheet: &Sheet) -> Option<u32> {
         .find(|(name, _)| name == "BasedOn")
         .and_then(|(_, value)| value.parse().ok())
 }
-/// Built-in ownership is from MS-VSDX ShapeSheet style-sheet cells; unlisted cells bypass styles.
+/// ShapeSheet style ownership follows the Line, Fill, and Text style-cell tables in
+/// Microsoft, *MS-VSDX*, section 2.2.5 (StyleSheet). Cells not listed here deliberately
+/// bypass a style slice: they resolve through local/master/page/document/default only.
+/// `Character` and `Paragraph` are TextStyle-owned sections; Geometry is never style-owned.
 fn style_owner(name: &str) -> Option<Provenance> {
     const LINE: &[&str] = &[
         "LineColor",
@@ -409,6 +412,7 @@ fn style_owner(name: &str) -> Option<Provenance> {
         "EndArrowSize",
         "LineColorTrans",
         "LinePatternTrans",
+        "CompoundType",
         "Rounding",
         "LineGradientDir",
         "LineGradientAngle",
@@ -427,7 +431,14 @@ fn style_owner(name: &str) -> Option<Provenance> {
         "FillGradientStopCount",
         "ShdwForegnd",
         "ShdwForegndTrans",
+        "ShdwBkgnd",
+        "ShdwBkgndTrans",
         "ShdwPattern",
+        "ShdwOffsetX",
+        "ShdwOffsetY",
+        "ShdwType",
+        "ShdwObliqueAngle",
+        "ShdwScaleFactor",
         "ShapeShdwType",
         "ShapeShdwOffsetX",
         "ShapeShdwOffsetY",
@@ -436,6 +447,26 @@ fn style_owner(name: &str) -> Option<Provenance> {
         "Char",
         "Para",
         "Text",
+        "Font",
+        "Color",
+        "Size",
+        "Style",
+        "Case",
+        "Pos",
+        "FontScale",
+        "Letterspace",
+        "ColorTrans",
+        "Locale",
+        "HorzAlign",
+        "IndFirst",
+        "IndLeft",
+        "IndRight",
+        "SpLine",
+        "SpBefore",
+        "SpAfter",
+        "BulletStr",
+        "Bullet",
+        "Flags",
         "VerticalAlign",
         "TxtPinX",
         "TxtPinY",

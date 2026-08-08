@@ -28,6 +28,7 @@ betteroffice-docx = { path = "crates/betteroffice-docx", version = "0.0.4" }
 pptx-parse = { package = "betteroffice-pptx-parse", path = "crates/pptx-parse", version = "0.0.4" }
 vsdx-parse = { package = "betteroffice-vsdx-parse", path = "crates/vsdx-parse", version = "0.0.4" }
 vsdx-resolve = { package = "betteroffice-vsdx-resolve", path = "crates/vsdx-resolve", version = "0.0.4" }
+vsdx-eval = { package = "betteroffice-vsdx-eval", path = "crates/vsdx-eval", version = "0.0.4" }
 betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.0.4" }
 pptx-edit = { package = "betteroffice-pptx-edit", path = "crates/pptx-edit", version = "0.0.4" }
 pptx-render = { package = "betteroffice-pptx-render", path = "crates/pptx-render", version = "0.0.4" }

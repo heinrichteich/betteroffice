@@ -247,6 +247,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-vsdx-eval"
+version = "0.0.4"
+dependencies = [
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "thiserror",
+]
+
+[[package]]
 name = "betteroffice-vsdx-parse"
 version = "0.0.4"
 dependencies = [
