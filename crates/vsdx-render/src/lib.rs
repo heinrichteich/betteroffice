@@ -55,8 +55,9 @@ fn rich_paragraphs(
         subscript: false,
         letter_spacing: 0.0,
         case: 0,
-        diagnostic: None,
+        diagnostics: Vec::new(),
         tab: None,
+        diagnosed_face: None,
     };
     let mut paragraphs = vec![RichParagraph {
         runs: Vec::new(),
@@ -84,7 +85,11 @@ fn rich_paragraphs(
             }
             vsdx_resolve::ResolvedTextToken::CharacterRun { index, properties } => {
                 if properties.is_empty() {
-                    append_diagnostic(&mut character, format!("unresolved Character row {index}"));
+                    append_diagnostic(
+                        &mut character,
+                        "unresolved-character-row",
+                        format!("unresolved Character row {index}"),
+                    );
                 } else {
                     character = character_run(
                         renderer, package, references, resolved, shape_id, properties, &character,
@@ -114,9 +119,15 @@ fn rich_paragraphs(
                     let alignment = property_number(properties, "Alignment").unwrap_or(0.0) as i32;
                     let default_interval =
                         property_number(&resolved.cells, "DefaultTabStop").unwrap_or(0.5) as f32;
-                    run.diagnostic = position.is_none().then(|| format!(
-                        "tab stop missing Position; used renderer policy DefaultTabStop {default_interval} in"
-                    ));
+                    if position.is_none() {
+                        append_diagnostic(
+                            run,
+                            "missing-tab-position",
+                            format!(
+                                "tab stop missing Position; used renderer policy DefaultTabStop {default_interval} in"
+                            ),
+                        );
+                    }
                     run.tab = Some(TabStop {
                         position: position.unwrap_or(0.0) as f32,
                         alignment,
@@ -130,7 +141,7 @@ fn rich_paragraphs(
                     Ok(value) => run.text = value,
                     Err(reason) => {
                         run.text = "[unresolved field]".into();
-                        run.diagnostic = Some(reason);
+                        append_diagnostic(&mut run, "unresolvable-field", reason);
                     }
                 }
                 paragraphs
@@ -186,7 +197,7 @@ fn append_run(paragraphs: &mut [RichParagraph], character: &TextRun, text: Strin
     run.text = match character_case(character, &text) {
         Ok(text) => text,
         Err(diagnostic) => {
-            run.diagnostic = Some(diagnostic);
+            append_diagnostic(&mut run, "unresolvable-character-case", diagnostic);
             text
         }
     };
@@ -231,9 +242,11 @@ fn character_run(
     if properties.contains_key("Color") {
         match text_colour(package, references, resolved, shape_id, properties) {
             Ok(color) => run.color = color,
-            Err(reason) => {
-                append_diagnostic(&mut run, format!("unresolvable text colour: {reason}"))
-            }
+            Err(reason) => append_diagnostic(
+                &mut run,
+                "unresolvable-text-colour",
+                format!("unresolvable text colour: {reason}"),
+            ),
         }
     }
     if let Some(style) = property_number(properties, "Style") {
@@ -248,7 +261,11 @@ fn character_run(
             0 => (run.superscript, run.subscript) = (false, false),
             1 => (run.superscript, run.subscript) = (true, false),
             2 => (run.superscript, run.subscript) = (false, true),
-            _ => append_diagnostic(&mut run, format!("unresolvable Character.Pos value {pos}")),
+            _ => append_diagnostic(
+                &mut run,
+                "unresolvable-character-pos",
+                format!("unresolvable Character.Pos value {pos}"),
+            ),
         }
     }
     if let Some(case) = property_number(properties, "Case") {
@@ -261,18 +278,18 @@ fn character_run(
         renderer
             .registered_fonts
             .contains_key(&(run.family.clone(), run.bold, run.italic));
-    if !exact_font
-        && !run.diagnostic.as_deref().is_some_and(|diagnostic| {
-            diagnostic.contains("unregistered font") || diagnostic.contains("font substituted")
-        })
-    {
+    if !exact_font && run.diagnosed_face.as_deref() != Some(run.family.as_str()) {
         let family = run.family.clone();
-        let diagnostic = if renderer.font_for(&family, run.bold, run.italic).is_some() {
-            format!("font substituted for '{family}'")
+        let (code, detail) = if renderer.font_for(&family, run.bold, run.italic).is_some() {
+            (
+                "font-substituted",
+                format!("font substituted for '{family}'"),
+            )
         } else {
-            format!("unregistered font '{family}'")
+            ("unregistered-font", format!("unregistered font '{family}'"))
         };
-        append_diagnostic(&mut run, diagnostic);
+        append_diagnostic(&mut run, code, detail);
+        run.diagnosed_face = Some(family);
     }
     run
 }
@@ -290,11 +307,8 @@ fn row_properties(
         .unwrap_or_default()
 }
 
-fn append_diagnostic(run: &mut TextRun, diagnostic: String) {
-    run.diagnostic = Some(match run.diagnostic.take() {
-        Some(existing) => format!("{existing}; {diagnostic}"),
-        None => diagnostic,
-    });
+fn append_diagnostic(run: &mut TextRun, code: &'static str, detail: impl Into<String>) {
+    run.diagnostics.push(Diagnostic::for_code(code, detail));
 }
 
 fn text_colour(
@@ -753,10 +767,7 @@ impl Renderer {
             if paragraph.align == 3
                 && let Some(run) = paragraph.runs.first_mut()
             {
-                run.diagnostic = Some(match run.diagnostic.take() {
-                    Some(diagnostic) => format!("{diagnostic}; justify falls back to left"),
-                    None => "justify falls back to left".into(),
-                });
+                append_diagnostic(run, "justify-fallback", "justify falls back to left");
             }
         }
         let text = paragraphs
@@ -2092,11 +2103,12 @@ mod tests {
         else {
             unreachable!()
         };
-        assert!(
-            paragraphs[0].runs[1].diagnostic.as_deref().is_some_and(
-                |diagnostic| diagnostic.contains("renderer policy DefaultTabStop 0.75 in")
-            )
-        );
+        assert!(paragraphs[0].runs[1].diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing-tab-position"
+                && diagnostic
+                    .detail
+                    .contains("renderer policy DefaultTabStop 0.75 in")
+        }));
         assert!((lines[0].caret_stops[2].x - 1.75).abs() < 0.001);
     }
 
@@ -2125,23 +2137,18 @@ mod tests {
             runs.iter().map(|run| run.text.as_str()).collect::<String>(),
             " before resolved middle [unresolved field] after "
         );
-        assert_eq!(
-            runs[1].diagnostic.as_deref(),
-            Some("unregistered font 'sans-serif'")
-        );
-        assert_eq!(
-            text_diagnostic_category(runs[1].diagnostic.as_deref().unwrap()),
-            TextDiagnosticCategory::Fidelity
-        );
+        assert!(runs[1].diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unregistered-font"
+                && diagnostic.detail == "unregistered font 'sans-serif'"
+                && diagnostic.category == DiagnosticCategory::Fidelity
+        }));
         assert!(
             runs[3]
-                .diagnostic
-                .as_deref()
-                .is_some_and(|reason| reason.contains("no Value cell"))
-        );
-        assert_eq!(
-            text_diagnostic_category(runs[3].diagnostic.as_deref().unwrap()),
-            TextDiagnosticCategory::Integrity
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "unresolvable-field"
+                    && diagnostic.detail.contains("no Value cell")
+                    && diagnostic.category == DiagnosticCategory::Integrity)
         );
     }
 
@@ -2296,10 +2303,9 @@ mod tests {
         let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
             unreachable!()
         };
-        assert_eq!(
-            paragraphs[0].runs[0].diagnostic.as_deref(),
-            Some("unregistered font '99'")
-        );
+        assert!(paragraphs[0].runs[0].diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unregistered-font" && diagnostic.detail == "unregistered font '99'"
+        }));
     }
 
     #[test]
@@ -2308,9 +2314,131 @@ mod tests {
         let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
             unreachable!()
         };
+        assert!(paragraphs[0].runs[0].diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unregistered-font"
+                && diagnostic.detail == "unregistered font 'sans-serif'"
+        }));
+    }
+
+    #[test]
+    fn text_runs_append_structured_diagnostics_without_losing_integrity() {
+        let mut run = TextRun {
+            text: String::new(),
+            family: "sans-serif".into(),
+            size_in: 1.0 / 6.0,
+            bold: false,
+            italic: false,
+            underline: false,
+            small_caps: false,
+            superscript: false,
+            subscript: false,
+            letter_spacing: 0.0,
+            case: 0,
+            color: "currentColor".into(),
+            diagnostics: Vec::new(),
+            tab: None,
+            diagnosed_face: None,
+        };
+        append_diagnostic(&mut run, "missing-tab-position", "missing tab position");
+        append_diagnostic(&mut run, "unresolvable-text-colour", "unresolvable colour");
         assert_eq!(
-            paragraphs[0].runs[0].diagnostic.as_deref(),
-            Some("unregistered font 'sans-serif'")
+            run.diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.category)
+                .collect::<Vec<_>>(),
+            [DiagnosticCategory::Fidelity, DiagnosticCategory::Integrity]
+        );
+    }
+
+    #[test]
+    fn text_diagnostics_preserve_categories_when_a_tab_and_case_fail() {
+        let mut shape = text_shape(vec![TextToken::Literal("a".into()), TextToken::Tab(3)]);
+        shape.children.push(text_section(
+            "Character",
+            vec![row(
+                0,
+                "",
+                vec![cell("Color", "not-a-colour"), cell("Case", "9")],
+            )],
+        ));
+        let list = render(vec![shape]);
+        let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        let literal = &paragraphs[0].runs[0].diagnostics;
+        assert!(
+            literal
+                .iter()
+                .any(|item| item.category == DiagnosticCategory::Integrity)
+        );
+        assert!(
+            literal
+                .iter()
+                .any(|item| item.category == DiagnosticCategory::Fidelity)
+        );
+        let tab = &paragraphs[0].runs[1].diagnostics;
+        assert!(
+            tab.iter()
+                .any(|item| item.code == "unresolvable-text-colour")
+        );
+        assert!(tab.iter().any(|item| item.code == "missing-tab-position"));
+    }
+
+    #[test]
+    fn sequential_unavailable_faces_each_record_a_diagnostic() {
+        let mut shape = text_shape(vec![
+            TextToken::CharacterRun(0),
+            TextToken::Literal("a".into()),
+            TextToken::CharacterRun(1),
+            TextToken::Literal("b".into()),
+        ]);
+        shape.children.push(text_section(
+            "Character",
+            vec![
+                row(0, "", vec![cell("Font", "99")]),
+                row(1, "", vec![cell("Font", "98")]),
+            ],
+        ));
+        let mut renderer = Renderer::default();
+        renderer
+            .register_font(
+                "sans-serif",
+                false,
+                false,
+                include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf").to_vec(),
+            )
+            .unwrap();
+        let list = renderer.layout_page(&package(vec![shape]), "page").unwrap();
+        let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        let details = paragraphs[0]
+            .runs
+            .iter()
+            .flat_map(|run| &run.diagnostics)
+            .map(|diagnostic| diagnostic.detail.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            details.contains(&"font substituted for '99'"),
+            "{details:?}"
+        );
+        assert!(
+            details.contains(&"font substituted for '98'"),
+            "{details:?}"
+        );
+    }
+
+    #[test]
+    fn palette_colours_and_unknown_codes_fail_safe() {
+        let mut package = package(Vec::new());
+        package.colors = serde_json::from_value(serde_json::json!([
+            {"name":"ColorEntry","attributes":[["IX","3"],["RGB","010203"]],"children":[]}
+        ]))
+        .unwrap();
+        assert_eq!(palette_colour(&package, 3.0), Some("#010203".into()));
+        assert_eq!(
+            Diagnostic::for_code("future-diagnostic", "detail").category,
+            DiagnosticCategory::Integrity
         );
     }
 
@@ -3078,7 +3206,7 @@ mod tests {
     #[test]
     fn rejects_unknown_contract() {
         let list = VsdxDisplayList {
-            contract_version: 3,
+            contract_version: 4,
             width: 0.0,
             height: 0.0,
             paint_transform: final_paint_transform(0.0),
@@ -3349,6 +3477,136 @@ mod tests {
         assert_eq!(stats.field_only, 1);
         assert_eq!(stats.style_inherited, 1);
         assert_eq!(stats.master_inherited, 1);
+        let mut text_by_id = BTreeMap::new();
+        text_boxes_by_id(&list.primitives, &mut text_by_id);
+        let text = |id: &str| match text_by_id[&format!("{page}:{id}")] {
+            Primitive::TextBox { paragraphs, .. } => paragraphs,
+            _ => unreachable!(),
+        };
+        assert_eq!(text("4")[0].runs[0].text, "master text");
+        assert_eq!(text("2")[0].runs[0].text, "field value");
+        let inherited = &text("3")[0].runs[0];
+        assert_eq!(inherited.family, "Calibri");
+        assert_eq!(inherited.size_in, 1.0 / 6.0);
+        assert_eq!(inherited.color, "currentColor");
+    }
+
+    fn accounting_oracle_fixture() -> (VsdxDisplayList, Vec<Vec<ExpectedTextRun>>) {
+        let run = |text: &str, category| TextRun {
+            text: text.into(),
+            family: "sans-serif".into(),
+            size_in: 1.0 / 6.0,
+            bold: false,
+            italic: false,
+            underline: false,
+            small_caps: false,
+            superscript: false,
+            subscript: false,
+            letter_spacing: 0.0,
+            case: 0,
+            color: "currentColor".into(),
+            diagnostics: vec![Diagnostic::new(category, "fixture", "fixture")],
+            tab: None,
+            diagnosed_face: None,
+        };
+        let paragraphs = vec![
+            TextParagraph {
+                runs: vec![
+                    run("first", DiagnosticCategory::Integrity),
+                    run("second", DiagnosticCategory::Fidelity),
+                ],
+            },
+            TextParagraph {
+                runs: vec![run("third", DiagnosticCategory::Integrity)],
+            },
+        ];
+        let expected = paragraphs
+            .iter()
+            .map(|paragraph| {
+                paragraph
+                    .runs
+                    .iter()
+                    .map(|run| ExpectedTextRun {
+                        text: run.text.clone(),
+                        diagnostic_categories: run
+                            .diagnostics
+                            .iter()
+                            .map(|item| item.category)
+                            .collect(),
+                    })
+                    .collect()
+            })
+            .collect();
+        (
+            VsdxDisplayList {
+                contract_version: CONTRACT_VERSION,
+                width: 0.0,
+                height: 0.0,
+                paint_transform: final_paint_transform(0.0),
+                primitives: vec![Primitive::TextBox {
+                    id: "fixture".into(),
+                    z_order: 0,
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                    paragraphs,
+                    lines: Vec::new(),
+                }],
+            },
+            expected,
+        )
+    }
+
+    fn fixture_paragraphs(list: &VsdxDisplayList) -> &[TextParagraph] {
+        let Primitive::TextBox { paragraphs, .. } = &list.primitives[0] else {
+            unreachable!()
+        };
+        paragraphs
+    }
+
+    fn fixture_paragraphs_mut(list: &mut VsdxDisplayList) -> &mut Vec<TextParagraph> {
+        let Primitive::TextBox { paragraphs, .. } = &mut list.primitives[0] else {
+            unreachable!()
+        };
+        paragraphs
+    }
+
+    #[test]
+    fn accounting_oracle_rejects_a_dropped_run() {
+        let (mut list, expected) = accounting_oracle_fixture();
+        fixture_paragraphs_mut(&mut list)[0].runs.pop();
+        assert!(
+            assert_display_text_matches("fixture", fixture_paragraphs(&list), &expected).is_err()
+        );
+    }
+
+    #[test]
+    fn accounting_oracle_rejects_a_dropped_paragraph() {
+        let (mut list, expected) = accounting_oracle_fixture();
+        fixture_paragraphs_mut(&mut list).pop();
+        assert!(
+            assert_display_text_matches("fixture", fixture_paragraphs(&list), &expected).is_err()
+        );
+    }
+
+    #[test]
+    fn accounting_oracle_rejects_reordered_runs() {
+        let (mut list, expected) = accounting_oracle_fixture();
+        fixture_paragraphs_mut(&mut list)[0].runs.swap(0, 1);
+        assert!(
+            assert_display_text_matches("fixture", fixture_paragraphs(&list), &expected).is_err()
+        );
+    }
+
+    #[test]
+    fn accounting_oracle_rejects_a_swapped_diagnostic_category() {
+        let (mut list, expected) = accounting_oracle_fixture();
+        fixture_paragraphs_mut(&mut list)[0].runs[0].diagnostics[0].category =
+            DiagnosticCategory::Fidelity;
+        assert!(
+            assert_display_text_matches("fixture", fixture_paragraphs(&list), &expected).is_err()
+        );
     }
 
     fn count_primitives(
@@ -3419,12 +3677,17 @@ mod tests {
         rendered: &mut std::collections::BTreeSet<String>,
         stats: &mut TextCorpusStats,
     ) {
-        let page = &package.page_contents[page_part];
+        let contents = &package.page_contents[page_part];
+        let page = package
+            .page_part_ids
+            .get(page_part)
+            .and_then(|id| package.page_sheets.get(id))
+            .unwrap_or(contents);
         let resolver = Resolver::new(package);
         let references = PageShapeReferences::new(&resolver, page_part).ok();
         let mut text_boxes = BTreeMap::new();
         text_boxes_by_id(primitives, &mut text_boxes);
-        for shape in page.shapes() {
+        for shape in contents.shapes() {
             assert_shape_text(
                 renderer,
                 package,
@@ -3459,7 +3722,9 @@ mod tests {
         {
             return;
         }
-        let tokens = resolver.resolve_text(shape, page).unwrap();
+        let tokens = resolver
+            .resolve_text_in_context(shape, page, &resolved)
+            .unwrap();
         if tokens.iter().all(|token| {
             matches!(
                 token,
@@ -3497,11 +3762,9 @@ mod tests {
         }) {
             stats.style_inherited += 1;
         }
-        let expected = rich_paragraphs(renderer, package, references, &resolved, shape.id, &tokens);
-        let expected_runs = expected
-            .iter()
-            .map(|paragraph| paragraph.runs.len())
-            .sum::<usize>();
+        let expected =
+            expected_text_runs(renderer, package, references, &resolved, shape.id, &tokens);
+        let expected_runs = expected.iter().map(Vec::len).sum::<usize>();
         if expected_runs > 0 {
             stats.paragraphs += expected.len();
             stats.runs += expected_runs;
@@ -3509,51 +3772,13 @@ mod tests {
         match text_boxes.get(&id) {
             Some(Primitive::TextBox { paragraphs, .. }) => {
                 rendered.insert(id.clone());
-                assert_eq!(paragraphs.len(), expected.len(), "{id}: paragraph count");
-                assert_eq!(
-                    paragraphs
-                        .iter()
-                        .map(|paragraph| paragraph.runs.len())
-                        .sum::<usize>(),
-                    expected_runs,
-                    "{id}: run count"
-                );
-                let actual_text = paragraphs
-                    .iter()
-                    .flat_map(|paragraph| &paragraph.runs)
-                    .map(|run| run.text.as_str())
-                    .collect::<String>();
-                let expected_text = expected
-                    .iter()
-                    .flat_map(|paragraph| &paragraph.runs)
-                    .map(|run| run.text.as_str())
-                    .collect::<String>();
-                assert_eq!(actual_text, expected_text, "{id}: visible text");
-                let actual_diagnostics = paragraphs
-                    .iter()
-                    .flat_map(|paragraph| &paragraph.runs)
-                    .filter(|run| run.diagnostic.is_some())
-                    .count();
-                let expected_diagnostics = expected
-                    .iter()
-                    .flat_map(|paragraph| &paragraph.runs)
-                    .filter(|run| run.diagnostic.is_some())
-                    .count();
-                assert_eq!(
-                    actual_diagnostics, expected_diagnostics,
-                    "{id}: diagnostic-run count"
-                );
+                assert_display_text_matches(&id, paragraphs, &expected).unwrap();
                 stats.shapes += 1;
                 let integrity_diagnostics = paragraphs
                     .iter()
                     .flat_map(|paragraph| &paragraph.runs)
-                    .filter_map(|run| run.diagnostic.as_deref())
-                    .filter(|diagnostic| {
-                        matches!(
-                            text_diagnostic_category(diagnostic),
-                            TextDiagnosticCategory::Integrity
-                        )
-                    })
+                    .flat_map(|run| &run.diagnostics)
+                    .filter(|diagnostic| diagnostic.category == DiagnosticCategory::Integrity)
                     .count();
                 if integrity_diagnostics == 0 {
                     stats.zero_integrity_diagnostics += 1;
@@ -3561,19 +3786,22 @@ mod tests {
                 for diagnostic in paragraphs
                     .iter()
                     .flat_map(|paragraph| &paragraph.runs)
-                    .filter_map(|run| run.diagnostic.as_deref())
+                    .flat_map(|run| &run.diagnostics)
                 {
-                    match text_diagnostic_category(diagnostic) {
-                        TextDiagnosticCategory::Integrity => {
+                    match diagnostic.category {
+                        DiagnosticCategory::Integrity => {
                             stats.integrity_diagnostics += 1;
                             *stats
                                 .integrity_reasons
-                                .entry(diagnostic.into())
+                                .entry(format!("{}: {}", diagnostic.code, diagnostic.detail))
                                 .or_default() += 1;
                         }
-                        TextDiagnosticCategory::Fidelity => {
+                        DiagnosticCategory::Fidelity => {
                             stats.fidelity_diagnostics += 1;
-                            *stats.fidelity_reasons.entry(diagnostic.into()).or_default() += 1;
+                            *stats
+                                .fidelity_reasons
+                                .entry(format!("{}: {}", diagnostic.code, diagnostic.detail))
+                                .or_default() += 1;
                         }
                     }
                 }
@@ -3587,6 +3815,158 @@ mod tests {
                 rendered, stats,
             );
         }
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ExpectedTextRun {
+        text: String,
+        diagnostic_categories: Vec<DiagnosticCategory>,
+    }
+
+    fn expected_text_runs(
+        renderer: &Renderer,
+        package: &VsdxPackage,
+        references: Option<&PageShapeReferences>,
+        resolved: &ResolvedShape,
+        shape_id: u32,
+        tokens: &[vsdx_resolve::ResolvedTextToken],
+    ) -> Vec<Vec<ExpectedTextRun>> {
+        let mut character = TextRun {
+            text: String::new(),
+            family: "sans-serif".into(),
+            size_in: 1.0 / 6.0,
+            bold: false,
+            italic: false,
+            underline: false,
+            small_caps: false,
+            superscript: false,
+            subscript: false,
+            letter_spacing: 0.0,
+            case: 0,
+            color: "currentColor".into(),
+            diagnostics: Vec::new(),
+            tab: None,
+            diagnosed_face: None,
+        };
+        character = character_run(
+            renderer,
+            package,
+            references,
+            resolved,
+            shape_id,
+            &row_properties(resolved, "Character", 0),
+            &character,
+        );
+        let mut paragraphs = vec![Vec::new()];
+        let mut justified = vec![false];
+        for token in tokens {
+            match token {
+                vsdx_resolve::ResolvedTextToken::Literal(value) => {
+                    let mut categories = character
+                        .diagnostics
+                        .iter()
+                        .map(|item| item.category)
+                        .collect::<Vec<_>>();
+                    let text = match character_case(&character, value) {
+                        Ok(text) => text,
+                        Err(_) => {
+                            categories.push(DiagnosticCategory::Fidelity);
+                            value.clone()
+                        }
+                    };
+                    paragraphs.last_mut().unwrap().push(ExpectedTextRun {
+                        text,
+                        diagnostic_categories: categories,
+                    });
+                }
+                vsdx_resolve::ResolvedTextToken::CharacterRun { index, properties } => {
+                    if properties.is_empty() {
+                        append_diagnostic(
+                            &mut character,
+                            "unresolved-character-row",
+                            format!("unresolved Character row {index}"),
+                        );
+                    } else {
+                        character = character_run(
+                            renderer, package, references, resolved, shape_id, properties,
+                            &character,
+                        );
+                    }
+                }
+                vsdx_resolve::ResolvedTextToken::ParagraphRun { properties, .. } => {
+                    paragraphs.push(Vec::new());
+                    justified.push(property_number(properties, "HorzAlign") == Some(3.0));
+                }
+                vsdx_resolve::ResolvedTextToken::Tab { properties, .. } => {
+                    let mut categories = character
+                        .diagnostics
+                        .iter()
+                        .map(|item| item.category)
+                        .collect::<Vec<_>>();
+                    if property_number(properties, "Position").is_none() {
+                        categories.push(DiagnosticCategory::Fidelity);
+                    }
+                    paragraphs.last_mut().unwrap().push(ExpectedTextRun {
+                        text: "\t".into(),
+                        diagnostic_categories: categories,
+                    });
+                }
+                vsdx_resolve::ResolvedTextToken::Field { properties, .. } => {
+                    let result = field_value(package, resolved, properties);
+                    let mut categories = character
+                        .diagnostics
+                        .iter()
+                        .map(|item| item.category)
+                        .collect::<Vec<_>>();
+                    if result.is_err() {
+                        categories.push(DiagnosticCategory::Integrity);
+                    }
+                    paragraphs.last_mut().unwrap().push(ExpectedTextRun {
+                        text: result.unwrap_or_else(|_| "[unresolved field]".into()),
+                        diagnostic_categories: categories,
+                    });
+                }
+            }
+        }
+        for (runs, justified) in paragraphs.iter_mut().zip(justified) {
+            if justified && let Some(run) = runs.first_mut() {
+                run.diagnostic_categories.push(DiagnosticCategory::Fidelity);
+            }
+        }
+        paragraphs
+    }
+
+    fn assert_display_text_matches(
+        id: &str,
+        paragraphs: &[TextParagraph],
+        expected: &[Vec<ExpectedTextRun>],
+    ) -> Result<(), String> {
+        if paragraphs.len() != expected.len() {
+            return Err(format!("{id}: paragraph count"));
+        }
+        for (paragraph_index, (actual, expected)) in paragraphs.iter().zip(expected).enumerate() {
+            if actual.runs.len() != expected.len() {
+                return Err(format!("{id}: paragraph {paragraph_index} run count"));
+            }
+            for (run_index, (actual, expected)) in actual.runs.iter().zip(expected).enumerate() {
+                if actual.text != expected.text {
+                    return Err(format!(
+                        "{id}: paragraph {paragraph_index} run {run_index} text"
+                    ));
+                }
+                let categories = actual
+                    .diagnostics
+                    .iter()
+                    .map(|item| item.category)
+                    .collect::<Vec<_>>();
+                if categories != expected.diagnostic_categories {
+                    return Err(format!(
+                        "{id}: paragraph {paragraph_index} run {run_index} diagnostics"
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     #[derive(Default)]
@@ -3603,26 +3983,6 @@ mod tests {
         master_inherited: usize,
         integrity_reasons: BTreeMap<String, usize>,
         fidelity_reasons: BTreeMap<String, usize>,
-    }
-
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum TextDiagnosticCategory {
-        Integrity,
-        Fidelity,
-    }
-
-    fn text_diagnostic_category(diagnostic: &str) -> TextDiagnosticCategory {
-        if diagnostic.starts_with("font substituted")
-            || diagnostic.starts_with("unregistered font")
-            || diagnostic.starts_with("tab stop missing Position; used renderer policy")
-            || diagnostic == "justify falls back to left"
-            || diagnostic.starts_with("unresolvable Character.Pos")
-            || diagnostic.starts_with("unresolvable Character.Case")
-        {
-            TextDiagnosticCategory::Fidelity
-        } else {
-            TextDiagnosticCategory::Integrity
-        }
     }
 
     fn text_boxes_by_id<'a>(

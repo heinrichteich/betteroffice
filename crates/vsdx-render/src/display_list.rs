@@ -1,7 +1,7 @@
 use ooxml_drawingml::GeometryPathCommand;
 use serde::{Deserialize, Serialize};
 
-pub const CONTRACT_VERSION: u32 = 2;
+pub const CONTRACT_VERSION: u32 = 3;
 
 /// Replay primitives in ascending `z_order` (back-to-front); hit test in descending order.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -208,10 +208,77 @@ pub struct TextRun {
     #[serde(skip)]
     pub(crate) case: i32,
     pub color: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diagnostic: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<Diagnostic>,
     #[serde(skip)]
     pub(crate) tab: Option<super::TabStop>,
+    #[serde(skip)]
+    pub(crate) diagnosed_face: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DiagnosticCategory {
+    Integrity,
+    Fidelity,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Diagnostic {
+    pub category: DiagnosticCategory,
+    pub code: &'static str,
+    pub detail: String,
+}
+
+impl Diagnostic {
+    pub fn new(
+        category: DiagnosticCategory,
+        code: &'static str,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            category,
+            code,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn for_code(code: &'static str, detail: impl Into<String>) -> Self {
+        Self::new(DiagnosticCategory::for_code(code), code, detail)
+    }
+}
+
+impl DiagnosticCategory {
+    pub fn for_code(code: &str) -> Self {
+        match code {
+            "font-substituted"
+            | "unregistered-font"
+            | "missing-tab-position"
+            | "justify-fallback"
+            | "unresolvable-character-pos"
+            | "unresolvable-character-case" => Self::Fidelity,
+            _ => Self::Integrity,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Diagnostic {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WireDiagnostic {
+            code: String,
+            detail: String,
+        }
+
+        let wire = WireDiagnostic::deserialize(deserializer)?;
+        let code = Box::leak(wire.code.into_boxed_str());
+        Ok(Self::for_code(code, wire.detail))
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -55,7 +55,7 @@ for (const [name, rows] of [
 const textAccounting = new JSZip();
 for (const [part, contents] of Object.entries({
   ...parts,
-  'visio/document.xml': `<VisioDocument ${ns}><FaceNames><FaceName ID='0' Name='Calibri'/></FaceNames><StyleSheets><StyleSheet ID='1' NameU='Text'><Section N='Character'><Row IX='0'><Cell N='Font' V='0'/></Row></Section></StyleSheet></StyleSheets><DocumentSheet><Cell N='PageWidth' V='8.5'/><Cell N='PageHeight' V='11'/></DocumentSheet></VisioDocument>`,
+  'visio/document.xml': `<VisioDocument ${ns}><FaceNames><FaceName ID='0' Name='Calibri'/></FaceNames><StyleSheets><StyleSheet ID='1' NameU='Text'><Section N='Character'><Row IX='0'><Cell N='Font' V='0'/><Cell N='Size' V='0.25'/><Cell N='Color' V='RGB(1,2,3)'/></Row></Section></StyleSheet></StyleSheets><DocumentSheet><Cell N='PageWidth' V='8.5'/><Cell N='PageHeight' V='11'/></DocumentSheet></VisioDocument>`,
   'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Shape'>${xform(1, 1, 1, 1, 0, 0, 0, 0, 0)}${rect}<Text><cp IX='0'/><pp IX='0'/></Text></Shape><Shape ID='2' Type='Shape'>${xform(1, 1, 2, 1, 0, 0, 0, 0, 0)}${rect}<Section N='Field'><Row IX='0'><Cell N='Value' V='field value'/></Row></Section><Text><fld IX='0'/></Text></Shape><Shape ID='3' Type='Shape' TextStyle='1'>${xform(1, 1, 3, 1, 0, 0, 0, 0, 0)}${rect}<Text><cp IX='0'/>style text</Text></Shape><Shape ID='4' Type='Shape' Master='1' MasterShape='10'>${xform(1, 1, 4, 1, 0, 0, 0, 0, 0)}${rect}</Shape></Shapes></PageContents>`,
   'visio/masters/master1.xml': `<MasterContents ${ns}><Shapes><Shape ID='10' Type='Shape'><Text>master text</Text></Shape></Shapes></MasterContents>`,
 } as Record<string, string>)) textAccounting.file(part, contents, { date: zipDate, createFolders: false });
