@@ -12,87 +12,143 @@ pub struct Cell {
     pub del: bool,
     pub other_attrs: Vec<(String, String)>,
 }
-
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Section {
     pub name: String,
-    pub index: Option<i32>,
+    pub index: Option<u32>,
     pub del: bool,
     pub rows: Vec<Row>,
     pub other_attrs: Vec<(String, String)>,
 }
-
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Row {
-    pub index: Option<i32>,
+    pub index: Option<u32>,
     pub name: Option<String>,
+    pub local_name: Option<String>,
     pub row_type: Option<String>,
     pub del: bool,
     pub cells: Vec<Cell>,
     pub other_attrs: Vec<(String, String)>,
 }
-
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Shape {
-    pub id: i32,
+    pub id: u32,
     pub name: Option<String>,
     pub name_u: Option<String>,
     pub shape_type: Option<String>,
-    pub master: Option<i32>,
-    pub master_shape: Option<i32>,
-    pub line_style: Option<i32>,
-    pub fill_style: Option<i32>,
-    pub text_style: Option<i32>,
-    pub cells: Vec<Cell>,
-    pub sections: Vec<Section>,
-    pub text: Option<Vec<TextToken>>,
-    pub children: Vec<Shape>,
+    pub master: Option<u32>,
+    pub master_shape: Option<u32>,
+    pub line_style: Option<u32>,
+    pub fill_style: Option<u32>,
+    pub text_style: Option<u32>,
+    pub children: Vec<ShapeChild>,
     pub del: bool,
     pub other_attrs: Vec<(String, String)>,
 }
-
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ShapeChild {
+    Cell(Cell),
+    Section(Section),
+    Text(Vec<TextToken>),
+    Shapes(Vec<Shape>),
+    Unknown(OpaqueXml),
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpaqueXml {
+    pub name: String,
+    pub attributes: Vec<(String, String)>,
+    pub children: Vec<OpaqueXmlNode>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OpaqueXmlNode {
+    Element(OpaqueXml),
+    Text(String),
+}
+impl Shape {
+    pub fn cells(&self) -> impl Iterator<Item = &Cell> {
+        self.children.iter().filter_map(|child| {
+            if let ShapeChild::Cell(value) = child {
+                Some(value)
+            } else {
+                None
+            }
+        })
+    }
+    pub fn sections(&self) -> impl Iterator<Item = &Section> {
+        self.children.iter().filter_map(|child| {
+            if let ShapeChild::Section(value) = child {
+                Some(value)
+            } else {
+                None
+            }
+        })
+    }
+    pub fn text(&self) -> Option<&[TextToken]> {
+        self.children.iter().find_map(|child| {
+            if let ShapeChild::Text(value) = child {
+                Some(value.as_slice())
+            } else {
+                None
+            }
+        })
+    }
+    pub fn shapes(&self) -> impl Iterator<Item = &Shape> {
+        self.children
+            .iter()
+            .filter_map(|child| {
+                if let ShapeChild::Shapes(values) = child {
+                    Some(values.iter())
+                } else {
+                    None
+                }
+            })
+            .flatten()
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TextToken {
     Literal(String),
-    CharacterRun(i32),
-    ParagraphRun(i32),
-    Tab(i32),
-    Field(i32),
+    CharacterRun(u32),
+    ParagraphRun(u32),
+    Tab(u32),
+    Field(u32),
 }
-
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Connect {
-    pub from_sheet: i32,
+    pub from_sheet: u32,
     pub from_cell: Option<String>,
     pub from_part: Option<i32>,
-    pub to_sheet: i32,
+    pub to_sheet: u32,
     pub to_cell: Option<String>,
     pub to_part: Option<i32>,
     pub other_attrs: Vec<(String, String)>,
 }
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Sheet {
+    pub id: Option<u32>,
     pub cells: Vec<Cell>,
     pub sections: Vec<Section>,
     pub shapes: Vec<Shape>,
     pub connects: Vec<Connect>,
+    pub has_shapes: bool,
+    pub has_connects: bool,
     pub other_attrs: Vec<(String, String)>,
 }
-
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct XmlRecord {
     pub name: String,
     pub attributes: Vec<(String, String)>,
 }
-
 pub(crate) fn parse_records(parent: Option<&XmlElement>) -> Vec<XmlRecord> {
     parent
         .into_iter()
@@ -103,14 +159,14 @@ pub(crate) fn parse_records(parent: Option<&XmlElement>) -> Vec<XmlRecord> {
         })
         .collect()
 }
-
 pub(crate) fn parse_sheet(
     root: &XmlElement,
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<Sheet, VsdxError> {
     let mut sheet = Sheet {
-        other_attrs: root.attributes.clone(),
+        id: optional_u32(root, "ID", part)?,
+        other_attrs: other(root, &["ID"]),
         ..Sheet::default()
     };
     for child in elements(root) {
@@ -118,13 +174,15 @@ pub(crate) fn parse_sheet(
             "Cell" => sheet.cells.push(parse_cell(child, part, budget)?),
             "Section" => sheet.sections.push(parse_section(child, part, budget)?),
             "Shapes" => {
-                for shape in elements(child).filter(|element| element.local_name() == "Shape") {
+                sheet.has_shapes = true;
+                for shape in elements(child).filter(|e| e.local_name() == "Shape") {
                     sheet.shapes.push(parse_shape(shape, part, budget)?);
                 }
             }
             "Connects" => {
-                for connect in elements(child).filter(|element| element.local_name() == "Connect") {
-                    sheet.connects.push(parse_connect(connect)?);
+                sheet.has_connects = true;
+                for connect in elements(child).filter(|e| e.local_name() == "Connect") {
+                    sheet.connects.push(parse_connect(connect, part)?);
                 }
             }
             _ => {}
@@ -132,7 +190,6 @@ pub(crate) fn parse_sheet(
     }
     Ok(sheet)
 }
-
 fn parse_shape(
     element: &XmlElement,
     part: &str,
@@ -140,18 +197,15 @@ fn parse_shape(
 ) -> Result<Shape, VsdxError> {
     budget.charge_shape(part)?;
     let mut shape = Shape {
-        id: required_i32(element, "ID", part)?,
+        id: required_u32(element, "ID", part)?,
         name: attr(element, "Name"),
         name_u: attr(element, "NameU"),
         shape_type: attr(element, "Type"),
-        master: optional_i32(element, "Master", part)?,
-        master_shape: optional_i32(element, "MasterShape", part)?,
-        line_style: optional_i32(element, "LineStyle", part)?,
-        fill_style: optional_i32(element, "FillStyle", part)?,
-        text_style: optional_i32(element, "TextStyle", part)?,
-        cells: Vec::new(),
-        sections: Vec::new(),
-        text: None,
+        master: optional_u32(element, "Master", part)?,
+        master_shape: optional_u32(element, "MasterShape", part)?,
+        line_style: optional_u32(element, "LineStyle", part)?,
+        fill_style: optional_u32(element, "FillStyle", part)?,
+        text_style: optional_u32(element, "TextStyle", part)?,
         children: Vec::new(),
         del: deleted(element),
         other_attrs: other(
@@ -171,17 +225,18 @@ fn parse_shape(
         ),
     };
     for child in elements(element) {
-        match child.local_name() {
-            "Cell" => shape.cells.push(parse_cell(child, part, budget)?),
-            "Section" => shape.sections.push(parse_section(child, part, budget)?),
-            "Text" => shape.text = Some(parse_text(child, part)?),
-            "Shapes" => {
-                for nested in elements(child).filter(|nested| nested.local_name() == "Shape") {
-                    shape.children.push(parse_shape(nested, part, budget)?);
-                }
-            }
-            _ => {}
-        }
+        shape.children.push(match child.local_name() {
+            "Cell" => ShapeChild::Cell(parse_cell(child, part, budget)?),
+            "Section" => ShapeChild::Section(parse_section(child, part, budget)?),
+            "Text" => ShapeChild::Text(parse_text(child, part)?),
+            "Shapes" => ShapeChild::Shapes(
+                elements(child)
+                    .filter(|e| e.local_name() == "Shape")
+                    .map(|e| parse_shape(e, part, budget))
+                    .collect::<Result<_, _>>()?,
+            ),
+            _ => ShapeChild::Unknown(opaque(child)),
+        });
     }
     Ok(shape)
 }
@@ -206,17 +261,16 @@ fn parse_section(
     budget: &mut ParseBudget<'_>,
 ) -> Result<Section, VsdxError> {
     budget.charge_section(part)?;
-    let mut section = Section {
+    Ok(Section {
         name: required(element, "N", part)?,
-        index: optional_i32(element, "IX", part)?,
+        index: optional_u32(element, "IX", part)?,
         del: deleted(element),
-        rows: Vec::new(),
+        rows: elements(element)
+            .filter(|e| e.local_name() == "Row")
+            .map(|e| parse_row(e, part, budget))
+            .collect::<Result<_, _>>()?,
         other_attrs: other(element, &["N", "IX", "Del"]),
-    };
-    for row in elements(element).filter(|child| child.local_name() == "Row") {
-        section.rows.push(parse_row(row, part, budget)?);
-    }
-    Ok(section)
+    })
 }
 fn parse_row(
     element: &XmlElement,
@@ -224,18 +278,18 @@ fn parse_row(
     budget: &mut ParseBudget<'_>,
 ) -> Result<Row, VsdxError> {
     budget.charge_row(part)?;
-    let mut row = Row {
-        index: optional_i32(element, "IX", part)?,
+    Ok(Row {
+        index: optional_u32(element, "IX", part)?,
         name: attr(element, "N"),
+        local_name: attr(element, "LocalName"),
         row_type: attr(element, "T"),
         del: deleted(element),
-        cells: Vec::new(),
-        other_attrs: other(element, &["IX", "N", "T", "Del"]),
-    };
-    for cell in elements(element).filter(|child| child.local_name() == "Cell") {
-        row.cells.push(parse_cell(cell, part, budget)?);
-    }
-    Ok(row)
+        cells: elements(element)
+            .filter(|e| e.local_name() == "Cell")
+            .map(|e| parse_cell(e, part, budget))
+            .collect::<Result<_, _>>()?,
+        other_attrs: other(element, &["IX", "N", "LocalName", "T", "Del"]),
+    })
 }
 fn parse_text(element: &XmlElement, part: &str) -> Result<Vec<TextToken>, VsdxError> {
     element
@@ -244,23 +298,23 @@ fn parse_text(element: &XmlElement, part: &str) -> Result<Vec<TextToken>, VsdxEr
         .map(|node| match node {
             XmlNode::Text(text) => Ok(TextToken::Literal(text.clone())),
             XmlNode::Element(marker) => match marker.local_name() {
-                "cp" => Ok(TextToken::CharacterRun(required_i32(marker, "IX", part)?)),
-                "pp" => Ok(TextToken::ParagraphRun(required_i32(marker, "IX", part)?)),
-                "tp" => Ok(TextToken::Tab(required_i32(marker, "IX", part)?)),
-                "fld" => Ok(TextToken::Field(required_i32(marker, "IX", part)?)),
+                "cp" => Ok(TextToken::CharacterRun(required_u32(marker, "IX", part)?)),
+                "pp" => Ok(TextToken::ParagraphRun(required_u32(marker, "IX", part)?)),
+                "tp" => Ok(TextToken::Tab(required_u32(marker, "IX", part)?)),
+                "fld" => Ok(TextToken::Field(required_u32(marker, "IX", part)?)),
                 name => Err(malformed(part, format!("unknown Text child {name}"))),
             },
         })
         .collect()
 }
-fn parse_connect(element: &XmlElement) -> Result<Connect, VsdxError> {
+fn parse_connect(element: &XmlElement, part: &str) -> Result<Connect, VsdxError> {
     Ok(Connect {
-        from_sheet: required_i32(element, "FromSheet", "Connect")?,
+        from_sheet: required_u32(element, "FromSheet", part)?,
         from_cell: attr(element, "FromCell"),
-        from_part: optional_i32(element, "FromPart", "Connect")?,
-        to_sheet: required_i32(element, "ToSheet", "Connect")?,
+        from_part: optional_i32(element, "FromPart", part)?,
+        to_sheet: required_u32(element, "ToSheet", part)?,
         to_cell: attr(element, "ToCell"),
-        to_part: optional_i32(element, "ToPart", "Connect")?,
+        to_part: optional_i32(element, "ToPart", part)?,
         other_attrs: other(
             element,
             &[
@@ -274,10 +328,27 @@ fn parse_connect(element: &XmlElement) -> Result<Connect, VsdxError> {
         ),
     })
 }
+fn opaque(element: &XmlElement) -> OpaqueXml {
+    OpaqueXml {
+        name: element.name.clone(),
+        attributes: element.attributes.clone(),
+        children: element
+            .children
+            .iter()
+            .map(|node| match node {
+                XmlNode::Text(text) => OpaqueXmlNode::Text(text.clone()),
+                XmlNode::Element(element) => OpaqueXmlNode::Element(opaque(element)),
+            })
+            .collect(),
+    }
+}
 fn elements(element: &XmlElement) -> impl Iterator<Item = &XmlElement> {
-    element.children.iter().filter_map(|node| match node {
-        XmlNode::Element(element) => Some(element),
-        XmlNode::Text(_) => None,
+    element.children.iter().filter_map(|node| {
+        if let XmlNode::Element(element) = node {
+            Some(element)
+        } else {
+            None
+        }
     })
 }
 fn attr(element: &XmlElement, name: &str) -> Option<String> {
@@ -286,10 +357,19 @@ fn attr(element: &XmlElement, name: &str) -> Option<String> {
 fn required(element: &XmlElement, name: &str, part: &str) -> Result<String, VsdxError> {
     attr(element, name).ok_or_else(|| malformed(part, format!("missing {name}")))
 }
-fn required_i32(element: &XmlElement, name: &str, part: &str) -> Result<i32, VsdxError> {
+fn required_u32(element: &XmlElement, name: &str, part: &str) -> Result<u32, VsdxError> {
     required(element, name, part)?
         .parse()
         .map_err(|_| malformed(part, format!("invalid {name}")))
+}
+fn optional_u32(element: &XmlElement, name: &str, part: &str) -> Result<Option<u32>, VsdxError> {
+    attr(element, name)
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| malformed(part, format!("invalid {name}")))
+        })
+        .transpose()
 }
 fn optional_i32(element: &XmlElement, name: &str, part: &str) -> Result<Option<i32>, VsdxError> {
     attr(element, name)
@@ -316,5 +396,201 @@ fn malformed(part: &str, message: String) -> VsdxError {
         part: part.to_owned(),
         offset: 0,
         message,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn serialize_sheet(root: &str, sheet: &Sheet) -> String {
+    let mut output = String::new();
+    let mut root_attrs = sheet.other_attrs.clone();
+    if let Some(id) = sheet.id {
+        root_attrs.push(("ID".to_owned(), id.to_string()));
+    }
+    element_open(&mut output, root, &root_attrs);
+    for cell in &sheet.cells {
+        serialize_cell(&mut output, cell);
+    }
+    for section in &sheet.sections {
+        serialize_section(&mut output, section);
+    }
+    if sheet.has_shapes {
+        output.push_str("<Shapes>");
+        for shape in &sheet.shapes {
+            serialize_shape(&mut output, shape);
+        }
+        output.push_str("</Shapes>");
+    }
+    if sheet.has_connects {
+        output.push_str("<Connects>");
+        for connect in &sheet.connects {
+            serialize_connect(&mut output, connect);
+        }
+        output.push_str("</Connects>");
+    }
+    output.push_str("</");
+    output.push_str(root);
+    output.push('>');
+    output
+}
+#[cfg(test)]
+fn element_open(output: &mut String, name: &str, attrs: &[(String, String)]) {
+    output.push('<');
+    output.push_str(name);
+    for (name, value) in attrs {
+        output.push(' ');
+        output.push_str(name);
+        output.push_str("=\"");
+        escape(output, value, true);
+        output.push('"');
+    }
+    output.push('>');
+}
+#[cfg(test)]
+fn attrs(mut attrs: Vec<(String, String)>, other: &[(String, String)]) -> Vec<(String, String)> {
+    attrs.extend(other.iter().cloned());
+    attrs
+}
+#[cfg(test)]
+fn option(attrs: &mut Vec<(String, String)>, name: &str, value: &Option<String>) {
+    if let Some(value) = value {
+        attrs.push((name.to_owned(), value.clone()));
+    }
+}
+#[cfg(test)]
+fn number<T: ToString>(attrs: &mut Vec<(String, String)>, name: &str, value: Option<T>) {
+    if let Some(value) = value {
+        attrs.push((name.to_owned(), value.to_string()));
+    }
+}
+#[cfg(test)]
+fn serialize_cell(output: &mut String, cell: &Cell) {
+    let mut a = vec![("N".to_owned(), cell.name.clone())];
+    option(&mut a, "F", &cell.formula);
+    option(&mut a, "V", &cell.value);
+    option(&mut a, "U", &cell.unit);
+    if cell.del {
+        a.push(("Del".to_owned(), "1".to_owned()))
+    };
+    element_open(output, "Cell", &attrs(a, &cell.other_attrs));
+    output.push_str("</Cell>");
+}
+#[cfg(test)]
+fn serialize_section(output: &mut String, section: &Section) {
+    let mut a = vec![("N".to_owned(), section.name.clone())];
+    number(&mut a, "IX", section.index);
+    if section.del {
+        a.push(("Del".to_owned(), "1".to_owned()))
+    };
+    element_open(output, "Section", &attrs(a, &section.other_attrs));
+    for row in &section.rows {
+        serialize_row(output, row);
+    }
+    output.push_str("</Section>");
+}
+#[cfg(test)]
+fn serialize_row(output: &mut String, row: &Row) {
+    let mut a = Vec::new();
+    number(&mut a, "IX", row.index);
+    option(&mut a, "N", &row.name);
+    option(&mut a, "LocalName", &row.local_name);
+    option(&mut a, "T", &row.row_type);
+    if row.del {
+        a.push(("Del".to_owned(), "1".to_owned()))
+    };
+    element_open(output, "Row", &attrs(a, &row.other_attrs));
+    for cell in &row.cells {
+        serialize_cell(output, cell)
+    }
+    output.push_str("</Row>");
+}
+#[cfg(test)]
+fn serialize_shape(output: &mut String, shape: &Shape) {
+    let mut a = vec![("ID".to_owned(), shape.id.to_string())];
+    option(&mut a, "Name", &shape.name);
+    option(&mut a, "NameU", &shape.name_u);
+    option(&mut a, "Type", &shape.shape_type);
+    number(&mut a, "Master", shape.master);
+    number(&mut a, "MasterShape", shape.master_shape);
+    number(&mut a, "LineStyle", shape.line_style);
+    number(&mut a, "FillStyle", shape.fill_style);
+    number(&mut a, "TextStyle", shape.text_style);
+    if shape.del {
+        a.push(("Del".to_owned(), "1".to_owned()))
+    };
+    element_open(output, "Shape", &attrs(a, &shape.other_attrs));
+    for child in &shape.children {
+        match child {
+            ShapeChild::Cell(value) => serialize_cell(output, value),
+            ShapeChild::Section(value) => serialize_section(output, value),
+            ShapeChild::Text(value) => serialize_text(output, value),
+            ShapeChild::Shapes(values) => {
+                output.push_str("<Shapes>");
+                for value in values {
+                    serialize_shape(output, value)
+                }
+                output.push_str("</Shapes>")
+            }
+            ShapeChild::Unknown(value) => serialize_opaque(output, value),
+        }
+    }
+    output.push_str("</Shape>");
+}
+#[cfg(test)]
+fn serialize_text(output: &mut String, tokens: &[TextToken]) {
+    output.push_str("<Text>");
+    for token in tokens {
+        match token {
+            TextToken::Literal(value) => escape(output, value, false),
+            TextToken::CharacterRun(ix) => marker(output, "cp", *ix),
+            TextToken::ParagraphRun(ix) => marker(output, "pp", *ix),
+            TextToken::Tab(ix) => marker(output, "tp", *ix),
+            TextToken::Field(ix) => marker(output, "fld", *ix),
+        }
+    }
+    output.push_str("</Text>");
+}
+#[cfg(test)]
+fn marker(output: &mut String, name: &str, ix: u32) {
+    output.push('<');
+    output.push_str(name);
+    output.push_str(" IX=\"");
+    output.push_str(&ix.to_string());
+    output.push_str("\"></");
+    output.push_str(name);
+    output.push('>');
+}
+#[cfg(test)]
+fn serialize_connect(output: &mut String, connect: &Connect) {
+    let mut a = vec![("FromSheet".to_owned(), connect.from_sheet.to_string())];
+    option(&mut a, "FromCell", &connect.from_cell);
+    number(&mut a, "FromPart", connect.from_part);
+    a.push(("ToSheet".to_owned(), connect.to_sheet.to_string()));
+    option(&mut a, "ToCell", &connect.to_cell);
+    number(&mut a, "ToPart", connect.to_part);
+    element_open(output, "Connect", &attrs(a, &connect.other_attrs));
+    output.push_str("</Connect>");
+}
+#[cfg(test)]
+fn serialize_opaque(output: &mut String, value: &OpaqueXml) {
+    element_open(output, &value.name, &value.attributes);
+    for child in &value.children {
+        match child {
+            OpaqueXmlNode::Text(value) => escape(output, value, false),
+            OpaqueXmlNode::Element(value) => serialize_opaque(output, value),
+        }
+    }
+    output.push_str("</");
+    output.push_str(&value.name);
+    output.push('>');
+}
+#[cfg(test)]
+fn escape(output: &mut String, value: &str, attribute: bool) {
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '"' if attribute => output.push_str("&quot;"),
+            _ => output.push(character),
+        }
     }
 }

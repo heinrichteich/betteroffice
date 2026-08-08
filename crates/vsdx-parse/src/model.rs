@@ -19,8 +19,10 @@ pub struct VsdxPackage {
     pub style_sheets: Vec<Sheet>,
     pub colors: Vec<XmlRecord>,
     pub face_names: Vec<XmlRecord>,
-    pub page_sheets: BTreeMap<String, Sheet>,
-    pub master_sheets: BTreeMap<String, Sheet>,
+    pub page_sheets: BTreeMap<u32, Sheet>,
+    pub master_sheets: BTreeMap<u32, Sheet>,
+    pub page_contents: BTreeMap<String, Sheet>,
+    pub master_contents: BTreeMap<String, Sheet>,
     #[serde(skip)]
     pub(crate) parts: Vec<PackagePart>,
 }

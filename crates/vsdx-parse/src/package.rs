@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::model::{PackagePart, VsdxPackage};
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
 use crate::sheet::{parse_records, parse_sheet};
-use crate::xml::{ParseBudget, parse_xml};
+use crate::xml::{ParseBudget, XmlElement, parse_xml};
 use crate::{ParseLimits, Sheet, VsdxError};
 
 pub fn parse_vsdx(data: &[u8]) -> Result<VsdxPackage, VsdxError> {
@@ -25,6 +25,7 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
         .collect();
     let mut budget = ParseBudget::new(limits);
+    let mut xml_parts = HashMap::new();
     let mut relationships = BTreeMap::new();
     let root_relationships = load_relationships("", &parts, &mut relationships, &mut budget)?;
     let document_path = root_relationships
@@ -33,7 +34,7 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         .and_then(|relationship| relationship.resolved_target.clone())
         .ok_or_else(|| VsdxError::MissingPart("root Visio document relationship".to_owned()))?;
     require_part(&parts, &document_path)?;
-    validate_xml_part(&parts, &document_path, &mut budget)?;
+    parse_part(&parts, &document_path, &mut xml_parts, &mut budget)?;
     let document_relationships =
         load_relationships(&document_path, &parts, &mut relationships, &mut budget)?;
     let pages_part_path = target_by_type(document_relationships, relationship_types::PAGES);
@@ -43,31 +44,31 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
     let mut page_part_paths = Vec::new();
     if let Some(path) = &pages_part_path {
         require_part(&parts, path)?;
-        validate_xml_part(&parts, path, &mut budget)?;
+        parse_part(&parts, path, &mut xml_parts, &mut budget)?;
         let rels = load_relationships(path, &parts, &mut relationships, &mut budget)?;
         page_part_paths = targets_by_type(rels, relationship_types::PAGE);
         for path in &page_part_paths {
             require_part(&parts, path)?;
-            validate_xml_part(&parts, path, &mut budget)?;
+            parse_part(&parts, path, &mut xml_parts, &mut budget)?;
         }
     }
     let mut master_part_paths = Vec::new();
     if let Some(path) = &masters_part_path {
         require_part(&parts, path)?;
-        validate_xml_part(&parts, path, &mut budget)?;
+        parse_part(&parts, path, &mut xml_parts, &mut budget)?;
         let rels = load_relationships(path, &parts, &mut relationships, &mut budget)?;
         master_part_paths = targets_by_type(rels, relationship_types::MASTER);
         for path in &master_part_paths {
             require_part(&parts, path)?;
-            validate_xml_part(&parts, path, &mut budget)?;
+            parse_part(&parts, path, &mut xml_parts, &mut budget)?;
         }
     }
     for path in theme_part_paths.iter().chain(windows_part_path.iter()) {
         require_part(&parts, path)?;
-        validate_xml_part(&parts, path, &mut budget)?;
+        parse_part(&parts, path, &mut xml_parts, &mut budget)?;
     }
     load_reachable_relationships(&parts, &mut relationships, &mut budget)?;
-    let document = parse_xml(parts[document_path.as_str()], &document_path, &mut budget)?;
+    let document = xml_parts.remove(&document_path).expect("document parsed");
     let document_sheet = document
         .children_named("DocumentSheet")
         .next()
@@ -80,8 +81,20 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         .collect::<Result<Vec<_>, _>>()?;
     let colors = parse_records(document.children_named("Colors").next());
     let face_names = parse_records(document.children_named("FaceNames").next());
-    let page_sheets = parse_part_sheets(&parts, &page_part_paths, &mut budget)?;
-    let master_sheets = parse_part_sheets(&parts, &master_part_paths, &mut budget)?;
+    let page_sheets = parse_catalog_sheets(
+        xml_parts.get(pages_part_path.as_deref().unwrap_or("")),
+        "Page",
+        &document_path,
+        &mut budget,
+    )?;
+    let master_sheets = parse_catalog_sheets(
+        xml_parts.get(masters_part_path.as_deref().unwrap_or("")),
+        "Master",
+        &document_path,
+        &mut budget,
+    )?;
+    let page_contents = parse_part_sheets(&page_part_paths, &mut xml_parts, &mut budget)?;
+    let master_contents = parse_part_sheets(&master_part_paths, &mut xml_parts, &mut budget)?;
     Ok(VsdxPackage {
         document_part_path: document_path,
         pages_part_path,
@@ -97,6 +110,8 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         face_names,
         page_sheets,
         master_sheets,
+        page_contents,
+        master_contents,
         parts: source_parts
             .into_iter()
             .map(|(path, bytes)| PackagePart { path, bytes })
@@ -105,23 +120,67 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
 }
 
 fn parse_part_sheets(
-    parts: &HashMap<&str, &[u8]>,
     paths: &[String],
+    xml_parts: &mut HashMap<String, XmlElement>,
     budget: &mut ParseBudget<'_>,
 ) -> Result<BTreeMap<String, Sheet>, VsdxError> {
     paths
         .iter()
         .map(|path| {
-            let root = parse_xml(
-                parts
-                    .get(path.as_str())
-                    .ok_or_else(|| VsdxError::MissingPart(path.clone()))?,
-                path,
-                budget,
-            )?;
+            let root = xml_parts
+                .remove(path)
+                .ok_or_else(|| VsdxError::MissingPart(path.clone()))?;
             Ok((path.clone(), parse_sheet(&root, path, budget)?))
         })
         .collect()
+}
+
+fn parse_catalog_sheets(
+    root: Option<&XmlElement>,
+    item: &str,
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<BTreeMap<u32, Sheet>, VsdxError> {
+    root.into_iter()
+        .flat_map(|root| root.children_named(item))
+        .map(|element| {
+            let id = element
+                .attribute("ID")
+                .ok_or_else(|| VsdxError::MalformedXml {
+                    part: part.to_owned(),
+                    offset: 0,
+                    message: format!("missing {item} ID"),
+                })?
+                .parse()
+                .map_err(|_| VsdxError::MalformedXml {
+                    part: part.to_owned(),
+                    offset: 0,
+                    message: format!("invalid {item} ID"),
+                })?;
+            let sheet = element
+                .children_named("PageSheet")
+                .next()
+                .map(|sheet| parse_sheet(sheet, part, budget))
+                .transpose()?
+                .unwrap_or_default();
+            Ok((id, sheet))
+        })
+        .collect()
+}
+
+fn parse_part(
+    parts: &HashMap<&str, &[u8]>,
+    path: &str,
+    xml_parts: &mut HashMap<String, XmlElement>,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), VsdxError> {
+    if !xml_parts.contains_key(path) {
+        let bytes = parts
+            .get(path)
+            .ok_or_else(|| VsdxError::MissingPart(path.to_owned()))?;
+        xml_parts.insert(path.to_owned(), parse_xml(bytes, path, budget)?);
+    }
+    Ok(())
 }
 
 fn load_reachable_relationships(
@@ -194,20 +253,6 @@ fn require_part(parts: &HashMap<&str, &[u8]>, path: &str) -> Result<(), VsdxErro
         Err(VsdxError::MissingPart(path.to_owned()))
     }
 }
-fn validate_xml_part(
-    parts: &HashMap<&str, &[u8]>,
-    path: &str,
-    budget: &mut ParseBudget<'_>,
-) -> Result<(), VsdxError> {
-    parse_xml(
-        parts
-            .get(path)
-            .ok_or_else(|| VsdxError::MissingPart(path.to_owned()))?,
-        path,
-        budget,
-    )?;
-    Ok(())
-}
 fn target_by_type(relationships: &[Relationship], kind: &str) -> Option<String> {
     relationships
         .iter()
@@ -227,6 +272,8 @@ fn targets_by_type(relationships: &[Relationship], kind: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sheet::serialize_sheet;
+    use crate::xml::{XmlNode, parse_xml};
     use ooxml_opc::{rezip_parts, unzip_parts};
     use std::path::PathBuf;
 
@@ -248,8 +295,8 @@ mod tests {
             let source = std::fs::read(&path).unwrap();
             let written = write_vsdx(&parse_vsdx(&source).unwrap()).unwrap();
             assert_eq!(
-                parse_vsdx(&written).unwrap().page_sheets,
-                parse_vsdx(&source).unwrap().page_sheets,
+                parse_vsdx(&written).unwrap().page_contents,
+                parse_vsdx(&source).unwrap().page_contents,
                 "{}",
                 path.display()
             );
@@ -265,48 +312,284 @@ mod tests {
     #[test]
     fn models_lossless_shapesheet_features() {
         let package = parse_vsdx(include_bytes!("../tests/fixtures/foundation.vsdx")).unwrap();
-        let sheet = &package.page_sheets["visio/pages/page1.xml"];
+        let sheet = &package.page_contents["visio/pages/page1.xml"];
         let shape = &sheet.shapes[0];
         assert!(
             shape
-                .cells
-                .iter()
+                .cells()
                 .any(|cell| cell.name == "LineWeight" && cell.del)
         );
         assert!(
             shape
-                .sections
-                .iter()
+                .sections()
                 .any(|section| section.name == "Scratch" && section.del)
         );
         let geometry = shape
-            .sections
-            .iter()
+            .sections()
             .find(|section| section.name == "Geometry")
             .unwrap();
         assert_eq!(geometry.rows[1].name.as_deref(), Some("LineTo"));
         assert_eq!(geometry.rows[2].index, Some(2));
         assert!(geometry.rows[2].del);
-        let connection = shape
-            .sections
-            .iter()
-            .find(|section| section.name == "Connection")
-            .unwrap();
-        assert_eq!(connection.rows[0].row_type.as_deref(), Some("Connection"));
         assert_eq!(
-            shape.text,
-            Some(vec![
-                crate::TextToken::Literal("Step ".to_owned()),
-                crate::TextToken::Field(0)
-            ])
+            shape.text(),
+            Some(
+                [
+                    crate::TextToken::Literal(" A".to_owned()),
+                    crate::TextToken::CharacterRun(1),
+                    crate::TextToken::Literal("B".to_owned()),
+                    crate::TextToken::ParagraphRun(2),
+                    crate::TextToken::Tab(3),
+                    crate::TextToken::Field(0),
+                    crate::TextToken::Literal(" C ".to_owned())
+                ]
+                .as_slice()
+            )
         );
         assert_eq!(sheet.connects[0].from_part, Some(9));
         assert_eq!(sheet.connects[0].to_part, Some(3));
+        assert_eq!(package.page_sheets[&1].cells[0].name, "PageWidth");
+        assert_eq!(package.master_sheets[&1].cells[0].name, "PageHeight");
+        assert_eq!(geometry.rows[0].local_name.as_deref(), Some("Start"));
+        assert!(
+            shape
+                .cells()
+                .any(|cell| cell.name == "FOnly" && cell.formula.is_some() && cell.value.is_none())
+        );
+        assert!(
+            shape
+                .cells()
+                .any(|cell| cell.name == "VOnly" && cell.formula.is_none() && cell.value.is_some())
+        );
+        assert!(
+            shape
+                .cells()
+                .any(|cell| cell.name == "Both" && cell.formula.is_some() && cell.value.is_some())
+        );
+        let user = shape
+            .sections()
+            .find(|section| section.name == "User")
+            .unwrap();
+        assert_eq!(user.rows[0].name.as_deref(), Some("visVersion"));
+        assert_eq!(user.rows[1].index, Some(3));
+        assert_eq!(user.rows[1].row_type.as_deref(), Some("UnknownRow"));
+        assert_eq!(
+            user.rows[1].cells[0].other_attrs,
+            [("UnknownAttr".to_owned(), "kept".to_owned())]
+        );
         let written = write_vsdx(&package).unwrap();
         assert_eq!(
-            parse_vsdx(&written).unwrap().page_sheets,
-            package.page_sheets
+            parse_vsdx(&written).unwrap().page_contents,
+            package.page_contents
         );
+    }
+
+    #[test]
+    fn model_serializer_matches_original_parts_and_reparse() {
+        assert_model_serialization(
+            include_bytes!("../tests/fixtures/foundation.vsdx"),
+            "foundation.vsdx",
+        );
+        let Some(directory) = std::env::var_os("VSDX_CORPUS_DIR") else {
+            return;
+        };
+        for file in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
+            let path = PathBuf::from(&directory).join(file);
+            assert!(path.is_file(), "missing corpus file: {}", path.display());
+            assert_model_serialization(&std::fs::read(&path).unwrap(), &path.display().to_string());
+        }
+    }
+
+    fn assert_model_serialization(source: &[u8], label: &str) {
+        let package = parse_vsdx(source).unwrap();
+        let original = unzip_parts(source).unwrap();
+        let document_bytes = original
+            .iter()
+            .find(|(path, _)| path == &package.document_part_path)
+            .unwrap()
+            .1
+            .as_slice();
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let document = parse_xml(document_bytes, &package.document_part_path, &mut budget).unwrap();
+        if let Some(sheet) = &package.document_sheet {
+            assert_sheet_matches_element(
+                sheet,
+                "DocumentSheet",
+                document.children_named("DocumentSheet").next().unwrap(),
+                label,
+            );
+        }
+        for (sheet, original) in package.style_sheets.iter().zip(
+            document
+                .children_named("StyleSheets")
+                .flat_map(|styles| styles.children_named("StyleSheet")),
+        ) {
+            assert_sheet_matches_element(sheet, "StyleSheet", original, label);
+        }
+        if let Some(path) = &package.pages_part_path {
+            assert_catalog_sheets(&original, path, "Page", &package.page_sheets, label);
+        }
+        if let Some(path) = &package.masters_part_path {
+            assert_catalog_sheets(&original, path, "Master", &package.master_sheets, label);
+        }
+        for (path, sheet) in &package.page_contents {
+            let original = original
+                .iter()
+                .find(|(candidate, _)| candidate == path)
+                .unwrap()
+                .1
+                .as_slice();
+            let serialized = serialize_sheet("PageContents", sheet);
+            assert_canonical_xml_eq(original, serialized.as_bytes(), &format!("{label}:{path}"));
+            let reparsed = parse_sheet_for_test(serialized.as_bytes(), path);
+            assert_eq!(&reparsed, sheet, "{label}:{path}");
+        }
+        for (path, sheet) in &package.master_contents {
+            let original = original
+                .iter()
+                .find(|(candidate, _)| candidate == path)
+                .unwrap()
+                .1
+                .as_slice();
+            let serialized = serialize_sheet("MasterContents", sheet);
+            assert_canonical_xml_eq(original, serialized.as_bytes(), &format!("{label}:{path}"));
+            let reparsed = parse_sheet_for_test(serialized.as_bytes(), path);
+            assert_eq!(&reparsed, sheet, "{label}:{path}");
+        }
+    }
+
+    fn assert_catalog_sheets(
+        original: &[(String, Vec<u8>)],
+        path: &str,
+        item: &str,
+        sheets: &BTreeMap<u32, Sheet>,
+        label: &str,
+    ) {
+        let bytes = original
+            .iter()
+            .find(|(candidate, _)| candidate == path)
+            .unwrap()
+            .1
+            .as_slice();
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(bytes, path, &mut budget).unwrap();
+        for item_element in root.children_named(item) {
+            if let Some(original) = item_element.children_named("PageSheet").next() {
+                let id = item_element.attribute("ID").unwrap().parse().unwrap();
+                assert_sheet_matches_element(&sheets[&id], "PageSheet", original, label);
+            }
+        }
+    }
+
+    fn assert_sheet_matches_element(sheet: &Sheet, root: &str, original: &XmlElement, label: &str) {
+        let serialized = serialize_sheet(root, sheet);
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let serialized = parse_xml(serialized.as_bytes(), label, &mut budget).unwrap();
+        assert_eq!(canonical(original), canonical(&serialized), "{label}");
+        assert_eq!(
+            parse_sheet_for_test(serialize_sheet(root, sheet).as_bytes(), label),
+            *sheet,
+            "{label}"
+        );
+    }
+
+    fn parse_sheet_for_test(bytes: &[u8], part: &str) -> Sheet {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(bytes, part, &mut budget).unwrap();
+        parse_sheet(&root, part, &mut budget).unwrap()
+    }
+
+    fn assert_canonical_xml_eq(left: &[u8], right: &[u8], label: &str) {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let left = parse_xml(left, label, &mut budget).unwrap();
+        let mut budget = ParseBudget::new(&limits);
+        let right = parse_xml(right, label, &mut budget).unwrap();
+        assert_eq!(canonical(&left), canonical(&right), "{label}");
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum CanonicalNode {
+        Element(String, Vec<(String, String)>, Vec<CanonicalNode>),
+        Text(String),
+    }
+    fn canonical(element: &XmlElement) -> CanonicalNode {
+        let mut attributes = canonical_attributes(element);
+        attributes.sort();
+        let mut children = Vec::new();
+        for child in &element.children {
+            match child {
+                XmlNode::Element(element) => children.push(CanonicalNode::Element(
+                    element.local_name().to_owned(),
+                    canonical_attributes(element),
+                    canonical_children(element),
+                )),
+                XmlNode::Text(text) if !text.is_empty() => {
+                    if let Some(CanonicalNode::Text(previous)) = children.last_mut() {
+                        previous.push_str(text);
+                    } else {
+                        children.push(CanonicalNode::Text(text.clone()));
+                    }
+                }
+                XmlNode::Text(_) => {}
+            }
+        }
+        CanonicalNode::Element(element.local_name().to_owned(), attributes, children)
+    }
+    fn canonical_attributes(element: &XmlElement) -> Vec<(String, String)> {
+        let mut attributes = element
+            .attributes
+            .iter()
+            .filter(|(name, _)| name != "xmlns" && !name.starts_with("xmlns:"))
+            .map(|(name, value)| {
+                (
+                    name.rsplit_once(':')
+                        .map_or(name.as_str(), |(_, local)| local)
+                        .to_owned(),
+                    value.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        attributes.sort();
+        attributes
+    }
+    fn canonical_children(element: &XmlElement) -> Vec<CanonicalNode> {
+        match canonical(element) {
+            CanonicalNode::Element(_, _, children) => children,
+            CanonicalNode::Text(_) => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn enforces_sheet_resource_boundaries() {
+        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        for limits in [
+            ParseLimits {
+                max_cells: 0,
+                ..ParseLimits::default()
+            },
+            ParseLimits {
+                max_sections: 0,
+                ..ParseLimits::default()
+            },
+            ParseLimits {
+                max_rows: 0,
+                ..ParseLimits::default()
+            },
+            ParseLimits {
+                max_shapes: 0,
+                ..ParseLimits::default()
+            },
+        ] {
+            assert!(matches!(
+                parse_vsdx_with_limits(source, &limits),
+                Err(VsdxError::ResourceLimit { .. })
+            ));
+        }
     }
 
     #[test]
@@ -319,11 +602,11 @@ mod tests {
             .unwrap();
         page.1 = br#"<v:PageContents xmlns:v='urn:visio'><v:Shapes><v:Shape ID='1' Del='1'><v:Cell N='PinX' Del='1'/><v:Section N='Geometry' Del='1'><v:Row IX='0' Del='1'/></v:Section></v:Shape></v:Shapes></v:PageContents>"#.to_vec();
         let package = parse_vsdx(&rezip_parts(&parts).unwrap()).unwrap();
-        let shape = &package.page_sheets["visio/pages/page1.xml"].shapes[0];
+        let shape = &package.page_contents["visio/pages/page1.xml"].shapes[0];
         assert!(shape.del);
-        assert!(shape.cells[0].del);
-        assert!(shape.sections[0].del);
-        assert!(shape.sections[0].rows[0].del);
+        assert!(shape.cells().next().unwrap().del);
+        assert!(shape.sections().next().unwrap().del);
+        assert!(shape.sections().next().unwrap().rows[0].del);
     }
 
     #[test]
