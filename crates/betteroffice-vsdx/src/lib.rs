@@ -55,6 +55,13 @@ impl Diagram {
             &resolved,
         )?)
     }
+    /// Saves the formula changes accumulated by a collaborative session.
+    pub fn save_session(&self, session: &vsdx_edit::DiagramSession) -> Result<Vec<u8>> {
+        let edits = session
+            .semantic_cell_edits()
+            .map_err(|error| Error::Policy(error.to_string()))?;
+        self.save_cell_edits(&edits)
+    }
     /// Applies semantic and structural edits as one all-or-nothing save request.
     pub fn save_edits(
         &self,

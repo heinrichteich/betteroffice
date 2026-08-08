@@ -3,6 +3,7 @@ use betteroffice_vsdx::{
 };
 use ooxml_opc::{rezip_parts, unzip_parts};
 use std::collections::BTreeMap;
+use vsdx_edit::{DiagramSession, EditCtx};
 
 fn diagram_with_page(xml: &str) -> (Vec<u8>, Diagram, u32) {
     let source = include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx");
@@ -51,6 +52,59 @@ fn assert_only_part_changed(before: &[u8], after: &[u8], changed: &str) {
         } else {
             assert_eq!(after[&path], bytes, "{path}");
         }
+    }
+}
+
+#[test]
+fn saves_crdt_session_edits_for_every_corpus_file() {
+    let Ok(corpus) = std::env::var("VSDX_CORPUS_DIR") else {
+        return;
+    };
+    for file in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
+        let source = std::fs::read(std::path::Path::new(&corpus).join(file)).unwrap();
+        let session = DiagramSession::open(&source, 7).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let page = snapshot.pages.first().unwrap();
+        let shape = page
+            .shapes
+            .iter()
+            .find(|shape| shape.cells.iter().any(|cell| cell.formula.is_some()))
+            .unwrap();
+        let cell = shape
+            .cells
+            .iter()
+            .find(|cell| cell.formula.is_some())
+            .unwrap();
+        session
+            .set_cell_formula(
+                &EditCtx::local("test"),
+                &page.id,
+                &shape.id,
+                &cell.name,
+                "42",
+            )
+            .unwrap();
+        let saved = Diagram::open(&source)
+            .unwrap()
+            .save_session(&session)
+            .unwrap();
+        let reopened = DiagramSession::open(&saved, 8).unwrap();
+        let reopened_snapshot = reopened.snapshot().unwrap();
+        let changed = reopened_snapshot
+            .pages
+            .iter()
+            .find(|candidate| candidate.id == page.id)
+            .unwrap()
+            .shapes
+            .iter()
+            .find(|candidate| candidate.id == shape.id)
+            .unwrap()
+            .cells
+            .iter()
+            .find(|candidate| candidate.name == cell.name)
+            .unwrap();
+        assert_eq!(changed.formula.as_deref(), Some("42"), "{file}");
+        assert_only_part_changed(&source, &saved, &page.source_part_path);
     }
 }
 

@@ -102,6 +102,7 @@ fn seed_cell(
     cell.insert(txn, "name", name);
     if let Some(formula) = formula {
         cell.insert(txn, "formula", formula);
+        cell.insert(txn, "baselineFormula", formula);
     }
     if let Some(value) = value {
         cell.insert(txn, "value", value);
@@ -111,6 +112,10 @@ fn seed_cell(
 impl DiagramSession {
     pub fn snapshot(&self) -> EditResult<DiagramSnapshot> {
         snapshot_doc(&self.doc)
+    }
+
+    pub fn semantic_cell_edits(&self) -> EditResult<Vec<vsdx_parse::SemanticCellEdit>> {
+        semantic_cell_edits(&self.doc)
     }
 
     pub fn set_cell_formula(
@@ -488,6 +493,52 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
         });
     }
     Ok(DiagramSnapshot { pages: result })
+}
+
+fn semantic_cell_edits(doc: &Doc) -> EditResult<Vec<vsdx_parse::SemanticCellEdit>> {
+    let txn = doc.transact();
+    let pages = required_map(&txn, PAGES)?;
+    let sheets = required_map(&txn, SHEETS)?;
+    let mut edits = Vec::new();
+    for (page_id, page) in pages.iter(&txn) {
+        let Out::YMap(page) = page else { continue };
+        let source_page_id = page_id
+            .strip_prefix("page:")
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| EditError::InvalidState("invalid page ID".to_owned()))?;
+        let shape_order = map_array(&page, &txn, "shapes")?;
+        for index in 0..shape_order.len(&txn) {
+            let shape_id = array_string(&shape_order, &txn, index).ok_or_else(|| {
+                EditError::InvalidState("shape order contains non-string".to_owned())
+            })?;
+            let shape = map_ref(&sheets, &txn, &shape_id)?;
+            let source_id = map_number(&shape, &txn, "sourceId")
+                .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
+                as u32;
+            let cells = map_map(&shape, &txn, "cells")?;
+            for (name, value) in cells.iter(&txn) {
+                let Out::YMap(cell) = value else { continue };
+                let formula = map_string(&cell, &txn, "formula");
+                if formula == map_string(&cell, &txn, "baselineFormula") {
+                    continue;
+                }
+                let Some(formula) = formula else { continue };
+                edits.push(vsdx_parse::SemanticCellEdit {
+                    locator: CellLocator {
+                        sheet: CellSheet::Page(source_page_id),
+                        shape_id: Some(source_id),
+                        section: None,
+                        row: None,
+                        cell_name: name.to_string(),
+                    },
+                    gesture: gesture_for_cell(name),
+                    formula: Some(formula),
+                    value: None,
+                });
+            }
+        }
+    }
+    Ok(edits)
 }
 
 fn cell_map(
