@@ -85,7 +85,8 @@ pub struct ShapeReceipt {
     pub to_index: Option<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ShapeDraft {
     pub source_id: u32,
     pub name: Option<String>,

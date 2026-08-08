@@ -649,6 +649,89 @@ mod tests {
     }
 
     #[test]
+    fn add_shape_preserves_draft_section_row_cell_locators() {
+        let session = session();
+        let geometry = CellLocator {
+            sheet: CellSheet::Page(1),
+            shape_id: Some(42),
+            section: Some("Geometry".to_owned()),
+            row: Some(CellRow::Index(0)),
+            cell_name: "X".to_owned(),
+        };
+        let draft = ShapeDraft {
+            source_id: 42,
+            name: None,
+            cells: vec![
+                CellSnapshot {
+                    locator: geometry.clone(),
+                    name: "X".to_owned(),
+                    formula: Some("1".to_owned()),
+                    value: None,
+                },
+                CellSnapshot {
+                    locator: CellLocator {
+                        row: Some(CellRow::Index(1)),
+                        ..geometry.clone()
+                    },
+                    name: "X".to_owned(),
+                    formula: Some("2".to_owned()),
+                    value: None,
+                },
+            ],
+        };
+
+        let receipt = session
+            .add_shape(&EditCtx::local("a"), "page:1", &draft)
+            .unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let shape = snapshot.pages[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == receipt.shape_id)
+            .unwrap();
+
+        assert_eq!(shape.cells.len(), 2);
+        assert!(shape.cells.iter().any(|cell| {
+            cell.name == "X"
+                && cell.formula.as_deref() == Some("1")
+                && cell.locator.section.as_deref() == Some("Geometry")
+                && cell.locator.row == Some(CellRow::Index(0))
+        }));
+        assert!(shape.cells.iter().any(|cell| {
+            cell.name == "X"
+                && cell.formula.as_deref() == Some("2")
+                && cell.locator.section.as_deref() == Some("Geometry")
+                && cell.locator.row == Some(CellRow::Index(1))
+        }));
+    }
+
+    #[test]
+    fn shape_draft_round_trips_through_serde() {
+        let draft = ShapeDraft {
+            source_id: 42,
+            name: Some("Rectangle".to_owned()),
+            cells: vec![CellSnapshot {
+                locator: CellLocator {
+                    sheet: CellSheet::Page(1),
+                    shape_id: Some(42),
+                    section: Some("Geometry".to_owned()),
+                    row: Some(CellRow::Name("MoveTo".to_owned())),
+                    cell_name: "X".to_owned(),
+                },
+                name: "X".to_owned(),
+                formula: Some("2".to_owned()),
+                value: Some("2".to_owned()),
+            }],
+        };
+
+        let serialized = serde_json::to_string(&draft).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ShapeDraft>(&serialized).unwrap(),
+            draft
+        );
+    }
+
+    #[test]
     fn remote_protected_formula_rewrite_is_rejected_but_legitimate_update_is_accepted() {
         let session = session();
         add_cell(&session, "Width", Some("GUARD(1)"), None);
@@ -793,7 +876,20 @@ mod tests {
             .unwrap();
         left.apply_update_v1(&right_update).unwrap();
         right.apply_update_v1(&left_update).unwrap();
-        assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+        let snapshot = left.snapshot().unwrap();
+        assert_eq!(snapshot, right.snapshot().unwrap());
+        assert!(
+            snapshot.pages[0].shapes[0]
+                .cells
+                .iter()
+                .any(|cell| { cell.name == "X" && cell.formula.as_deref() == Some("2") })
+        );
+        assert!(
+            snapshot.pages[0].shapes[0]
+                .cells
+                .iter()
+                .any(|cell| { cell.name == "Y" && cell.formula.as_deref() == Some("3") })
+        );
     }
 
     #[test]

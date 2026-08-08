@@ -352,13 +352,7 @@ impl DiagramSession {
             seed_cell(
                 &cells,
                 &mut txn,
-                &CellLocator {
-                    sheet: CellSheet::Page(0),
-                    shape_id: None,
-                    section: None,
-                    row: None,
-                    cell_name: cell.name.clone(),
-                },
+                &cell.locator,
                 cell.formula.as_deref(),
                 cell.value.as_deref(),
             );
