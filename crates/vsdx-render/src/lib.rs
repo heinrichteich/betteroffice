@@ -118,8 +118,8 @@ impl Renderer {
             .ok_or_else(|| RenderError::PageDimensions("PageHeight is unavailable".into()))?;
         let page_width = page_dimension(&resolver, package, page_part, "PageWidth")
             .ok_or_else(|| RenderError::PageDimensions("PageWidth is unavailable".into()))?;
-        if !page_height.is_sign_positive()
-            || !page_width.is_sign_positive()
+        if page_height <= 0.0
+            || page_width <= 0.0
             || !(page_height as f32).is_finite()
             || !(page_width as f32).is_finite()
             || !(page_height as f32 * PIXELS_PER_INCH).is_finite()
@@ -261,8 +261,8 @@ impl Renderer {
                     id,
                     z_order,
                     asset_id: asset_id.into(),
-                    x: bounds.x as f32,
-                    y: bounds.y as f32,
+                    x: 0.0,
+                    y: 0.0,
                     width: bounds.width as f32,
                     height: bounds.height as f32,
                     transform: bounds_affine(bounds),
@@ -1164,6 +1164,35 @@ mod tests {
     fn shape_primitive(list: &VsdxDisplayList, id: u32) -> &Primitive {
         list.primitives.iter().find(|primitive| matches!(primitive, Primitive::Shape { id: actual, .. } if actual == &format!("page:{id}"))).unwrap()
     }
+
+    fn group(id: u32, pin_x: f64, pin_y: f64, children: Vec<Shape>) -> Shape {
+        let mut group = shape(id, pin_x, pin_y);
+        group
+            .children
+            .retain(|child| !matches!(child, ShapeChild::Section(_)));
+        group.children.push(ShapeChild::Shapes(
+            children.into_iter().map(ShapesChild::Shape).collect(),
+        ));
+        group
+    }
+
+    fn with_cell(shape: &mut Shape, name: &str, value: &str) {
+        shape.children.retain(
+            |child| !matches!(child, ShapeChild::Cell(Cell { name: actual, .. }) if actual == name),
+        );
+        shape.children.push(ShapeChild::Cell(cell(name, value)));
+    }
+
+    fn assert_point_close(actual: (f32, f32), expected: (f32, f32)) {
+        assert!(
+            (actual.0 - expected.0).abs() < 1e-5,
+            "{actual:?} != {expected:?}"
+        );
+        assert!(
+            (actual.1 - expected.1).abs() < 1e-5,
+            "{actual:?} != {expected:?}"
+        );
+    }
     #[test]
     fn flip_is_only_final_paint_transform() {
         let transform = final_paint_transform(10.0);
@@ -1258,6 +1287,208 @@ mod tests {
     }
 
     #[test]
+    fn forty_five_degree_group_transforms_all_text_corners_lines_and_caret_stops() {
+        let mut child = shape(2, 1.0, 2.0);
+        child
+            .children
+            .push(ShapeChild::Text(vec![TextToken::Literal("ab".into())]));
+        let mut parent = group(1, 10.0, 20.0, vec![child]);
+        with_cell(
+            &mut parent,
+            "Angle",
+            &std::f64::consts::FRAC_PI_4.to_string(),
+        );
+        let list = render(vec![parent]);
+        let Primitive::Group { primitives, .. } = &list.primitives[0] else {
+            unreachable!()
+        };
+        let Primitive::TextBox {
+            x,
+            y,
+            width,
+            height,
+            lines,
+            ..
+        } = &primitives[1]
+        else {
+            unreachable!()
+        };
+        let matrix = Affine {
+            a: std::f32::consts::FRAC_1_SQRT_2,
+            b: std::f32::consts::FRAC_1_SQRT_2,
+            c: -std::f32::consts::FRAC_1_SQRT_2,
+            d: std::f32::consts::FRAC_1_SQRT_2,
+            e: 10.0,
+            f: 20.0,
+        };
+        let corners =
+            [(1.0, 2.0), (2.0, 2.0), (1.0, 3.0), (2.0, 3.0)].map(|(x, y)| matrix.apply_point(x, y));
+        let min_x = corners
+            .iter()
+            .map(|point| point.0)
+            .fold(f32::INFINITY, f32::min);
+        let max_x = corners
+            .iter()
+            .map(|point| point.0)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_y = corners
+            .iter()
+            .map(|point| point.1)
+            .fold(f32::INFINITY, f32::min);
+        let max_y = corners
+            .iter()
+            .map(|point| point.1)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert_point_close((*x, *y), (min_x, min_y));
+        assert_point_close((*width, *height), (max_x - min_x, max_y - min_y));
+        assert_point_close((lines[0].x, lines[0].y), matrix.apply_point(1.0, 2.0));
+        assert_point_close(
+            (lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
+            matrix.apply_point(1.0 + 0.166_666_67 * 0.5, 2.0),
+        );
+    }
+
+    #[test]
+    fn forty_five_degree_group_preserves_image_orientation_and_all_corners() {
+        let mut image = shape(2, 1.0, 2.0);
+        image.children.push(ShapeChild::ForeignData(ForeignData {
+            foreign_type: None,
+            compression_type: None,
+            relationship_id: Some("image".into()),
+            other_attrs: vec![],
+        }));
+        let mut parent = group(1, 10.0, 20.0, vec![image]);
+        with_cell(
+            &mut parent,
+            "Angle",
+            &std::f64::consts::FRAC_PI_4.to_string(),
+        );
+        let mut package = package(vec![parent]);
+        package.relationships.insert(
+            "page".into(),
+            vec![vsdx_parse::Relationship {
+                id: "image".into(),
+                relationship_type: "image".into(),
+                target: "image.png".into(),
+                target_mode: Default::default(),
+                resolved_target: Some("image.png".into()),
+            }],
+        );
+        package.add_part("image.png", vec![0]);
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        let Primitive::Group { primitives, .. } = &list.primitives[0] else {
+            unreachable!()
+        };
+        let Primitive::Image {
+            x,
+            y,
+            width,
+            height,
+            transform,
+            ..
+        } = &primitives[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!((*x, *y, *width, *height), (0.0, 0.0, 1.0, 1.0));
+        assert!((transform.b - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
+        let corners = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+            .map(|(x, y)| transform.apply_point(x, y));
+        let expected = [(1.0, 2.0), (2.0, 2.0), (1.0, 3.0), (2.0, 3.0)].map(|(x, y)| {
+            Affine {
+                a: std::f32::consts::FRAC_1_SQRT_2,
+                b: std::f32::consts::FRAC_1_SQRT_2,
+                c: -std::f32::consts::FRAC_1_SQRT_2,
+                d: std::f32::consts::FRAC_1_SQRT_2,
+                e: 10.0,
+                f: 20.0,
+            }
+            .apply_point(x, y)
+        });
+        for (actual, expected) in corners.into_iter().zip(expected) {
+            assert_point_close(actual, expected);
+        }
+    }
+
+    #[test]
+    fn nested_rotated_flipped_groups_compose_by_matrix_multiplication() {
+        let child = shape(3, 1.0, 0.0);
+        let mut inner = group(2, 2.0, 3.0, vec![child]);
+        with_cell(
+            &mut inner,
+            "Angle",
+            &std::f64::consts::FRAC_PI_2.to_string(),
+        );
+        with_cell(&mut inner, "FlipX", "1");
+        let mut outer = group(1, 10.0, 20.0, vec![inner]);
+        with_cell(
+            &mut outer,
+            "Angle",
+            &std::f64::consts::FRAC_PI_2.to_string(),
+        );
+        with_cell(&mut outer, "FlipY", "1");
+        let list = render(vec![outer]);
+        let Primitive::Group { primitives, .. } = &list.primitives[0] else {
+            unreachable!()
+        };
+        let Primitive::Group { primitives, .. } = &primitives[0] else {
+            unreachable!()
+        };
+        let Primitive::Shape { path, .. } = &primitives[0] else {
+            unreachable!()
+        };
+        let GeometryPathCommand::Move { x, y } = path[0] else {
+            unreachable!()
+        };
+        let outer = Affine {
+            a: 0.0,
+            b: 1.0,
+            c: 1.0,
+            d: 0.0,
+            e: 10.0,
+            f: 20.0,
+        };
+        let inner = Affine {
+            a: 0.0,
+            b: -1.0,
+            c: -1.0,
+            d: 0.0,
+            e: 2.0,
+            f: 3.0,
+        };
+        let expected = outer.compose(inner).apply_point(1.0, 0.0);
+        assert_point_close((x as f32, y as f32), expected);
+    }
+
+    #[test]
+    fn affine_inversion_round_trips_and_degenerate_matrices_are_safe() {
+        let matrix = Affine {
+            a: -1.5,
+            b: -2.0,
+            c: -0.5,
+            d: 3.0,
+            e: 12.0,
+            f: -7.0,
+        };
+        let inverse = matrix.invert().unwrap();
+        assert_point_close(
+            inverse.apply_point(
+                matrix.apply_point(3.25, -8.5).0,
+                matrix.apply_point(3.25, -8.5).1,
+            ),
+            (3.25, -8.5),
+        );
+        let degenerate = Affine {
+            a: 0.0,
+            ..Affine::identity()
+        };
+        assert_eq!(degenerate.invert(), None);
+        assert!(!point_in_transformed_rect(
+            0.0, 0.0, 1.0, 1.0, degenerate, 0.5, 0.5
+        ));
+    }
+
+    #[test]
     fn hit_testing_honors_geometry_transform_order_groups_and_empty_canvas() {
         let mut rotated = shape(2, 3.0, 3.0);
         rotated.children.push(ShapeChild::Cell(cell(
@@ -1299,6 +1530,153 @@ mod tests {
             })
         );
         assert_eq!(hit_test(&list, 1.0, 1.0), None);
+    }
+
+    #[test]
+    fn hit_testing_uses_rotated_quads_curves_strokes_and_z_order() {
+        let canvas = VsdxDisplayList {
+            contract_version: CONTRACT_VERSION,
+            width: 100.0,
+            height: 100.0,
+            paint_transform: final_paint_transform(1.0),
+            primitives: vec![
+                Primitive::Shape {
+                    id: "bottom".into(),
+                    z_order: 10,
+                    path: vec![
+                        GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                        GeometryPathCommand::Line { x: 1.0, y: 0.0 },
+                        GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                        GeometryPathCommand::Line { x: 0.0, y: 1.0 },
+                    ],
+                    fill: Some(Paint::Solid {
+                        color: "#000".into(),
+                    }),
+                    stroke: None,
+                    transform: Affine::identity(),
+                },
+                Primitive::Shape {
+                    id: "top".into(),
+                    z_order: 20,
+                    path: vec![
+                        GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                        GeometryPathCommand::Line { x: 1.0, y: 0.0 },
+                        GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                        GeometryPathCommand::Line { x: 0.0, y: 1.0 },
+                    ],
+                    fill: Some(Paint::Solid {
+                        color: "#000".into(),
+                    }),
+                    stroke: None,
+                    transform: Affine::identity(),
+                },
+                Primitive::Image {
+                    id: "rotated-image".into(),
+                    z_order: 1,
+                    asset_id: "i".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    width: 2.0,
+                    height: 2.0,
+                    transform: Affine {
+                        a: std::f32::consts::FRAC_1_SQRT_2,
+                        b: std::f32::consts::FRAC_1_SQRT_2,
+                        c: -std::f32::consts::FRAC_1_SQRT_2,
+                        d: std::f32::consts::FRAC_1_SQRT_2,
+                        e: 5.0,
+                        f: 0.0,
+                    },
+                },
+                Primitive::Shape {
+                    id: "curve".into(),
+                    z_order: 2,
+                    path: vec![
+                        GeometryPathCommand::Move { x: 7.0, y: 0.0 },
+                        GeometryPathCommand::Cubic {
+                            cp1x: 9.0,
+                            cp1y: 0.0,
+                            cp2x: 9.0,
+                            cp2y: 2.0,
+                            x: 7.0,
+                            y: 2.0,
+                        },
+                        GeometryPathCommand::Cubic {
+                            cp1x: 5.0,
+                            cp1y: 2.0,
+                            cp2x: 5.0,
+                            cp2y: 0.0,
+                            x: 7.0,
+                            y: 0.0,
+                        },
+                    ],
+                    fill: Some(Paint::Solid {
+                        color: "#000".into(),
+                    }),
+                    stroke: None,
+                    transform: Affine::identity(),
+                },
+                Primitive::Shape {
+                    id: "stroke".into(),
+                    z_order: 3,
+                    path: vec![
+                        GeometryPathCommand::Move { x: 0.0, y: 3.0 },
+                        GeometryPathCommand::Line { x: 2.0, y: 3.0 },
+                    ],
+                    fill: None,
+                    stroke: Some(Stroke {
+                        color: "#000".into(),
+                        width: 0.2,
+                        dashed: false,
+                    }),
+                    transform: Affine::identity(),
+                },
+            ],
+        };
+        let hit = |x: f32, y: f32| hit_test(&canvas, x * 96.0, 96.0 - y * 96.0);
+        assert_eq!(
+            hit(0.5, 0.5),
+            Some(HitTestResult::Shape {
+                shape_id: "top".into()
+            })
+        );
+        assert_eq!(
+            hit(5.0, 1.0),
+            Some(HitTestResult::Shape {
+                shape_id: "rotated-image".into()
+            })
+        );
+        assert_eq!(hit(3.7, 0.1), None);
+        assert_eq!(
+            hit(7.0, 1.0),
+            Some(HitTestResult::Shape {
+                shape_id: "curve".into()
+            })
+        );
+        assert_eq!(hit(9.5, 1.0), None);
+        assert_eq!(
+            hit(1.0, 3.08),
+            Some(HitTestResult::Shape {
+                shape_id: "stroke".into()
+            })
+        );
+    }
+
+    #[test]
+    fn hit_testing_returns_a_rotated_group_child() {
+        let child = shape(2, 1.0, 0.0);
+        let mut parent = group(1, 5.0, 5.0, vec![child]);
+        with_cell(
+            &mut parent,
+            "Angle",
+            &std::f64::consts::FRAC_PI_2.to_string(),
+        );
+        let list = render(vec![parent]);
+        assert_eq!(
+            hit_test(&list, 96.0 * 4.5, 768.0 - 96.0 * 6.5),
+            Some(HitTestResult::Shape {
+                shape_id: "page:2".into()
+            })
+        );
     }
 
     #[test]
@@ -1372,6 +1750,83 @@ mod tests {
         assert!(
             matches!(&list.primitives[1], Primitive::Placeholder { reason, .. } if reason.starts_with("unresolvable colour:"))
         );
+    }
+
+    #[test]
+    fn dangling_media_and_non_finite_stroke_width_become_placeholders() {
+        let mut image = shape(1, 1.0, 1.0);
+        image.children.push(ShapeChild::ForeignData(ForeignData {
+            foreign_type: None,
+            compression_type: None,
+            relationship_id: Some("image".into()),
+            other_attrs: vec![],
+        }));
+        let mut line = shape(2, 2.0, 1.0);
+        with_cell(&mut line, "LineWeight", "1e100");
+        let mut package = package(vec![image, line]);
+        package.relationships.insert(
+            "page".into(),
+            vec![vsdx_parse::Relationship {
+                id: "image".into(),
+                relationship_type: "image".into(),
+                target: "missing.png".into(),
+                target_mode: Default::default(),
+                resolved_target: Some("missing.png".into()),
+            }],
+        );
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert!(
+            matches!(&list.primitives[0], Primitive::Placeholder { reason, .. } if reason.contains("dangling ForeignData image target"))
+        );
+        assert!(
+            matches!(&list.primitives[1], Primitive::Placeholder { reason, .. } if reason.contains("non-finite stroke width"))
+        );
+    }
+
+    #[test]
+    fn unsupported_colour_reason_preserves_evaluator_detail() {
+        let mut coloured = shape(1, 1.0, 1.0);
+        coloured.children.retain(
+            |child| !matches!(child, ShapeChild::Cell(Cell { name, .. }) if name == "FillForegnd"),
+        );
+        coloured
+            .children
+            .push(ShapeChild::Cell(formula("FillForegnd", "THEMEVAL(999)")));
+        let list = render(vec![coloured]);
+        assert!(
+            matches!(&list.primitives[0], Primitive::Placeholder { reason, .. } if reason.starts_with("unresolvable colour:") && reason.len() > "unresolvable colour:".len())
+        );
+    }
+
+    #[test]
+    fn invalid_page_dimensions_are_rejected_before_pixel_conversion() {
+        for (width, height) in [("0", "8"), ("-1", "8"), ("1e100", "8")] {
+            let mut page = package(vec![]);
+            let sheet = page.page_sheets.get_mut(&1).unwrap();
+            sheet.children = vec![
+                SheetChild::Cell(cell("PageWidth", width)),
+                SheetChild::Cell(cell("PageHeight", height)),
+            ];
+            assert!(
+                matches!(
+                    Renderer::default().layout_page(&page, "page"),
+                    Err(RenderError::PageDimensions(_))
+                ),
+                "{width} x {height}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_finite_text_run_size_and_line_height_are_rejected() {
+        let mut text = shape(1, 1.0, 1.0);
+        with_cell(&mut text, "Char.Size", "1e100");
+        text.children
+            .push(ShapeChild::Text(vec![TextToken::Literal("x".into())]));
+        assert!(matches!(
+            Renderer::default().layout_page(&package(vec![text]), "page"),
+            Err(RenderError::PageDimensions(_))
+        ));
     }
 
     #[test]
@@ -1495,15 +1950,10 @@ mod tests {
         let list = Renderer::default()
             .layout_page(&package, &package.page_part_paths[0])
             .unwrap();
-        assert_eq!(list.contract_version, CONTRACT_VERSION);
-        assert!(list.width > 0.0 && list.height > 0.0);
-        assert!(display_list_finite(&list));
-        assert!(!list.primitives.is_empty());
-        assert!(
-            list.primitives
-                .iter()
-                .all(|primitive| z_order(primitive) < 100)
-        );
+        let actual = serde_json::to_value(list).unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/golden/foundation.json")).unwrap();
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -1516,6 +1966,7 @@ mod tests {
         };
         let mut painted = 0usize;
         let mut placeholders = 0usize;
+        let mut groups = 0usize;
         let mut reasons = BTreeMap::new();
         for file in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
             let path = std::path::Path::new(&directory).join(file);
@@ -1524,26 +1975,49 @@ mod tests {
                 let list = Renderer::default().layout_page(&package, page).unwrap();
                 let json = serde_json::to_string(&list).unwrap();
                 assert!(!json.contains("NaN") && !json.contains("Infinity"));
+                let expected = package.page_contents[page]
+                    .shapes()
+                    .flat_map(|shape| shape_ids(page, shape))
+                    .collect::<std::collections::BTreeSet<_>>();
                 let mut page_painted = std::collections::BTreeSet::new();
                 let mut page_placeholders = std::collections::BTreeSet::new();
-                let total_shapes = package.page_contents[page]
-                    .shapes()
-                    .map(shape_count)
-                    .sum::<usize>();
+                let mut page_groups = std::collections::BTreeSet::new();
+                let mut text_shapes = std::collections::BTreeSet::new();
+                let mut image_shapes = std::collections::BTreeSet::new();
+                expected_subcontent(
+                    package.page_contents[page].shapes(),
+                    page,
+                    &mut text_shapes,
+                    &mut image_shapes,
+                );
                 count_primitives(
                     &list.primitives,
                     &mut page_painted,
                     &mut page_placeholders,
+                    &mut page_groups,
                     &mut reasons,
                 );
-                assert_eq!(page_painted.len() + page_placeholders.len(), total_shapes);
+                assert!(page_painted.is_disjoint(&page_placeholders));
+                assert!(page_painted.is_disjoint(&page_groups));
+                assert!(page_placeholders.is_disjoint(&page_groups));
+                let actual = page_painted
+                    .union(&page_placeholders)
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>();
+                let actual = actual
+                    .union(&page_groups)
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(actual, expected);
+                assert!(text_shapes.is_subset(&page_painted));
+                assert!(image_shapes.is_subset(&page_painted));
                 painted += page_painted.len();
                 placeholders += page_placeholders.len();
+                groups += page_groups.len();
             }
         }
         eprintln!(
-            "VSDX corpus render: painted={} placeholdered={} placeholder reasons={reasons:?}",
-            painted, placeholders
+            "VSDX corpus render: painted={painted} placeholdered={placeholders} group={groups} placeholder reasons={reasons:?}",
         );
     }
 
@@ -1551,6 +2025,7 @@ mod tests {
         primitives: &[Primitive],
         painted: &mut std::collections::BTreeSet<String>,
         placeholders: &mut std::collections::BTreeSet<String>,
+        groups: &mut std::collections::BTreeSet<String>,
         reasons: &mut BTreeMap<String, usize>,
     ) {
         for primitive in primitives {
@@ -1564,14 +2039,39 @@ mod tests {
                     placeholders.insert(id.clone());
                     *reasons.entry(reason.clone()).or_default() += 1;
                 }
-                Primitive::Group { primitives, .. } => {
-                    count_primitives(primitives, painted, placeholders, reasons)
+                Primitive::Group { id, primitives, .. } => {
+                    groups.insert(id.clone());
+                    count_primitives(primitives, painted, placeholders, groups, reasons)
                 }
             }
         }
     }
 
-    fn shape_count(shape: &Shape) -> usize {
-        1 + shape.shapes().map(shape_count).sum::<usize>()
+    fn shape_ids(page: &str, shape: &Shape) -> Vec<String> {
+        std::iter::once(format!("{page}:{}", shape.id))
+            .chain(shape.shapes().flat_map(|child| shape_ids(page, child)))
+            .collect()
+    }
+
+    fn expected_subcontent<'a>(
+        shapes: impl Iterator<Item = &'a Shape>,
+        page: &str,
+        text: &mut std::collections::BTreeSet<String>,
+        images: &mut std::collections::BTreeSet<String>,
+    ) {
+        for shape in shapes {
+            let id = format!("{page}:{}", shape.id);
+            if shape.text().is_some_and(|tokens| {
+                tokens
+                    .iter()
+                    .any(|token| matches!(token, TextToken::Literal(value) if !value.is_empty()))
+            }) {
+                text.insert(id.clone());
+            }
+            if shape.foreign_data().is_some() {
+                images.insert(id);
+            }
+            expected_subcontent(shape.shapes(), page, text, images);
+        }
     }
 }
