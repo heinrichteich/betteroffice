@@ -3216,6 +3216,43 @@ mod tests {
     }
 
     #[test]
+    fn display_list_decode_rejects_unsupported_contract() {
+        let payload = r#"{"contractVersion":2,"width":0.0,"height":0.0,"paintTransform":{"a":1.0,"b":0.0,"c":0.0,"d":1.0,"e":0.0,"f":0.0},"primitives":[]}"#;
+        assert!(serde_json::from_str::<VsdxDisplayList>(payload).is_err());
+    }
+
+    #[test]
+    fn decoded_diagnostics_own_codes_and_honour_wire_categories() {
+        let diagnostics = (0..10_000)
+            .map(|index| {
+                serde_json::from_value::<Diagnostic>(serde_json::json!({
+                    "category": "fidelity",
+                    "code": format!("unknown-{index}"),
+                    "detail": "fixture",
+                }))
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let _: String = diagnostics[0].code.clone();
+        assert_eq!(diagnostics[9_999].code, "unknown-9999");
+        assert!(diagnostics.iter().all(|diagnostic| {
+            diagnostic.category == DiagnosticCategory::Fidelity && !diagnostic.category_defaulted
+        }));
+    }
+
+    #[test]
+    fn decoded_diagnostic_missing_or_invalid_category_defaults_to_integrity() {
+        for payload in [
+            serde_json::json!({"code":"unknown","detail":"fixture"}),
+            serde_json::json!({"category":"future","code":"unknown","detail":"fixture"}),
+        ] {
+            let diagnostic = serde_json::from_value::<Diagnostic>(payload).unwrap();
+            assert_eq!(diagnostic.category, DiagnosticCategory::Integrity);
+            assert!(diagnostic.category_defaulted);
+        }
+    }
+
+    #[test]
     fn closed_path_stroke_hits_its_implicit_closing_segment() {
         let path = vec![
             GeometryPathCommand::Move { x: 0.0, y: 0.0 },
