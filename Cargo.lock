@@ -239,6 +239,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-vsdx"
+version = "0.0.4"
+dependencies = [
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+]
+
+[[package]]
 name = "betteroffice-vsdx-parse"
 version = "0.0.4"
 dependencies = [

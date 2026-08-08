@@ -93,6 +93,20 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         &document_path,
         &mut budget,
     )?;
+    let page_part_ids = catalog_part_ids(
+        xml_parts.get(pages_part_path.as_deref().unwrap_or("")),
+        "Page",
+        relationships
+            .get(pages_part_path.as_deref().unwrap_or(""))
+            .map(Vec::as_slice),
+    );
+    let master_part_ids = catalog_part_ids(
+        xml_parts.get(masters_part_path.as_deref().unwrap_or("")),
+        "Master",
+        relationships
+            .get(masters_part_path.as_deref().unwrap_or(""))
+            .map(Vec::as_slice),
+    );
     let page_contents = parse_part_sheets(&page_part_paths, &mut xml_parts, &mut budget)?;
     let master_contents = parse_part_sheets(&master_part_paths, &mut xml_parts, &mut budget)?;
     Ok(VsdxPackage {
@@ -110,6 +124,8 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         face_names,
         page_sheets,
         master_sheets,
+        page_part_ids,
+        master_part_ids,
         page_contents,
         master_contents,
         parts: source_parts
@@ -117,6 +133,31 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
             .map(|(path, bytes)| PackagePart { path, bytes })
             .collect(),
     })
+}
+
+fn catalog_part_ids(
+    root: Option<&XmlElement>,
+    item: &str,
+    relationships: Option<&[Relationship]>,
+) -> BTreeMap<String, u32> {
+    root.into_iter()
+        .flat_map(|root| root.children_named(item))
+        .filter_map(|element| {
+            let id = element.attribute("ID")?.parse().ok()?;
+            let relationship_id = element
+                .attributes
+                .iter()
+                .find(|(name, _)| name == "r:id" || name == "id")?
+                .1
+                .as_str();
+            let path = relationships?
+                .iter()
+                .find(|relationship| relationship.id == relationship_id)?
+                .resolved_target
+                .clone()?;
+            Some((path, id))
+        })
+        .collect()
 }
 
 fn parse_part_sheets(
