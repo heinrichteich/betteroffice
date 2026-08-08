@@ -18,11 +18,18 @@ pub fn paint(
         .filter(|v| *v != "0")
         .map(|_| colour(package, references, shape, shape_id, "LineColor"))
         .transpose()?
-        .map(|color| Stroke {
-            color,
-            width: number(shape, "LineWeight").unwrap_or(0.01) as f32,
-            dashed: value(shape, "LinePattern").is_some_and(|v| v != "1"),
-        });
+        .map(|color| {
+            let width = number(shape, "LineWeight").unwrap_or(0.01) as f32;
+            if !width.is_finite() {
+                return Err::<Stroke, String>("non-finite stroke width".into());
+            }
+            Ok(Stroke {
+                color,
+                width,
+                dashed: value(shape, "LinePattern").is_some_and(|v| v != "1"),
+            })
+        })
+        .transpose()?;
     Ok((fill, stroke))
 }
 pub fn number(shape: &ResolvedShape, name: &str) -> Option<f64> {

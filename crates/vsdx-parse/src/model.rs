@@ -49,6 +49,13 @@ impl VsdxPackage {
         part.bytes = bytes;
         true
     }
+
+    pub fn add_part(&mut self, path: impl Into<String>, bytes: Vec<u8>) {
+        self.parts.push(PackagePart {
+            path: path.into(),
+            bytes,
+        });
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

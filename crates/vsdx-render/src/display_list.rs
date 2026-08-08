@@ -37,6 +37,70 @@ pub struct PaintTransform {
     pub f: f32,
 }
 
+/// An affine transform applied in scene coordinates before the final paint transform.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Affine {
+    pub a: f32,
+    pub b: f32,
+    pub c: f32,
+    pub d: f32,
+    pub e: f32,
+    pub f: f32,
+}
+impl Default for Affine {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+impl Affine {
+    pub const fn identity() -> Self {
+        Self {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 0.0,
+            f: 0.0,
+        }
+    }
+    pub fn compose(self, other: Self) -> Self {
+        Self {
+            a: self.a * other.a + self.c * other.b,
+            b: self.b * other.a + self.d * other.b,
+            c: self.a * other.c + self.c * other.d,
+            d: self.b * other.c + self.d * other.d,
+            e: self.a * other.e + self.c * other.f + self.e,
+            f: self.b * other.e + self.d * other.f + self.f,
+        }
+    }
+    pub fn apply_point(self, x: f32, y: f32) -> (f32, f32) {
+        (
+            self.a * x + self.c * y + self.e,
+            self.b * x + self.d * y + self.f,
+        )
+    }
+    pub fn invert(self) -> Option<Self> {
+        let determinant = self.a * self.d - self.b * self.c;
+        (determinant.is_finite() && determinant != 0.0).then(|| Self {
+            a: self.d / determinant,
+            b: -self.b / determinant,
+            c: -self.c / determinant,
+            d: self.a / determinant,
+            e: (self.c * self.f - self.d * self.e) / determinant,
+            f: (self.b * self.e - self.a * self.f) / determinant,
+        })
+    }
+    pub fn is_finite(self) -> bool {
+        [self.a, self.b, self.c, self.d, self.e, self.f]
+            .into_iter()
+            .all(f32::is_finite)
+    }
+    pub fn is_identity(&self) -> bool {
+        *self == Self::identity()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -61,22 +125,6 @@ pub struct Stroke {
     #[serde(default, skip_serializing_if = "is_false")]
     pub dashed: bool,
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Transform {
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub rotation_deg: f32,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub flip_x: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub flip_y: bool,
-}
-impl Transform {
-    pub fn is_identity(&self) -> bool {
-        self.rotation_deg == 0.0 && !self.flip_x && !self.flip_y
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -90,8 +138,8 @@ pub enum Primitive {
         path: Vec<GeometryPathCommand>,
         fill: Option<Paint>,
         stroke: Option<Stroke>,
-        #[serde(default, skip_serializing_if = "Transform::is_identity")]
-        transform: Transform,
+        #[serde(default, skip_serializing_if = "Affine::is_identity")]
+        transform: Affine,
     },
     Image {
         id: String,
@@ -101,8 +149,9 @@ pub enum Primitive {
         y: f32,
         width: f32,
         height: f32,
-        #[serde(default, skip_serializing_if = "Transform::is_identity")]
-        transform: Transform,
+        /// Maps this local image rectangle into scene coordinates before the final paint transform.
+        #[serde(default, skip_serializing_if = "Affine::is_identity")]
+        transform: Affine,
     },
     TextBox {
         id: String,
@@ -127,8 +176,8 @@ pub enum Primitive {
         id: String,
         z_order: u32,
         primitives: Vec<Primitive>,
-        #[serde(default, skip_serializing_if = "Transform::is_identity")]
-        transform: Transform,
+        #[serde(default, skip_serializing_if = "Affine::is_identity")]
+        transform: Affine,
     },
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -162,10 +211,8 @@ pub struct PositionedLine {
 pub struct CaretStop {
     pub position: u32,
     pub x: f32,
+    pub y: f32,
 }
 fn is_false(value: &bool) -> bool {
     !*value
-}
-fn is_zero(value: &f32) -> bool {
-    *value == 0.0
 }

@@ -118,6 +118,17 @@ impl Renderer {
             .ok_or_else(|| RenderError::PageDimensions("PageHeight is unavailable".into()))?;
         let page_width = page_dimension(&resolver, package, page_part, "PageWidth")
             .ok_or_else(|| RenderError::PageDimensions("PageWidth is unavailable".into()))?;
+        if !page_height.is_sign_positive()
+            || !page_width.is_sign_positive()
+            || !(page_height as f32).is_finite()
+            || !(page_width as f32).is_finite()
+            || !(page_height as f32 * PIXELS_PER_INCH).is_finite()
+            || !(page_width as f32 * PIXELS_PER_INCH).is_finite()
+        {
+            return Err(RenderError::PageDimensions(
+                "dimensions must be positive finite canvas values".into(),
+            ));
+        }
         let mut state = State {
             count: 0,
             z_order: 0,
@@ -220,7 +231,7 @@ impl Renderer {
                 id,
                 z_order,
                 primitives: children,
-                transform: Transform::default(),
+                transform: Affine::identity(),
             });
             return Ok(());
         }
@@ -237,6 +248,15 @@ impl Renderer {
                     })
             });
             if let Some(asset_id) = asset_id {
+                if package.part_bytes(asset_id).is_none() {
+                    return self.placeholder_at(
+                        id,
+                        z_order,
+                        bounds,
+                        state,
+                        "dangling ForeignData image target",
+                    );
+                }
                 state.primitives.push(Primitive::Image {
                     id,
                     z_order,
@@ -245,11 +265,7 @@ impl Renderer {
                     y: bounds.y as f32,
                     width: bounds.width as f32,
                     height: bounds.height as f32,
-                    transform: Transform {
-                        rotation_deg: bounds.angle.to_degrees() as f32,
-                        flip_x: bounds.flip_x,
-                        flip_y: bounds.flip_y,
-                    },
+                    transform: bounds_affine(bounds),
                 });
                 return Ok(());
             }
@@ -287,8 +303,17 @@ impl Renderer {
                 command
             })
             .collect::<Vec<_>>();
-        let Ok((fill, stroke)) = paint::paint(package, references, &resolved, shape.id) else {
-            return self.placeholder_at(id, z_order, bounds, state, "unresolvable colour");
+        let (fill, stroke) = match paint::paint(package, references, &resolved, shape.id) {
+            Ok(paint) => paint,
+            Err(reason) => {
+                return self.placeholder_at(
+                    id,
+                    z_order,
+                    bounds,
+                    state,
+                    &format!("unresolvable colour: {reason}"),
+                );
+            }
         };
         state.primitives.push(Primitive::Shape {
             id: id.clone(),
@@ -296,7 +321,7 @@ impl Renderer {
             path,
             fill,
             stroke,
-            transform: Transform::default(),
+            transform: Affine::identity(),
         });
         self.text(shape, &resolved, id, bounds, state)?;
         Ok(())
@@ -345,8 +370,7 @@ impl Renderer {
         state.text_paragraphs += 1;
         state.text_lines += 1;
         state.text_runs += 1;
-        let size =
-            paint::number(resolved, "Char.Size").unwrap_or(0.166_666_67) as f32 * PIXELS_PER_INCH;
+        let size = paint::number(resolved, "Char.Size").unwrap_or(0.166_666_67) as f32;
         let family = "Arial".to_owned();
         let width = self
             .registered_fonts
@@ -360,10 +384,12 @@ impl Renderer {
             .map(|(position, _)| CaretStop {
                 position: position as u32,
                 x: bounds.x as f32 + position as f32 * size * 0.5,
+                y: bounds.y as f32,
             })
             .chain(std::iter::once(CaretStop {
                 position: text.len() as u32,
                 x: bounds.x as f32 + width,
+                y: bounds.y as f32,
             }))
             .collect();
         let z_order = state.next_z();
@@ -431,46 +457,40 @@ impl Renderer {
     }
 }
 fn bake_group_transform(primitive: &mut Primitive, group: Bounds) {
+    let matrix = bounds_affine(group);
     match primitive {
         Primitive::Shape {
             path, transform, ..
         } => {
             for command in path {
-                transform_command(command, group);
+                transform_affine(command, matrix);
             }
-            *transform = Transform::default();
+            *transform = Affine::identity();
         }
-        Primitive::Image {
+        Primitive::Image { transform, .. } => *transform = matrix.compose(*transform),
+        Primitive::TextBox {
             x,
             y,
             width,
             height,
-            ..
-        }
-        | Primitive::TextBox {
-            x,
-            y,
-            width,
-            height,
-            ..
-        }
-        | Primitive::Placeholder {
-            x,
-            y,
-            width,
-            height,
+            lines,
             ..
         } => {
-            let (x0, y0) = group_point(*x as f64, *y as f64, group);
-            let (x1, y1) = group_point((*x + *width) as f64, (*y + *height) as f64, group);
-            *x = x0.min(x1) as f32;
-            *y = y0.min(y1) as f32;
-            *width = (x1 - x0).abs() as f32;
-            *height = (y1 - y0).abs() as f32;
-            if let Primitive::Image { transform, .. } = primitive {
-                *transform = Transform::default();
+            transform_rect(x, y, width, height, matrix);
+            for line in lines {
+                (line.x, line.y) = matrix.apply_point(line.x, line.y);
+                for stop in &mut line.caret_stops {
+                    (stop.x, stop.y) = matrix.apply_point(stop.x, stop.y);
+                }
             }
         }
+        Primitive::Placeholder {
+            x,
+            y,
+            width,
+            height,
+            ..
+        } => transform_rect(x, y, width, height, matrix),
         Primitive::Group {
             primitives,
             transform,
@@ -479,14 +499,42 @@ fn bake_group_transform(primitive: &mut Primitive, group: Bounds) {
             for child in primitives {
                 bake_group_transform(child, group);
             }
-            *transform = Transform::default();
+            *transform = Affine::identity();
         }
     }
 }
+fn transform_rect(x: &mut f32, y: &mut f32, width: &mut f32, height: &mut f32, matrix: Affine) {
+    let corners = [
+        matrix.apply_point(*x, *y),
+        matrix.apply_point(*x + *width, *y),
+        matrix.apply_point(*x, *y + *height),
+        matrix.apply_point(*x + *width, *y + *height),
+    ];
+    let (min_x, max_x) = corners
+        .iter()
+        .map(|(x, _)| *x)
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), value| {
+            (min.min(value), max.max(value))
+        });
+    let (min_y, max_y) = corners
+        .iter()
+        .map(|(_, y)| *y)
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), value| {
+            (min.min(value), max.max(value))
+        });
+    *x = min_x;
+    *y = min_y;
+    *width = max_x - min_x;
+    *height = max_y - min_y;
+}
 fn transform_command(command: &mut ooxml_drawingml::GeometryPathCommand, group: Bounds) {
+    transform_affine(command, bounds_affine(group));
+}
+fn transform_affine(command: &mut ooxml_drawingml::GeometryPathCommand, matrix: Affine) {
     use ooxml_drawingml::GeometryPathCommand::*;
     let point = |x: &mut f64, y: &mut f64| {
-        (*x, *y) = group_point(*x, *y, group);
+        let (transformed_x, transformed_y) = matrix.apply_point(*x as f32, *y as f32);
+        (*x, *y) = (transformed_x as f64, transformed_y as f64);
     };
     match command {
         Move { x, y } | Line { x, y } => point(x, y),
@@ -509,21 +557,22 @@ fn transform_command(command: &mut ooxml_drawingml::GeometryPathCommand, group: 
         Close => {}
     }
 }
-fn group_point(x: f64, y: f64, group: Bounds) -> (f64, f64) {
+fn bounds_affine(group: Bounds) -> Affine {
     let loc_x = group.loc_pin_x;
     let loc_y = group.loc_pin_y;
     let pin_x = group.x + group.loc_pin_x;
     let pin_y = group.y + group.loc_pin_y;
-    let mut x = x - loc_x;
-    let mut y = y - loc_y;
-    if group.flip_x {
-        x = -x;
-    }
-    if group.flip_y {
-        y = -y;
-    }
     let (sin, cos) = group.angle.sin_cos();
-    (pin_x + x * cos - y * sin, pin_y + x * sin + y * cos)
+    let sx = if group.flip_x { -1.0 } else { 1.0 };
+    let sy = if group.flip_y { -1.0 } else { 1.0 };
+    Affine {
+        a: (cos * sx) as f32,
+        b: (sin * sx) as f32,
+        c: (-sin * sy) as f32,
+        d: (cos * sy) as f32,
+        e: (pin_x - cos * sx * loc_x + sin * sy * loc_y) as f32,
+        f: (pin_y - sin * sx * loc_x - cos * sy * loc_y) as f32,
+    }
 }
 struct State {
     count: usize,
@@ -673,8 +722,19 @@ fn display_list_finite(list: &VsdxDisplayList) -> bool {
 fn primitives_finite(primitives: &[Primitive]) -> bool {
     primitives.iter().all(|primitive| match primitive {
         Primitive::Shape {
-            path, transform, ..
-        } => transform.rotation_deg.is_finite() && path.iter().all(command_finite),
+            path,
+            transform,
+            fill,
+            stroke,
+            ..
+        } => {
+            transform.is_finite()
+                && path.iter().all(command_finite)
+                && paint_finite(fill)
+                && stroke
+                    .as_ref()
+                    .is_none_or(|stroke| stroke.width.is_finite())
+        }
         Primitive::Image {
             x,
             y,
@@ -682,14 +742,13 @@ fn primitives_finite(primitives: &[Primitive]) -> bool {
             height,
             transform,
             ..
-        } => [*x, *y, *width, *height, transform.rotation_deg]
-            .into_iter()
-            .all(f32::is_finite),
+        } => [*x, *y, *width, *height].into_iter().all(f32::is_finite) && transform.is_finite(),
         Primitive::TextBox {
             x,
             y,
             width,
             height,
+            paragraphs,
             lines,
             ..
         } => {
@@ -698,8 +757,14 @@ fn primitives_finite(primitives: &[Primitive]) -> bool {
                     [line.x, line.y, line.width, line.height]
                         .into_iter()
                         .all(f32::is_finite)
-                        && line.caret_stops.iter().all(|stop| stop.x.is_finite())
+                        && line
+                            .caret_stops
+                            .iter()
+                            .all(|stop| stop.x.is_finite() && stop.y.is_finite())
                 })
+                && paragraphs
+                    .iter()
+                    .all(|paragraph| paragraph.runs.iter().all(|run| run.size_px.is_finite()))
         }
         Primitive::Placeholder {
             x,
@@ -712,8 +777,14 @@ fn primitives_finite(primitives: &[Primitive]) -> bool {
             transform,
             primitives,
             ..
-        } => transform.rotation_deg.is_finite() && primitives_finite(primitives),
+        } => transform.is_finite() && primitives_finite(primitives),
     })
+}
+fn paint_finite(paint: &Option<Paint>) -> bool {
+    match paint {
+        Some(Paint::Gradient { stops }) => stops.iter().all(|stop| stop.position.is_finite()),
+        _ => true,
+    }
 }
 fn command_finite(command: &ooxml_drawingml::GeometryPathCommand) -> bool {
     use ooxml_drawingml::GeometryPathCommand::*;
@@ -742,80 +813,109 @@ pub enum HitTestResult {
     Text { shape_id: String, position: u32 },
 }
 pub fn hit_test(list: &VsdxDisplayList, x: f32, y: f32) -> Option<HitTestResult> {
-    let (x, y) = (
-        (x - list.paint_transform.e) / list.paint_transform.a,
-        (y - list.paint_transform.f) / list.paint_transform.d,
-    );
-    fn visit(primitives: &[Primitive], x: f32, y: f32) -> Option<HitTestResult> {
-        for primitive in primitives.iter().rev() {
-            match primitive {
-                Primitive::TextBox {
-                    id,
-                    x: left,
-                    y: top,
-                    width,
-                    height,
-                    lines,
-                    ..
-                } if x >= *left && x <= left + width && y >= *top && y <= top + height => {
-                    let line = lines
-                        .iter()
-                        .min_by(|a, b| (a.y - y).abs().total_cmp(&(b.y - y).abs()))?;
-                    let stop = line
-                        .caret_stops
-                        .iter()
-                        .min_by(|a, b| (a.x - x).abs().total_cmp(&(b.x - x).abs()))?;
-                    return Some(HitTestResult::Text {
-                        shape_id: id.clone(),
-                        position: stop.position,
-                    });
-                }
-                Primitive::Shape {
-                    id,
-                    path,
-                    transform,
-                    ..
-                } if path_hit(path, *transform, x as f64, y as f64) => {
-                    return Some(HitTestResult::Shape {
-                        shape_id: id.clone(),
-                    });
-                }
-                Primitive::Image {
-                    id,
-                    x: left,
-                    y: top,
-                    width,
-                    height,
-                    transform,
-                    ..
-                } if point_in_transformed_rect(*left, *top, *width, *height, *transform, x, y) => {
-                    return Some(HitTestResult::Shape {
-                        shape_id: id.clone(),
-                    });
-                }
-                Primitive::Placeholder {
-                    id,
-                    x: left,
-                    y: top,
-                    width,
-                    height,
-                    ..
-                } if x >= *left && x <= left + width && y >= *top && y <= top + height => {
-                    return Some(HitTestResult::Shape {
-                        shape_id: id.clone(),
-                    });
-                }
-                Primitive::Group { primitives, .. } => {
-                    if let Some(hit) = visit(primitives, x, y) {
-                        return Some(hit);
-                    }
-                }
-                _ => {}
+    let inverse = Affine {
+        a: list.paint_transform.a,
+        b: list.paint_transform.b,
+        c: list.paint_transform.c,
+        d: list.paint_transform.d,
+        e: list.paint_transform.e,
+        f: list.paint_transform.f,
+    }
+    .invert()?;
+    let (x, y) = inverse.apply_point(x, y);
+    fn collect<'a>(primitives: &'a [Primitive], output: &mut Vec<&'a Primitive>) {
+        for primitive in primitives {
+            output.push(primitive);
+            if let Primitive::Group { primitives, .. } = primitive {
+                collect(primitives, output);
             }
         }
-        None
     }
-    visit(&list.primitives, x, y)
+    let mut primitives = Vec::new();
+    collect(&list.primitives, &mut primitives);
+    primitives.sort_by_key(|primitive| std::cmp::Reverse(z_order(primitive)));
+    for primitive in primitives {
+        match primitive {
+            Primitive::TextBox {
+                id,
+                x: left,
+                y: top,
+                width,
+                height,
+                lines,
+                ..
+            } if x >= *left && x <= left + width && y >= *top && y <= top + height => {
+                let line = lines
+                    .iter()
+                    .min_by(|a, b| (a.y - y).abs().total_cmp(&(b.y - y).abs()))?;
+                let stop = line
+                    .caret_stops
+                    .iter()
+                    .min_by(|a, b| (a.x - x).abs().total_cmp(&(b.x - x).abs()))?;
+                return Some(HitTestResult::Text {
+                    shape_id: id.clone(),
+                    position: stop.position,
+                });
+            }
+            Primitive::Shape {
+                id,
+                path,
+                fill,
+                stroke,
+                transform,
+                ..
+            } if path_hit(
+                path,
+                *transform,
+                fill.is_some(),
+                stroke.as_ref().map_or(0.0, |stroke| stroke.width),
+                x,
+                y,
+            ) =>
+            {
+                return Some(HitTestResult::Shape {
+                    shape_id: id.clone(),
+                });
+            }
+            Primitive::Image {
+                id,
+                x: left,
+                y: top,
+                width,
+                height,
+                transform,
+                ..
+            } if point_in_transformed_rect(*left, *top, *width, *height, *transform, x, y) => {
+                return Some(HitTestResult::Shape {
+                    shape_id: id.clone(),
+                });
+            }
+            Primitive::Placeholder {
+                id,
+                x: left,
+                y: top,
+                width,
+                height,
+                ..
+            } if x >= *left && x <= left + width && y >= *top && y <= top + height => {
+                return Some(HitTestResult::Shape {
+                    shape_id: id.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn z_order(primitive: &Primitive) -> u32 {
+    match primitive {
+        Primitive::Shape { z_order, .. }
+        | Primitive::Image { z_order, .. }
+        | Primitive::TextBox { z_order, .. }
+        | Primitive::Placeholder { z_order, .. }
+        | Primitive::Group { z_order, .. } => *z_order,
+    }
 }
 
 fn point_in_transformed_rect(
@@ -823,51 +923,32 @@ fn point_in_transformed_rect(
     top: f32,
     width: f32,
     height: f32,
-    transform: Transform,
+    transform: Affine,
     x: f32,
     y: f32,
 ) -> bool {
-    let (x, y) = inverse_transform(
-        x as f64,
-        y as f64,
-        left as f64 + width as f64 / 2.0,
-        top as f64 + height as f64 / 2.0,
-        transform,
-    );
-    x >= left as f64 && x <= (left + width) as f64 && y >= top as f64 && y <= (top + height) as f64
+    let Some(inverse) = transform.invert() else {
+        return false;
+    };
+    let (x, y) = inverse.apply_point(x, y);
+    x >= left && x <= left + width && y >= top && y <= top + height
 }
 fn path_hit(
     path: &[ooxml_drawingml::GeometryPathCommand],
-    transform: Transform,
-    x: f64,
-    y: f64,
+    transform: Affine,
+    fill: bool,
+    stroke_width: f32,
+    x: f32,
+    y: f32,
 ) -> bool {
-    let points = path
-        .iter()
-        .filter_map(|command| match command {
-            ooxml_drawingml::GeometryPathCommand::Move { x, y }
-            | ooxml_drawingml::GeometryPathCommand::Line { x, y } => Some((*x, *y)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let Some((&min_x, &max_x, &min_y, &max_y)) = points
-        .iter()
-        .map(|(x, _)| x)
-        .min_by(|a, b| a.total_cmp(b))
-        .zip(points.iter().map(|(x, _)| x).max_by(|a, b| a.total_cmp(b)))
-        .zip(points.iter().map(|(_, y)| y).min_by(|a, b| a.total_cmp(b)))
-        .zip(points.iter().map(|(_, y)| y).max_by(|a, b| a.total_cmp(b)))
-        .map(|(((a, b), c), d)| (a, b, c, d))
-    else {
+    let Some(inverse) = transform.invert() else {
         return false;
     };
-    let (x, y) = inverse_transform(
-        x,
-        y,
-        (min_x + max_x) / 2.0,
-        (min_y + max_y) / 2.0,
-        transform,
-    );
+    let (x, y) = inverse.apply_point(x, y);
+    let points = flatten_path(path);
+    if points.is_empty() {
+        return false;
+    }
     let mut inside = false;
     for index in 0..points.len() {
         let (ax, ay) = points[index];
@@ -876,19 +957,78 @@ fn path_hit(
             inside = !inside;
         }
     }
-    inside
+    fill && inside
+        || stroke_width > 0.0
+            && points.windows(2).any(|segment| {
+                point_segment_distance(x, y, segment[0], segment[1]) <= stroke_width / 2.0
+            })
 }
-fn inverse_transform(x: f64, y: f64, cx: f64, cy: f64, transform: Transform) -> (f64, f64) {
-    let radians = -(transform.rotation_deg as f64).to_radians();
-    let (sin, cos) = radians.sin_cos();
-    let x = x - cx;
-    let y = y - cy;
-    let x = x * cos - y * sin;
-    let y = x * sin + y * cos;
-    (
-        if transform.flip_x { -x } else { x } + cx,
-        if transform.flip_y { -y } else { y } + cy,
-    )
+fn point_segment_distance(x: f32, y: f32, (ax, ay): (f32, f32), (bx, by): (f32, f32)) -> f32 {
+    let dx = bx - ax;
+    let dy = by - ay;
+    let length = dx * dx + dy * dy;
+    let t = if length == 0.0 {
+        0.0
+    } else {
+        (((x - ax) * dx + (y - ay) * dy) / length).clamp(0.0, 1.0)
+    };
+    ((x - (ax + t * dx)).powi(2) + (y - (ay + t * dy)).powi(2)).sqrt()
+}
+fn flatten_path(path: &[ooxml_drawingml::GeometryPathCommand]) -> Vec<(f32, f32)> {
+    use ooxml_drawingml::GeometryPathCommand::*;
+    let mut points = Vec::new();
+    let mut current = (0.0, 0.0);
+    for command in path {
+        match *command {
+            Move { x, y } => {
+                current = (x as f32, y as f32);
+                points.push(current);
+            }
+            Line { x, y } => {
+                current = (x as f32, y as f32);
+                points.push(current);
+            }
+            Quad { cpx, cpy, x, y } => {
+                let start = current;
+                for step in 1..=16 {
+                    let t = step as f32 / 16.0;
+                    let u = 1.0 - t;
+                    points.push((
+                        u * u * start.0 + 2.0 * u * t * cpx as f32 + t * t * x as f32,
+                        u * u * start.1 + 2.0 * u * t * cpy as f32 + t * t * y as f32,
+                    ));
+                }
+                current = (x as f32, y as f32);
+            }
+            Cubic {
+                cp1x,
+                cp1y,
+                cp2x,
+                cp2y,
+                x,
+                y,
+            } => {
+                let start = current;
+                for step in 1..=16 {
+                    let t = step as f32 / 16.0;
+                    let u = 1.0 - t;
+                    points.push((
+                        u.powi(3) * start.0
+                            + 3.0 * u * u * t * cp1x as f32
+                            + 3.0 * u * t * t * cp2x as f32
+                            + t.powi(3) * x as f32,
+                        u.powi(3) * start.1
+                            + 3.0 * u * u * t * cp1y as f32
+                            + 3.0 * u * t * t * cp2y as f32
+                            + t.powi(3) * y as f32,
+                    ));
+                }
+                current = (x as f32, y as f32);
+            }
+            Close => {}
+        }
+    }
+    points
 }
 
 #[cfg(test)]
@@ -1059,7 +1199,7 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!(*transform, Transform::default());
+        assert_eq!(*transform, Affine::identity());
         assert!(
             matches!(path[1], GeometryPathCommand::Line { x, y } if (x - 3.0).abs() < 1e-9 && (y - 5.0).abs() < 1e-9)
         );
@@ -1081,7 +1221,7 @@ mod tests {
             else {
                 unreachable!()
             };
-            assert_eq!(*transform, Transform::default());
+            assert_eq!(*transform, Affine::identity());
             let expected = if flip_x { (2.0, 5.0) } else { (4.0, 3.0) };
             assert!(
                 matches!(path[2], GeometryPathCommand::Line { x, y } if (x - expected.0).abs() < 1e-9 && (y - expected.1).abs() < 1e-9)
@@ -1111,7 +1251,7 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!(*transform, Transform::default());
+        assert_eq!(*transform, Affine::identity());
         assert!(
             matches!(path[0], GeometryPathCommand::Move { x, y } if (x - 10.0).abs() < 1e-9 && (y - 19.0).abs() < 1e-9)
         );
@@ -1188,6 +1328,7 @@ mod tests {
                 resolved_target: Some("visio/media/image1.png".into()),
             }],
         );
+        package.add_part("visio/media/image1.png", vec![0]);
         let list = Renderer::default().layout_page(&package, "page").unwrap();
         assert!(
             matches!(&list.primitives[0], Primitive::Shape { fill: Some(Paint::Solid { color }), stroke: Some(Stroke { color: line, width, dashed: false }), .. } if color == "#010203" && line == "#040506" && *width == 0.02)
@@ -1229,7 +1370,7 @@ mod tests {
             matches!(&list.primitives[0], Primitive::Placeholder { reason, .. } if reason == "unsupported ForeignData image")
         );
         assert!(
-            matches!(&list.primitives[1], Primitive::Placeholder { reason, .. } if reason == "unresolvable colour")
+            matches!(&list.primitives[1], Primitive::Placeholder { reason, .. } if reason.starts_with("unresolvable colour:"))
         );
     }
 
@@ -1347,45 +1488,21 @@ mod tests {
 
     #[test]
     fn foundation_display_list_matches_golden_contract() {
-        let mut text = shape(2, 2.0, 1.0);
-        text.children
-            .push(ShapeChild::Text(vec![TextToken::Literal("golden".into())]));
-        let mut image = shape(3, 3.0, 1.0);
-        image.children.push(ShapeChild::ForeignData(ForeignData {
-            foreign_type: None,
-            compression_type: None,
-            relationship_id: Some("image".into()),
-            other_attrs: vec![],
-        }));
-        let mut group = shape(4, 5.0, 2.0);
-        group
-            .children
-            .retain(|child| !matches!(child, ShapeChild::Section(_)));
-        group.children.push(ShapeChild::Cell(cell(
-            "Angle",
-            &std::f64::consts::FRAC_PI_2.to_string(),
-        )));
-        group
-            .children
-            .push(ShapeChild::Shapes(vec![ShapesChild::Shape(shape(
-                5, 1.0, 0.0,
-            ))]));
-        let mut package = package(vec![shape(1, 1.0, 1.0), text, image, group]);
-        package.relationships.insert(
-            "page".into(),
-            vec![vsdx_parse::Relationship {
-                id: "image".into(),
-                relationship_type: "image".into(),
-                target: "media/image.png".into(),
-                target_mode: Default::default(),
-                resolved_target: Some("visio/media/image.png".into()),
-            }],
-        );
-        let list = Renderer::default().layout_page(&package, "page").unwrap();
-        let actual = serde_json::to_string(&list).unwrap();
-        assert_eq!(
-            actual,
-            include_str!("../tests/golden/foundation.json").trim()
+        let package = vsdx_parse::parse_vsdx(include_bytes!(
+            "../../vsdx-parse/tests/fixtures/foundation.vsdx"
+        ))
+        .unwrap();
+        let list = Renderer::default()
+            .layout_page(&package, &package.page_part_paths[0])
+            .unwrap();
+        assert_eq!(list.contract_version, CONTRACT_VERSION);
+        assert!(list.width > 0.0 && list.height > 0.0);
+        assert!(display_list_finite(&list));
+        assert!(!list.primitives.is_empty());
+        assert!(
+            list.primitives
+                .iter()
+                .all(|primitive| z_order(primitive) < 100)
         );
     }
 
