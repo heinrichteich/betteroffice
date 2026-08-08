@@ -245,6 +245,7 @@ impl VsdxDocument {
         self.update_observer = None;
     }
 
+    /// Returns `[2]` after overflow; discard queued observations and resync from a state vector.
     #[wasm_bindgen(js_name = drainUpdateEvent)]
     pub fn drain_update_event(&self) -> Vec<u8> {
         let Some(observer) = &self.update_observer else {
@@ -620,5 +621,20 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn wasm_update_observation_overflow_requires_resync() {
+        let mut document = document();
+        document.start_update_observation().unwrap();
+        for index in 0..=super::MAX_PENDING_UPDATE_EVENTS {
+            add_cell(
+                &document,
+                &format!("Overflow{index}"),
+                &format!("Overflow{index}"),
+                "1",
+            );
+        }
+        assert_eq!(document.drain_update_event(), vec![2]);
     }
 }
