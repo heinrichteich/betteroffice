@@ -445,11 +445,10 @@ fn js_error(error: impl std::fmt::Display) -> JsValue {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CellLocatorArgs, MoveShapeArgs, ResizeShapeArgs, SetCellFormulaArgs, VsdxDocument,
-        parse_client_id_raw,
-    };
-    use crate::{DiagramSession, MAX_SAFE_CLIENT_ID, SHEETS};
+    use super::{VsdxDocument, parse_client_id_raw};
+    #[cfg(target_arch = "wasm32")]
+    use crate::DiagramSession;
+    use crate::{MAX_SAFE_CLIENT_ID, SHEETS};
     use yrs::{Map, MapPrelim, Out, ReadTxn, Transact};
 
     fn document() -> VsdxDocument {
@@ -480,6 +479,11 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn error_string(result: Result<String, wasm_bindgen::JsValue>) -> String {
+        result.unwrap_err().as_string().unwrap()
+    }
+
     #[test]
     fn client_ids_must_be_positive_safe_integers() {
         for client_id in [-1.0, 1.5, (MAX_SAFE_CLIENT_ID + 1) as f64] {
@@ -487,39 +491,29 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
     #[test]
     fn wasm_refuses_guarded_section_row_cell_edits() {
         let document = document();
         add_cell(&document, "Geometry\u{1f}IX:0\u{1f}X", "X", "GUARD(1)");
-        let result = document.set_cell_formula(SetCellFormulaArgs {
-            page_id: "page:1".to_owned(),
-            shape_id: "page:1:shape:1".to_owned(),
-            locator: CellLocatorArgs {
-                section: Some("Geometry".to_owned()),
-                row_index: Some(0),
-                row_name: None,
-                cell_name: "X".to_owned(),
-            },
-            formula: "2".to_owned(),
-        });
-        assert!(result.is_err());
+        assert_eq!(
+            error_string(document.set_cell_formula_json(r#"{"pageId":"page:1","shapeId":"page:1:shape:1","locator":{"section":"Geometry","rowIndex":0,"cellName":"X"},"formula":"2"}"#)),
+            "invalid diagram state: GUARD protects the requested cell"
+        );
     }
 
+    #[cfg(target_arch = "wasm32")]
     #[test]
     fn wasm_locks_refuse_atomic_move_and_resize() {
         let document = document();
         add_cell(&document, "PinX", "PinX", "1");
         add_cell(&document, "PinY", "PinY", "1");
         add_cell(&document, "LockMoveY", "LockMoveY", "1");
-        assert!(
-            document
-                .move_shape(MoveShapeArgs {
-                    page_id: "page:1".to_owned(),
-                    shape_id: "page:1:shape:1".to_owned(),
-                    x_formula: "2".to_owned(),
-                    y_formula: "3".to_owned(),
-                })
-                .is_err()
+        assert_eq!(
+            error_string(document.move_shape_json(
+                r#"{"pageId":"page:1","shapeId":"page:1:shape:1","xFormula":"2","yFormula":"3"}"#
+            )),
+            "invalid diagram state: LockMoveY protects this move gesture"
         );
         let snapshot = document.snapshot_json().unwrap();
         assert!(snapshot.contains(r#""name":"PinX","formula":"1""#));
@@ -528,15 +522,9 @@ mod tests {
         add_cell(&document, "Width", "Width", "1");
         add_cell(&document, "Height", "Height", "1");
         add_cell(&document, "LockHeight", "LockHeight", "1");
-        assert!(
-            document
-                .resize_shape(ResizeShapeArgs {
-                    page_id: "page:1".to_owned(),
-                    shape_id: "page:1:shape:1".to_owned(),
-                    width_formula: "2".to_owned(),
-                    height_formula: "3".to_owned(),
-                })
-                .is_err()
+        assert_eq!(
+            error_string(document.resize_shape_json(r#"{"pageId":"page:1","shapeId":"page:1:shape:1","widthFormula":"2","heightFormula":"3"}"#)),
+            "invalid diagram state: LockHeight protects this resize gesture"
         );
         let snapshot = document.snapshot_json().unwrap();
         assert!(snapshot.contains(r#""name":"Width","formula":"1""#));
@@ -548,25 +536,33 @@ mod tests {
         let document = document();
         add_cell(&document, "Width", "Width", "SETATREF(Target)");
         add_cell(&document, "Target", "Target", "1");
-        let receipt = document
-            .set_cell_formula(SetCellFormulaArgs {
-                page_id: "page:1".to_owned(),
-                shape_id: "page:1:shape:1".to_owned(),
-                locator: CellLocatorArgs {
-                    section: None,
-                    row_index: None,
-                    row_name: None,
-                    cell_name: "Width".to_owned(),
-                },
-                formula: "2".to_owned(),
-            })
-            .unwrap();
-        assert_eq!(receipt.cell_name, "Target");
+        assert_eq!(
+            document
+                .set_cell_formula_json(r#"{"pageId":"page:1","shapeId":"page:1:shape:1","locator":{"cellName":"Width"},"formula":"2"}"#)
+                .unwrap(),
+            r#"{"pageId":"page:1","shapeId":"page:1:shape:1","cellName":"Target","before":"1","after":"2"}"#
+        );
         let snapshot = document.snapshot_json().unwrap();
         assert!(snapshot.contains(r#""name":"Width","formula":"SETATREF(Target)""#));
         assert!(snapshot.contains(r#""name":"Target","formula":"2""#));
     }
 
+    #[test]
+    fn wasm_move_shape_json_returns_receipts() {
+        let document = document();
+        add_cell(&document, "PinX", "PinX", "1");
+        add_cell(&document, "PinY", "PinY", "1");
+        assert_eq!(
+            document
+                .move_shape_json(
+                    r#"{"pageId":"page:1","shapeId":"page:1:shape:1","xFormula":"2","yFormula":"3"}"#,
+                )
+                .unwrap(),
+            r#"[{"pageId":"page:1","shapeId":"page:1:shape:1","cellName":"PinX","before":"1","after":"2"},{"pageId":"page:1","shapeId":"page:1:shape:1","cellName":"PinY","before":"1","after":"3"}]"#
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
     #[test]
     fn wasm_rejects_malicious_setatref_updates_without_changing_the_document() {
         let document = document();
@@ -592,34 +588,60 @@ mod tests {
         let update = attacker
             .encode_diff_v1(&document.encode_state_vector())
             .unwrap();
-        assert!(document.apply_update(&update).is_err());
+        assert_eq!(
+            error_string(document.apply_update_json(&update)),
+            "invalid diagram state: remote update bypasses formula redirect at page:1/page:1:shape:1/Width"
+        );
         assert_eq!(before, document.encode_state_as_update());
     }
 
     #[test]
-    fn wasm_media_bytes_returns_known_part_and_rejects_unknown_part() {
-        let document = document();
-        let path = document.session().package().unwrap().document_part_path;
-        assert!(!document.media_bytes_result(&path).unwrap().is_empty());
-        assert!(
-            document
-                .media_bytes_result("visio/media/missing.png")
-                .is_err()
+    fn wasm_media_bytes_returns_committed_media() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/nested-groups.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(
+            document.media_bytes("visio/media/image1.png").unwrap(),
+            vec![137, 80, 78, 71, 13, 10, 26, 10]
         );
     }
 
     #[test]
-    fn wasm_media_bytes_returns_a_known_media_part() {
-        let Ok(corpus) = std::env::var("VSDX_CORPUS_DIR") else {
-            return;
-        };
-        let bytes = std::fs::read(std::path::Path::new(&corpus).join("lichtsysteme.vsdx")).unwrap();
-        let document = VsdxDocument::open_collaborative(&bytes, 1.0).unwrap();
-        assert!(
-            !document
-                .media_bytes_result("visio/media/image1.png")
-                .unwrap()
-                .is_empty()
+    fn wasm_add_shape_json_returns_a_receipt() {
+        let document = document();
+        assert_eq!(
+            document
+                .add_shape_json(
+                    r#"{"pageId":"page:1","draft":{"sourceId":2,"name":"Added","cells":[]}}"#
+                )
+                .unwrap(),
+            r#"{"pageId":"page:1","shapeId":"page:1:shape:1:0","fromIndex":null,"toIndex":1}"#
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn wasm_media_bytes_rejects_unknown_parts() {
+        assert_eq!(
+            document()
+                .media_bytes("visio/media/missing.png")
+                .unwrap_err()
+                .as_string()
+                .unwrap(),
+            "invalid diagram state: media part was not found"
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn wasm_add_shape_json_rejects_raw_values() {
+        assert_eq!(
+            error_string(document().add_shape_json(
+                r#"{"pageId":"page:1","draft":{"sourceId":3,"cells":[{"value":"1"}]}}"#
+            )),
+            "shape draft cells must not contain value"
         );
     }
 
