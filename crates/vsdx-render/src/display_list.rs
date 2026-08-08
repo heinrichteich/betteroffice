@@ -194,6 +194,18 @@ pub struct TextRun {
     pub size_px: f32,
     pub bold: bool,
     pub italic: bool,
+    #[serde(default)]
+    pub underline: bool,
+    #[serde(default)]
+    pub small_caps: bool,
+    #[serde(default)]
+    pub superscript: bool,
+    #[serde(default)]
+    pub subscript: bool,
+    #[serde(default)]
+    pub letter_spacing: f32,
+    #[serde(skip)]
+    pub(crate) case: i32,
     pub color: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<String>,

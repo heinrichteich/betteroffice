@@ -21,6 +21,10 @@ struct RichParagraph {
     align: i32,
     before: f32,
     after: f32,
+    left: f32,
+    right: f32,
+    first: f32,
+    line_spacing: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -33,16 +37,24 @@ struct TabStop {
 fn rich_paragraphs(
     renderer: &Renderer,
     package: &VsdxPackage,
+    references: Option<&PageShapeReferences>,
     resolved: &ResolvedShape,
+    shape_id: u32,
     tokens: &[vsdx_resolve::ResolvedTextToken],
 ) -> Vec<RichParagraph> {
     let mut character = TextRun {
         text: String::new(),
-        family: "Arial".into(),
+        family: "sans-serif".into(),
         size_px: 1.0 / 6.0,
         bold: false,
         italic: false,
-        color: "#000000".into(),
+        color: "currentColor".into(),
+        underline: false,
+        small_caps: false,
+        superscript: false,
+        subscript: false,
+        letter_spacing: 0.0,
+        case: 0,
         diagnostic: None,
         tab: None,
     };
@@ -51,25 +63,45 @@ fn rich_paragraphs(
         align: 0,
         before: 0.0,
         after: 0.0,
+        left: 0.0,
+        right: 0.0,
+        first: 0.0,
+        line_spacing: None,
     }];
+    character = character_run(
+        renderer,
+        package,
+        references,
+        resolved,
+        shape_id,
+        &row_properties(resolved, "Character", 0),
+        &character,
+    );
     for token in tokens {
         match token {
             vsdx_resolve::ResolvedTextToken::Literal(value) => {
                 append_run(&mut paragraphs, &character, value.clone())
             }
-            vsdx_resolve::ResolvedTextToken::CharacterRun { properties, .. } => {
-                character = character_run(renderer, package, properties, &character)
+            vsdx_resolve::ResolvedTextToken::CharacterRun { index, properties } => {
+                if properties.is_empty() {
+                    append_diagnostic(&mut character, format!("unresolved Character row {index}"));
+                } else {
+                    character = character_run(
+                        renderer, package, references, resolved, shape_id, properties, &character,
+                    );
+                }
             }
             vsdx_resolve::ResolvedTextToken::ParagraphRun { properties, .. } => {
-                let mut paragraph = RichParagraph {
+                let paragraph = RichParagraph {
                     runs: Vec::new(),
                     align: property_number(properties, "HorzAlign").unwrap_or(0.0) as i32,
                     before: property_number(properties, "SpBefore").unwrap_or(0.0) as f32,
                     after: property_number(properties, "SpAfter").unwrap_or(0.0) as f32,
+                    left: property_number(properties, "IndLeft").unwrap_or(0.0) as f32,
+                    right: property_number(properties, "IndRight").unwrap_or(0.0) as f32,
+                    first: property_number(properties, "IndFirst").unwrap_or(0.0) as f32,
+                    line_spacing: property_number(properties, "SpLine").map(|value| value as f32),
                 };
-                if let Some(indent) = property_number(properties, "IndLeft") {
-                    paragraph.before += indent as f32 * 0.0;
-                }
                 paragraphs.push(paragraph);
             }
             vsdx_resolve::ResolvedTextToken::Tab { properties, .. } => {
@@ -151,7 +183,13 @@ fn field_value(
 
 fn append_run(paragraphs: &mut [RichParagraph], character: &TextRun, text: String) {
     let mut run = character.clone();
-    run.text = text;
+    run.text = match character_case(character, &text) {
+        Ok(text) => text,
+        Err(diagnostic) => {
+            run.diagnostic = Some(diagnostic);
+            text
+        }
+    };
     run.tab = None;
     paragraphs
         .last_mut()
@@ -163,6 +201,9 @@ fn append_run(paragraphs: &mut [RichParagraph], character: &TextRun, text: Strin
 fn character_run(
     renderer: &Renderer,
     package: &VsdxPackage,
+    references: Option<&PageShapeReferences>,
+    resolved: &ResolvedShape,
+    shape_id: u32,
     properties: &std::collections::BTreeMap<String, Lookup>,
     current: &TextRun,
 ) -> TextRun {
@@ -187,17 +228,34 @@ fn character_run(
     if let Some(size) = property_number(properties, "Size") {
         run.size_px = size as f32;
     }
-    if let Some(color) = property_value(properties, "Color") {
-        run.color = if color.starts_with('#') {
-            color.into()
-        } else {
-            format!("#{color}")
-        };
+    if properties.contains_key("Color") {
+        match text_colour(package, references, resolved, shape_id, properties) {
+            Ok(color) => run.color = color,
+            Err(reason) => {
+                append_diagnostic(&mut run, format!("unresolvable text colour: {reason}"))
+            }
+        }
     }
     if let Some(style) = property_number(properties, "Style") {
         let style = style as i32;
         run.bold = style & 1 != 0;
         run.italic = style & 2 != 0;
+        run.underline = style & 4 != 0;
+        run.small_caps = style & 8 != 0;
+    }
+    if let Some(pos) = property_number(properties, "Pos") {
+        match pos as i32 {
+            0 => (run.superscript, run.subscript) = (false, false),
+            1 => (run.superscript, run.subscript) = (true, false),
+            2 => (run.superscript, run.subscript) = (false, true),
+            _ => append_diagnostic(&mut run, format!("unresolvable Character.Pos value {pos}")),
+        }
+    }
+    if let Some(case) = property_number(properties, "Case") {
+        run.case = case as i32;
+    }
+    if let Some(letter_spacing) = property_number(properties, "Letterspace") {
+        run.letter_spacing = letter_spacing as f32 / 1440.0;
     }
     if property_value(properties, "Font").is_some() {
         run.diagnostic = renderer
@@ -206,6 +264,105 @@ fn character_run(
             .then(|| format!("unregistered font '{}'", run.family));
     }
     run
+}
+
+fn row_properties(
+    resolved: &ResolvedShape,
+    section: &str,
+    index: u32,
+) -> std::collections::BTreeMap<String, Lookup> {
+    resolved
+        .sections
+        .get(section)
+        .and_then(|section| section.rows.get(&format!("IX:{index}")))
+        .map(|row| row.cells.clone())
+        .unwrap_or_default()
+}
+
+fn append_diagnostic(run: &mut TextRun, diagnostic: String) {
+    run.diagnostic = Some(match run.diagnostic.take() {
+        Some(existing) => format!("{existing}; {diagnostic}"),
+        None => diagnostic,
+    });
+}
+
+fn text_colour(
+    package: &VsdxPackage,
+    references: Option<&PageShapeReferences>,
+    resolved: &ResolvedShape,
+    shape_id: u32,
+    properties: &std::collections::BTreeMap<String, Lookup>,
+) -> Result<String, String> {
+    let Some(Lookup::Found(cell)) = properties.get("Color") else {
+        return Err("missing Color cell".into());
+    };
+    let formula = cell
+        .cell
+        .formula
+        .as_deref()
+        .or(cell.cell.value.as_deref())
+        .ok_or_else(|| "missing Color value".to_string())?;
+    let references = references.ok_or_else(|| "unavailable colour references".to_string())?;
+    match evaluate_cell_with_shape_package_theme(
+        "Char.Color",
+        formula,
+        &references.for_shape(shape_id),
+        &ParseLimits::default(),
+        resolved,
+        package,
+    ) {
+        Evaluation::Evaluated(result) => match result.value {
+            Value::Color(color) => Ok(format!(
+                "#{:02X}{:02X}{:02X}",
+                color.red, color.green, color.blue
+            )),
+            Value::Number(value) => palette_colour(package, value.number)
+                .ok_or_else(|| "Color evaluated to an unresolvable palette index".into()),
+        },
+        Evaluation::Unsupported(reason) => Err(reason),
+        Evaluation::Error(error) => Err(error.message),
+    }
+}
+
+fn palette_colour(package: &VsdxPackage, index: f64) -> Option<String> {
+    let index = (index.fract() == 0.0).then_some(index as i64)?;
+    let record = package.colors.iter().find(|record| {
+        record.attributes.iter().any(|(name, value)| {
+            matches!(name.as_str(), "IX" | "Index") && value.parse::<i64>().ok() == Some(index)
+        })
+    })?;
+    let value = record
+        .attributes
+        .iter()
+        .find(|(name, _)| matches!(name.as_str(), "RGB" | "Color" | "Value"))?
+        .1
+        .trim_start_matches('#');
+    (value.len() == 6 && value.chars().all(|ch| ch.is_ascii_hexdigit()))
+        .then(|| format!("#{value}"))
+}
+
+fn character_case(run: &TextRun, text: &str) -> Result<String, String> {
+    match run.case {
+        0 => Ok(text.into()),
+        1 => Ok(text.to_uppercase()),
+        2 => Ok(title_case(text)),
+        value => Err(format!("unresolvable Character.Case value {value}")),
+    }
+}
+
+fn title_case(text: &str) -> String {
+    let mut start = true;
+    text.chars()
+        .flat_map(|ch| {
+            let output = if start {
+                ch.to_uppercase().collect::<String>()
+            } else {
+                ch.to_lowercase().collect()
+            };
+            start = !ch.is_alphanumeric();
+            output.chars().collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 fn property_value<'a>(
@@ -546,7 +703,7 @@ impl Renderer {
             transform: Affine::identity(),
         });
         self.text(
-            package, resolver, page_part, shape, &resolved, id, bounds, state,
+            package, resolver, references, page_part, shape, &resolved, id, bounds, state,
         )?;
         Ok(())
     }
@@ -555,6 +712,7 @@ impl Renderer {
         &self,
         package: &VsdxPackage,
         resolver: &Resolver<'_>,
+        references: Option<&PageShapeReferences>,
         page_part: &str,
         shape: &Shape,
         resolved: &ResolvedShape,
@@ -575,7 +733,8 @@ impl Renderer {
             .or_else(|| package.page_contents.get(page_part))
             .ok_or_else(|| RenderError::MissingPage(page_part.into()))?;
         let tokens = resolver.resolve_text_in_context(shape, page, resolved)?;
-        let mut paragraphs = rich_paragraphs(self, package, resolved, &tokens);
+        let mut paragraphs =
+            rich_paragraphs(self, package, references, resolved, shape.id, &tokens);
         if paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()) {
             return Ok(());
         }
@@ -641,7 +800,33 @@ impl Renderer {
                 continue;
             }
             cursor_y += paragraph.before;
-            let laid_out = self.wrap_paragraph(paragraph, available_width, x, cursor_y, offset);
+            let width = (available_width - paragraph.left - paragraph.right).max(0.0);
+            let mut laid_out =
+                self.wrap_paragraph(paragraph, width, x + paragraph.left, cursor_y, offset);
+            if let Some(first) = laid_out.first_mut() {
+                first.x += paragraph.first;
+                for stop in &mut first.caret_stops {
+                    stop.x += paragraph.first;
+                }
+            }
+            if let Some(spacing) = paragraph.line_spacing {
+                let solid = laid_out.first().map_or(0.2, |line| line.height / 1.2);
+                let line_height = if spacing > 0.0 {
+                    spacing
+                } else if spacing < 0.0 {
+                    solid * -spacing / 100.0
+                } else {
+                    solid
+                };
+                for (index, line) in laid_out.iter_mut().enumerate() {
+                    let y = cursor_y + index as f32 * line_height;
+                    line.y = y;
+                    line.height = line_height;
+                    for stop in &mut line.caret_stops {
+                        stop.y = y;
+                    }
+                }
+            }
             offset += paragraph
                 .runs
                 .iter()
@@ -716,8 +901,26 @@ impl Renderer {
                     Some((*end > index).then_some(run))
                 })
                 .find_map(|run| run);
+            let run_end = paragraph
+                .runs
+                .iter()
+                .scan(0usize, |end, run| {
+                    *end += run.text.len();
+                    Some((*end > index).then_some(*end))
+                })
+                .find_map(|end| end);
             let (mut width, line_height) = run
-                .map(|run| (self.measure(run, &ch.to_string()), run.size_px * 1.2))
+                .map(|run| {
+                    (
+                        self.measure(run, &ch.to_string())
+                            + if run_end > Some(index + ch.len_utf8()) {
+                                run.letter_spacing
+                            } else {
+                                0.0
+                            },
+                        run.size_px * 1.2,
+                    )
+                })
                 .unwrap_or((0.0, 0.2));
             if ch == '\t'
                 && let Some(tab) = run.and_then(|run| run.tab)
@@ -906,7 +1109,19 @@ impl Renderer {
                         Some((*end > index).then_some(run))
                     })
                     .find_map(|run| run)
-                    .map_or(0.0, |run| self.measure(run, &ch.to_string()))
+                    .map_or(0.0, |run| {
+                        let end = paragraph
+                            .runs
+                            .iter()
+                            .scan(0usize, |end, run| {
+                                *end += run.text.len();
+                                Some((*end > index).then_some(*end))
+                            })
+                            .find_map(|end| end)
+                            .unwrap_or(index + ch.len_utf8());
+                        self.measure(run, &ch.to_string())
+                            + (end > index + ch.len_utf8()) as u8 as f32 * run.letter_spacing
+                    })
             })
             .sum()
     }
@@ -1923,6 +2138,65 @@ mod tests {
             };
             assert!((lines[0].x - expected_x).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn paragraph_indents_and_line_spacing_change_line_geometry() {
+        let mut shape = text_shape(vec![
+            TextToken::ParagraphRun(0),
+            TextToken::Literal("a\nb".into()),
+        ]);
+        with_cell(&mut shape, "TxtWidth", "1");
+        shape.children.push(ShapeChild::Section(Section {
+            name: "Paragraph".into(),
+            index: None,
+            del: false,
+            children: vec![SectionChild::Row(row(
+                0,
+                "",
+                vec![
+                    cell("IndLeft", "0.2"),
+                    cell("IndRight", "0.3"),
+                    cell("IndFirst", "0.1"),
+                    cell("SpLine", "-200"),
+                ],
+            ))],
+            other_attrs: vec![],
+        }));
+        let list = render(vec![shape]);
+        let Primitive::TextBox { lines, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        assert_eq!(lines.len(), 2);
+        assert!((lines[0].x - 1.3).abs() < 1e-5);
+        assert!((lines[1].x - 1.2).abs() < 1e-5);
+        assert!((lines[1].y - lines[0].y - 1.0 / 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn character_defaults_case_position_and_tracking_apply_before_text() {
+        let mut shape = text_shape(vec![TextToken::Literal("hello".into())]);
+        shape.children.push(text_section(
+            "Character",
+            vec![row(
+                0,
+                "",
+                vec![
+                    cell("Case", "1"),
+                    cell("Pos", "1"),
+                    cell("Letterspace", "20"),
+                    cell("Style", "12"),
+                ],
+            )],
+        ));
+        let list = render(vec![shape]);
+        let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        let run = &paragraphs[0].runs[0];
+        assert_eq!(run.text, "HELLO");
+        assert!(run.superscript && run.underline && run.small_caps);
+        assert!((run.letter_spacing - 1.0 / 72.0).abs() < 1e-5);
     }
 
     #[test]
