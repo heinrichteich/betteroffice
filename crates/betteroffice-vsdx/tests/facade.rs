@@ -112,6 +112,46 @@ fn setatref_resolves_a_sheet_reference() {
 }
 
 #[test]
+fn setatref_bypasses_are_rejected_without_writing_the_source() {
+    for formula in [
+        "SETATREF(Target)+1",
+        "SETATREF(Target)+SETATREF(Other)",
+        "IF(1,SETATREF(Target),0)",
+    ] {
+        let (_, diagram, page_id) = diagram_with_page(&format!(
+            "<PageContents><Shapes><Shape ID='1'><Cell N='Width' F='{formula}' V='1'/><Cell N='Target' V='1'/><Cell N='Other' V='1'/></Shape></Shapes></PageContents>"
+        ));
+        let page_path = diagram.package().page_part_paths[0].clone();
+        let before = diagram.package().part_bytes(&page_path).unwrap().to_vec();
+        assert!(
+            diagram
+                .save_cell_edits(&[edit(page_id, 1, "Width", "7", MutationGesture::ResizeWidth)])
+                .is_err()
+        );
+        assert_eq!(diagram.package().part_bytes(&page_path).unwrap(), before);
+    }
+}
+
+#[test]
+fn redirects_reapply_guards_and_reject_missing_targets() {
+    for formula in ["SETATREF(Target)", "SETATREF(Missing)"] {
+        let target = if formula.contains("Missing") {
+            ""
+        } else {
+            "<Cell N='Target' F='GUARD(1)' V='1'/>"
+        };
+        let (_, diagram, page_id) = diagram_with_page(&format!(
+            "<PageContents><Shapes><Shape ID='1'><Cell N='Width' F='{formula}' V='1'/>{target}</Shape></Shapes></PageContents>"
+        ));
+        assert!(
+            diagram
+                .save_cell_edits(&[edit(page_id, 1, "Width", "7", MutationGesture::ResizeWidth)])
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn locks_refuse_only_their_matching_gesture() {
     let (_, diagram, page_id) = diagram_with_page(
         "<PageContents><Shapes><Shape ID='1'><Cell N='LockWidth' V='1'/><Cell N='LockMoveX' V='1'/><Cell N='Width' V='1'/><Cell N='PinX' V='1'/><Cell N='PinY' V='1'/></Shape></Shapes></PageContents>",
@@ -130,6 +170,33 @@ fn locks_refuse_only_their_matching_gesture() {
         diagram
             .save_cell_edits(&[edit(page_id, 1, "PinY", "2", MutationGesture::MoveY)])
             .is_ok()
+    );
+}
+
+#[test]
+fn lock_literals_are_evaluated_instead_of_treated_as_nonzero_text() {
+    for (formula, expected) in [("FALSE", true), ("0", true), ("TRUE", false), ("1", false)] {
+        let (_, diagram, page_id) = diagram_with_page(&format!(
+            "<PageContents><Shapes><Shape ID='1'><Cell N='LockWidth' F='{formula}' V='stale'/><Cell N='Width' V='1'/></Shape></Shapes></PageContents>"
+        ));
+        assert_eq!(
+            diagram
+                .save_cell_edits(&[edit(page_id, 1, "Width", "2", MutationGesture::ResizeWidth)])
+                .is_ok(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn unevaluable_lock_formula_is_unsupported() {
+    let (_, diagram, page_id) = diagram_with_page(
+        "<PageContents><Shapes><Shape ID='1'><Cell N='LockWidth' F='Unknown(1)' V='0'/><Cell N='Width' V='1'/></Shape></Shapes></PageContents>",
+    );
+    assert!(
+        diagram
+            .save_cell_edits(&[edit(page_id, 1, "Width", "2", MutationGesture::ResizeWidth)])
+            .is_err()
     );
 }
 
