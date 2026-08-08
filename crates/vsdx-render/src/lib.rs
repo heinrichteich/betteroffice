@@ -3215,6 +3215,7 @@ mod tests {
         let mut placeholders = 0usize;
         let mut groups = 0usize;
         let mut reasons = BTreeMap::new();
+        let mut text = TextCorpusStats::default();
         for file in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
             let path = std::path::Path::new(&directory).join(file);
             let package = vsdx_parse::parse_vsdx(&std::fs::read(path).unwrap()).unwrap();
@@ -3231,12 +3232,10 @@ mod tests {
                 let mut page_images = std::collections::BTreeSet::new();
                 let mut page_placeholders = std::collections::BTreeSet::new();
                 let mut page_groups = std::collections::BTreeSet::new();
-                let mut text_shapes = std::collections::BTreeSet::new();
                 let mut image_shapes = std::collections::BTreeSet::new();
                 expected_subcontent(
                     package.page_contents[page].shapes(),
                     page,
-                    &mut text_shapes,
                     &mut image_shapes,
                 );
                 count_primitives(
@@ -3268,8 +3267,16 @@ mod tests {
                     .cloned()
                     .collect::<std::collections::BTreeSet<_>>();
                 assert_eq!(actual, expected);
-                assert_eq!(page_text, text_shapes);
                 assert_eq!(page_images, image_shapes);
+                let mut resolved_text = std::collections::BTreeSet::new();
+                assert_resolved_text(
+                    &package,
+                    page,
+                    &list.primitives,
+                    &mut resolved_text,
+                    &mut text,
+                );
+                assert_eq!(page_text, resolved_text);
                 painted += page_shapes.len() + page_text.len() + page_images.len();
                 placeholders += page_placeholders.len();
                 groups += page_groups.len();
@@ -3278,6 +3285,35 @@ mod tests {
         eprintln!(
             "VSDX corpus render: painted={painted} placeholdered={placeholders} group={groups} placeholder reasons={reasons:?}",
         );
+        eprintln!(
+            "VSDX corpus text: full={} diagnostics={} paragraphs={} runs={} marker-only={} field-only={} style-inherited={} master-inherited={} diagnostic reasons={:?}",
+            text.full,
+            text.diagnostics,
+            text.paragraphs,
+            text.runs,
+            text.marker_only,
+            text.field_only,
+            text.style_inherited,
+            text.master_inherited,
+            text.diagnostic_reasons,
+        );
+    }
+
+    #[test]
+    fn text_accounting_fixture_covers_resolved_text_sources() {
+        let package = vsdx_parse::parse_vsdx(include_bytes!(
+            "../../vsdx-parse/tests/fixtures/text-accounting.vsdx"
+        ))
+        .unwrap();
+        let page = &package.page_part_paths[0];
+        let list = Renderer::default().layout_page(&package, page).unwrap();
+        let mut rendered = std::collections::BTreeSet::new();
+        let mut stats = TextCorpusStats::default();
+        assert_resolved_text(&package, page, &list.primitives, &mut rendered, &mut stats);
+        assert_eq!(stats.marker_only, 1);
+        assert_eq!(stats.field_only, 1);
+        assert_eq!(stats.style_inherited, 1);
+        assert_eq!(stats.master_inherited, 1);
     }
 
     fn count_primitives(
@@ -3329,22 +3365,204 @@ mod tests {
     fn expected_subcontent<'a>(
         shapes: impl Iterator<Item = &'a Shape>,
         page: &str,
-        text: &mut std::collections::BTreeSet<String>,
         images: &mut std::collections::BTreeSet<String>,
     ) {
         for shape in shapes {
             let id = format!("{page}:{}", shape.id);
-            if shape.text().is_some_and(|tokens| {
-                tokens
-                    .iter()
-                    .any(|token| matches!(token, TextToken::Literal(value) if !value.is_empty()))
-            }) {
-                text.insert(id.clone());
-            }
             if shape.foreign_data().is_some() {
                 images.insert(id);
             }
-            expected_subcontent(shape.shapes(), page, text, images);
+            expected_subcontent(shape.shapes(), page, images);
+        }
+    }
+
+    fn assert_resolved_text(
+        package: &VsdxPackage,
+        page_part: &str,
+        primitives: &[Primitive],
+        rendered: &mut std::collections::BTreeSet<String>,
+        stats: &mut TextCorpusStats,
+    ) {
+        let page = &package.page_contents[page_part];
+        let resolver = Resolver::new(package);
+        let references = PageShapeReferences::new(&resolver, page_part).ok();
+        let mut text_boxes = BTreeMap::new();
+        text_boxes_by_id(primitives, &mut text_boxes);
+        for shape in page.shapes() {
+            assert_shape_text(
+                package,
+                &resolver,
+                references.as_ref(),
+                page,
+                page_part,
+                shape,
+                &text_boxes,
+                rendered,
+                stats,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assert_shape_text(
+        package: &VsdxPackage,
+        resolver: &Resolver<'_>,
+        references: Option<&PageShapeReferences>,
+        page: &Sheet,
+        page_part: &str,
+        shape: &Shape,
+        text_boxes: &BTreeMap<String, &Primitive>,
+        rendered: &mut std::collections::BTreeSet<String>,
+        stats: &mut TextCorpusStats,
+    ) {
+        let id = format!("{page_part}:{}", shape.id);
+        let resolved = resolver.resolve_shape(page_part, shape.id).unwrap();
+        if resolved.deleted || paint::number(&resolved, "NoShow").is_some_and(|value| value != 0.0)
+        {
+            return;
+        }
+        let tokens = resolver.resolve_text(shape, page).unwrap();
+        if tokens.iter().all(|token| {
+            matches!(
+                token,
+                vsdx_resolve::ResolvedTextToken::CharacterRun { .. }
+                    | vsdx_resolve::ResolvedTextToken::ParagraphRun { .. }
+            )
+        }) && !tokens.is_empty()
+        {
+            stats.marker_only += 1;
+        }
+        if tokens.iter().all(|token| {
+            matches!(
+                token,
+                vsdx_resolve::ResolvedTextToken::CharacterRun { .. }
+                    | vsdx_resolve::ResolvedTextToken::ParagraphRun { .. }
+                    | vsdx_resolve::ResolvedTextToken::Field { .. }
+            )
+        }) && tokens
+            .iter()
+            .any(|token| matches!(token, vsdx_resolve::ResolvedTextToken::Field { .. }))
+        {
+            stats.field_only += 1;
+        }
+        if !tokens.is_empty() && shape.text().is_none() {
+            stats.master_inherited += 1;
+        }
+        if tokens.iter().any(|token| match token {
+            vsdx_resolve::ResolvedTextToken::CharacterRun { properties, .. }
+            | vsdx_resolve::ResolvedTextToken::ParagraphRun { properties, .. }
+            | vsdx_resolve::ResolvedTextToken::Tab { properties, .. }
+            | vsdx_resolve::ResolvedTextToken::Field { properties, .. } => properties.values().any(
+                |value| matches!(value, Lookup::Found(value) if value.provenance == vsdx_resolve::Provenance::StyleText),
+            ),
+            vsdx_resolve::ResolvedTextToken::Literal(_) => false,
+        }) {
+            stats.style_inherited += 1;
+        }
+        let expected = rich_paragraphs(
+            &Renderer::default(),
+            package,
+            references,
+            &resolved,
+            shape.id,
+            &tokens,
+        );
+        let expected_runs = expected
+            .iter()
+            .map(|paragraph| paragraph.runs.len())
+            .sum::<usize>();
+        if expected_runs > 0 {
+            stats.paragraphs += expected.len();
+            stats.runs += expected_runs;
+        }
+        match text_boxes.get(&id) {
+            Some(Primitive::TextBox { paragraphs, .. }) => {
+                rendered.insert(id.clone());
+                assert_eq!(paragraphs.len(), expected.len(), "{id}: paragraph count");
+                assert_eq!(
+                    paragraphs
+                        .iter()
+                        .map(|paragraph| paragraph.runs.len())
+                        .sum::<usize>(),
+                    expected_runs,
+                    "{id}: run count"
+                );
+                let actual_text = paragraphs
+                    .iter()
+                    .flat_map(|paragraph| &paragraph.runs)
+                    .map(|run| run.text.as_str())
+                    .collect::<String>();
+                let expected_text = expected
+                    .iter()
+                    .flat_map(|paragraph| &paragraph.runs)
+                    .map(|run| run.text.as_str())
+                    .collect::<String>();
+                assert_eq!(actual_text, expected_text, "{id}: visible text");
+                let actual_diagnostics = paragraphs
+                    .iter()
+                    .flat_map(|paragraph| &paragraph.runs)
+                    .filter(|run| run.diagnostic.is_some())
+                    .count();
+                let expected_diagnostics = expected
+                    .iter()
+                    .flat_map(|paragraph| &paragraph.runs)
+                    .filter(|run| run.diagnostic.is_some())
+                    .count();
+                assert_eq!(
+                    actual_diagnostics, expected_diagnostics,
+                    "{id}: diagnostic-run count"
+                );
+                if actual_diagnostics == 0 {
+                    stats.full += 1;
+                } else {
+                    stats.diagnostics += 1;
+                    for diagnostic in paragraphs
+                        .iter()
+                        .flat_map(|paragraph| &paragraph.runs)
+                        .filter_map(|run| run.diagnostic.as_deref())
+                    {
+                        *stats
+                            .diagnostic_reasons
+                            .entry(diagnostic.into())
+                            .or_default() += 1;
+                    }
+                }
+            }
+            None => assert_eq!(expected_runs, 0, "{id}: resolved text was not rendered"),
+            Some(_) => unreachable!(),
+        }
+        for child in shape.shapes() {
+            assert_shape_text(
+                package, resolver, references, page, page_part, child, text_boxes, rendered, stats,
+            );
+        }
+    }
+
+    #[derive(Default)]
+    struct TextCorpusStats {
+        full: usize,
+        diagnostics: usize,
+        paragraphs: usize,
+        runs: usize,
+        marker_only: usize,
+        field_only: usize,
+        style_inherited: usize,
+        master_inherited: usize,
+        diagnostic_reasons: BTreeMap<String, usize>,
+    }
+
+    fn text_boxes_by_id<'a>(
+        primitives: &'a [Primitive],
+        text_boxes: &mut BTreeMap<String, &'a Primitive>,
+    ) {
+        for primitive in primitives {
+            match primitive {
+                Primitive::TextBox { id, .. } => {
+                    assert!(text_boxes.insert(id.clone(), primitive).is_none());
+                }
+                Primitive::Group { primitives, .. } => text_boxes_by_id(primitives, text_boxes),
+                _ => {}
+            }
         }
     }
 }
