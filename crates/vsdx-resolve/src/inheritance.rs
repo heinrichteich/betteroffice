@@ -407,8 +407,7 @@ impl<'a> Resolver<'a> {
         let mut keys = Vec::new();
         for (_, section) in &sources {
             let Some(section) = section else { continue };
-            for (ordinal, row) in section.rows().enumerate() {
-                let key = row_key(row, ordinal);
+            for key in row_keys(section) {
                 if !keys.contains(&key) {
                     keys.push(key);
                 }
@@ -425,9 +424,10 @@ impl<'a> Resolver<'a> {
                     (
                         *p,
                         section.and_then(|s| {
-                            s.rows()
-                                .enumerate()
-                                .find(|(ordinal, row)| row_key(row, *ordinal) == key)
+                            row_keys(s)
+                                .into_iter()
+                                .zip(s.rows())
+                                .find(|(row_key, _)| row_key == &key)
                                 .map(|(_, row)| row)
                         }),
                     )
@@ -687,20 +687,32 @@ impl HasSections for Sheet {
         Box::new(self.sections())
     }
 }
-fn row_key(row: &Row, ordinal: usize) -> String {
-    let key = row
-        .name
+fn row_base_key(row: &Row) -> String {
+    row.name
         .clone()
         .map(|name| format!("N:{name}"))
         .or_else(|| row.index.map(|index| format!("IX:{index}")))
-        .unwrap_or_else(|| "row".into());
-    format!("{key}\u{1f}{ordinal}")
+        .unwrap_or_else(|| "row".into())
+}
+
+fn row_keys(section: &Section) -> Vec<String> {
+    let mut occurrences = BTreeMap::new();
+    section
+        .rows()
+        .map(|row| {
+            let key = row_base_key(row);
+            let occurrence = occurrences.entry(key.clone()).or_insert(0usize);
+            let identity = format!("{key}\u{1f}{occurrence}");
+            *occurrence += 1;
+            identity
+        })
+        .collect()
 }
 fn resolved_row_key(identity: &str, rows: &BTreeMap<String, ResolvedRow>) -> String {
-    let (key, ordinal) = identity.rsplit_once('\u{1f}').unwrap_or((identity, "0"));
+    let (key, occurrence) = identity.rsplit_once('\u{1f}').unwrap_or((identity, "0"));
     if !rows.contains_key(key) {
         key.into()
     } else {
-        format!("{key}\u{1f}{ordinal}")
+        format!("{key}\u{1f}{occurrence}")
     }
 }

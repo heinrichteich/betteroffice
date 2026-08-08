@@ -2125,9 +2125,19 @@ mod tests {
         // Each expected AABB is min/max(M(corner)) for the original source rectangle;
         // the image corners and text caret are direct substitutions into that same affine.
         assert_point_close((x as f32, y as f32), (10.021151, 11.018823));
-        let Primitive::TextBox { lines, .. } = &inner[1] else {
+        let Primitive::TextBox {
+            x,
+            y,
+            width,
+            height,
+            lines,
+            ..
+        } = &inner[1]
+        else {
             unreachable!()
         };
+        assert_point_close((*x, *y), (9.079249, 9.821818));
+        assert_point_close((*width, *height), (2.8263865, 1.4685154));
         assert_point_close((lines[0].x, lines[0].y), (10.021151, 11.018823));
         assert_point_close(
             (lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
