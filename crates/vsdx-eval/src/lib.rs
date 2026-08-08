@@ -314,6 +314,17 @@ pub fn evaluate_cell_with_shape_package_theme(
     evaluate_cell_with_theme(name, input, refs, limits, theme)
 }
 
+/// Evaluates a sheet cell with the package's default theme when one is available.
+pub fn evaluate_cell_with_package_theme(
+    name: &str,
+    input: &str,
+    refs: &impl References,
+    limits: &ParseLimits,
+    package: &VsdxPackage,
+) -> Evaluation {
+    evaluate_cell_with_theme(name, input, refs, limits, package.themes.get(&1))
+}
+
 struct Engine<'a, R> {
     refs: &'a R,
     limits: &'a ParseLimits,
@@ -1641,13 +1652,31 @@ mod tests {
             {
                 let refs = sheet_references(sheet);
                 for (name, formula) in sheet_formulas(sheet) {
-                    measurement.record(formula, evaluate_cell(&name, formula, &refs, &limits()));
+                    measurement.record(
+                        formula,
+                        evaluate_cell_with_package_theme(
+                            &name,
+                            formula,
+                            &refs,
+                            &limits(),
+                            &package,
+                        ),
+                    );
                 }
             }
             for (page, sheet) in &package.page_contents {
                 let refs = sheet_references(sheet);
                 for (name, formula) in sheet_formulas(sheet) {
-                    measurement.record(formula, evaluate_cell(&name, formula, &refs, &limits()));
+                    measurement.record(
+                        formula,
+                        evaluate_cell_with_package_theme(
+                            &name,
+                            formula,
+                            &refs,
+                            &limits(),
+                            &package,
+                        ),
+                    );
                 }
                 let resolver = Resolver::new(&package);
                 let page_refs =
@@ -1673,7 +1702,16 @@ mod tests {
             for sheet in package.master_contents.values() {
                 let refs = sheet_references(sheet);
                 for (name, formula) in sheet_formulas(sheet) {
-                    measurement.record(formula, evaluate_cell(&name, formula, &refs, &limits()));
+                    measurement.record(
+                        formula,
+                        evaluate_cell_with_package_theme(
+                            &name,
+                            formula,
+                            &refs,
+                            &limits(),
+                            &package,
+                        ),
+                    );
                 }
                 let resolver = Resolver::new(&package);
                 for shape in shapes(sheet) {
@@ -1697,8 +1735,9 @@ mod tests {
             }
         }
         eprintln!(
-            "VSDX corpus formulas: parse_ast_ok={} outcomes: evaluated={} unsupported_known={} unsupported_other={} error={} total={}",
+            "VSDX corpus formulas: parse_ast_ok={} static_known_unsupported={} outcomes: evaluated={} unsupported_known={} unsupported_other={} error={} total={}",
             measurement.ast_ok,
+            measurement.static_known_unsupported,
             measurement.evaluated,
             measurement.unsupported_known,
             measurement.unsupported_other,
@@ -1749,6 +1788,7 @@ mod tests {
     #[derive(Default)]
     struct CorpusMeasurement {
         ast_ok: usize,
+        static_known_unsupported: usize,
         evaluated: usize,
         unsupported_known: usize,
         unsupported_other: usize,
@@ -1762,26 +1802,22 @@ mod tests {
     impl CorpusMeasurement {
         fn record(&mut self, formula: &str, evaluation: Evaluation) {
             self.total += 1;
-            let known_unsupported = if let Ok(expression) = parse(formula, &limits()) {
+            if let Ok(expression) = parse(formula, &limits()) {
                 self.ast_ok += 1;
                 if has_unsupported(&expression) {
+                    self.static_known_unsupported += 1;
                     collect_unsupported(&expression, &mut self.unsupported_names);
-                    true
-                } else {
-                    false
                 }
-            } else {
-                false
-            };
-            if known_unsupported {
-                self.unsupported_known += 1;
-                return;
             }
             match evaluation {
                 Evaluation::Evaluated(_) => self.evaluated += 1,
                 Evaluation::Unsupported(reason) => {
-                    self.unsupported_other += 1;
-                    *self.unsupported_other_kinds.entry(reason).or_default() += 1;
+                    if is_known_deferred_reason(&reason) {
+                        self.unsupported_known += 1;
+                    } else {
+                        self.unsupported_other += 1;
+                        *self.unsupported_other_kinds.entry(reason).or_default() += 1;
+                    }
                 }
                 Evaluation::Error(error) => {
                     self.error += 1;
@@ -1790,6 +1826,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn corpus_measurement_uses_evaluation_outcomes_not_static_calls() {
+        let refs = BTreeMap::new();
+        let mut measurement = CorpusMeasurement::default();
+        measurement.record(
+            "IF(0,PNT(1,2),1)",
+            evaluate("IF(0,PNT(1,2),1)", &refs, &limits()),
+        );
+        measurement.record("1/0+PNT(1,2)", evaluate("1/0+PNT(1,2)", &refs, &limits()));
+
+        assert_eq!(measurement.static_known_unsupported, 2);
+        assert_eq!(measurement.evaluated, 1);
+        assert_eq!(measurement.error, 1);
+        assert_eq!(measurement.unsupported_known, 0);
+        assert_eq!(measurement.unsupported_other, 0);
     }
 
     fn classify_error(
@@ -1916,42 +1969,52 @@ mod tests {
     fn has_unsupported(expression: &Expr) -> bool {
         match expression {
             Expr::Call(name, args) => {
-                !matches!(
-                    name.to_ascii_uppercase().as_str(),
-                    "IF" | "AND"
-                        | "OR"
-                        | "NOT"
-                        | "MIN"
-                        | "MAX"
-                        | "ABS"
-                        | "INT"
-                        | "ROUND"
-                        | "CEILING"
-                        | "FLOOR"
-                        | "SQRT"
-                        | "SIN"
-                        | "COS"
-                        | "TAN"
-                        | "ATAN2"
-                        | "PI"
-                        | "MOD"
-                        | "SUM"
-                        | "TRUNC"
-                        | "SIGN"
-                        | "RGB"
-                        | "TINT"
-                        | "MSOTINT"
-                        | "SAT"
-                        | "THEMEVAL"
-                        | "THEMEGUARD"
-                        | "_XFTRIGGER"
-                        | "GUARD"
-                ) || args.iter().any(has_unsupported)
+                is_known_deferred_call(name) || args.iter().any(has_unsupported)
             }
             Expr::Unary(value) => has_unsupported(value),
             Expr::Binary(left, _, right) => has_unsupported(left) || has_unsupported(right),
             _ => false,
         }
+    }
+    fn is_known_deferred_call(name: &str) -> bool {
+        !matches!(
+            name.to_ascii_uppercase().as_str(),
+            "IF" | "AND"
+                | "OR"
+                | "NOT"
+                | "MIN"
+                | "MAX"
+                | "ABS"
+                | "INT"
+                | "ROUND"
+                | "CEILING"
+                | "FLOOR"
+                | "SQRT"
+                | "SIN"
+                | "COS"
+                | "TAN"
+                | "ATAN2"
+                | "PI"
+                | "MOD"
+                | "SUM"
+                | "TRUNC"
+                | "SIGN"
+                | "RGB"
+                | "TINT"
+                | "MSOTINT"
+                | "SAT"
+                | "THEMEVAL"
+                | "THEMEGUARD"
+                | "_XFTRIGGER"
+                | "GUARD"
+        )
+    }
+    fn is_known_deferred_reason(reason: &str) -> bool {
+        let name = reason
+            .strip_prefix("unsupported function ")
+            .or_else(|| reason.strip_suffix(" is not implemented"))
+            .or_else(|| reason.strip_suffix(" is outside the phase-4 evaluator"));
+        name.is_some_and(is_known_deferred_call)
     }
     fn collect_unsupported(expression: &Expr, counts: &mut BTreeMap<String, usize>) {
         match expression {

@@ -122,7 +122,7 @@ impl<'a> Resolver<'a> {
                 ..Default::default()
             });
         }
-        let masters = self.master_chain(shape)?;
+        let masters = self.master_chain(shape, page)?;
         let styles = self.style_chains(shape)?;
         let mut names = HashSet::new();
         for source in std::iter::once(shape as &dyn HasCells)
@@ -176,13 +176,26 @@ impl<'a> Resolver<'a> {
         }
         Ok(out)
     }
-    fn master_chain(&self, shape: &Shape) -> Result<Vec<(Provenance, &'a Shape)>, ResolveError> {
+    fn master_chain(
+        &self,
+        shape: &Shape,
+        source_sheet: &'a Sheet,
+    ) -> Result<Vec<(Provenance, &'a Shape)>, ResolveError> {
         let mut out = Vec::new();
         let mut current = shape;
+        let mut current_sheet = source_sheet;
         let mut seen = HashSet::new();
         for depth in 0..MAX_INHERITANCE_DEPTH {
-            let Some(master_id) = current.master else {
-                return Ok(out);
+            let (master_id, master_shape, provenance) = match (current.master, current.master_shape)
+            {
+                (Some(master_id), _) => (master_id, None, Provenance::Master),
+                (None, Some(master_shape)) => {
+                    let Some(master_id) = self.enclosing_master(current_sheet, current.id) else {
+                        return Ok(out);
+                    };
+                    (master_id, Some(master_shape), Provenance::MasterShape)
+                }
+                (None, None) => return Ok(out),
             };
             let Some(path) = self
                 .package
@@ -195,8 +208,8 @@ impl<'a> Resolver<'a> {
             let Some(sheet) = self.package.master_contents.get(path) else {
                 return Err(ResolveError::MissingMaster(master_id));
             };
-            let next = match current.master_shape {
-                Some(id) => find_shape(sheet, id).or_else(|| find_shape(sheet, master_id)),
+            let next = match master_shape {
+                Some(id) => find_shape(sheet, id),
                 None => sheet.shapes().next(),
             };
             let Some(next) = next else {
@@ -208,20 +221,20 @@ impl<'a> Resolver<'a> {
                     next.id
                 )));
             }
-            out.push((
-                if current.master_shape.is_some() {
-                    Provenance::MasterShape
-                } else {
-                    Provenance::Master
-                },
-                next,
-            ));
+            out.push((provenance, next));
             current = next;
+            current_sheet = sheet;
             if depth + 1 == MAX_INHERITANCE_DEPTH {
                 return Err(ResolveError::Cycle("maximum inheritance depth".into()));
             }
         }
         unreachable!()
+    }
+    fn enclosing_master(&self, sheet: &'a Sheet, shape_id: u32) -> Option<u32> {
+        let parent = enclosing_shape(sheet, shape_id)?;
+        parent
+            .master
+            .or_else(|| self.enclosing_master(sheet, parent.id))
     }
     fn style_chains(
         &self,
@@ -486,6 +499,19 @@ fn find_shape_in(shape: &Shape, id: u32) -> Option<&Shape> {
         return Some(shape);
     }
     shape.shapes().find_map(|child| find_shape_in(child, id))
+}
+fn enclosing_shape(sheet: &Sheet, id: u32) -> Option<&Shape> {
+    sheet
+        .shapes()
+        .find_map(|shape| enclosing_shape_in(shape, id))
+}
+fn enclosing_shape_in(shape: &Shape, id: u32) -> Option<&Shape> {
+    if shape.shapes().any(|child| child.id == id) {
+        return Some(shape);
+    }
+    shape
+        .shapes()
+        .find_map(|child| enclosing_shape_in(child, id))
 }
 fn based_on(sheet: &Sheet) -> Option<u32> {
     sheet

@@ -341,7 +341,7 @@ fn master_without_master_shape_inherits_from_master_root() {
 }
 
 #[test]
-fn master_shape_inherits_from_the_specified_shape_not_the_root() {
+fn master_ignores_master_shape_and_inherits_from_master_root() {
     let mut package = package();
     let mut local = shape(10, vec![]);
     local.master = Some(5);
@@ -357,9 +357,42 @@ fn master_shape_inherits_from_the_specified_shape_not_the_root() {
     );
 
     let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+    assert_eq!(found(&resolved, "PinX"), ("root", Provenance::Master));
+}
+
+#[test]
+fn master_shape_inherits_from_the_enclosing_masters_subshape() {
+    let mut package = package();
+    let mut group = shape(
+        10,
+        vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+            shape(11, vec![]),
+        )])],
+    );
+    group.master = Some(5);
+    let ShapeChild::Shapes(children) = &mut group.children[0] else {
+        panic!("expected group children");
+    };
+    let vsdx_parse::ShapesChild::Shape(local) = &mut children[0] else {
+        panic!("expected local subshape");
+    };
+    local.master_shape = Some(51);
+    add_page(&mut package, group);
+    add_master_shapes(
+        &mut package,
+        5,
+        vec![shape(
+            50,
+            vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+                shape(51, vec![ShapeChild::Cell(cell("PinX", "subshape"))]),
+            )])],
+        )],
+    );
+
+    let resolved = Resolver::new(&package).resolve_shape("page", 11).unwrap();
     assert_eq!(
         found(&resolved, "PinX"),
-        ("specified", Provenance::MasterShape)
+        ("subshape", Provenance::MasterShape)
     );
 }
 
@@ -381,7 +414,6 @@ fn master_inheritance_walks_deeply_and_local_overrides() {
     let mut package = package();
     let mut local = shape(10, vec![]);
     local.master = Some(1);
-    local.master_shape = Some(1);
     add_page(&mut package, local);
     let mut first = shape(1, vec![]);
     first.master = Some(2);
@@ -404,14 +436,13 @@ fn master_inheritance_walks_deeply_and_local_overrides() {
     assert_eq!(found(&resolved, "PinX"), ("furthest", Provenance::Master));
     let mut direct = shape(12, vec![]);
     direct.master = Some(3);
-    direct.master_shape = Some(3);
     add_page(&mut package, direct);
     assert_eq!(
         found(
             &Resolver::new(&package).resolve_shape("page", 12).unwrap(),
             "PinY"
         ),
-        ("master-shape", Provenance::MasterShape)
+        ("master-shape", Provenance::Master)
     );
 
     let mut local = shape(11, vec![ShapeChild::Cell(cell("PinX", "local"))]);
@@ -549,6 +580,22 @@ fn inh_skips_each_inherited_layer_until_a_concrete_cell() {
         .push(SheetChild::Cell(cell("LocPinX", "7")));
     let resolved = Resolver::new(&package).resolve_shape("page", 6).unwrap();
     assert_eq!(found(&resolved, "LocPinX"), ("7", Provenance::Document));
+}
+
+#[test]
+fn inherited_master_cell_beats_documented_default() {
+    let mut package = package();
+    let mut local = shape(1, vec![ShapeChild::Cell(formula_cell("LocPinX", "Inh"))]);
+    local.master = Some(1);
+    add_page(&mut package, local);
+    add_master(
+        &mut package,
+        1,
+        shape(1, vec![ShapeChild::Cell(cell("LocPinX", "master"))]),
+    );
+
+    let resolved = Resolver::new(&package).resolve_shape("page", 1).unwrap();
+    assert_eq!(found(&resolved, "LocPinX"), ("master", Provenance::Master));
 }
 
 #[test]
