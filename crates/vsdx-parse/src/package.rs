@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::model::{PackagePart, VsdxPackage};
 use crate::patch::{
-    CellEdit, SpanEdit, apply_span_edits, escape_attribute_value, scan_element_spans,
+    CellEdit, MAX_PATCH_BYTES, MAX_PATCH_EDITS, SpanEdit, apply_span_edits, escape_attribute_value,
+    scan_element_spans,
 };
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
 use crate::sheet::{parse_records, parse_sheet};
@@ -123,6 +124,25 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
             Ok(((index + 1) as u32, parse_theme(root, path)?))
         })
         .collect::<Result<_, VsdxError>>()?;
+    let sheet_part_paths: HashSet<&str> = std::iter::once(document_path.as_str())
+        .chain(page_part_paths.iter().map(String::as_str))
+        .chain(master_part_paths.iter().map(String::as_str))
+        .collect();
+    let package_parts = source_parts
+        .into_iter()
+        .map(|(path, bytes)| {
+            let spans = if sheet_part_paths.contains(path.as_str()) {
+                scan_element_spans(&bytes).map_err(|_| VsdxError::MalformedXml {
+                    part: path.clone(),
+                    offset: 0,
+                    message: "invalid lexical XML structure".to_owned(),
+                })?
+            } else {
+                Vec::new()
+            };
+            Ok(PackagePart { path, bytes, spans })
+        })
+        .collect::<Result<Vec<_>, VsdxError>>()?;
     Ok(VsdxPackage {
         document_part_path: document_path,
         pages_part_path,
@@ -143,14 +163,7 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         master_part_ids,
         page_contents,
         master_contents,
-        parts: source_parts
-            .into_iter()
-            .map(|(path, bytes)| PackagePart {
-                spans: scan_element_spans(&bytes),
-                path,
-                bytes,
-            })
-            .collect(),
+        parts: package_parts,
     })
 }
 
@@ -317,8 +330,18 @@ pub fn write_vsdx(package: &VsdxPackage) -> Result<Vec<u8>, VsdxError> {
 
 /// Applies existing Cell@V and Cell@F attribute edits without mutating `package`.
 pub fn save_cell_edits(package: &VsdxPackage, edits: &[CellEdit]) -> Result<Vec<u8>, VsdxError> {
+    if edits.len() > MAX_PATCH_EDITS {
+        return Err(VsdxError::PatchLimit { kind: "editCount" });
+    }
     let mut part_edits: BTreeMap<&str, Vec<SpanEdit>> = BTreeMap::new();
+    let mut replacement_bytes = 0_usize;
     for edit in edits {
+        if !is_shapesheet_part(package, &edit.part_path) {
+            return Err(VsdxError::InvalidCellEdit {
+                part: edit.part_path.clone(),
+                message: "part is not an authoritative ShapeSheet part".to_owned(),
+            });
+        }
         let part = package
             .parts
             .iter()
@@ -347,12 +370,19 @@ pub fn save_cell_edits(package: &VsdxPackage, edits: &[CellEdit]) -> Result<Vec<
                 message: format!("Cell@{} does not exist", edit.attribute.name()),
             }
         })?;
+        let replacement = escape_attribute_value(&edit.value, attribute.quote)?;
+        replacement_bytes = replacement_bytes
+            .checked_add(replacement.len())
+            .ok_or(VsdxError::PatchLimit { kind: "editBytes" })?;
+        if replacement_bytes > MAX_PATCH_BYTES {
+            return Err(VsdxError::PatchLimit { kind: "editBytes" });
+        }
         part_edits
             .entry(part.path.as_str())
             .or_default()
             .push(SpanEdit {
                 span: attribute.value,
-                replacement: escape_attribute_value(&edit.value, attribute.quote)?,
+                replacement,
             });
     }
     let mut output = package.clone();
@@ -367,6 +397,18 @@ pub fn save_cell_edits(package: &VsdxPackage, edits: &[CellEdit]) -> Result<Vec<
     let bytes = write_vsdx(&output)?;
     parse_vsdx(&bytes)?;
     Ok(bytes)
+}
+
+fn is_shapesheet_part(package: &VsdxPackage, path: &str) -> bool {
+    path == package.document_part_path
+        || package
+            .page_part_paths
+            .iter()
+            .any(|candidate| candidate == path)
+        || package
+            .master_part_paths
+            .iter()
+            .any(|candidate| candidate == path)
 }
 
 fn load_relationships<'a>(
@@ -645,6 +687,87 @@ mod tests {
             Err(VsdxError::InvalidCellEdit { .. })
         ));
         assert_eq!(package.part_bytes(part_path).unwrap(), before);
+    }
+
+    #[test]
+    fn only_authoritative_shapesheet_parts_receive_spans_or_edits() {
+        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        let mut parts = unzip_parts(source).unwrap();
+        parts.push((
+            "visio/media/forged.png".to_owned(),
+            b"not PNG <Cell V='1'/>".to_vec(),
+        ));
+        parts.push((
+            "customXml/item1.xml".to_owned(),
+            b"<root><Cell V='1'/></root>".to_vec(),
+        ));
+        let package = parse_vsdx(&rezip_parts(&parts).unwrap()).unwrap();
+        for path in ["visio/media/forged.png", "customXml/item1.xml"] {
+            assert_eq!(package.element_spans(path), Some([].as_slice()));
+            assert!(matches!(
+                save_cell_edits(
+                    &package,
+                    &[CellEdit {
+                        part_path: path.to_owned(),
+                        cell_span: SourceSpan {
+                            offset: 0,
+                            length: 13
+                        },
+                        attribute: CellAttribute::Value,
+                        value: "changed".to_owned(),
+                    }]
+                ),
+                Err(VsdxError::InvalidCellEdit { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn replacing_a_part_invalidates_its_edit_provenance() {
+        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        let mut package = parse_vsdx(source).unwrap();
+        let part_path = package.page_part_paths.first().unwrap().clone();
+        let edit = first_value_edit(&package, &part_path, "changed");
+        let replacement = package.part_bytes(&part_path).unwrap().to_vec();
+        assert!(package.replace_part(&part_path, replacement.clone()));
+        assert_eq!(package.element_spans(&part_path), Some([].as_slice()));
+        assert!(matches!(
+            save_cell_edits(&package, &[edit]),
+            Err(VsdxError::InvalidCellEdit { .. })
+        ));
+        assert_eq!(package.part_bytes(&part_path), Some(replacement.as_slice()));
+    }
+
+    #[test]
+    fn rejects_an_aggregate_over_limit_before_mutating_the_package() {
+        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        let package = parse_vsdx(source).unwrap();
+        let part_path = package.page_part_paths.first().unwrap();
+        let edit = first_value_edit(&package, part_path, "changed");
+        let edits = vec![edit; MAX_PATCH_EDITS + 1];
+        let before = package.part_bytes(part_path).unwrap().to_vec();
+        assert!(matches!(
+            save_cell_edits(&package, &edits),
+            Err(VsdxError::PatchLimit { kind: "editCount" })
+        ));
+        assert_eq!(package.part_bytes(part_path), Some(before.as_slice()));
+    }
+
+    #[test]
+    fn saves_xml_whitespace_character_references_exactly() {
+        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        let package = parse_vsdx(source).unwrap();
+        let part_path = package.page_part_paths.first().unwrap();
+        let value = "a\tb\nc\rd";
+        let saved =
+            save_cell_edits(&package, &[first_value_edit(&package, part_path, value)]).unwrap();
+        let reparsed = parse_vsdx(&saved).unwrap();
+        assert!(
+            reparsed
+                .page_contents
+                .values()
+                .any(|sheet| sheet_has_value(sheet, value))
+        );
     }
 
     #[test]

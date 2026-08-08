@@ -24,6 +24,8 @@ pub enum VsdxError {
     InvalidRelationship { source_part: String, target: String },
     #[error("invalid lexical patch span")]
     InvalidSpan,
+    #[error("attribute value contains a character forbidden by XML 1.0")]
+    InvalidXmlCharacter,
     #[error("lexical patch limit {kind} exceeded")]
     PatchLimit { kind: &'static str },
     #[error("invalid cell edit in {part}: {message}")]

@@ -48,6 +48,7 @@ impl VsdxPackage {
             return false;
         };
         part.bytes = bytes;
+        part.spans.clear();
         true
     }
 
