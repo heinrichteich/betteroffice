@@ -29,6 +29,17 @@ fn cell(name: &str, value: &str) -> Cell {
     }
 }
 
+fn formula_cell(name: &str, formula: &str) -> Cell {
+    Cell {
+        name: name.into(),
+        formula: Some(formula.into()),
+        value: None,
+        unit: None,
+        del: false,
+        other_attrs: vec![],
+    }
+}
+
 fn deleted_cell(name: &str) -> Cell {
     Cell {
         name: name.into(),
@@ -405,6 +416,46 @@ fn style_slices_and_based_on_chains_resolve_independently() {
         ),
         ("child", Provenance::StyleLine)
     );
+}
+
+#[test]
+fn inh_skips_each_inherited_layer_until_a_concrete_cell() {
+    let mut package = package();
+    let mut local = shape(1, vec![ShapeChild::Cell(formula_cell("PinX", "Inh"))]);
+    local.master = Some(1);
+    add_page(&mut package, local);
+    let mut master = shape(1, vec![ShapeChild::Cell(formula_cell("PinX", "Inh"))]);
+    master.master = Some(2);
+    add_master(&mut package, 1, master);
+    add_master(
+        &mut package,
+        2,
+        shape(2, vec![ShapeChild::Cell(cell("PinX", "4"))]),
+    );
+    let resolved = Resolver::new(&package).resolve_shape("page", 1).unwrap();
+    assert_eq!(found(&resolved, "PinX"), ("4", Provenance::Master));
+
+    package.style_sheets = vec![
+        Sheet {
+            id: Some(1),
+            children: vec![SheetChild::Cell(formula_cell("LineWeight", "Inh"))],
+            other_attrs: vec![("BasedOn".into(), "2".into())],
+        },
+        sheet(Some(2), vec![SheetChild::Cell(cell("LineWeight", "3"))]),
+    ];
+    let mut styled = shape(3, vec![ShapeChild::Cell(formula_cell("LineWeight", "Inh"))]);
+    styled.line_style = Some(1);
+    add_page(&mut package, styled);
+    let resolved = Resolver::new(&package).resolve_shape("page", 3).unwrap();
+    assert_eq!(found(&resolved, "LineWeight"), ("3", Provenance::StyleLine));
+
+    let unresolved = shape(4, vec![ShapeChild::Cell(formula_cell("PinY", "Inh"))]);
+    add_page(&mut package, unresolved);
+    let resolved = Resolver::new(&package).resolve_shape("page", 4).unwrap();
+    match &resolved.cells["PinY"] {
+        Lookup::Found(cell) => assert_eq!(cell.cell.formula.as_deref(), Some("Inh")),
+        value => panic!("expected unresolved Inh, got {value:?}"),
+    }
 }
 
 #[test]

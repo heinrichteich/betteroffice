@@ -247,10 +247,25 @@ impl<'a> Resolver<'a> {
                 .as_ref()
                 .and_then(|s| s.cells().find(|c| c.name == name)),
         ));
+        let mut inherited = None;
         for (provenance, cell) in sources {
             if let Some(cell) = cell {
+                if cell
+                    .formula
+                    .as_deref()
+                    .is_some_and(|formula| formula.eq_ignore_ascii_case("Inh"))
+                {
+                    inherited.get_or_insert_with(|| ResolvedCell {
+                        cell: cell.clone(),
+                        provenance,
+                    });
+                    continue;
+                }
                 return found(cell, provenance);
             }
+        }
+        if let Some(cell) = inherited {
+            return Lookup::Found(cell);
         }
         self.defaults
             .get(name)

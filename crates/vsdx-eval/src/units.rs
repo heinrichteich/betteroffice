@@ -12,6 +12,7 @@ pub fn unit(s: &str) -> Option<(Unit, f64)> {
     match s.to_ascii_lowercase().as_str() {
         "" => Some((Unit::Number, 1.)),
         "in" => Some((Unit::Inches, 1.)),
+        "dl" => Some((Unit::Inches, 1.)),
         "cm" => Some((Unit::Inches, 1. / 2.54)),
         "mm" => Some((Unit::Inches, 1. / 25.4)),
         "pt" => Some((Unit::Inches, 1. / 72.)),

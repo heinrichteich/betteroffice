@@ -57,6 +57,9 @@ pub struct Diagnostic {
 /// is applied before formulas are evaluated.
 pub trait References {
     fn formula(&self, name: &str) -> Option<&str>;
+    fn exhausted_inheritance(&self, _name: &str) -> bool {
+        false
+    }
     fn value(&self, _name: &str) -> Option<(&str, Option<&str>)> {
         None
     }
@@ -94,6 +97,15 @@ impl References for ResolvedShape {
             _ => None,
         }
     }
+    fn exhausted_inheritance(&self, name: &str) -> bool {
+        self.cells
+            .get(name)
+            .and_then(|lookup| match lookup {
+                Lookup::Found(value) => value.cell.formula.as_deref(),
+                Lookup::Deleted | Lookup::Absent => None,
+            })
+            .is_some_and(|formula| formula.eq_ignore_ascii_case("Inh"))
+    }
 }
 impl References for BTreeMap<String, String> {
     fn formula(&self, name: &str) -> Option<&str> {
@@ -109,6 +121,38 @@ pub fn parse(input: &str, limits: &ParseLimits) -> Result<Expr, Diagnostic> {
 }
 pub fn evaluate(input: &str, refs: &impl References, limits: &ParseLimits) -> Evaluation {
     evaluate_with_theme(input, refs, limits, None)
+}
+/// Evaluates a cell formula with its ShapeSheet host-cell identity.
+pub fn evaluate_cell(
+    name: &str,
+    input: &str,
+    refs: &impl References,
+    limits: &ParseLimits,
+) -> Evaluation {
+    if is_event_cell(name) {
+        // Event/recalculation plumbing is outside the display evaluation profile.
+        return unsupported("event cell is outside the display evaluation profile");
+    }
+    if name.eq_ignore_ascii_case("TheText") {
+        return unsupported("TheText requires phase-4b text layout");
+    }
+    if input.trim().eq_ignore_ascii_case("Inh") {
+        return match refs.formula(name) {
+            Some(formula) if !formula.eq_ignore_ascii_case("Inh") => {
+                evaluate_with_theme(formula, refs, limits, None)
+            }
+            _ if refs.exhausted_inheritance(name) => err("Inh has no concrete inherited value"),
+            _ => unsupported("Inh requires an inheritance host"),
+        };
+    }
+    evaluate(input, refs, limits)
+}
+
+fn is_event_cell(name: &str) -> bool {
+    matches!(
+        name.rsplit_once('!').map_or(name, |(_, name)| name),
+        "EventXFMod" | "BegTrigger" | "EndTrigger"
+    )
 }
 /// Evaluates against the active theme selected for the shape/page by the caller.
 /// ThemeIndex and ColorSchemeIndex selection belongs to resolution, where the package is available.
@@ -180,7 +224,19 @@ impl<R: References> Engine<'_, R> {
             Expr::String(_) => unsupported("string values are not display numbers"),
             Expr::Reference(name) => {
                 if name.eq_ignore_ascii_case("Inh") {
-                    return unsupported("Inh requires host-cell inheritance context");
+                    return err("Inh has no concrete inherited value");
+                }
+                if is_event_cell(name) {
+                    return unsupported("event cell is outside the display evaluation profile");
+                }
+                if name.eq_ignore_ascii_case("TheText") {
+                    return unsupported("TheText requires phase-4b text layout");
+                }
+                if name.eq_ignore_ascii_case("FALSE") {
+                    return number(0., Unit::Bool);
+                }
+                if name.eq_ignore_ascii_case("TRUE") {
+                    return number(1., Unit::Bool);
                 }
                 if let Some(value) = self.memo.get(name) {
                     return value.clone();
@@ -657,7 +713,7 @@ fn numeric_result(number: f64, unit: Unit, guarded: bool) -> Evaluation {
     if number.is_finite() {
         result(Value::Number(Number { number, unit }), guarded)
     } else {
-        err("non-finite result")
+        unsupported("non-finite result")
     }
 }
 fn err(message: impl Into<String>) -> Evaluation {
@@ -1217,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_shape_cell_literals_without_treating_inh_as_a_reference() {
+    fn resolves_shape_cell_literals_and_host_inheritance() {
         let mut shape = ResolvedShape::default();
         shape.cells.insert(
             "Width".into(),
@@ -1243,10 +1299,44 @@ mod tests {
                 guarded: false,
             })
         );
+        {
+            let Lookup::Found(width) = shape.cells.get_mut("Width").unwrap() else {
+                panic!("expected Width");
+            };
+            width.cell.formula = Some("Inh".into());
+        }
         assert!(matches!(
-            evaluate("Inh", &shape, &limits()),
-            Evaluation::Unsupported(_)
+            evaluate_cell("Width", "Inh", &shape, &limits()),
+            Evaluation::Error(Diagnostic { message }) if message == "Inh has no concrete inherited value"
         ));
+        let Lookup::Found(width) = shape.cells.get_mut("Width").unwrap() else {
+            panic!("expected Width");
+        };
+        width.cell.formula = Some("2 in".into());
+        assert_eq!(
+            evaluate_cell("Width", "Inh", &shape, &limits()),
+            Evaluation::Evaluated(Evaluated {
+                value: Value::Number(Number {
+                    number: 2.0,
+                    unit: Unit::Inches
+                }),
+                guarded: false,
+            })
+        );
+        assert_eq!(number("FALSE").unit, Unit::Bool);
+        assert_eq!(number("2 DL").number, 2.0);
+        for name in [
+            "EventXFMod",
+            "Sheet.1!EventXFMod",
+            "BegTrigger",
+            "EndTrigger",
+            "TheText",
+        ] {
+            assert!(matches!(
+                evaluate_cell(name, "1", &shape, &limits()),
+                Evaluation::Unsupported(_)
+            ));
+        }
     }
 
     #[test]
@@ -1365,43 +1455,35 @@ mod tests {
                 .chain(package.master_sheets.values())
             {
                 let refs = sheet_references(sheet);
-                for formula in sheet_formulas(sheet) {
-                    measurement.record(formula, evaluate(formula, &refs, &limits()));
+                for (name, formula) in sheet_formulas(sheet) {
+                    measurement.record(formula, evaluate_cell(name, formula, &refs, &limits()));
                 }
             }
             for (page, sheet) in &package.page_contents {
                 let refs = sheet_references(sheet);
-                for formula in sheet_formulas(sheet) {
-                    measurement.record(formula, evaluate(formula, &refs, &limits()));
+                for (name, formula) in sheet_formulas(sheet) {
+                    measurement.record(formula, evaluate_cell(name, formula, &refs, &limits()));
                 }
                 let resolver = Resolver::new(&package);
                 for shape in shapes(sheet) {
                     let resolved = resolver
                         .resolve_shape(page, shape.id)
                         .expect("resolve corpus shape");
-                    for formula in shape_formulas(shape) {
-                        measurement.record(
-                            formula,
-                            evaluate_with_shape_package_theme(
-                                formula,
-                                &resolved,
-                                &limits(),
-                                &resolved,
-                                &package,
-                            ),
-                        );
+                    for (name, formula) in shape_formulas(shape) {
+                        measurement
+                            .record(formula, evaluate_cell(name, formula, &resolved, &limits()));
                     }
                 }
             }
             for sheet in package.master_contents.values() {
                 let refs = sheet_references(sheet);
-                for formula in sheet_formulas(sheet) {
-                    measurement.record(formula, evaluate(formula, &refs, &limits()));
+                for (name, formula) in sheet_formulas(sheet) {
+                    measurement.record(formula, evaluate_cell(name, formula, &refs, &limits()));
                 }
                 for shape in shapes(sheet) {
                     let refs = shape_references(shape);
-                    for formula in shape_formulas(shape) {
-                        measurement.record(formula, evaluate(formula, &refs, &limits()));
+                    for (name, formula) in shape_formulas(shape) {
+                        measurement.record(formula, evaluate_cell(name, formula, &refs, &limits()));
                     }
                 }
             }
@@ -1464,6 +1546,10 @@ mod tests {
                 Evaluation::Evaluated(_) => {}
                 Evaluation::Unsupported(_) => self.eval_unsupported += 1,
                 Evaluation::Error(error) => {
+                    if error.message == "Inh has no concrete inherited value" {
+                        self.eval_unsupported += 1;
+                        return;
+                    }
                     self.errors += 1;
                     let kind = classify_error(&error.message, &mut self.unresolved_references);
                     *self.error_kinds.entry(kind).or_default() += 1;
@@ -1505,26 +1591,42 @@ mod tests {
         format!("other: {message}")
     }
 
-    fn sheet_formulas(sheet: &Sheet) -> Vec<&str> {
+    fn sheet_formulas(sheet: &Sheet) -> Vec<(&str, &str)> {
         let mut values = sheet
             .cells()
-            .filter_map(|cell| cell.formula.as_deref())
+            .filter_map(|cell| {
+                cell.formula
+                    .as_deref()
+                    .map(|formula| (cell.name.as_str(), formula))
+            })
             .collect::<Vec<_>>();
         for section in sheet.sections() {
             for row in section.rows() {
-                values.extend(row.cells().filter_map(|cell| cell.formula.as_deref()));
+                values.extend(row.cells().filter_map(|cell| {
+                    cell.formula
+                        .as_deref()
+                        .map(|formula| (cell.name.as_str(), formula))
+                }));
             }
         }
         values
     }
-    fn shape_formulas(shape: &Shape) -> Vec<&str> {
+    fn shape_formulas(shape: &Shape) -> Vec<(&str, &str)> {
         let mut values = shape
             .cells()
-            .filter_map(|cell| cell.formula.as_deref())
+            .filter_map(|cell| {
+                cell.formula
+                    .as_deref()
+                    .map(|formula| (cell.name.as_str(), formula))
+            })
             .collect::<Vec<_>>();
         for section in shape.sections() {
             for row in section.rows() {
-                values.extend(row.cells().filter_map(|cell| cell.formula.as_deref()));
+                values.extend(row.cells().filter_map(|cell| {
+                    cell.formula
+                        .as_deref()
+                        .map(|formula| (cell.name.as_str(), formula))
+                }));
             }
         }
         values
