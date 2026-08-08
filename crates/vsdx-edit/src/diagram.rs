@@ -367,7 +367,7 @@ fn protected_formulas(doc: &Doc) -> EditResult<std::collections::BTreeMap<String
                     values
                         .get(name)
                         .and_then(|value| value.as_deref())
-                        .is_some_and(|value| value.trim_start_matches('=') == "1")
+                        .is_some_and(|value| lock_is_enabled(value, &values))
                 });
                 let protected_target = lock_target(name).is_none()
                     && [
@@ -386,7 +386,7 @@ fn protected_formulas(doc: &Doc) -> EditResult<std::collections::BTreeMap<String
                             && values
                                 .get(*lock)
                                 .and_then(|value| value.as_deref())
-                                .is_some_and(|value| value == "1")
+                                .is_some_and(|value| lock_is_enabled(value, &values))
                     });
                 if locked || protected_target || formula.as_deref().is_some_and(is_guarded) {
                     protected.insert(
@@ -398,6 +398,25 @@ fn protected_formulas(doc: &Doc) -> EditResult<std::collections::BTreeMap<String
         }
     }
     Ok(protected)
+}
+
+fn lock_is_enabled(
+    value: &str,
+    formulas: &std::collections::BTreeMap<String, Option<String>>,
+) -> bool {
+    let formulas = formulas
+        .iter()
+        .filter_map(|(name, formula)| {
+            formula
+                .as_ref()
+                .map(|formula| (name.clone(), formula.clone()))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    matches!(
+        evaluate(value.trim_start_matches('='), &formulas, &ParseLimits::default()),
+        vsdx_eval::Evaluation::Evaluated(result)
+            if matches!(result.value, vsdx_eval::Value::Number(number) if number.number == 1.0)
+    )
 }
 
 fn lock_target(lock: &str) -> Option<&str> {
