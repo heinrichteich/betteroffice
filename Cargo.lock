@@ -243,6 +243,7 @@ name = "betteroffice-vsdx"
 version = "0.0.4"
 dependencies = [
  "betteroffice-opc",
+ "betteroffice-vsdx-edit",
  "betteroffice-vsdx-eval",
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-resolve",
