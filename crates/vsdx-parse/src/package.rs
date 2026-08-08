@@ -113,13 +113,13 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
     let themes = theme_part_paths
         .iter()
         .enumerate()
-        .filter_map(|(index, path)| {
-            xml_parts
+        .map(|(index, path)| {
+            let root = xml_parts
                 .get(path)
-                .and_then(parse_theme)
-                .map(|theme| ((index + 1) as u32, theme))
+                .ok_or_else(|| VsdxError::MissingPart(path.clone()))?;
+            Ok(((index + 1) as u32, parse_theme(root, path)?))
         })
-        .collect();
+        .collect::<Result<_, VsdxError>>()?;
     Ok(VsdxPackage {
         document_part_path: document_path,
         pages_part_path,
@@ -147,16 +147,22 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
     })
 }
 
-fn parse_theme(root: &XmlElement) -> Option<Theme> {
-    let scheme = root
-        .children_named("themeElements")
-        .next()?
-        .children_named("clrScheme")
-        .next()?;
+fn parse_theme(root: &XmlElement, part: &str) -> Result<Theme, VsdxError> {
     let mut theme = Theme {
         name: root.attribute("name").unwrap_or("Office Theme").to_owned(),
         ..Theme::default()
     };
+    let Some(theme_elements) = root.children_named("themeElements").next() else {
+        return Ok(theme);
+    };
+    let scheme = theme_elements
+        .children_named("clrScheme")
+        .next()
+        .ok_or_else(|| VsdxError::MalformedXml {
+            part: part.to_owned(),
+            offset: 0,
+            message: "theme is missing themeElements/clrScheme".to_owned(),
+        })?;
     for slot in [
         "dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5",
         "accent6", "hlink", "folHlink",
@@ -173,7 +179,7 @@ fn parse_theme(root: &XmlElement) -> Option<Theme> {
         };
         theme.color_scheme.set(slot, value.to_owned());
     }
-    Some(theme)
+    Ok(theme)
 }
 
 fn catalog_part_ids(
@@ -357,6 +363,23 @@ mod tests {
     use crate::sheet::serialize_sheet;
     use crate::xml::{XmlNode, parse_xml};
     use ooxml_opc::{rezip_parts, unzip_parts};
+
+    #[test]
+    fn rejects_incomplete_theme_parts() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let part = "visio/theme/theme1.xml";
+        let root = parse_xml(
+            br#"<a:theme xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main'><a:themeElements/></a:theme>"#,
+            part,
+            &mut budget,
+        )
+        .unwrap();
+        assert!(matches!(
+            parse_theme(&root, part),
+            Err(VsdxError::MalformedXml { message, .. }) if message == "theme is missing themeElements/clrScheme"
+        ));
+    }
     use std::path::PathBuf;
 
     #[test]

@@ -365,16 +365,29 @@ impl<'a> Resolver<'a> {
             }
             let mut cells = BTreeMap::new();
             for cell_name in names {
-                let lookup = rows
+                let mut inherited = None;
+                let mut lookup = None;
+                for (provenance, row) in rows
                     .iter()
                     .filter(|(_, row)| row.is_none_or(|row| !row.del))
-                    .find_map(|(p, row)| {
-                        row.and_then(|row| {
-                            row.cells()
-                                .find(|c| c.name == cell_name)
-                                .map(|c| found(c, *p))
-                        })
-                    });
+                {
+                    let Some(cell) =
+                        row.and_then(|row| row.cells().find(|cell| cell.name == cell_name))
+                    else {
+                        continue;
+                    };
+                    if cell
+                        .formula
+                        .as_deref()
+                        .is_some_and(|formula| formula.eq_ignore_ascii_case("Inh"))
+                    {
+                        inherited.get_or_insert_with(|| found(cell, *provenance));
+                        continue;
+                    }
+                    lookup = Some(found(cell, *provenance));
+                    break;
+                }
+                let lookup = lookup.or(inherited);
                 cells.insert(cell_name, lookup.unwrap_or(Lookup::Absent));
             }
             out.rows.insert(

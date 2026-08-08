@@ -22,6 +22,8 @@ pub struct ParseLimits {
     pub max_formula_depth: usize,
     /// Maximum AST nodes accepted by the bounded ShapeSheet formula parser.
     pub max_formula_nodes: usize,
+    /// Maximum tokens accepted by the bounded ShapeSheet formula tokenizer.
+    pub max_formula_tokens: usize,
     /// Maximum evaluator operations for one ShapeSheet formula.
     pub max_formula_steps: usize,
 }
@@ -42,6 +44,7 @@ impl Default for ParseLimits {
             max_shapes: 100_000,
             max_formula_depth: 256,
             max_formula_nodes: 8_192,
+            max_formula_tokens: 16_384,
             max_formula_steps: 32_768,
         }
     }

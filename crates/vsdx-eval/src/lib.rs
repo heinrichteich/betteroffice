@@ -117,7 +117,13 @@ pub fn parse(input: &str, limits: &ParseLimits) -> Result<Expr, Diagnostic> {
     if input.trim().eq_ignore_ascii_case("No Formula") {
         return Ok(Expr::Call("No Formula".into(), Vec::new()));
     }
-    Parser::new(input, limits.max_formula_depth, limits.max_formula_nodes).parse()
+    Parser::new(
+        input,
+        limits.max_formula_depth,
+        limits.max_formula_nodes,
+        limits.max_formula_tokens,
+    )
+    .parse()
 }
 pub fn evaluate(input: &str, refs: &impl References, limits: &ParseLimits) -> Evaluation {
     evaluate_with_theme(input, refs, limits, None)
@@ -129,6 +135,16 @@ pub fn evaluate_cell(
     refs: &impl References,
     limits: &ParseLimits,
 ) -> Evaluation {
+    evaluate_cell_with_theme(name, input, refs, limits, None)
+}
+
+fn evaluate_cell_with_theme(
+    name: &str,
+    input: &str,
+    refs: &impl References,
+    limits: &ParseLimits,
+    theme: Option<&Theme>,
+) -> Evaluation {
     if is_event_cell(name) {
         // Event/recalculation plumbing is outside the display evaluation profile.
         return unsupported("event cell is outside the display evaluation profile");
@@ -139,19 +155,24 @@ pub fn evaluate_cell(
     if input.trim().eq_ignore_ascii_case("Inh") {
         return match refs.formula(name) {
             Some(formula) if !formula.eq_ignore_ascii_case("Inh") => {
-                evaluate_with_theme(formula, refs, limits, None)
+                evaluate_with_theme(formula, refs, limits, theme)
             }
             _ if refs.exhausted_inheritance(name) => err("Inh has no concrete inherited value"),
             _ => unsupported("Inh requires an inheritance host"),
         };
     }
-    evaluate(input, refs, limits)
+    evaluate_with_theme(input, refs, limits, theme)
 }
 
 fn is_event_cell(name: &str) -> bool {
     matches!(
         name.rsplit_once('!').map_or(name, |(_, name)| name),
-        "EventXFMod" | "BegTrigger" | "EndTrigger"
+        "EventXFMod"
+            | "BegTrigger"
+            | "EndTrigger"
+            | "EventDblClick"
+            | "EventDrop"
+            | "EventMultiDrop"
     )
 }
 /// Evaluates against the active theme selected for the shape/page by the caller.
@@ -199,7 +220,27 @@ pub fn evaluate_with_shape_package_theme(
     shape: &ResolvedShape,
     package: &VsdxPackage,
 ) -> Evaluation {
-    evaluate_with_shape_themes(input, refs, limits, shape, &package.themes)
+    let theme = shape
+        .theme_index()
+        .or_else(|| shape.color_scheme_index())
+        .and_then(|index| package.themes.get(&index));
+    evaluate_with_theme(input, refs, limits, theme)
+}
+
+/// Evaluates a host cell using the shape's selected package theme.
+pub fn evaluate_cell_with_shape_package_theme(
+    name: &str,
+    input: &str,
+    refs: &impl References,
+    limits: &ParseLimits,
+    shape: &ResolvedShape,
+    package: &VsdxPackage,
+) -> Evaluation {
+    let theme = shape
+        .theme_index()
+        .or_else(|| shape.color_scheme_index())
+        .and_then(|index| package.themes.get(&index));
+    evaluate_cell_with_theme(name, input, refs, limits, theme)
 }
 
 struct Engine<'a, R> {
@@ -849,9 +890,11 @@ struct Parser<'a> {
     max: usize,
     nodes: usize,
     max_nodes: usize,
+    tokens: usize,
+    max_tokens: usize,
 }
 impl<'a> Parser<'a> {
-    fn new(s: &'a str, max: usize, max_nodes: usize) -> Self {
+    fn new(s: &'a str, max: usize, max_nodes: usize, max_tokens: usize) -> Self {
         let mut p = Self {
             chars: s.chars().peekable(),
             current: Tok::End,
@@ -859,6 +902,8 @@ impl<'a> Parser<'a> {
             max,
             nodes: 0,
             max_nodes,
+            tokens: 0,
+            max_tokens,
         };
         p.next();
         p
@@ -892,6 +937,10 @@ impl<'a> Parser<'a> {
         let Some(c) = self.chars.next() else {
             return Tok::End;
         };
+        self.tokens += 1;
+        if self.tokens > self.max_tokens {
+            return Tok::Invalid("formula token limit exceeded".into());
+        }
         match c {
             '(' => Tok::L,
             ')' => Tok::R,
@@ -924,14 +973,29 @@ impl<'a> Parser<'a> {
             }
             x if x.is_ascii_digit() || x == '.' => {
                 let mut s = x.to_string();
-                while self.chars.peek().is_some_and(|x| {
-                    x.is_ascii_digit()
-                        || *x == '.'
-                        || *x == 'e'
-                        || *x == 'E'
-                        || matches!(*x, '+' | '-') && s.ends_with(['e', 'E'])
-                }) {
+                while self
+                    .chars
+                    .peek()
+                    .is_some_and(|x| x.is_ascii_digit() || *x == '.')
+                {
                     s.push(self.chars.next().unwrap());
+                }
+                if self.chars.peek().is_some_and(|x| matches!(*x, 'e' | 'E')) {
+                    let mut exponent = self.chars.clone();
+                    exponent.next();
+                    let exponent_digit = match exponent.next() {
+                        Some('+' | '-') => exponent.next(),
+                        value => value,
+                    };
+                    if exponent_digit.is_some_and(|x| x.is_ascii_digit()) {
+                        s.push(self.chars.next().unwrap());
+                        if self.chars.peek().is_some_and(|x| matches!(*x, '+' | '-')) {
+                            s.push(self.chars.next().unwrap());
+                        }
+                        while self.chars.peek().is_some_and(|x| x.is_ascii_digit()) {
+                            s.push(self.chars.next().unwrap());
+                        }
+                    }
                 }
                 let mut n = s.parse().unwrap_or(f64::NAN);
                 while self.chars.peek().is_some_and(|x| x.is_whitespace()) {
@@ -1102,6 +1166,15 @@ mod tests {
         assert_eq!(number("2^3^2").number, 512.0);
         assert_eq!(number("-(1 + 2)").number, -3.0);
         assert_eq!(number("1.5E-6").number, 1.5E-6);
+        assert_eq!(number("2em").number, 120.0);
+        assert_eq!(number("3ed").number, 3.0 * 24.0 * 60.0 * 60.0);
+        assert_eq!(number("4es").number, 4.0);
+        assert_eq!(number("5ew").number, 5.0 * 7.0 * 24.0 * 60.0 * 60.0);
+        for formula in ["1e", "1e+"] {
+            assert!(
+                matches!(parse(formula, &limits()), Err(Diagnostic { message }) if message == "unknown unit suffix e")
+            );
+        }
         assert!(matches!(
             parse("Geometry1.X2", &limits()),
             Ok(Expr::Reference(_))
@@ -1331,6 +1404,9 @@ mod tests {
         for name in [
             "EventXFMod",
             "Sheet.1!EventXFMod",
+            "EventDblClick",
+            "EventDrop",
+            "EventMultiDrop",
             "BegTrigger",
             "EndTrigger",
             "TheText",
@@ -1416,6 +1492,18 @@ mod tests {
     }
 
     #[test]
+    fn bounds_formula_token_count() {
+        let limits = ParseLimits {
+            max_formula_tokens: 8,
+            ..limits()
+        };
+        assert!(matches!(
+            parse(&std::iter::repeat_n("1", 16).collect::<Vec<_>>().join("+"), &limits),
+            Err(Diagnostic { message }) if message == "formula token limit exceeded"
+        ));
+    }
+
+    #[test]
     fn memoizes_diamond_references_with_a_step_budget() {
         let refs = BTreeMap::from([
             ("A".into(), "B+B".into()),
@@ -1473,8 +1561,17 @@ mod tests {
                         .resolve_shape(page, shape.id)
                         .expect("resolve corpus shape");
                     for (name, formula) in shape_formulas(shape) {
-                        measurement
-                            .record(formula, evaluate_cell(name, formula, &resolved, &limits()));
+                        measurement.record(
+                            formula,
+                            evaluate_cell_with_shape_package_theme(
+                                name,
+                                formula,
+                                &resolved,
+                                &limits(),
+                                &resolved,
+                                &package,
+                            ),
+                        );
                     }
                 }
             }
@@ -1492,11 +1589,12 @@ mod tests {
             }
         }
         eprintln!(
-            "VSDX corpus formulas: ast_ok={} statically_unsupported={} eval_unsupported={} errors={} total={}",
+            "VSDX corpus formulas: parse_ast_ok={} outcomes: evaluated={} unsupported_known={} unsupported_other={} error={} total={}",
             measurement.ast_ok,
-            measurement.statically_unsupported,
-            measurement.eval_unsupported,
-            measurement.errors,
+            measurement.evaluated,
+            measurement.unsupported_known,
+            measurement.unsupported_other,
+            measurement.error,
             measurement.total,
         );
         let mut top_unsupported = measurement
@@ -1522,14 +1620,23 @@ mod tests {
             measurement.total, 6_992,
             "corpus formula denominator changed"
         );
+        assert_eq!(
+            measurement.evaluated
+                + measurement.unsupported_known
+                + measurement.unsupported_other
+                + measurement.error,
+            measurement.total,
+            "corpus outcome buckets must be disjoint and exhaustive"
+        );
     }
 
     #[derive(Default)]
     struct CorpusMeasurement {
         ast_ok: usize,
-        statically_unsupported: usize,
-        eval_unsupported: usize,
-        errors: usize,
+        evaluated: usize,
+        unsupported_known: usize,
+        unsupported_other: usize,
+        error: usize,
         total: usize,
         unsupported_names: BTreeMap<String, usize>,
         error_kinds: BTreeMap<String, usize>,
@@ -1538,22 +1645,26 @@ mod tests {
     impl CorpusMeasurement {
         fn record(&mut self, formula: &str, evaluation: Evaluation) {
             self.total += 1;
-            if let Ok(expression) = parse(formula, &limits()) {
+            let known_unsupported = if let Ok(expression) = parse(formula, &limits()) {
                 self.ast_ok += 1;
                 if has_unsupported(&expression) {
-                    self.statically_unsupported += 1;
                     collect_unsupported(&expression, &mut self.unsupported_names);
+                    true
+                } else {
+                    false
                 }
+            } else {
+                false
+            };
+            if known_unsupported {
+                self.unsupported_known += 1;
+                return;
             }
             match evaluation {
-                Evaluation::Evaluated(_) => {}
-                Evaluation::Unsupported(_) => self.eval_unsupported += 1,
+                Evaluation::Evaluated(_) => self.evaluated += 1,
+                Evaluation::Unsupported(_) => self.unsupported_other += 1,
                 Evaluation::Error(error) => {
-                    if error.message == "Inh has no concrete inherited value" {
-                        self.eval_unsupported += 1;
-                        return;
-                    }
-                    self.errors += 1;
+                    self.error += 1;
                     let kind = classify_error(&error.message, &mut self.unresolved_references);
                     *self.error_kinds.entry(kind).or_default() += 1;
                 }

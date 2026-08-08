@@ -459,6 +459,74 @@ fn inh_skips_each_inherited_layer_until_a_concrete_cell() {
 }
 
 #[test]
+fn inh_section_cells_skip_to_master_and_text_style() {
+    let mut package = package();
+    let mut local = shape(
+        1,
+        vec![ShapeChild::Section(section(
+            "Geometry",
+            vec![row(0, vec![formula_cell("X", "Inh")])],
+        ))],
+    );
+    local.master = Some(1);
+    add_master(
+        &mut package,
+        1,
+        shape(
+            1,
+            vec![ShapeChild::Section(section(
+                "Geometry",
+                vec![row(0, vec![cell("X", "4")])],
+            ))],
+        ),
+    );
+    package.style_sheets = vec![sheet(
+        Some(2),
+        vec![SheetChild::Section(section(
+            "Character",
+            vec![row(0, vec![cell("Font", "3")])],
+        ))],
+    )];
+    let mut styled = shape(
+        2,
+        vec![ShapeChild::Section(section(
+            "Character",
+            vec![row(0, vec![formula_cell("Font", "Inh")])],
+        ))],
+    );
+    styled.text_style = Some(2);
+    package.page_part_ids.insert("page".into(), 1);
+    package.page_contents.insert(
+        "page".into(),
+        sheet(
+            None,
+            vec![SheetChild::Shapes(vec![
+                vsdx_parse::ShapesChild::Shape(local),
+                vsdx_parse::ShapesChild::Shape(styled),
+            ])],
+        ),
+    );
+
+    let resolver = Resolver::new(&package);
+    let geometry = resolver.resolve_shape("page", 1).unwrap();
+    match &geometry.sections["Geometry"].rows["IX:0"].cells["X"] {
+        Lookup::Found(value) => {
+            assert_eq!(value.cell.value.as_deref(), Some("4"));
+            assert_eq!(value.provenance, Provenance::Master);
+        }
+        value => panic!("expected inherited geometry cell, got {value:?}"),
+    }
+    let character = resolver.resolve_shape("page", 2).unwrap();
+    match &character.sections["Character"].rows["IX:0"].cells["Font"] {
+        Lookup::Found(value) => {
+            assert_eq!(value.cell.value.as_deref(), Some("3"));
+            assert_eq!(value.provenance, Provenance::StyleText);
+        }
+        value => panic!("expected inherited character cell, got {value:?}"),
+    }
+}
+
+#[test]
 fn deletions_block_inheritance_while_absence_inherits() {
     let mut package = package();
     let mut master = shape(
