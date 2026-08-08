@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use vsdx_parse::Cell;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Provenance {
     Local,
@@ -24,22 +25,33 @@ pub struct ResolvedCell {
     pub provenance: Provenance,
 }
 
+pub type ResolvedValue = ResolvedCell;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Lookup {
+    Found(ResolvedValue),
+    Deleted,
+    Absent,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedRow {
     pub key: String,
     pub row_type: Option<String>,
-    pub cells: BTreeMap<String, ResolvedCell>,
+    pub cells: BTreeMap<String, Lookup>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedSection {
     pub name: String,
+    pub deleted: bool,
     pub rows: BTreeMap<String, ResolvedRow>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedShape {
-    pub cells: BTreeMap<String, ResolvedCell>,
+    pub deleted: bool,
+    pub cells: BTreeMap<String, Lookup>,
     pub sections: BTreeMap<String, ResolvedSection>,
 }
 
@@ -48,19 +60,19 @@ pub enum ResolvedTextToken {
     Literal(String),
     CharacterRun {
         index: u32,
-        properties: BTreeMap<String, ResolvedCell>,
+        properties: BTreeMap<String, Lookup>,
     },
     ParagraphRun {
         index: u32,
-        properties: BTreeMap<String, ResolvedCell>,
+        properties: BTreeMap<String, Lookup>,
     },
     Tab {
         index: u32,
-        properties: BTreeMap<String, ResolvedCell>,
+        properties: BTreeMap<String, Lookup>,
     },
     Field {
         index: u32,
-        properties: BTreeMap<String, ResolvedCell>,
+        properties: BTreeMap<String, Lookup>,
     },
 }
 

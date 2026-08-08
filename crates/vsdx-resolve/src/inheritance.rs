@@ -4,9 +4,11 @@ use vsdx_parse::{Cell, Row, Section, Shape, Sheet, TextToken, VsdxPackage};
 
 use crate::text::row_cells;
 use crate::{
-    Provenance, ResolveError, ResolvedCell, ResolvedRow, ResolvedSection, ResolvedShape,
+    Lookup, Provenance, ResolveError, ResolvedCell, ResolvedRow, ResolvedSection, ResolvedShape,
     ResolvedTextToken,
 };
+
+const MAX_INHERITANCE_DEPTH: usize = 64;
 
 pub struct Resolver<'a> {
     package: &'a VsdxPackage,
@@ -28,47 +30,48 @@ impl<'a> Resolver<'a> {
         page_part: &str,
         shape_id: u32,
     ) -> Result<ResolvedShape, ResolveError> {
-        let sheet = self
+        let page_contents = self
             .package
             .page_contents
             .get(page_part)
             .ok_or_else(|| ResolveError::MissingPage(page_part.into()))?;
-        let shape = find_shape(sheet, shape_id).ok_or(ResolveError::MissingShape(shape_id))?;
-        let page_sheet = self
+        let shape =
+            find_shape(page_contents, shape_id).ok_or(ResolveError::MissingShape(shape_id))?;
+        let page = self
             .package
             .page_part_ids
             .get(page_part)
             .and_then(|id| self.package.page_sheets.get(id))
-            .unwrap_or(sheet);
-        self.resolve_shape_ref(shape, page_sheet, &mut HashSet::new(), 0)
+            .unwrap_or(page_contents);
+        self.resolve_shape_ref(shape, page)
     }
     pub fn resolve_text(
         &self,
         shape: &Shape,
-        page_sheet: &Sheet,
+        page: &Sheet,
     ) -> Result<Vec<ResolvedTextToken>, ResolveError> {
-        let resolved = self.resolve_shape_ref(shape, page_sheet, &mut HashSet::new(), 0)?;
+        let resolved = self.resolve_shape_ref(shape, page)?;
         Ok(shape
             .text()
             .unwrap_or_default()
             .iter()
             .map(|token| match token {
-                TextToken::Literal(text) => ResolvedTextToken::Literal(text.clone()),
-                TextToken::CharacterRun(ix) => ResolvedTextToken::CharacterRun {
-                    index: *ix,
-                    properties: row_cells(&resolved, "Character", *ix),
+                TextToken::Literal(value) => ResolvedTextToken::Literal(value.clone()),
+                TextToken::CharacterRun(index) => ResolvedTextToken::CharacterRun {
+                    index: *index,
+                    properties: row_cells(&resolved, "Character", *index),
                 },
-                TextToken::ParagraphRun(ix) => ResolvedTextToken::ParagraphRun {
-                    index: *ix,
-                    properties: row_cells(&resolved, "Paragraph", *ix),
+                TextToken::ParagraphRun(index) => ResolvedTextToken::ParagraphRun {
+                    index: *index,
+                    properties: row_cells(&resolved, "Paragraph", *index),
                 },
-                TextToken::Tab(ix) => ResolvedTextToken::Tab {
-                    index: *ix,
-                    properties: row_cells(&resolved, "Tabs", *ix),
+                TextToken::Tab(index) => ResolvedTextToken::Tab {
+                    index: *index,
+                    properties: row_cells(&resolved, "Tabs", *index),
                 },
-                TextToken::Field(ix) => ResolvedTextToken::Field {
-                    index: *ix,
-                    properties: row_cells(&resolved, "Field", *ix),
+                TextToken::Field(index) => ResolvedTextToken::Field {
+                    index: *index,
+                    properties: row_cells(&resolved, "Field", *index),
                 },
             })
             .collect())
@@ -76,272 +79,305 @@ impl<'a> Resolver<'a> {
     fn resolve_shape_ref(
         &self,
         shape: &Shape,
-        page_sheet: &Sheet,
-        seen: &mut HashSet<(u32, u32)>,
-        depth: usize,
+        page: &Sheet,
     ) -> Result<ResolvedShape, ResolveError> {
-        if depth >= MAX_INHERITANCE_DEPTH {
-            return Err(ResolveError::Cycle("maximum inheritance depth".into()));
+        if shape.del {
+            return Ok(ResolvedShape {
+                deleted: true,
+                ..Default::default()
+            });
         }
-        let master = self.master_shape(shape, seen)?;
-        let mut result = ResolvedShape::default();
-        let mut names = all_names(
-            shape,
-            master.map(|(_, s)| s),
-            page_sheet,
-            self.package.document_sheet.as_ref(),
-        );
-        for id in [shape.line_style, shape.fill_style, shape.text_style]
-            .into_iter()
-            .flatten()
+        let masters = self.master_chain(shape)?;
+        let styles = self.style_chains(shape)?;
+        let mut names = HashSet::new();
+        for source in std::iter::once(shape as &dyn HasCells)
+            .chain(masters.iter().map(|(_, s)| *s as &dyn HasCells))
+            .chain(
+                styles
+                    .iter()
+                    .flat_map(|(_, sheets)| sheets.iter().map(|s| *s as &dyn HasCells)),
+            )
+            .chain(std::iter::once(page as &dyn HasCells))
+            .chain(
+                self.package
+                    .document_sheet
+                    .iter()
+                    .map(|s| s as &dyn HasCells),
+            )
         {
-            if let Some(style) = self
-                .package
-                .style_sheets
-                .iter()
-                .find(|sheet| sheet.id == Some(id))
-            {
-                names.extend(style.cells().map(|cell| cell.name.clone()));
-            }
+            names.extend(source.cells().map(|c| c.name.clone()));
         }
+        names.extend(self.defaults.keys().cloned());
+        let mut out = ResolvedShape::default();
         for name in names {
-            if let Some(value) = self.resolve_cell(shape, master, page_sheet, &name, seen, depth)? {
-                result.cells.insert(name, value);
-            }
-        }
-        let mut sections = all_sections(shape, master.map(|(_, s)| s));
-        if shape.text_style.is_some() {
-            sections.extend(
-                ["Character", "Paragraph", "Tabs", "Field"]
-                    .into_iter()
-                    .map(str::to_owned),
+            out.cells.insert(
+                name.clone(),
+                self.resolve_cell(shape, &masters, &styles, page, &name),
             );
+        }
+        let mut sections = HashSet::new();
+        for source in std::iter::once(shape as &dyn HasSections)
+            .chain(masters.iter().map(|(_, s)| *s as &dyn HasSections))
+            .chain(
+                styles
+                    .iter()
+                    .flat_map(|(_, sheets)| sheets.iter().map(|s| *s as &dyn HasSections)),
+            )
+            .chain(std::iter::once(page as &dyn HasSections))
+            .chain(
+                self.package
+                    .document_sheet
+                    .iter()
+                    .map(|s| s as &dyn HasSections),
+            )
+        {
+            sections.extend(source.sections().map(|s| s.name.clone()));
         }
         for section in sections {
-            result.sections.insert(
+            out.sections.insert(
                 section.clone(),
-                self.resolve_section(shape, master, page_sheet, &section, seen, depth)?,
+                self.resolve_section(shape, &masters, &styles, page, &section),
             );
         }
-        Ok(result)
+        Ok(out)
     }
-    fn master_shape<'b>(
-        &'b self,
-        shape: &Shape,
-        seen: &mut HashSet<(u32, u32)>,
-    ) -> Result<Option<(Provenance, &'a Shape)>, ResolveError> {
-        let Some(master_id) = shape.master else {
-            return Ok(None);
-        };
-        let Some(path) = self
-            .package
-            .master_part_ids
-            .iter()
-            .find_map(|(path, id)| (*id == master_id).then_some(path))
-        else {
-            return Ok(None);
-        };
-        let Some(sheet) = self.package.master_contents.get(path) else {
-            return Ok(None);
-        };
-        let id = shape.master_shape.unwrap_or(master_id);
-        if !seen.insert((master_id, id)) {
-            return Err(ResolveError::Cycle(format!("master {master_id}/{id}")));
-        }
-        let found = find_shape(sheet, id).or_else(|| find_shape(sheet, master_id));
-        Ok(found.map(|s| {
-            (
-                if shape.master_shape.is_some() {
+    fn master_chain(&self, shape: &Shape) -> Result<Vec<(Provenance, &'a Shape)>, ResolveError> {
+        let mut out = Vec::new();
+        let mut current = shape;
+        let mut seen = HashSet::new();
+        for depth in 0..MAX_INHERITANCE_DEPTH {
+            let Some(master_id) = current.master else {
+                return Ok(out);
+            };
+            let Some(path) = self
+                .package
+                .master_part_ids
+                .iter()
+                .find_map(|(path, id)| (*id == master_id).then_some(path))
+            else {
+                return Ok(out);
+            };
+            let Some(sheet) = self.package.master_contents.get(path) else {
+                return Ok(out);
+            };
+            let id = current.master_shape.unwrap_or(master_id);
+            if !seen.insert((master_id, id)) {
+                return Err(ResolveError::Cycle(format!("master {master_id}/{id}")));
+            }
+            let Some(next) = find_shape(sheet, id).or_else(|| find_shape(sheet, master_id)) else {
+                return Ok(out);
+            };
+            out.push((
+                if current.master_shape.is_some() {
                     Provenance::MasterShape
                 } else {
                     Provenance::Master
                 },
-                s,
-            )
-        }))
+                next,
+            ));
+            current = next;
+            if depth + 1 == MAX_INHERITANCE_DEPTH {
+                return Err(ResolveError::Cycle("maximum inheritance depth".into()));
+            }
+        }
+        unreachable!()
+    }
+    fn style_chains(
+        &self,
+        shape: &Shape,
+    ) -> Result<Vec<(Provenance, Vec<&'a Sheet>)>, ResolveError> {
+        [
+            (shape.line_style, Provenance::StyleLine),
+            (shape.fill_style, Provenance::StyleFill),
+            (shape.text_style, Provenance::StyleText),
+        ]
+        .into_iter()
+        .map(|(id, provenance)| self.style_chain(id).map(|chain| (provenance, chain)))
+        .collect()
+    }
+    fn style_chain(&self, mut id: Option<u32>) -> Result<Vec<&'a Sheet>, ResolveError> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        while let Some(current) = id {
+            if !seen.insert(current) {
+                return Err(ResolveError::Cycle(format!("style {current}")));
+            }
+            let Some(sheet) = self
+                .package
+                .style_sheets
+                .iter()
+                .find(|s| s.id == Some(current))
+            else {
+                break;
+            };
+            out.push(sheet);
+            id = based_on(sheet);
+        }
+        Ok(out)
     }
     fn resolve_cell(
         &self,
         shape: &Shape,
-        master: Option<(Provenance, &Shape)>,
+        masters: &[(Provenance, &'a Shape)],
+        styles: &[(Provenance, Vec<&'a Sheet>)],
         page: &Sheet,
         name: &str,
-        seen: &mut HashSet<(u32, u32)>,
-        depth: usize,
-    ) -> Result<Option<ResolvedCell>, ResolveError> {
-        if let Some(c) = shape.cells().find(|c| c.name == name) {
-            return Ok((!c.del).then(|| ResolvedCell {
-                cell: c.clone(),
-                provenance: Provenance::Local,
-            }));
-        }
-        if let Some((source, m)) = master
-            && let Some(c) = m.cells().find(|c| c.name == name)
+    ) -> Lookup {
+        let mut sources: Vec<(Provenance, Option<&Cell>)> =
+            vec![(Provenance::Local, shape.cells().find(|c| c.name == name))];
+        sources.extend(
+            masters
+                .iter()
+                .map(|(p, s)| (*p, s.cells().find(|c| c.name == name))),
+        );
+        if let Some(owner) = style_owner(name)
+            && let Some((p, chain)) = styles.iter().find(|(p, _)| *p == owner)
         {
-            if c.del {
-                return Ok(None);
-            }
-            return Ok(Some(ResolvedCell {
-                cell: c.clone(),
-                provenance: source,
-            }));
+            sources.extend(
+                chain
+                    .iter()
+                    .map(|s| (*p, s.cells().find(|c| c.name == name))),
+            );
         }
-        if let Some(value) = self.style_cell(shape, name, seen, depth)? {
-            return Ok(Some(value));
-        }
-        if let Some(c) = page.cells().find(|c| c.name == name) {
-            if c.del {
-                return Ok(None);
+        sources.push((Provenance::Page, page.cells().find(|c| c.name == name)));
+        sources.push((
+            Provenance::Document,
+            self.package
+                .document_sheet
+                .as_ref()
+                .and_then(|s| s.cells().find(|c| c.name == name)),
+        ));
+        for (provenance, cell) in sources {
+            if let Some(cell) = cell {
+                return found(cell, provenance);
             }
-            return Ok(Some(ResolvedCell {
-                cell: c.clone(),
-                provenance: Provenance::Page,
-            }));
         }
-        if let Some(c) = self
-            .package
-            .document_sheet
-            .as_ref()
-            .and_then(|s| s.cells().find(|c| c.name == name))
-        {
-            if c.del {
-                return Ok(None);
-            }
-            return Ok(Some(ResolvedCell {
-                cell: c.clone(),
-                provenance: Provenance::Document,
-            }));
-        }
-        Ok(self.defaults.get(name).cloned().map(|cell| ResolvedCell {
-            cell,
-            provenance: Provenance::Default,
-        }))
-    }
-    fn style_cell(
-        &self,
-        shape: &Shape,
-        name: &str,
-        _seen: &mut HashSet<(u32, u32)>,
-        _depth: usize,
-    ) -> Result<Option<ResolvedCell>, ResolveError> {
-        let (id, provenance) = if is_line(name) {
-            (shape.line_style, Provenance::StyleLine)
-        } else if is_fill(name) {
-            (shape.fill_style, Provenance::StyleFill)
-        } else if is_text(name) {
-            (shape.text_style, Provenance::StyleText)
-        } else {
-            return Ok(None);
-        };
-        let mut current = id;
-        let mut visited = HashSet::new();
-        while let Some(id) = current {
-            if !visited.insert(id) {
-                return Err(ResolveError::Cycle(format!("style {id}")));
-            }
-            let Some(sheet) = self.package.style_sheets.iter().find(|s| s.id == Some(id)) else {
-                break;
-            };
-            if let Some(c) = sheet.cells().find(|c| c.name == name) {
-                return Ok((!c.del).then(|| ResolvedCell {
-                    cell: c.clone(),
-                    provenance,
-                }));
-            }
-            current = based_on(sheet);
-        }
-        Ok(None)
+        self.defaults
+            .get(name)
+            .map(|cell| ResolvedCell {
+                cell: cell.clone(),
+                provenance: Provenance::Default,
+            })
+            .map(Lookup::Found)
+            .unwrap_or(Lookup::Absent)
     }
     fn resolve_section(
         &self,
         shape: &Shape,
-        master: Option<(Provenance, &Shape)>,
-        _page: &Sheet,
-        section: &str,
-        _seen: &mut HashSet<(u32, u32)>,
-        _depth: usize,
-    ) -> Result<ResolvedSection, ResolveError> {
+        masters: &[(Provenance, &'a Shape)],
+        styles: &[(Provenance, Vec<&'a Sheet>)],
+        page: &Sheet,
+        name: &str,
+    ) -> ResolvedSection {
+        let mut sources: Vec<(Provenance, Option<&Section>)> =
+            vec![(Provenance::Local, shape.sections().find(|s| s.name == name))];
+        sources.extend(
+            masters
+                .iter()
+                .map(|(p, s)| (*p, s.sections().find(|v| v.name == name))),
+        );
+        if (name == "Character" || name == "Paragraph" || name == "Tabs" || name == "Field")
+            && let Some((p, chain)) = styles.iter().find(|(p, _)| *p == Provenance::StyleText)
+        {
+            sources.extend(
+                chain
+                    .iter()
+                    .map(|s| (*p, s.sections().find(|v| v.name == name))),
+            );
+        }
+        sources.push((Provenance::Page, page.sections().find(|s| s.name == name)));
+        sources.push((
+            Provenance::Document,
+            self.package
+                .document_sheet
+                .as_ref()
+                .and_then(|s| s.sections().find(|s| s.name == name)),
+        ));
+        if let Some(position) = sources
+            .iter()
+            .position(|(_, section)| section.is_some_and(|section| section.del))
+        {
+            if position == 0 {
+                return ResolvedSection {
+                    name: name.into(),
+                    deleted: true,
+                    ..Default::default()
+                };
+            }
+            sources.truncate(position);
+        }
+        let mut keys = HashSet::new();
+        for (_, section) in &sources {
+            if let Some(section) = section {
+                keys.extend(section.rows().map(row_key));
+            }
+        }
         let mut out = ResolvedSection {
-            name: section.into(),
+            name: name.into(),
             ..Default::default()
         };
-        let local = shape.sections().find(|s| s.name == section);
-        let inherited = master.and_then(|(_, s)| s.sections().find(|v| v.name == section));
-        let style = self.style_section(shape, section)?;
-        let style_section = style.and_then(|(_, s)| s.sections().find(|v| v.name == section));
-        for key in row_keys3(local, inherited, style_section) {
-            let a = local.and_then(|s| s.rows().find(|r| row_key(r) == key));
-            let b = inherited.and_then(|s| s.rows().find(|r| row_key(r) == key));
-            let c = style_section.and_then(|s| s.rows().find(|r| row_key(r) == key));
-            if a.is_some_and(|r| r.del) {
-                continue;
-            }
-            let source = a.or(b).or(c);
-            if let Some(row) = source {
-                let mut cells = BTreeMap::new();
-                for name in row_cell_names(a, b, c) {
-                    let candidate = a
-                        .and_then(|r| r.cells().find(|v| v.name == name))
-                        .map(|v| (Provenance::Local, v))
-                        .or_else(|| {
-                            b.and_then(|r| r.cells().find(|v| v.name == name))
-                                .map(|v| (master.map(|m| m.0).unwrap_or(Provenance::Master), v))
-                        })
-                        .or_else(|| {
-                            c.and_then(|r| r.cells().find(|v| v.name == name))
-                                .map(|v| (style.map(|s| s.0).unwrap_or(Provenance::StyleText), v))
-                        });
-                    if let Some((provenance, cell)) = candidate.filter(|(_, cell)| !cell.del) {
-                        cells.insert(
-                            name,
-                            ResolvedCell {
-                                cell: cell.clone(),
-                                provenance,
-                            },
-                        );
-                    }
-                }
+        for key in keys {
+            let rows: Vec<(Provenance, Option<&Row>)> = sources
+                .iter()
+                .map(|(p, section)| {
+                    (
+                        *p,
+                        section.and_then(|s| s.rows().find(|r| row_key(r) == key)),
+                    )
+                })
+                .collect();
+            if rows.iter().any(|(_, row)| row.is_some_and(|row| row.del)) {
                 out.rows.insert(
-                    key,
+                    key.clone(),
                     ResolvedRow {
-                        key: row_key(row),
-                        row_type: row.row_type.clone(),
-                        cells,
+                        key,
+                        ..Default::default()
                     },
                 );
+                continue;
             }
+            let row = rows.iter().find_map(|(_, row)| *row);
+            let Some(row) = row else { continue };
+            let mut names = HashSet::new();
+            for (_, row) in &rows {
+                if let Some(row) = row {
+                    names.extend(row.cells().map(|c| c.name.clone()));
+                }
+            }
+            let mut cells = BTreeMap::new();
+            for cell_name in names {
+                let lookup = rows.iter().find_map(|(p, row)| {
+                    row.and_then(|row| {
+                        row.cells()
+                            .find(|c| c.name == cell_name)
+                            .map(|c| found(c, *p))
+                    })
+                });
+                cells.insert(cell_name, lookup.unwrap_or(Lookup::Absent));
+            }
+            out.rows.insert(
+                key.clone(),
+                ResolvedRow {
+                    key,
+                    row_type: row.row_type.clone(),
+                    cells,
+                },
+            );
         }
-        Ok(out)
-    }
-    fn style_section(
-        &self,
-        shape: &Shape,
-        section: &str,
-    ) -> Result<Option<(Provenance, &Sheet)>, ResolveError> {
-        let (id, provenance) = match section {
-            "Character" | "Paragraph" | "Tabs" | "Field" => {
-                (shape.text_style, Provenance::StyleText)
-            }
-            _ => return Ok(None),
-        };
-        let mut current = id;
-        let mut visited = HashSet::new();
-        while let Some(id) = current {
-            if !visited.insert(id) {
-                return Err(ResolveError::Cycle(format!("style {id}")));
-            }
-            let Some(sheet) = self.package.style_sheets.iter().find(|s| s.id == Some(id)) else {
-                break;
-            };
-            if sheet.sections().any(|s| s.name == section) {
-                return Ok(Some((provenance, sheet)));
-            }
-            current = based_on(sheet);
-        }
-        Ok(None)
+        out
     }
 }
 
+fn found(cell: &Cell, provenance: Provenance) -> Lookup {
+    if cell.del {
+        Lookup::Deleted
+    } else {
+        Lookup::Found(ResolvedCell {
+            cell: cell.clone(),
+            provenance,
+        })
+    }
+}
 fn find_shape(sheet: &Sheet, id: u32) -> Option<&Shape> {
     sheet.shapes().find(|s| s.id == id)
 }
@@ -349,77 +385,106 @@ fn based_on(sheet: &Sheet) -> Option<u32> {
     sheet
         .other_attrs
         .iter()
-        .find(|(n, _)| n == "BasedOn")
-        .and_then(|(_, v)| v.parse().ok())
+        .find(|(name, _)| name == "BasedOn")
+        .and_then(|(_, value)| value.parse().ok())
 }
-fn is_line(n: &str) -> bool {
-    matches!(
-        n,
-        "LineColor" | "LinePattern" | "LineWeight" | "LineCap" | "BeginArrow" | "EndArrow"
-    )
+/// Built-in ownership is from MS-VSDX ShapeSheet style-sheet cells; unlisted cells bypass styles.
+fn style_owner(name: &str) -> Option<Provenance> {
+    const LINE: &[&str] = &[
+        "LineColor",
+        "LinePattern",
+        "LineWeight",
+        "LineCap",
+        "BeginArrow",
+        "EndArrow",
+        "BeginArrowSize",
+        "EndArrowSize",
+        "LineColorTrans",
+        "LinePatternTrans",
+        "Rounding",
+        "LineGradientDir",
+        "LineGradientAngle",
+        "LineGradientEnabled",
+    ];
+    const FILL: &[&str] = &[
+        "FillForegnd",
+        "FillBkgnd",
+        "FillPattern",
+        "FillForegndTrans",
+        "FillBkgndTrans",
+        "FillGradientDir",
+        "FillGradientAngle",
+        "FillGradientEnabled",
+        "FillGradientStops",
+        "FillGradientStopCount",
+        "ShdwForegnd",
+        "ShdwForegndTrans",
+        "ShdwPattern",
+        "ShapeShdwType",
+        "ShapeShdwOffsetX",
+        "ShapeShdwOffsetY",
+    ];
+    const TEXT: &[&str] = &[
+        "Char",
+        "Para",
+        "Text",
+        "VerticalAlign",
+        "TxtPinX",
+        "TxtPinY",
+        "TxtWidth",
+        "TxtHeight",
+        "TxtAngle",
+        "TxtLocPinX",
+        "TxtLocPinY",
+        "LeftMargin",
+        "RightMargin",
+        "TopMargin",
+        "BottomMargin",
+        "TextBkgnd",
+        "DefaultTabStop",
+        "TextDirection",
+        "TextBlockVerticalAlign",
+    ];
+    if LINE.contains(&name) {
+        Some(Provenance::StyleLine)
+    } else if FILL.contains(&name) {
+        Some(Provenance::StyleFill)
+    } else if TEXT.contains(&name) {
+        Some(Provenance::StyleText)
+    } else {
+        None
+    }
 }
-fn is_fill(n: &str) -> bool {
-    matches!(
-        n,
-        "FillForegnd" | "FillBkgnd" | "FillPattern" | "FillForegndTrans" | "FillBkgndTrans"
-    )
+trait HasCells {
+    fn cells(&self) -> Box<dyn Iterator<Item = &Cell> + '_>;
 }
-fn is_text(n: &str) -> bool {
-    matches!(
-        n,
-        "Char" | "Para" | "Text" | "VerticalAlign" | "TxtPinX" | "TxtPinY"
-    )
+impl HasCells for Shape {
+    fn cells(&self) -> Box<dyn Iterator<Item = &Cell> + '_> {
+        Box::new(self.cells())
+    }
 }
-fn all_names(
-    shape: &Shape,
-    master: Option<&Shape>,
-    page: &Sheet,
-    document: Option<&Sheet>,
-) -> HashSet<String> {
-    shape
-        .cells()
-        .chain(master.into_iter().flat_map(Shape::cells))
-        .chain(page.cells())
-        .chain(document.into_iter().flat_map(Sheet::cells))
-        .map(|c| c.name.clone())
-        .chain(std::iter::empty())
-        .collect()
+impl HasCells for Sheet {
+    fn cells(&self) -> Box<dyn Iterator<Item = &Cell> + '_> {
+        Box::new(self.cells())
+    }
 }
-fn all_sections(shape: &Shape, master: Option<&Shape>) -> HashSet<String> {
-    shape
-        .sections()
-        .chain(master.into_iter().flat_map(Shape::sections))
-        .map(|s| s.name.clone())
-        .collect()
+trait HasSections {
+    fn sections(&self) -> Box<dyn Iterator<Item = &Section> + '_>;
+}
+impl HasSections for Shape {
+    fn sections(&self) -> Box<dyn Iterator<Item = &Section> + '_> {
+        Box::new(self.sections())
+    }
+}
+impl HasSections for Sheet {
+    fn sections(&self) -> Box<dyn Iterator<Item = &Section> + '_> {
+        Box::new(self.sections())
+    }
 }
 fn row_key(row: &Row) -> String {
     row.name
         .clone()
-        .map(|n| format!("N:{n}"))
-        .or_else(|| row.index.map(|i| format!("IX:{i}")))
-        .unwrap_or_default()
-}
-fn row_keys3(a: Option<&Section>, b: Option<&Section>, c: Option<&Section>) -> HashSet<String> {
-    a.into_iter()
-        .flat_map(Section::rows)
-        .chain(b.into_iter().flat_map(Section::rows))
-        .chain(c.into_iter().flat_map(Section::rows))
-        .map(row_key)
-        .collect()
-}
-fn row_cell_names(a: Option<&Row>, b: Option<&Row>, c: Option<&Row>) -> HashSet<String> {
-    a.into_iter()
-        .flat_map(Row::cells)
-        .chain(b.into_iter().flat_map(Row::cells))
-        .chain(c.into_iter().flat_map(Row::cells))
-        .map(|v| v.name.clone())
-        .collect()
-}
-fn row_cells(shape: &ResolvedShape, section: &str, index: u32) -> BTreeMap<String, ResolvedCell> {
-    shape
-        .sections
-        .get(section)
-        .and_then(|s| s.rows.get(&format!("IX:{index}")))
-        .map(|r| r.cells.clone())
+        .map(|name| format!("N:{name}"))
+        .or_else(|| row.index.map(|index| format!("IX:{index}")))
         .unwrap_or_default()
 }

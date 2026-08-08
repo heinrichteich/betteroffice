@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 
-use crate::{ResolvedCell, ResolvedShape};
+use crate::{Lookup, ResolvedShape};
 
 pub(crate) fn row_cells(
     shape: &ResolvedShape,
     section: &str,
     index: u32,
-) -> BTreeMap<String, ResolvedCell> {
+) -> BTreeMap<String, Lookup> {
     shape
         .sections
         .get(section)

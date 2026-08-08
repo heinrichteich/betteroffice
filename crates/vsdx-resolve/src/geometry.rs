@@ -1,7 +1,5 @@
+use crate::{GeometryIssue, Lookup, RealizedGeometry, ResolvedSection};
 use ooxml_drawingml::GeometryPathCommand;
-use vsdx_parse::Cell;
-
-use crate::{GeometryIssue, RealizedGeometry, ResolvedRow, ResolvedSection};
 
 pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
     let mut out = RealizedGeometry::default();
@@ -19,7 +17,10 @@ pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
         let value = |name: &str| {
             row.cells
                 .get(name)
-                .and_then(|v| v.cell.value.as_deref())
+                .and_then(|v| match v {
+                    Lookup::Found(value) => value.cell.value.as_deref(),
+                    Lookup::Deleted | Lookup::Absent => None,
+                })
                 .and_then(|v| v.parse::<f64>().ok())
         };
         let mut required = |names: &[&str]| -> Option<Vec<f64>> {
@@ -262,6 +263,9 @@ fn cubic_arc_segment(
 #[cfg(test)]
 mod tests {
     use crate::*;
+    use ooxml_drawingml::GeometryPathCommand;
+    use std::collections::BTreeMap;
+    use vsdx_parse::Cell;
 
     fn cell(name: &str, value: &str) -> Cell {
         Cell {
@@ -282,10 +286,10 @@ mod tests {
                 .map(|cell| {
                     (
                         cell.name.clone(),
-                        ResolvedCell {
+                        Lookup::Found(ResolvedCell {
                             cell,
                             provenance: Provenance::Local,
-                        },
+                        }),
                     )
                 })
                 .collect(),
@@ -296,6 +300,8 @@ mod tests {
     fn geometry_uses_cached_values_and_reports_unsupported_rows() {
         let section = ResolvedSection {
             name: "Geometry".into(),
+            deleted: false,
+
             rows: BTreeMap::from([
                 (
                     "IX:0".into(),
@@ -319,6 +325,7 @@ mod tests {
     fn arc_to_uses_its_bow_for_cubic_controls() {
         let section = ResolvedSection {
             name: "Geometry".into(),
+            deleted: false,
             rows: BTreeMap::from([
                 (
                     "IX:0".into(),
@@ -354,6 +361,7 @@ mod tests {
     fn ellipse_uses_its_bounds_for_cubic_controls() {
         let section = ResolvedSection {
             name: "Geometry".into(),
+            deleted: false,
             rows: BTreeMap::from([(
                 "IX:0".into(),
                 resolved_row(
@@ -394,6 +402,7 @@ mod tests {
     fn elliptical_arc_requires_all_cached_schema_cells() {
         let section = ResolvedSection {
             name: "Geometry".into(),
+            deleted: false,
             rows: BTreeMap::from([(
                 "IX:0".into(),
                 resolved_row(
