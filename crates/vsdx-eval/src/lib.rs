@@ -5,10 +5,12 @@ mod colour;
 #[path = "tests.rs"]
 mod corpus;
 mod eval;
+mod policy;
 mod tokenizer;
 mod units;
 
 pub use ast::{Expr, Op};
+pub use policy::{MutationContext, MutationOutcome, decide as decide_mutation};
 pub use units::Unit;
 use units::unit;
 

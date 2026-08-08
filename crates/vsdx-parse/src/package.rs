@@ -43,8 +43,23 @@ pub struct CellLocator {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SemanticCellEdit {
     pub locator: CellLocator,
+    pub gesture: MutationGesture,
     pub formula: Option<String>,
     pub value: Option<String>,
+}
+
+/// The user action that requested a ShapeSheet mutation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MutationGesture {
+    CellEdit,
+    MoveX,
+    MoveY,
+    ResizeWidth,
+    ResizeHeight,
+    ResizeAspect,
+    TextEdit,
+    Format,
+    Delete,
 }
 
 type PendingInsertion = (crate::SourceSpan, u8, Vec<(CellAttribute, String)>);
@@ -906,6 +921,7 @@ mod tests {
                 &package,
                 &[SemanticCellEdit {
                     locator,
+                    gesture: MutationGesture::CellEdit,
                     formula: None,
                     value: Some(new_value.to_owned()),
                 }],

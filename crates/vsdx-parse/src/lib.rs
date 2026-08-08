@@ -11,8 +11,8 @@ mod xml;
 pub use error::VsdxError;
 pub use model::*;
 pub use package::{
-    CellLocator, CellRow, CellSheet, SemanticCellEdit, parse_vsdx, parse_vsdx_with_limits,
-    save_cell_edits, save_semantic_cell_edits, write_vsdx,
+    CellLocator, CellRow, CellSheet, MutationGesture, SemanticCellEdit, parse_vsdx,
+    parse_vsdx_with_limits, save_cell_edits, save_semantic_cell_edits, write_vsdx,
 };
 pub use patch::{
     CellAttribute, CellEdit, ElementSpan, MAX_PATCH_BYTES, MAX_PATCH_EDITS, SourceSpan, SpanEdit,

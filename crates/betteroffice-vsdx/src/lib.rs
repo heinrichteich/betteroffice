@@ -1,13 +1,15 @@
 //! Typed native facade for inspecting VSDX diagrams.
 
-pub use vsdx_parse::{CellLocator, CellRow, CellSheet, SemanticCellEdit};
-use vsdx_parse::{ParseLimits, Shape, VsdxError, VsdxPackage};
+use vsdx_eval::{Evaluation, MutationContext, MutationOutcome, Value, decide_mutation, evaluate};
+use vsdx_parse::{Cell, ParseLimits, Shape, VsdxError, VsdxPackage};
+pub use vsdx_parse::{CellLocator, CellRow, CellSheet, MutationGesture, SemanticCellEdit};
 use vsdx_resolve::{ResolveError, ResolvedShape, Resolver};
 
 #[derive(Debug)]
 pub enum Error {
     Parse(VsdxError),
     Resolve(ResolveError),
+    Policy(String),
 }
 
 impl From<VsdxError> for Error {
@@ -41,8 +43,52 @@ impl Diagram {
     pub fn package(&self) -> &VsdxPackage {
         &self.package
     }
+    /// Writes formulas to Cell@F and their evaluated numeric cache to Cell@V.
     pub fn save_cell_edits(&self, edits: &[SemanticCellEdit]) -> Result<Vec<u8>> {
-        Ok(vsdx_parse::save_semantic_cell_edits(&self.package, edits)?)
+        let context = PackageMutationContext {
+            package: &self.package,
+        };
+        let mut resolved = Vec::with_capacity(edits.len());
+        for edit in edits {
+            if edit.value.is_some() {
+                return Err(Error::Policy(
+                    "semantic edits write formulas; raw Cell@V edits are not allowed".to_owned(),
+                ));
+            }
+            let formula = edit
+                .formula
+                .clone()
+                .ok_or_else(|| Error::Policy("semantic edits require a formula".to_owned()))?;
+            match decide_mutation(
+                &context,
+                edit.locator.clone(),
+                edit.gesture,
+                formula,
+                &ParseLimits::default(),
+            ) {
+                MutationOutcome::Allowed { target, formula }
+                | MutationOutcome::Redirected {
+                    to: target,
+                    formula,
+                    ..
+                } => {
+                    let value = context.evaluate_formula(&target, &formula)?;
+                    resolved.push(SemanticCellEdit {
+                        locator: target,
+                        gesture: edit.gesture,
+                        formula: Some(formula),
+                        value: Some(value),
+                    });
+                }
+                MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                    return Err(Error::Policy(reason));
+                }
+            }
+        }
+        Ok(vsdx_parse::save_semantic_cell_edits(
+            &self.package,
+            &resolved,
+        )?)
     }
     pub fn pages(&self) -> impl Iterator<Item = Page<'_>> {
         self.package.page_contents.keys().map(|part| Page {
@@ -50,6 +96,182 @@ impl Diagram {
             part,
         })
     }
+}
+
+struct PackageMutationContext<'a> {
+    package: &'a VsdxPackage,
+}
+
+impl PackageMutationContext<'_> {
+    fn resolved_cell(&self, locator: &CellLocator) -> std::result::Result<Option<Cell>, String> {
+        let resolver = Resolver::new(self.package);
+        let key = locator_key(locator);
+        let resolved = match (&locator.sheet, locator.shape_id) {
+            (CellSheet::Page(_), Some(shape_id)) => resolver
+                .resolve_shape(&sheet_path(self.package, &locator.sheet)?, shape_id)
+                .map_err(|error| error.to_string())?,
+            (CellSheet::Page(page_id), None) => resolver
+                .resolve_sheet(
+                    self.package
+                        .page_sheets
+                        .get(page_id)
+                        .ok_or_else(|| "page sheet does not exist".to_owned())?,
+                )
+                .map_err(|error| error.to_string())?,
+            (CellSheet::Document, None) => resolver
+                .resolve_sheet(
+                    self.package
+                        .document_sheet
+                        .as_ref()
+                        .ok_or_else(|| "document sheet does not exist".to_owned())?,
+                )
+                .map_err(|error| error.to_string())?,
+            (CellSheet::Master(_), _) | (CellSheet::Document, Some(_)) => {
+                return Err("mutation policy does not yet support this sheet identity".to_owned());
+            }
+        };
+        Ok(resolved.cell(&key).and_then(|lookup| match lookup {
+            vsdx_resolve::Lookup::Found(cell) => Some(cell.cell.clone()),
+            vsdx_resolve::Lookup::Deleted | vsdx_resolve::Lookup::Absent => None,
+        }))
+    }
+
+    fn evaluate_formula(&self, locator: &CellLocator, formula: &str) -> Result<String> {
+        let resolver = Resolver::new(self.package);
+        let CellSheet::Page(_) = locator.sheet else {
+            return Err(Error::Policy(
+                "formula cache updates currently require a page ShapeSheet".to_owned(),
+            ));
+        };
+        let shape_id = locator.shape_id.ok_or_else(|| {
+            Error::Policy("formula cache updates require a shape cell".to_owned())
+        })?;
+        let page = sheet_path(self.package, &locator.sheet).map_err(Error::Policy)?;
+        let references = vsdx_eval::PageShapeReferences::new(&resolver, &page)
+            .map_err(|error| Error::Policy(error.to_string()))?;
+        let evaluation = evaluate(
+            formula.trim_start_matches('='),
+            &references.for_shape(shape_id),
+            &ParseLimits::default(),
+        );
+        match evaluation {
+            Evaluation::Evaluated(value) => match value.value {
+                Value::Number(number) => Ok(number.number.to_string()),
+                Value::Color(_) => Err(Error::Policy(
+                    "formula cache update does not support colour values".to_owned(),
+                )),
+            },
+            Evaluation::Unsupported(reason) => Err(Error::Policy(format!(
+                "formula cache update is unsupported: {reason}"
+            ))),
+            Evaluation::Error(error) => Err(Error::Policy(format!(
+                "formula cache update failed: {}",
+                error.message
+            ))),
+        }
+    }
+}
+
+impl MutationContext for PackageMutationContext<'_> {
+    fn current_formula(
+        &self,
+        locator: &CellLocator,
+    ) -> std::result::Result<Option<String>, String> {
+        Ok(self.resolved_cell(locator)?.and_then(|cell| cell.formula))
+    }
+
+    fn resolve_reference(
+        &self,
+        from: &CellLocator,
+        reference: &str,
+    ) -> std::result::Result<CellLocator, String> {
+        let (sheet, shape_id, cell_name) = if let Some((shape_id, cell_name)) = reference
+            .strip_prefix("Sheet.")
+            .and_then(|reference| reference.split_once('!'))
+        {
+            (
+                from.sheet.clone(),
+                Some(
+                    shape_id
+                        .parse()
+                        .map_err(|_| "invalid Sheet reference".to_owned())?,
+                ),
+                cell_name,
+            )
+        } else if let Some(cell_name) = reference.strip_prefix("ThePage!") {
+            (from.sheet.clone(), None, cell_name)
+        } else if let Some(cell_name) = reference.strip_prefix("TheDoc!") {
+            (CellSheet::Document, None, cell_name)
+        } else {
+            (from.sheet.clone(), from.shape_id, reference)
+        };
+        let (section, row, cell_name) = split_reference(cell_name);
+        let target = CellLocator {
+            sheet,
+            shape_id,
+            section,
+            row,
+            cell_name,
+        };
+        self.resolved_cell(&target)?
+            .ok_or_else(|| format!("SETATREF target does not exist: {reference}"))?;
+        Ok(target)
+    }
+
+    fn lock_enabled(&self, locator: &CellLocator, lock: &str) -> std::result::Result<bool, String> {
+        if lock.is_empty() {
+            return Ok(false);
+        }
+        let Some(cell) = self.resolved_cell(&CellLocator {
+            sheet: locator.sheet.clone(),
+            shape_id: locator.shape_id,
+            section: None,
+            row: None,
+            cell_name: lock.to_owned(),
+        })?
+        else {
+            return Ok(false);
+        };
+        Ok(cell.value.as_deref().is_some_and(|value| value != "0"))
+    }
+}
+
+fn sheet_path(package: &VsdxPackage, sheet: &CellSheet) -> std::result::Result<String, String> {
+    match sheet {
+        CellSheet::Page(id) => package
+            .page_part_ids
+            .iter()
+            .find_map(|(path, candidate)| (*candidate == *id).then(|| path.clone()))
+            .ok_or_else(|| "page does not exist".to_owned()),
+        CellSheet::Document => Ok(package.document_part_path.clone()),
+        CellSheet::Master(_) => Err("master sheets are unsupported mutation targets".to_owned()),
+    }
+}
+
+fn locator_key(locator: &CellLocator) -> String {
+    match (&locator.section, &locator.row) {
+        (Some(section), Some(CellRow::Name(row))) => {
+            format!("{section}.{row}.{}", locator.cell_name)
+        }
+        (Some(section), Some(CellRow::Index(row))) => {
+            format!("{section}.{}{}", locator.cell_name, row)
+        }
+        _ => locator.cell_name.clone(),
+    }
+}
+
+fn split_reference(reference: &str) -> (Option<String>, Option<CellRow>, String) {
+    let Some((section, rest)) = reference.split_once('.') else {
+        return (None, None, reference.to_owned());
+    };
+    if section == "User" || section == "Prop" || section == "Actions" {
+        return (
+            Some(section.to_owned()),
+            Some(CellRow::Name(rest.to_owned())),
+            "Value".to_owned(),
+        );
+    }
+    (None, None, reference.to_owned())
 }
 
 pub struct Page<'a> {
