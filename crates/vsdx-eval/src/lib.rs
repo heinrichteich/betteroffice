@@ -57,6 +57,9 @@ pub struct Diagnostic {
 /// is applied before formulas are evaluated.
 pub trait References {
     fn formula(&self, name: &str) -> Option<&str>;
+    fn value(&self, _name: &str) -> Option<(&str, Option<&str>)> {
+        None
+    }
 }
 impl References for ResolvedShape {
     fn formula(&self, name: &str) -> Option<&str> {
@@ -67,7 +70,27 @@ impl References for ResolvedShape {
                 .and_then(|s| s.rows.values().find_map(|r| r.cells.get(cell)))
         });
         match direct.or(sectioned) {
-            Some(Lookup::Found(value)) => value.cell.formula.as_deref(),
+            Some(Lookup::Found(value)) => value
+                .cell
+                .formula
+                .as_deref()
+                .filter(|formula| !formula.eq_ignore_ascii_case("Inh")),
+            _ => None,
+        }
+    }
+    fn value(&self, name: &str) -> Option<(&str, Option<&str>)> {
+        let direct = self.cells.get(name);
+        let sectioned = name.split_once('.').and_then(|(section, cell)| {
+            self.sections
+                .get(section)
+                .and_then(|s| s.rows.values().find_map(|r| r.cells.get(cell)))
+        });
+        match direct.or(sectioned) {
+            Some(Lookup::Found(cell)) => cell
+                .cell
+                .value
+                .as_deref()
+                .map(|value| (value, cell.cell.unit.as_deref())),
             _ => None,
         }
     }
@@ -156,6 +179,9 @@ impl<R: References> Engine<'_, R> {
             Expr::Number(n, u) => number(*n, *u),
             Expr::String(_) => unsupported("string values are not display numbers"),
             Expr::Reference(name) => {
+                if name.eq_ignore_ascii_case("Inh") {
+                    return unsupported("Inh requires host-cell inheritance context");
+                }
                 if let Some(value) = self.memo.get(name) {
                     return value.clone();
                 }
@@ -167,7 +193,10 @@ impl<R: References> Engine<'_, R> {
                         Ok(e) => self.expr(&e, depth + 1),
                         Err(e) => Evaluation::Error(e),
                     },
-                    None => err(format!("unresolved reference {name}")),
+                    None => self.refs.value(name).map_or_else(
+                        || err(format!("unresolved reference {name}")),
+                        |(value, unit)| cell_value(value, unit),
+                    ),
                 };
                 self.active.remove(name);
                 self.memo.insert(name.clone(), result.clone());
@@ -612,6 +641,18 @@ impl<R: References> Engine<'_, R> {
 fn number(number: f64, unit: Unit) -> Evaluation {
     numeric_result(number, unit, false)
 }
+fn cell_value(value: &str, unit_name: Option<&str>) -> Evaluation {
+    if let Some(color) = parse_color(value) {
+        return result(Value::Color(color), false);
+    }
+    let Ok(value) = value.parse::<f64>() else {
+        return unsupported("cell value is not a supported display literal");
+    };
+    let Some((unit, scale)) = unit(unit_name.unwrap_or("")) else {
+        return unsupported("cell value has an unsupported unit");
+    };
+    number(value * scale, unit)
+}
 fn numeric_result(number: f64, unit: Unit, guarded: bool) -> Evaluation {
     if number.is_finite() {
         result(Value::Number(Number { number, unit }), guarded)
@@ -981,7 +1022,8 @@ impl<'a> Parser<'a> {
 mod tests {
     use super::*;
     use std::fs;
-    use vsdx_parse::{Shape, Sheet, parse_vsdx};
+    use vsdx_parse::{Cell, Shape, Sheet, parse_vsdx};
+    use vsdx_resolve::Resolver;
 
     fn limits() -> ParseLimits {
         ParseLimits::default()
@@ -1175,6 +1217,39 @@ mod tests {
     }
 
     #[test]
+    fn resolves_shape_cell_literals_without_treating_inh_as_a_reference() {
+        let mut shape = ResolvedShape::default();
+        shape.cells.insert(
+            "Width".into(),
+            Lookup::Found(vsdx_resolve::ResolvedCell {
+                cell: vsdx_parse::Cell {
+                    name: "Width".into(),
+                    formula: None,
+                    value: Some("2".into()),
+                    unit: Some("in".into()),
+                    del: false,
+                    other_attrs: Vec::new(),
+                },
+                provenance: vsdx_resolve::Provenance::Local,
+            }),
+        );
+        assert_eq!(
+            evaluate("Width + 1 in", &shape, &limits()),
+            Evaluation::Evaluated(Evaluated {
+                value: Value::Number(Number {
+                    number: 3.0,
+                    unit: Unit::Inches,
+                }),
+                guarded: false,
+            })
+        );
+        assert!(matches!(
+            evaluate("Inh", &shape, &limits()),
+            Evaluation::Unsupported(_)
+        ));
+    }
+
+    #[test]
     fn evaluates_documented_colour_transforms() {
         for formula in [
             "LUMDIFF(RGB(255,255,255),RGB(0,0,0))",
@@ -1277,14 +1352,7 @@ mod tests {
                 "missing corpus file: {file}"
             );
         }
-        let mut ast_ok = 0_usize;
-        let mut statically_unsupported = 0_usize;
-        let mut eval_unsupported = 0_usize;
-        let mut errors = 0_usize;
-        let mut total = 0_usize;
-        let mut unsupported_names = BTreeMap::new();
-        let mut error_kinds = BTreeMap::<String, usize>::new();
-        let mut unresolved_references = BTreeMap::<String, usize>::new();
+        let mut measurement = CorpusMeasurement::default();
         for file in files {
             let path = directory.join(file);
             let package = parse_vsdx(&fs::read(&path).expect("read corpus file"))
@@ -1295,47 +1363,113 @@ mod tests {
                 .chain(package.style_sheets.iter())
                 .chain(package.page_sheets.values())
                 .chain(package.master_sheets.values())
-                .chain(package.page_contents.values())
-                .chain(package.master_contents.values())
             {
-                for formula in formulas(sheet) {
-                    total += 1;
-                    if let Ok(expression) = parse(formula, &limits()) {
-                        ast_ok += 1;
-                        if has_unsupported(&expression) {
-                            statically_unsupported += 1;
-                            collect_unsupported(&expression, &mut unsupported_names);
-                        }
+                let refs = sheet_references(sheet);
+                for formula in sheet_formulas(sheet) {
+                    measurement.record(formula, evaluate(formula, &refs, &limits()));
+                }
+            }
+            for (page, sheet) in &package.page_contents {
+                let refs = sheet_references(sheet);
+                for formula in sheet_formulas(sheet) {
+                    measurement.record(formula, evaluate(formula, &refs, &limits()));
+                }
+                let resolver = Resolver::new(&package);
+                for shape in shapes(sheet) {
+                    let resolved = resolver
+                        .resolve_shape(page, shape.id)
+                        .expect("resolve corpus shape");
+                    for formula in shape_formulas(shape) {
+                        measurement.record(
+                            formula,
+                            evaluate_with_shape_package_theme(
+                                formula,
+                                &resolved,
+                                &limits(),
+                                &resolved,
+                                &package,
+                            ),
+                        );
                     }
-                    match evaluate(formula, &BTreeMap::<String, String>::new(), &limits()) {
-                        Evaluation::Evaluated(_) => {}
-                        Evaluation::Unsupported(_) => eval_unsupported += 1,
-                        Evaluation::Error(error) => {
-                            errors += 1;
-                            let kind = classify_error(&error.message, &mut unresolved_references);
-                            *error_kinds.entry(kind).or_default() += 1;
-                        }
+                }
+            }
+            for sheet in package.master_contents.values() {
+                let refs = sheet_references(sheet);
+                for formula in sheet_formulas(sheet) {
+                    measurement.record(formula, evaluate(formula, &refs, &limits()));
+                }
+                for shape in shapes(sheet) {
+                    let refs = shape_references(shape);
+                    for formula in shape_formulas(shape) {
+                        measurement.record(formula, evaluate(formula, &refs, &limits()));
                     }
                 }
             }
         }
         eprintln!(
-            "VSDX corpus formulas: ast_ok={ast_ok} statically_unsupported={statically_unsupported} eval_unsupported={eval_unsupported} errors={errors} total={total}"
+            "VSDX corpus formulas: ast_ok={} statically_unsupported={} eval_unsupported={} errors={} total={}",
+            measurement.ast_ok,
+            measurement.statically_unsupported,
+            measurement.eval_unsupported,
+            measurement.errors,
+            measurement.total,
         );
-        let mut top_unsupported = unsupported_names.into_iter().collect::<Vec<_>>();
+        let mut top_unsupported = measurement
+            .unsupported_names
+            .into_iter()
+            .collect::<Vec<_>>();
         top_unsupported
             .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
         eprintln!("VSDX corpus top unsupported constructs: {top_unsupported:?}");
-        let mut top_errors = error_kinds.into_iter().collect::<Vec<_>>();
+        let mut top_errors = measurement.error_kinds.into_iter().collect::<Vec<_>>();
         top_errors.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
         top_errors.truncate(15);
         eprintln!("VSDX corpus top error kinds: {top_errors:?}");
-        let mut top_references = unresolved_references.into_iter().collect::<Vec<_>>();
+        let mut top_references = measurement
+            .unresolved_references
+            .into_iter()
+            .collect::<Vec<_>>();
         top_references
             .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
         top_references.truncate(15);
         eprintln!("VSDX corpus top unresolved references: {top_references:?}");
-        assert_eq!(total, 6_992, "corpus formula denominator changed");
+        assert_eq!(
+            measurement.total, 6_992,
+            "corpus formula denominator changed"
+        );
+    }
+
+    #[derive(Default)]
+    struct CorpusMeasurement {
+        ast_ok: usize,
+        statically_unsupported: usize,
+        eval_unsupported: usize,
+        errors: usize,
+        total: usize,
+        unsupported_names: BTreeMap<String, usize>,
+        error_kinds: BTreeMap<String, usize>,
+        unresolved_references: BTreeMap<String, usize>,
+    }
+    impl CorpusMeasurement {
+        fn record(&mut self, formula: &str, evaluation: Evaluation) {
+            self.total += 1;
+            if let Ok(expression) = parse(formula, &limits()) {
+                self.ast_ok += 1;
+                if has_unsupported(&expression) {
+                    self.statically_unsupported += 1;
+                    collect_unsupported(&expression, &mut self.unsupported_names);
+                }
+            }
+            match evaluation {
+                Evaluation::Evaluated(_) => {}
+                Evaluation::Unsupported(_) => self.eval_unsupported += 1,
+                Evaluation::Error(error) => {
+                    self.errors += 1;
+                    let kind = classify_error(&error.message, &mut self.unresolved_references);
+                    *self.error_kinds.entry(kind).or_default() += 1;
+                }
+            }
+        }
     }
 
     fn classify_error(
@@ -1371,7 +1505,7 @@ mod tests {
         format!("other: {message}")
     }
 
-    fn formulas(sheet: &Sheet) -> Vec<&str> {
+    fn sheet_formulas(sheet: &Sheet) -> Vec<&str> {
         let mut values = sheet
             .cells()
             .filter_map(|cell| cell.formula.as_deref())
@@ -1381,27 +1515,65 @@ mod tests {
                 values.extend(row.cells().filter_map(|cell| cell.formula.as_deref()));
             }
         }
-        for shape in sheet.shapes() {
-            shape_formulas(shape, &mut values);
-        }
         values
     }
-    fn shape_formulas<'a>(shape: &'a Shape, values: &mut Vec<&'a str>) {
-        values.extend(shape.cells().filter_map(|cell| cell.formula.as_deref()));
+    fn shape_formulas(shape: &Shape) -> Vec<&str> {
+        let mut values = shape
+            .cells()
+            .filter_map(|cell| cell.formula.as_deref())
+            .collect::<Vec<_>>();
         for section in shape.sections() {
             for row in section.rows() {
                 values.extend(row.cells().filter_map(|cell| cell.formula.as_deref()));
             }
         }
+        values
+    }
+    fn shapes(sheet: &Sheet) -> Vec<&Shape> {
+        let mut values = Vec::new();
+        for shape in sheet.shapes() {
+            collect_shapes(shape, &mut values);
+        }
+        values
+    }
+    fn collect_shapes<'a>(shape: &'a Shape, values: &mut Vec<&'a Shape>) {
+        values.push(shape);
         for child in &shape.children {
             if let vsdx_parse::ShapeChild::Shapes(children) = child {
                 for child in children {
                     if let vsdx_parse::ShapesChild::Shape(shape) = child {
-                        shape_formulas(shape, values);
+                        collect_shapes(shape, values);
                     }
                 }
             }
         }
+    }
+    fn sheet_references(sheet: &Sheet) -> BTreeMap<String, String> {
+        references(
+            sheet.cells().chain(
+                sheet
+                    .sections()
+                    .flat_map(|section| section.rows().flat_map(|row| row.cells())),
+            ),
+        )
+    }
+    fn shape_references(shape: &Shape) -> BTreeMap<String, String> {
+        references(
+            shape.cells().chain(
+                shape
+                    .sections()
+                    .flat_map(|section| section.rows().flat_map(|row| row.cells())),
+            ),
+        )
+    }
+    fn references<'a>(cells: impl Iterator<Item = &'a Cell>) -> BTreeMap<String, String> {
+        cells
+            .filter_map(|cell| {
+                cell.formula
+                    .as_ref()
+                    .map(|formula| (cell.name.clone(), formula.clone()))
+            })
+            .collect()
     }
     fn has_unsupported(expression: &Expr) -> bool {
         match expression {
