@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use quick_xml::events::{BytesCData, BytesStart, BytesText, Event};
-use quick_xml::{Reader, Writer, XmlVersion};
+use quick_xml::name::ResolveResult;
+use quick_xml::{NsReader, Reader, Writer, XmlVersion};
 
 use crate::{rezip_parts, unzip_parts};
 
@@ -112,7 +113,7 @@ pub fn detect_package_kind(parts: &[(String, Vec<u8>)]) -> Result<DocumentKind, 
         .iter()
         .find(|(path, _)| path.eq_ignore_ascii_case("[Content_Types].xml"))
         .ok_or(DocumentKindError::MissingContentTypes)?;
-    let mut reader = Reader::from_reader(bytes.as_slice());
+    let mut reader = NsReader::from_reader(bytes.as_slice());
     let mut kinds = BTreeSet::new();
     let mut overrides = BTreeMap::new();
     let mut defaults = BTreeMap::new();
@@ -120,16 +121,17 @@ pub fn detect_package_kind(parts: &[(String, Vec<u8>)]) -> Result<DocumentKind, 
     let mut content_types_root = false;
     loop {
         match reader
-            .read_event()
+            .read_resolved_event()
             .map_err(|error| DocumentKindError::InvalidContentTypes(error.to_string()))?
         {
-            Event::Start(start) => {
+            (namespace, Event::Start(start)) => {
                 let local = start.name().local_name();
                 if depth == 0 {
                     content_types_root =
-                        local.as_ref() == b"Types" && has_content_types_namespace(&reader, &start)?;
+                        local.as_ref() == b"Types" && is_content_types_namespace(&namespace);
                 } else if content_types_root
                     && depth == 1
+                    && is_content_types_namespace(&namespace)
                     && matches!(local.as_ref(), b"Override" | b"Default")
                 {
                     let values = content_type_attributes(&reader, &start)?;
@@ -155,13 +157,14 @@ pub fn detect_package_kind(parts: &[(String, Vec<u8>)]) -> Result<DocumentKind, 
                 }
                 depth += 1;
             }
-            Event::Empty(start) => {
+            (namespace, Event::Empty(start)) => {
                 let local = start.name().local_name();
                 if depth == 0 {
                     content_types_root =
-                        local.as_ref() == b"Types" && has_content_types_namespace(&reader, &start)?;
+                        local.as_ref() == b"Types" && is_content_types_namespace(&namespace);
                 } else if content_types_root
                     && depth == 1
+                    && is_content_types_namespace(&namespace)
                     && matches!(local.as_ref(), b"Override" | b"Default")
                 {
                     let values = content_type_attributes(&reader, &start)?;
@@ -186,13 +189,13 @@ pub fn detect_package_kind(parts: &[(String, Vec<u8>)]) -> Result<DocumentKind, 
                     }
                 }
             }
-            Event::End(_) => depth = depth.saturating_sub(1),
-            Event::DocType(_) => {
+            (_, Event::End(_)) => depth = depth.saturating_sub(1),
+            (_, Event::DocType(_)) => {
                 return Err(DocumentKindError::InvalidContentTypes(
                     "DTD is forbidden".to_owned(),
                 ));
             }
-            Event::Eof => break,
+            (_, Event::Eof) => break,
             _ => {}
         }
     }
@@ -233,16 +236,9 @@ pub fn detect_package_kind(parts: &[(String, Vec<u8>)]) -> Result<DocumentKind, 
     }
 }
 
-fn has_content_types_namespace(
-    reader: &Reader<&[u8]>,
-    start: &BytesStart<'_>,
-) -> Result<bool, DocumentKindError> {
-    Ok(content_type_attributes(reader, start)?
-        .iter()
-        .any(|(key, value)| {
-            key == "xmlns"
-                && value == "http://schemas.openxmlformats.org/package/2006/content-types"
-        }))
+fn is_content_types_namespace(namespace: &ResolveResult<'_>) -> bool {
+    matches!(namespace, ResolveResult::Bound(namespace)
+        if namespace.0 == b"http://schemas.openxmlformats.org/package/2006/content-types")
 }
 
 fn content_type_attributes(
@@ -1024,6 +1020,36 @@ mod tests {
             detect_package_kind(&foreign),
             Err(DocumentKindError::MissingMainDocumentKind)
         );
+    }
+
+    #[test]
+    fn ignores_foreign_namespaced_direct_content_type_entries() {
+        let parts = vec![(
+            "[Content_Types].xml".to_owned(),
+            br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types' xmlns:evil='urn:evil'><evil:Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec(),
+        )];
+        assert_eq!(
+            detect_package_kind(&parts),
+            Err(DocumentKindError::MissingMainDocumentKind)
+        );
+    }
+
+    #[test]
+    fn accepts_prefixed_content_type_declarations() {
+        let parts = vec![(
+            "[Content_Types].xml".to_owned(),
+            br#"<ct:Types xmlns:ct='http://schemas.openxmlformats.org/package/2006/content-types'><ct:Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></ct:Types>"#.to_vec(),
+        )];
+        assert_eq!(detect_package_kind(&parts), Ok(DocumentKind::Vsdx));
+    }
+
+    #[test]
+    fn accepts_default_namespaced_content_type_declarations() {
+        let parts = vec![(
+            "[Content_Types].xml".to_owned(),
+            br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec(),
+        )];
+        assert_eq!(detect_package_kind(&parts), Ok(DocumentKind::Vsdx));
     }
 
     #[test]
