@@ -122,6 +122,87 @@ impl References for ResolvedShape {
     }
 }
 
+pub struct DocumentReferences<'a, R> {
+    references: &'a R,
+    document: Option<&'a ResolvedShape>,
+}
+impl<'a, R> DocumentReferences<'a, R> {
+    pub fn new(references: &'a R, document: Option<&'a ResolvedShape>) -> Self {
+        Self {
+            references,
+            document,
+        }
+    }
+    fn document_name(name: &str) -> Option<&str> {
+        name.strip_prefix("TheDoc!")
+    }
+}
+impl<R: References> References for DocumentReferences<'_, R> {
+    fn formula(&self, name: &str) -> Option<&str> {
+        match Self::document_name(name) {
+            Some(name) => self.document?.formula(name),
+            None => self.references.formula(name),
+        }
+    }
+    fn exhausted_inheritance(&self, name: &str) -> bool {
+        match Self::document_name(name) {
+            Some(name) => self
+                .document
+                .is_some_and(|document| document.exhausted_inheritance(name)),
+            None => self.references.exhausted_inheritance(name),
+        }
+    }
+    fn value(&self, name: &str) -> Option<(&str, Option<&str>)> {
+        match Self::document_name(name) {
+            Some(name) => self.document?.value(name),
+            None => self.references.value(name),
+        }
+    }
+    fn formula_in(&self, sheet: Option<u32>, name: &str) -> Option<&str> {
+        match Self::document_name(name) {
+            Some(name) => self.document?.formula_in(sheet, name),
+            None => self.references.formula_in(sheet, name),
+        }
+    }
+    fn formula_in_scoped(
+        &self,
+        sheet: Option<u32>,
+        scope: Option<&str>,
+        name: &str,
+    ) -> Option<&str> {
+        if scope == Some("TheDoc") {
+            self.document?.formula_in(sheet, name)
+        } else {
+            self.references.formula_in_scoped(sheet, scope, name)
+        }
+    }
+    fn value_in(&self, sheet: Option<u32>, name: &str) -> Option<(&str, Option<&str>)> {
+        match Self::document_name(name) {
+            Some(name) => self.document?.value_in(sheet, name),
+            None => self.references.value_in(sheet, name),
+        }
+    }
+    fn value_in_scoped(
+        &self,
+        sheet: Option<u32>,
+        scope: Option<&str>,
+        name: &str,
+    ) -> Option<(&str, Option<&str>)> {
+        if scope == Some("TheDoc") {
+            self.document?.value_in(sheet, name)
+        } else {
+            self.references.value_in_scoped(sheet, scope, name)
+        }
+    }
+    fn reference_key(&self, sheet: Option<u32>, name: &str) -> String {
+        if name.starts_with("TheDoc!") {
+            name.into()
+        } else {
+            self.references.reference_key(sheet, name)
+        }
+    }
+}
+
 pub struct PageShapeReferences {
     shapes: BTreeMap<u32, ResolvedShape>,
     page: ResolvedShape,
@@ -167,6 +248,12 @@ pub struct ShapeReferences<'a> {
 }
 impl ShapeReferences<'_> {
     fn target(&self, sheet: Option<u32>, name: &str) -> Option<&ResolvedShape> {
+        if let Some((sheet, _)) = name
+            .strip_prefix("Sheet.")
+            .and_then(|name| name.split_once('!'))
+        {
+            return self.shapes.get(&sheet.parse().ok()?);
+        }
         if let Some((scope, _)) = name.split_once('!') {
             let sheet = match scope {
                 "ThePage" => self.page,
@@ -175,13 +262,7 @@ impl ShapeReferences<'_> {
             };
             return Some(sheet);
         }
-        let sheet = match name
-            .strip_prefix("Sheet.")
-            .and_then(|name| name.split_once('!'))
-        {
-            Some((sheet, _)) => sheet.parse().ok()?,
-            None => sheet.unwrap_or(self.current),
-        };
+        let sheet = sheet.unwrap_or(self.current);
         self.shapes.get(&sheet)
     }
     fn cell_name<'a>(&self, name: &'a str) -> &'a str {
@@ -1332,6 +1413,20 @@ mod tests {
         }
     }
 
+    fn resolved_value(name: &str, value: &str) -> Lookup {
+        Lookup::Found(ResolvedCell {
+            cell: Cell {
+                name: name.into(),
+                formula: None,
+                value: Some(value.into()),
+                unit: None,
+                del: false,
+                other_attrs: Vec::new(),
+            },
+            provenance: Provenance::Local,
+        })
+    }
+
     #[test]
     fn parses_literals_references_and_precedence() {
         assert_eq!(number("1 + 2 * 3").number, 7.0);
@@ -1430,8 +1525,12 @@ mod tests {
             cells: BTreeMap::from([("DocScale".into(), value("3"))]),
             ..Default::default()
         };
+        let shape = ResolvedShape {
+            cells: BTreeMap::from([("Width".into(), formula("Width", "2"))]),
+            ..Default::default()
+        };
         let page_refs = PageShapeReferences {
-            shapes: BTreeMap::new(),
+            shapes: BTreeMap::from([(5, shape)]),
             page,
             document: Some(document),
         };
@@ -1440,6 +1539,7 @@ mod tests {
         assert_eq!(number_with(&refs, "ThePage!PageWidth").number, 10.0);
         assert_eq!(number_with(&refs, "TheDoc!DocScale").number, 3.0);
         assert_eq!(number_with(&refs, "ThePage!User.x").number, 7.0);
+        assert_eq!(refs.formula("Sheet.5!Width"), Some("2"));
         for name in ["ThePage!Unknown", "TheDoc!Unknown"] {
             assert!(matches!(
                 evaluate(name, &refs, &limits()),
@@ -1448,8 +1548,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn resolves_document_references_without_a_page_context() {
+        let document = ResolvedShape {
+            cells: BTreeMap::from([("DocScale".into(), resolved_value("DocScale", "3"))]),
+            sections: BTreeMap::from([(
+                "User".into(),
+                ResolvedSection {
+                    name: "User".into(),
+                    rows: BTreeMap::from([(
+                        "N:x".into(),
+                        ResolvedRow {
+                            key: "N:x".into(),
+                            cells: BTreeMap::from([("Value".into(), resolved_value("Value", "7"))]),
+                            ..Default::default()
+                        },
+                    )]),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let master = ResolvedShape::default();
+        let master_refs = DocumentReferences::new(&master, Some(&document));
+        assert_eq!(
+            number_with_cell(&master_refs, "Width", "TheDoc!DocScale").number,
+            3.0
+        );
+        assert_eq!(
+            number_with_cell(&master_refs, "Width", "TheDoc!User.x").number,
+            7.0
+        );
+        assert!(matches!(
+            evaluate_cell("Width", "ThePage!PageWidth", &master_refs, &limits()),
+            Evaluation::Error(Diagnostic { message }) if message == "unresolved reference ThePage!PageWidth"
+        ));
+
+        let style_sheet = BTreeMap::from([("Width".into(), "TheDoc!DocScale".into())]);
+        let style_refs = DocumentReferences::new(&style_sheet, Some(&document));
+        assert_eq!(number_with(&style_refs, "Width").number, 3.0);
+
+        let page_sheet = BTreeMap::from([("Height".into(), "TheDoc!DocScale".into())]);
+        let page_refs = DocumentReferences::new(&page_sheet, Some(&document));
+        assert_eq!(number_with(&page_refs, "Height").number, 3.0);
+    }
+
     fn number_with(refs: &impl References, formula: &str) -> Number {
         match evaluate(formula, refs, &limits()) {
+            Evaluation::Evaluated(Evaluated {
+                value: Value::Number(value),
+                ..
+            }) => value,
+            value => panic!("expected value, got {value:?}"),
+        }
+    }
+
+    fn number_with_cell(refs: &impl References, name: &str, formula: &str) -> Number {
+        match evaluate_cell(name, formula, refs, &limits()) {
             Evaluation::Evaluated(Evaluated {
                 value: Value::Number(value),
                 ..
@@ -1792,6 +1947,13 @@ mod tests {
             let path = directory.join(file);
             let package = parse_vsdx(&fs::read(&path).expect("read corpus file"))
                 .expect("parse corpus package");
+            let resolver = Resolver::new(&package);
+            let document = package
+                .document_sheet
+                .as_ref()
+                .map(|sheet| resolver.resolve_sheet(sheet))
+                .transpose()
+                .expect("resolve corpus document sheet");
             for sheet in package
                 .document_sheet
                 .iter()
@@ -1800,6 +1962,7 @@ mod tests {
                 .chain(package.master_sheets.values())
             {
                 let refs = sheet_references(sheet);
+                let refs = DocumentReferences::new(&refs, document.as_ref());
                 for (name, formula) in sheet_formulas(sheet) {
                     measurement.record(
                         formula,
@@ -1815,6 +1978,7 @@ mod tests {
             }
             for (page, sheet) in &package.page_contents {
                 let refs = sheet_references(sheet);
+                let refs = DocumentReferences::new(&refs, document.as_ref());
                 for (name, formula) in sheet_formulas(sheet) {
                     measurement.record(
                         formula,
@@ -1827,7 +1991,6 @@ mod tests {
                         ),
                     );
                 }
-                let resolver = Resolver::new(&package);
                 let page_refs =
                     PageShapeReferences::new(&resolver, page).expect("resolve corpus page shapes");
                 for shape in shapes(sheet) {
@@ -1850,6 +2013,7 @@ mod tests {
             }
             for sheet in package.master_contents.values() {
                 let refs = sheet_references(sheet);
+                let refs = DocumentReferences::new(&refs, document.as_ref());
                 for (name, formula) in sheet_formulas(sheet) {
                     measurement.record(
                         formula,
@@ -1862,7 +2026,6 @@ mod tests {
                         ),
                     );
                 }
-                let resolver = Resolver::new(&package);
                 for shape in shapes(sheet) {
                     let resolved = resolver
                         .resolve_shape_in_sheet(shape, sheet)
@@ -1873,7 +2036,7 @@ mod tests {
                             evaluate_cell_with_shape_package_theme(
                                 &name,
                                 formula,
-                                &resolved,
+                                &DocumentReferences::new(&resolved, document.as_ref()),
                                 &limits(),
                                 &resolved,
                                 &package,
