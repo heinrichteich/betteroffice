@@ -289,6 +289,7 @@ fn validate_state_vector_entry_count(bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vsdx_parse::{CellLocator, CellRow, CellSheet};
     use yrs::{Any, Array, ArrayPrelim, Map, MapPrelim, Transact};
 
     fn session() -> DiagramSession {
@@ -338,6 +339,17 @@ mod tests {
     }
 
     fn add_cell(session: &DiagramSession, name: &str, formula: Option<&str>, value: Option<&str>) {
+        add_cell_at(session, name, None, None, formula, value);
+    }
+
+    fn add_cell_at(
+        session: &DiagramSession,
+        name: &str,
+        section: Option<&str>,
+        row: Option<CellRow>,
+        formula: Option<&str>,
+        value: Option<&str>,
+    ) {
         let mut txn = session.doc.transact_mut_with(HYDRATE_ORIGIN);
         let sheets = txn.get_map(SHEETS).unwrap();
         let shape = match sheets.get(&txn, "page:1:shape:1") {
@@ -348,8 +360,26 @@ mod tests {
             Some(yrs::Out::YMap(cells)) => cells,
             _ => unreachable!(),
         };
-        let cell = cells.insert(&mut txn, name, MapPrelim::default());
+        let key = match (&section, &row) {
+            (Some(section), Some(CellRow::Index(row))) => {
+                format!("{section}\u{1f}IX:{row}\u{1f}{name}")
+            }
+            (Some(section), Some(CellRow::Name(row))) => {
+                format!("{section}\u{1f}N:{row}\u{1f}{name}")
+            }
+            _ => name.to_owned(),
+        };
+        let cell = cells.insert(&mut txn, key.as_str(), MapPrelim::default());
         cell.insert(&mut txn, "name", name);
+        if let Some(section) = section {
+            cell.insert(&mut txn, "section", section);
+        }
+        if let Some(row) = row {
+            match row {
+                CellRow::Index(row) => cell.insert(&mut txn, "rowIndex", row as f64),
+                CellRow::Name(row) => cell.insert(&mut txn, "rowName", row),
+            };
+        }
         if let Some(formula) = formula {
             cell.insert(&mut txn, "formula", formula);
         }
@@ -396,6 +426,139 @@ mod tests {
                 .resize_shape(&EditCtx::local("a"), "page:1", "page:1:shape:1", "2", "3")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn move_refusal_leaves_both_axes_unchanged() {
+        let session = session();
+        add_cell(&session, "PinX", Some("1"), None);
+        add_cell(&session, "PinY", Some("1"), None);
+        add_cell(&session, "LockMoveY", Some("1"), None);
+        assert!(
+            session
+                .move_shape(&EditCtx::local("a"), "page:1", "page:1:shape:1", "2", "3")
+                .is_err()
+        );
+        let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+        assert_eq!(
+            cells
+                .iter()
+                .find(|cell| cell.name == "PinX")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            cells
+                .iter()
+                .find(|cell| cell.name == "PinY")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn resize_refusal_leaves_both_axes_unchanged() {
+        let session = session();
+        add_cell(&session, "Width", Some("1"), None);
+        add_cell(&session, "Height", Some("1"), None);
+        add_cell(&session, "LockHeight", Some("1"), None);
+        assert!(
+            session
+                .resize_shape(&EditCtx::local("a"), "page:1", "page:1:shape:1", "2", "3")
+                .is_err()
+        );
+        let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+        assert_eq!(
+            cells
+                .iter()
+                .find(|cell| cell.name == "Width")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            cells
+                .iter()
+                .find(|cell| cell.name == "Height")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn second_axis_guard_leaves_gesture_unchanged() {
+        let session = session();
+        add_cell(&session, "PinX", Some("1"), None);
+        add_cell(&session, "PinY", Some("GUARD(1)"), None);
+        assert!(
+            session
+                .move_shape(&EditCtx::local("a"), "page:1", "page:1:shape:1", "2", "3")
+                .is_err()
+        );
+        let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+        assert_eq!(
+            cells
+                .iter()
+                .find(|cell| cell.name == "PinX")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            cells
+                .iter()
+                .find(|cell| cell.name == "PinY")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("GUARD(1)")
+        );
+    }
+
+    #[test]
+    fn guarded_section_row_cell_refuses_edits() {
+        let session = session();
+        let locator = CellLocator {
+            sheet: CellSheet::Page(1),
+            shape_id: Some(1),
+            section: Some("Geometry".to_owned()),
+            row: Some(CellRow::Index(0)),
+            cell_name: "X".to_owned(),
+        };
+        add_cell_at(
+            &session,
+            "X",
+            Some("Geometry"),
+            Some(CellRow::Index(0)),
+            Some("GUARD(1)"),
+            None,
+        );
+        assert!(
+            session
+                .set_cell_formula_at(
+                    &EditCtx::local("a"),
+                    "page:1",
+                    "page:1:shape:1",
+                    locator.clone(),
+                    "2"
+                )
+                .is_err()
+        );
+        let snapshot = session.snapshot().unwrap();
+        let cell = snapshot.pages[0].shapes[0]
+            .cells
+            .iter()
+            .find(|cell| cell.locator == locator)
+            .unwrap();
+        assert_eq!(cell.formula.as_deref(), Some("GUARD(1)"));
     }
 
     #[test]
@@ -582,6 +745,84 @@ mod tests {
         left.apply_update_v1(&right_update).unwrap();
         right.apply_update_v1(&left_update).unwrap();
         assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+    }
+
+    #[test]
+    fn peers_converge_after_editing_distinct_section_row_cells() {
+        let seed = session();
+        let x = CellLocator {
+            sheet: CellSheet::Page(1),
+            shape_id: Some(1),
+            section: Some("Geometry".to_owned()),
+            row: Some(CellRow::Index(0)),
+            cell_name: "X".to_owned(),
+        };
+        let y = CellLocator {
+            cell_name: "Y".to_owned(),
+            ..x.clone()
+        };
+        add_cell_at(
+            &seed,
+            "X",
+            Some("Geometry"),
+            Some(CellRow::Index(0)),
+            Some("1"),
+            None,
+        );
+        add_cell_at(
+            &seed,
+            "Y",
+            Some("Geometry"),
+            Some(CellRow::Index(0)),
+            Some("1"),
+            None,
+        );
+        let state = seed.encode_state_as_update_v1();
+        let left = DiagramSession::open_from_update(&state, 11).unwrap();
+        let right = DiagramSession::open_from_update(&state, 12).unwrap();
+        left.set_cell_formula_at(&EditCtx::local("left"), "page:1", "page:1:shape:1", x, "2")
+            .unwrap();
+        right
+            .set_cell_formula_at(&EditCtx::local("right"), "page:1", "page:1:shape:1", y, "3")
+            .unwrap();
+        let left_update = left
+            .encode_diff_v1(&right.encode_state_vector_v1())
+            .unwrap();
+        let right_update = right
+            .encode_diff_v1(&left.encode_state_vector_v1())
+            .unwrap();
+        left.apply_update_v1(&right_update).unwrap();
+        right.apply_update_v1(&left_update).unwrap();
+        assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+    }
+
+    #[test]
+    fn grouped_child_cells_are_addressable_from_snapshots() {
+        let session = DiagramSession::open(
+            include_bytes!("../../vsdx-parse/tests/fixtures/nested-groups.vsdx"),
+            7,
+        )
+        .unwrap();
+        let parent = &session.snapshot().unwrap().pages[0].shapes[0];
+        let child = parent.children.first().unwrap();
+        let cell = child.cells.first().unwrap();
+        assert_eq!(cell.locator.shape_id, Some(child.source_id));
+        session
+            .set_cell_formula_at(
+                &EditCtx::local("a"),
+                "page:1",
+                &child.id,
+                cell.locator.clone(),
+                "42",
+            )
+            .unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let changed = snapshot.pages[0].shapes[0].children[0]
+            .cells
+            .iter()
+            .find(|candidate| candidate.locator == cell.locator)
+            .unwrap();
+        assert_eq!(changed.formula.as_deref(), Some("42"));
     }
 
     #[test]

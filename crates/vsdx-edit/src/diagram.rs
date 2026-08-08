@@ -276,10 +276,13 @@ impl DiagramSession {
         x_formula: impl Into<String>,
         y_formula: impl Into<String>,
     ) -> EditResult<[CellFormulaReceipt; 2]> {
-        Ok([
-            self.set_cell_formula(context, page_id, shape_id, "PinX", x_formula)?,
-            self.set_cell_formula(context, page_id, shape_id, "PinY", y_formula)?,
-        ])
+        self.set_cell_formula_pair(
+            context,
+            page_id,
+            shape_id,
+            ("PinX", x_formula.into(), MutationGesture::MoveX),
+            ("PinY", y_formula.into(), MutationGesture::MoveY),
+        )
     }
 
     pub fn resize_shape(
@@ -290,10 +293,17 @@ impl DiagramSession {
         width_formula: impl Into<String>,
         height_formula: impl Into<String>,
     ) -> EditResult<[CellFormulaReceipt; 2]> {
-        Ok([
-            self.set_cell_formula(context, page_id, shape_id, "Width", width_formula)?,
-            self.set_cell_formula(context, page_id, shape_id, "Height", height_formula)?,
-        ])
+        self.set_cell_formula_pair(
+            context,
+            page_id,
+            shape_id,
+            ("Width", width_formula.into(), MutationGesture::ResizeWidth),
+            (
+                "Height",
+                height_formula.into(),
+                MutationGesture::ResizeHeight,
+            ),
+        )
     }
 
     pub fn reorder_shape(
@@ -360,6 +370,61 @@ impl DiagramSession {
             from_index: None,
             to_index: Some(index),
         })
+    }
+
+    fn set_cell_formula_pair(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        first: (&str, String, MutationGesture),
+        second: (&str, String, MutationGesture),
+    ) -> EditResult<[CellFormulaReceipt; 2]> {
+        let mut txn = self.transact_for(context);
+        let context_for_policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
+        let decide =
+            |(name, formula, gesture): (&str, String, MutationGesture)| match decide_mutation(
+                &context_for_policy,
+                context_for_policy.locator(CellLocator {
+                    sheet: CellSheet::Page(0),
+                    shape_id: None,
+                    section: None,
+                    row: None,
+                    cell_name: name.to_owned(),
+                }),
+                gesture,
+                formula.clone(),
+                &ParseLimits::default(),
+            ) {
+                MutationOutcome::Allowed { target, .. } => Ok((target, formula)),
+                MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                    Err(EditError::InvalidState(reason))
+                }
+            };
+        let (first_target, first_formula) = decide(first)?;
+        let (second_target, second_formula) = decide(second)?;
+        let first_cell = cell_map(&mut txn, page_id, shape_id, &first_target)?;
+        let second_cell = cell_map(&mut txn, page_id, shape_id, &second_target)?;
+        let first_before = map_string(&first_cell, &txn, "formula");
+        let second_before = map_string(&second_cell, &txn, "formula");
+        first_cell.insert(&mut txn, "formula", first_formula.as_str());
+        second_cell.insert(&mut txn, "formula", second_formula.as_str());
+        Ok([
+            CellFormulaReceipt {
+                page_id: page_id.to_owned(),
+                shape_id: shape_id.to_owned(),
+                cell_name: first_target.cell_name,
+                before: first_before,
+                after: first_formula,
+            },
+            CellFormulaReceipt {
+                page_id: page_id.to_owned(),
+                shape_id: shape_id.to_owned(),
+                cell_name: second_target.cell_name,
+                before: second_before,
+                after: second_formula,
+            },
+        ])
     }
 }
 
@@ -585,31 +650,14 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
             let shape_id = array_string(&shape_order, &txn, shape_index).ok_or_else(|| {
                 EditError::InvalidState("shape order contains non-string".to_owned())
             })?;
-            let shape = map_ref(&sheets, &txn, &shape_id)?;
-            let cells = map_map(&shape, &txn, "cells")?;
-            let mut snapshots = Vec::new();
-            for (_key, value) in cells.iter(&txn) {
-                let Out::YMap(cell) = value else {
-                    return Err(EditError::InvalidState("cell is not a map".to_owned()));
-                };
-                if map_string(&cell, &txn, "section").is_some() {
-                    continue;
-                }
-                snapshots.push(CellSnapshot {
-                    name: map_string(&cell, &txn, "name").unwrap_or_default(),
-                    formula: map_string(&cell, &txn, "formula"),
-                    value: map_string(&cell, &txn, "value"),
-                });
-            }
-            snapshots.sort_by(|left, right| left.name.cmp(&right.name));
-            shapes.push(ShapeSnapshot {
-                id: shape_id,
-                source_id: map_number(&shape, &txn, "sourceId")
-                    .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
-                    as u32,
-                name: map_string(&shape, &txn, "name"),
-                cells: snapshots,
-            });
+            shapes.push(snapshot_shape(
+                &sheets,
+                &txn,
+                &shape_id,
+                id.strip_prefix("page:")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or_default(),
+            )?);
         }
         result.push(PageSnapshot {
             id,
@@ -619,6 +667,53 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
         });
     }
     Ok(DiagramSnapshot { pages: result })
+}
+
+fn snapshot_shape<T: ReadTxn>(
+    sheets: &MapRef,
+    txn: &T,
+    shape_id: &str,
+    page_id: u32,
+) -> EditResult<ShapeSnapshot> {
+    let shape = map_ref(sheets, txn, shape_id)?;
+    let source_id = map_number(&shape, txn, "sourceId")
+        .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
+        as u32;
+    let cells = map_map(&shape, txn, "cells")?;
+    let mut snapshots = Vec::new();
+    for (_key, value) in cells.iter(txn) {
+        let Out::YMap(cell) = value else {
+            return Err(EditError::InvalidState("cell is not a map".to_owned()));
+        };
+        let locator = cell_locator(&cell, txn, page_id, source_id)?;
+        snapshots.push(CellSnapshot {
+            name: locator.cell_name.clone(),
+            locator,
+            formula: map_string(&cell, txn, "formula"),
+            value: map_string(&cell, txn, "value"),
+        });
+    }
+    snapshots.sort_by_key(|cell| locator_key(&cell.locator));
+    let mut children = sheets
+        .iter(txn)
+        .filter_map(|(id, value)| match value {
+            Out::YMap(child)
+                if map_string(&child, txn, "parentId").as_deref() == Some(shape_id) =>
+            {
+                Some(id.to_owned())
+            }
+            _ => None,
+        })
+        .map(|id| snapshot_shape(sheets, txn, &id, page_id))
+        .collect::<EditResult<Vec<_>>>()?;
+    children.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(ShapeSnapshot {
+        id: shape_id.to_owned(),
+        source_id,
+        name: map_string(&shape, txn, "name"),
+        cells: snapshots,
+        children,
+    })
 }
 
 fn semantic_cell_edits(doc: &Doc) -> EditResult<Vec<vsdx_parse::SemanticCellEdit>> {

@@ -1,5 +1,6 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
+use vsdx_parse::{CellLocator, CellRow, CellSheet};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,6 +31,11 @@ impl EditCtx {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CellSnapshot {
+    #[serde(
+        serialize_with = "serialize_cell_locator",
+        deserialize_with = "deserialize_cell_locator"
+    )]
+    pub locator: CellLocator,
     pub name: String,
     pub formula: Option<String>,
     pub value: Option<String>,
@@ -42,6 +48,7 @@ pub struct ShapeSnapshot {
     pub source_id: u32,
     pub name: Option<String>,
     pub cells: Vec<CellSnapshot>,
+    pub children: Vec<ShapeSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -78,12 +85,88 @@ pub struct ShapeReceipt {
     pub to_index: Option<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ShapeDraft {
     pub source_id: u32,
     pub name: Option<String>,
     pub cells: Vec<CellSnapshot>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum SnapshotCellSheet {
+    Document,
+    Page(u32),
+    Master(u32),
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum SnapshotCellRow {
+    Index(u32),
+    Name(String),
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotCellLocator {
+    sheet: SnapshotCellSheet,
+    shape_id: Option<u32>,
+    section: Option<String>,
+    row: Option<SnapshotCellRow>,
+    cell_name: String,
+}
+
+impl From<&CellLocator> for SnapshotCellLocator {
+    fn from(locator: &CellLocator) -> Self {
+        Self {
+            sheet: match locator.sheet {
+                CellSheet::Document => SnapshotCellSheet::Document,
+                CellSheet::Page(id) => SnapshotCellSheet::Page(id),
+                CellSheet::Master(id) => SnapshotCellSheet::Master(id),
+            },
+            shape_id: locator.shape_id,
+            section: locator.section.clone(),
+            row: locator.row.as_ref().map(|row| match row {
+                CellRow::Index(id) => SnapshotCellRow::Index(*id),
+                CellRow::Name(name) => SnapshotCellRow::Name(name.clone()),
+            }),
+            cell_name: locator.cell_name.clone(),
+        }
+    }
+}
+
+impl From<SnapshotCellLocator> for CellLocator {
+    fn from(locator: SnapshotCellLocator) -> Self {
+        Self {
+            sheet: match locator.sheet {
+                SnapshotCellSheet::Document => CellSheet::Document,
+                SnapshotCellSheet::Page(id) => CellSheet::Page(id),
+                SnapshotCellSheet::Master(id) => CellSheet::Master(id),
+            },
+            shape_id: locator.shape_id,
+            section: locator.section,
+            row: locator.row.map(|row| match row {
+                SnapshotCellRow::Index(id) => CellRow::Index(id),
+                SnapshotCellRow::Name(name) => CellRow::Name(name),
+            }),
+            cell_name: locator.cell_name,
+        }
+    }
+}
+
+fn serialize_cell_locator<S>(locator: &CellLocator, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    SnapshotCellLocator::from(locator).serialize(serializer)
+}
+
+fn deserialize_cell_locator<'de, D>(deserializer: D) -> Result<CellLocator, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    SnapshotCellLocator::deserialize(deserializer).map(Into::into)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -58,6 +58,7 @@ fn assert_only_part_changed(before: &[u8], after: &[u8], changed: &str) {
 #[test]
 fn saves_crdt_session_edits_for_every_corpus_file() {
     let Ok(corpus) = std::env::var("VSDX_CORPUS_DIR") else {
+        eprintln!("warning: VSDX_CORPUS_DIR is unset; skipping corpus save bridge test");
         return;
     };
     for file in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
@@ -76,11 +77,11 @@ fn saves_crdt_session_edits_for_every_corpus_file() {
             .find(|cell| cell.formula.is_some())
             .unwrap();
         session
-            .set_cell_formula(
+            .set_cell_formula_at(
                 &EditCtx::local("test"),
                 &page.id,
                 &shape.id,
-                &cell.name,
+                cell.locator.clone(),
                 "42",
             )
             .unwrap();
@@ -101,7 +102,7 @@ fn saves_crdt_session_edits_for_every_corpus_file() {
             .unwrap()
             .cells
             .iter()
-            .find(|candidate| candidate.name == cell.name)
+            .find(|candidate| candidate.locator == cell.locator)
             .unwrap();
         assert_eq!(changed.formula.as_deref(), Some("42"), "{file}");
         assert_only_part_changed(&source, &saved, &page.source_part_path);
