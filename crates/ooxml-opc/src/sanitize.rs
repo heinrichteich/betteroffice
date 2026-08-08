@@ -10,7 +10,7 @@ pub fn sanitize_package(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 pub fn sanitize_package_for_format(data: &[u8], expected_format: &str) -> Result<Vec<u8>, String> {
-    if !matches!(expected_format, "docx" | "xlsx" | "pptx") {
+    if !matches!(expected_format, "docx" | "xlsx" | "pptx" | "vsdx") {
         return Err(format!("unsupported OOXML format: {expected_format}"));
     }
     sanitize_package_inner(data, Some(expected_format))
@@ -20,10 +20,11 @@ fn sanitize_package_inner(data: &[u8], expected_format: Option<&str>) -> Result<
     let mut parts = unzip_parts(data)?;
     let detected = detect_format(&parts)?;
     if let Some(expected) = expected_format
-        && detected != expected
+        && detected.format() != expected
     {
         return Err(format!(
-            "claimed {expected} content does not match detected {detected} package"
+            "claimed {expected} content does not match detected {} package",
+            detected.format()
         ));
     }
 
@@ -53,7 +54,32 @@ fn sanitize_package_inner(data: &[u8], expected_format: Option<&str>) -> Result<
     rezip_parts(&parts)
 }
 
-fn detect_format(parts: &[(String, Vec<u8>)]) -> Result<&'static str, String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DocumentKind {
+    Docx,
+    Xlsx,
+    Pptx,
+    Vsdx,
+    Vsdm,
+    Vssx,
+    Vstx,
+}
+
+impl DocumentKind {
+    fn format(self) -> &'static str {
+        match self {
+            Self::Docx => "docx",
+            Self::Xlsx => "xlsx",
+            Self::Pptx => "pptx",
+            Self::Vsdx => "vsdx",
+            Self::Vsdm => "vsdm",
+            Self::Vssx => "vssx",
+            Self::Vstx => "vstx",
+        }
+    }
+}
+
+fn detect_format(parts: &[(String, Vec<u8>)]) -> Result<DocumentKind, String> {
     if let Some((_, bytes)) = parts
         .iter()
         .find(|(path, _)| path.eq_ignore_ascii_case("[Content_Types].xml"))
@@ -62,27 +88,45 @@ fn detect_format(parts: &[(String, Vec<u8>)]) -> Result<&'static str, String> {
         if content_types.contains("wordprocessingml.document.main+xml")
             || content_types.contains("ms-word.document.macroenabled.main+xml")
         {
-            return Ok("docx");
+            return Ok(DocumentKind::Docx);
         }
         if content_types.contains("spreadsheetml.sheet.main+xml")
             || content_types.contains("ms-excel.sheet.macroenabled.main+xml")
         {
-            return Ok("xlsx");
+            return Ok(DocumentKind::Xlsx);
         }
         if content_types.contains("presentationml.presentation.main+xml")
             || content_types.contains("ms-powerpoint.presentation.macroenabled.main+xml")
         {
-            return Ok("pptx");
+            return Ok(DocumentKind::Pptx);
+        }
+        if content_types.contains("application/vnd.ms-visio.drawing.macroenabled.main+xml") {
+            return Ok(DocumentKind::Vsdm);
+        }
+        if content_types.contains("application/vnd.ms-visio.drawing.main+xml") {
+            return Ok(DocumentKind::Vsdx);
+        }
+        if content_types.contains("application/vnd.ms-visio.stencil.main+xml")
+            || content_types.contains("application/vnd.ms-visio.stencil.macroenabled.main+xml")
+        {
+            return Ok(DocumentKind::Vssx);
+        }
+        if content_types.contains("application/vnd.ms-visio.template.main+xml")
+            || content_types.contains("application/vnd.ms-visio.template.macroenabled.main+xml")
+        {
+            return Ok(DocumentKind::Vstx);
         }
     }
     if has_part(parts, "word/document.xml") {
-        Ok("docx")
+        Ok(DocumentKind::Docx)
     } else if has_part(parts, "xl/workbook.xml") {
-        Ok("xlsx")
+        Ok(DocumentKind::Xlsx)
     } else if has_part(parts, "ppt/presentation.xml") {
-        Ok("pptx")
+        Ok(DocumentKind::Pptx)
+    } else if has_part(parts, "visio/document.xml") {
+        Ok(DocumentKind::Vsdx)
     } else {
-        Err("could not detect DOCX, XLSX, or PPTX package".to_owned())
+        Err("could not detect DOCX, XLSX, PPTX, or VSDX package".to_owned())
     }
 }
 
@@ -619,6 +663,94 @@ mod tests {
                     .iter()
                     .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains("DDE secret"))
             );
+        }
+    }
+
+    #[test]
+    fn accepts_vsdx_and_preserves_visio_fields_and_formulas() {
+        let package = rezip_parts(&[
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec(),
+            ),
+            ("visio/document.xml".to_owned(), b"<VisioDocument/>".to_vec()),
+            (
+                "visio/pages/page1.xml".to_owned(),
+                br#"<PageContents><Shapes><Shape><Cell N='PinX' F='Width*0.5' V='1'/><Text>Page <fld IX='0'/></Text></Shape></Shapes></PageContents>"#.to_vec(),
+            ),
+        ])
+        .unwrap();
+        let sanitized = sanitize_package_for_format(&package, "vsdx").unwrap();
+        let parts = unzip_parts(&sanitized).unwrap();
+        let page = parts
+            .iter()
+            .find(|(path, _)| path == "visio/pages/page1.xml")
+            .unwrap();
+        let xml = String::from_utf8_lossy(&page.1);
+        assert!(xml.contains("F=\"Width*0.5\""));
+        assert!(xml.contains("<fld IX=\"0\"/>"));
+    }
+
+    #[test]
+    fn rejects_recognized_non_drawing_visio_kinds() {
+        for content_type in [
+            "application/vnd.ms-visio.drawing.macroEnabled.main+xml",
+            "application/vnd.ms-visio.stencil.main+xml",
+            "application/vnd.ms-visio.template.main+xml",
+        ] {
+            let package = rezip_parts(&[
+                (
+                    "[Content_Types].xml".to_owned(),
+                    format!("<Types><Override PartName='/visio/document.xml' ContentType='{content_type}'/></Types>").into_bytes(),
+                ),
+                ("visio/document.xml".to_owned(), b"<VisioDocument/>".to_vec()),
+            ])
+            .unwrap();
+            assert!(sanitize_package_for_format(&package, "vsdx").is_err());
+        }
+    }
+
+    #[test]
+    fn content_type_is_authoritative_for_visio_kind_detection() {
+        let macro_enabled = rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.macroEnabled.main+xml'/></Types>"#.to_vec()),
+            ("visio/document.xml".to_owned(), b"<VisioDocument/>".to_vec()),
+        ]).unwrap();
+        assert!(sanitize_package_for_format(&macro_enabled, "vsdx").is_err());
+
+        let no_content_type = rezip_parts(&[(
+            "visio/document.xml".to_owned(),
+            b"<VisioDocument/>".to_vec(),
+        )])
+        .unwrap();
+        assert!(sanitize_package_for_format(&no_content_type, "vsdx").is_ok());
+    }
+
+    #[test]
+    fn keeps_existing_format_detection_results() {
+        let cases = [
+            (
+                "word/document.xml",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+                DocumentKind::Docx,
+            ),
+            (
+                "xl/workbook.xml",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+                DocumentKind::Xlsx,
+            ),
+            (
+                "ppt/presentation.xml",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
+                DocumentKind::Pptx,
+            ),
+        ];
+        for (part_name, content_type, expected) in cases {
+            let parts = vec![
+                ("[Content_Types].xml".to_owned(), format!("<Types><Override PartName='/{part_name}' ContentType='{content_type}'/></Types>").into_bytes()),
+                (part_name.to_owned(), b"<root/>".to_vec()),
+            ];
+            assert_eq!(detect_format(&parts).unwrap(), expected);
         }
     }
 
