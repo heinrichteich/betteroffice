@@ -22,6 +22,7 @@ pub fn unit(s: &str) -> Option<(Unit, f64)> {
         "m" => Some((Unit::Inches, 100. / 2.54)),
         "deg" => Some((Unit::Radians, std::f64::consts::PI / 180.)),
         "rad" => Some((Unit::Radians, 1.)),
+        "da" => Some((Unit::Radians, 1.)),
         "es" => Some((Unit::Seconds, 1.)),
         "em" => Some((Unit::Seconds, 60.)),
         "ed" => Some((Unit::Seconds, 24. * 60. * 60.)),

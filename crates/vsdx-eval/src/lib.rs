@@ -156,6 +156,11 @@ impl References for ShapeReferences<'_> {
         let (sheet, name) = self.lookup(sheet, name)?;
         References::value(self.shapes.get(&sheet)?, name)
     }
+    fn exhausted_inheritance(&self, name: &str) -> bool {
+        self.lookup(None, name).is_some_and(|(sheet, name)| {
+            References::exhausted_inheritance(self.shapes.get(&sheet).expect("checked shape"), name)
+        })
+    }
     fn reference_key(&self, sheet: Option<u32>, name: &str) -> String {
         self.lookup(sheet, name).map_or_else(
             || sheet.map_or_else(|| name.into(), |sheet| format!("Sheet.{sheet}!{name}")),
@@ -211,13 +216,13 @@ fn evaluate_cell_with_theme(
     if input.trim().eq_ignore_ascii_case("Inh") {
         return match refs.formula(name) {
             Some(formula) if !formula.eq_ignore_ascii_case("Inh") => {
-                evaluate_with_theme(formula, refs, limits, theme)
+                evaluate_with_theme_at(formula, refs, limits, theme, Some(name))
             }
             _ if refs.exhausted_inheritance(name) => err("Inh has no concrete inherited value"),
             _ => unsupported("Inh requires an inheritance host"),
         };
     }
-    evaluate_with_theme(input, refs, limits, theme)
+    evaluate_with_theme_at(input, refs, limits, theme, Some(name))
 }
 
 fn is_event_cell(name: &str) -> bool {
@@ -239,6 +244,15 @@ pub fn evaluate_with_theme(
     limits: &ParseLimits,
     theme: Option<&Theme>,
 ) -> Evaluation {
+    evaluate_with_theme_at(input, refs, limits, theme, None)
+}
+fn evaluate_with_theme_at(
+    input: &str,
+    refs: &impl References,
+    limits: &ParseLimits,
+    theme: Option<&Theme>,
+    host: Option<&str>,
+) -> Evaluation {
     match parse(input, limits) {
         Ok(expr) => Engine {
             refs,
@@ -248,6 +262,7 @@ pub fn evaluate_with_theme(
             memo: HashMap::new(),
             steps: 0,
             sheet: None,
+            host: host.map(str::to_owned),
         }
         .expr(&expr, 0),
         Err(error) => Evaluation::Error(error),
@@ -308,6 +323,7 @@ struct Engine<'a, R> {
     memo: HashMap<String, Evaluation>,
     steps: usize,
     sheet: Option<u32>,
+    host: Option<String>,
 }
 impl<R: References> Engine<'_, R> {
     fn expr(&mut self, expr: &Expr, depth: usize) -> Evaluation {
@@ -686,15 +702,10 @@ impl<R: References> Engine<'_, R> {
         )
     }
     fn themeval(&mut self, args: &[Expr], d: usize) -> Evaluation {
-        if args.is_empty() {
-            return unsupported("THEMEVAL host-cell lookup requires theme-cell context");
-        }
-        let Some(theme) = self.theme else {
-            return args.get(1).map_or_else(
-                || unsupported("THEMEVAL has no resolvable theme"),
-                |arg| self.expr(arg, d),
-            );
-        };
+        let host = self
+            .host
+            .as_deref()
+            .and_then(|host| host.rsplit('.').next());
         let name = match args.first() {
             Some(Expr::String(name)) => name.clone(),
             Some(expr) => match numeric(self.expr(expr, d)) {
@@ -716,7 +727,19 @@ impl<R: References> Engine<'_, R> {
                 Ok(_) => return unsupported("THEMEVAL requires a string or integer theme value"),
                 Err(error) => return error,
             },
-            None => unreachable!(),
+            None => match host {
+                Some("FillForegnd") => "FillColor".to_owned(),
+                Some("FillBkgnd") => "FillColor2".to_owned(),
+                Some("LineColor") => "LineColor".to_owned(),
+                Some("Color") => "TextColor".to_owned(),
+                _ => return unsupported("THEMEVAL host-cell lookup requires theme-cell context"),
+            },
+        };
+        let Some(theme) = self.theme else {
+            return args.get(1).map_or_else(
+                || unsupported("THEMEVAL has no resolvable theme"),
+                |arg| self.expr(arg, d),
+            );
         };
         let name = name.as_str();
         let slot = match name {
@@ -1619,13 +1642,13 @@ mod tests {
             {
                 let refs = sheet_references(sheet);
                 for (name, formula) in sheet_formulas(sheet) {
-                    measurement.record(formula, evaluate_cell(name, formula, &refs, &limits()));
+                    measurement.record(formula, evaluate_cell(&name, formula, &refs, &limits()));
                 }
             }
             for (page, sheet) in &package.page_contents {
                 let refs = sheet_references(sheet);
                 for (name, formula) in sheet_formulas(sheet) {
-                    measurement.record(formula, evaluate_cell(name, formula, &refs, &limits()));
+                    measurement.record(formula, evaluate_cell(&name, formula, &refs, &limits()));
                 }
                 let resolver = Resolver::new(&package);
                 let page_refs =
@@ -1637,7 +1660,7 @@ mod tests {
                         measurement.record(
                             formula,
                             evaluate_cell_with_shape_package_theme(
-                                name,
+                                &name,
                                 formula,
                                 &refs,
                                 &limits(),
@@ -1651,7 +1674,7 @@ mod tests {
             for sheet in package.master_contents.values() {
                 let refs = sheet_references(sheet);
                 for (name, formula) in sheet_formulas(sheet) {
-                    measurement.record(formula, evaluate_cell(name, formula, &refs, &limits()));
+                    measurement.record(formula, evaluate_cell(&name, formula, &refs, &limits()));
                 }
                 let resolver = Resolver::new(&package);
                 for shape in shapes(sheet) {
@@ -1662,7 +1685,7 @@ mod tests {
                         measurement.record(
                             formula,
                             evaluate_cell_with_shape_package_theme(
-                                name,
+                                &name,
                                 formula,
                                 &resolved,
                                 &limits(),
@@ -1803,13 +1826,13 @@ mod tests {
         format!("other: {message}")
     }
 
-    fn sheet_formulas(sheet: &Sheet) -> Vec<(&str, &str)> {
+    fn sheet_formulas(sheet: &Sheet) -> Vec<(String, &str)> {
         let mut values = sheet
             .cells()
             .filter_map(|cell| {
                 cell.formula
                     .as_deref()
-                    .map(|formula| (cell.name.as_str(), formula))
+                    .map(|formula| (cell.name.clone(), formula))
             })
             .collect::<Vec<_>>();
         for section in sheet.sections() {
@@ -1817,19 +1840,19 @@ mod tests {
                 values.extend(row.cells().filter_map(|cell| {
                     cell.formula
                         .as_deref()
-                        .map(|formula| (cell.name.as_str(), formula))
+                        .map(|formula| (section_cell_name(section, row, cell), formula))
                 }));
             }
         }
         values
     }
-    fn shape_formulas(shape: &Shape) -> Vec<(&str, &str)> {
+    fn shape_formulas(shape: &Shape) -> Vec<(String, &str)> {
         let mut values = shape
             .cells()
             .filter_map(|cell| {
                 cell.formula
                     .as_deref()
-                    .map(|formula| (cell.name.as_str(), formula))
+                    .map(|formula| (cell.name.clone(), formula))
             })
             .collect::<Vec<_>>();
         for section in shape.sections() {
@@ -1837,11 +1860,21 @@ mod tests {
                 values.extend(row.cells().filter_map(|cell| {
                     cell.formula
                         .as_deref()
-                        .map(|formula| (cell.name.as_str(), formula))
+                        .map(|formula| (section_cell_name(section, row, cell), formula))
                 }));
             }
         }
         values
+    }
+    fn section_cell_name(
+        section: &vsdx_parse::Section,
+        row: &vsdx_parse::Row,
+        cell: &Cell,
+    ) -> String {
+        row.name.as_ref().map_or_else(
+            || format!("{}.{}", section.name, cell.name),
+            |row| format!("{}.{}.{}", section.name, row, cell.name),
+        )
     }
     fn shapes(sheet: &Sheet) -> Vec<&Shape> {
         let mut values = Vec::new();
@@ -1863,21 +1896,22 @@ mod tests {
         }
     }
     fn sheet_references(sheet: &Sheet) -> BTreeMap<String, String> {
-        references(
-            sheet.cells().chain(
-                sheet
-                    .sections()
-                    .flat_map(|section| section.rows().flat_map(|row| row.cells())),
-            ),
-        )
+        let mut refs = references(sheet.cells().map(|cell| (cell.name.clone(), cell)));
+        for section in sheet.sections() {
+            for row in section.rows() {
+                for cell in row.cells() {
+                    refs.extend(references(std::iter::once((
+                        section_cell_name(section, row, cell),
+                        cell,
+                    ))));
+                }
+            }
+        }
+        refs
     }
-    fn references<'a>(cells: impl Iterator<Item = &'a Cell>) -> BTreeMap<String, String> {
+    fn references<'a>(cells: impl Iterator<Item = (String, &'a Cell)>) -> BTreeMap<String, String> {
         cells
-            .filter_map(|cell| {
-                cell.formula
-                    .as_ref()
-                    .map(|formula| (cell.name.clone(), formula.clone()))
-            })
+            .filter_map(|(name, cell)| cell.formula.as_ref().map(|formula| (name, formula.clone())))
             .collect()
     }
     fn has_unsupported(expression: &Expr) -> bool {

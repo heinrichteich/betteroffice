@@ -74,14 +74,19 @@ impl ResolvedShape {
                 })?;
             let (row, cell) = reference.split_once('.').map_or_else(
                 || {
-                    let split = reference
-                        .char_indices()
-                        .rev()
-                        .take_while(|(_, c)| c.is_ascii_digit())
-                        .last()
-                        .map_or(reference.len(), |(index, _)| index);
-                    let (cell, index) = reference.split_at(split);
-                    (section.rows.get(&format!("IX:{index}")), cell)
+                    section.rows.get(&format!("N:{reference}")).map_or_else(
+                        || {
+                            let split = reference
+                                .char_indices()
+                                .rev()
+                                .take_while(|(_, c)| c.is_ascii_digit())
+                                .last()
+                                .map_or(reference.len(), |(index, _)| index);
+                            let (cell, index) = reference.split_at(split);
+                            (section.rows.get(&format!("IX:{index}")), cell)
+                        },
+                        |row| (Some(row), "X"),
+                    )
                 },
                 |(row, cell)| (section.rows.get(&format!("N:{row}")), cell),
             );
