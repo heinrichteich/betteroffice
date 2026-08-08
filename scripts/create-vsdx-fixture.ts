@@ -25,3 +25,17 @@ const parts: Record<string, string> = {
 const zip = new JSZip();
 for (const [name, contents] of Object.entries(parts)) zip.file(name, contents, { date: zipDate, createFolders: false });
 fs.writeFileSync(output, await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', platform: 'DOS' }));
+
+const nestedOutput = path.join(root, 'crates/vsdx-parse/tests/fixtures/nested-groups.vsdx');
+const xform = (width: number, height: number, pinX: number, pinY: number, locPinX: number, locPinY: number, angle: number, flipX: number, flipY: number) =>
+  `<Cell N='Width' V='${width}'/><Cell N='Height' V='${height}'/><Cell N='PinX' V='${pinX}'/><Cell N='PinY' V='${pinY}'/><Cell N='LocPinX' V='${locPinX}'/><Cell N='LocPinY' V='${locPinY}'/><Cell N='Angle' V='${angle}'/><Cell N='FlipX' V='${flipX}'/><Cell N='FlipY' V='${flipY}'/>`;
+const rect = `<Section N='Geometry'><Row IX='0' T='MoveTo'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row><Row IX='1' T='LineTo'><Cell N='X' V='1'/><Cell N='Y' V='0'/></Row><Row IX='2' T='LineTo'><Cell N='X' V='1'/><Cell N='Y' V='1'/></Row><Row IX='3' T='LineTo'><Cell N='X' V='0'/><Cell N='Y' V='1'/></Row><Row IX='4' T='Close'/></Section>`;
+const nestedParts: Record<string, string | Uint8Array> = {
+  ...parts,
+  'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Group'>${xform(6, 4, 10, 10, 1, 0.5, 0.5235987755982988, 1, 0)}<Shapes><Shape ID='2' Type='Group'>${xform(3, 5, 2, 1, 0.25, 0.75, -0.7853981633974483, 0, 1)}<Shapes><Shape ID='3' Type='Shape'>${xform(1, 1, 0, 0, 0, 0, 0, 0, 0)}${rect}<Text>deep\nvector</Text></Shape><Shape ID='4' Type='Shape'>${xform(1, 2, 2, 1, 0, 0, 0, 0, 0)}<ForeignData ForeignType='Bitmap'><Rel r:id='rIdImage' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'/></ForeignData></Shape><Shape ID='5' Type='Shape'>${xform(1, 1, 1, 3, 0, 0, 0, 0, 0)}<Section N='Geometry'><Row T='EllipticalArcTo'><Cell N='X' V='1'/></Row></Section></Shape></Shapes></Shape></Shapes></Shape></Shapes></PageContents>`,
+  'visio/pages/_rels/page1.xml.rels': "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rIdImage' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/image' Target='../media/image1.png'/></Relationships>",
+  'visio/media/image1.png': new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+};
+const nestedZip = new JSZip();
+for (const [name, contents] of Object.entries(nestedParts)) nestedZip.file(name, contents, { date: zipDate, createFolders: false });
+fs.writeFileSync(nestedOutput, await nestedZip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', platform: 'DOS' }));

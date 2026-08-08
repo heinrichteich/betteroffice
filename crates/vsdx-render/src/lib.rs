@@ -2042,6 +2042,96 @@ mod tests {
     }
 
     #[test]
+    fn nested_groups_fixture_preserves_scaled_affine_content_and_replay_order() {
+        let package = vsdx_parse::parse_vsdx(include_bytes!(
+            "../../vsdx-parse/tests/fixtures/nested-groups.vsdx"
+        ))
+        .unwrap();
+        let list = Renderer::default()
+            .layout_page(&package, &package.page_part_paths[0])
+            .unwrap();
+        let Primitive::Group {
+            primitives: outer, ..
+        } = &list.primitives[0]
+        else {
+            unreachable!()
+        };
+        let Primitive::Group {
+            primitives: inner, ..
+        } = &outer[0]
+        else {
+            unreachable!()
+        };
+        assert!(matches!(&inner[0], Primitive::Shape { id, .. } if id.ends_with(":3")));
+        assert!(
+            matches!(&inner[1], Primitive::TextBox { id, lines, .. } if id.ends_with(":3") && lines.len() == 1)
+        );
+        assert!(
+            matches!(&inner[2], Primitive::Image { id, asset_id, .. } if id.ends_with(":4") && asset_id == "visio/media/image1.png")
+        );
+        assert!(
+            matches!(&inner[3], Primitive::Placeholder { id, reason, .. } if id.ends_with(":5") && reason.starts_with("unsupported geometry:"))
+        );
+        let Primitive::Shape { path, .. } = &inner[0] else {
+            unreachable!()
+        };
+        let GeometryPathCommand::Move { x, y } = path[0] else {
+            unreachable!()
+        };
+        assert_point_close((x as f32, y as f32), (6.8900614, 9.442028));
+        let Primitive::TextBox { lines, .. } = &inner[1] else {
+            unreachable!()
+        };
+        assert_point_close((lines[0].x, lines[0].y), (6.8900614, 9.442028));
+        assert_point_close(
+            (lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
+            (6.811569, 9.342278),
+        );
+        let Primitive::Image {
+            x,
+            y,
+            width,
+            height,
+            transform,
+            ..
+        } = &inner[2]
+        else {
+            unreachable!()
+        };
+        let corners = [
+            transform.apply_point(*x, *y),
+            transform.apply_point(*x + *width, *y),
+            transform.apply_point(*x, *y + *height),
+            transform.apply_point(*x + *width, *y + *height),
+        ];
+        assert_point_close(corners[0], (6.8907413, 7.3195295));
+        assert_point_close(corners[1], (5.948839, 6.1225248));
+        assert_point_close(corners[2], (10.65971, 7.8625517));
+        assert_point_close(corners[3], (9.717808, 6.665547));
+        let Primitive::Placeholder {
+            x,
+            y,
+            width,
+            height,
+            ..
+        } = &inner[3]
+        else {
+            unreachable!()
+        };
+        assert_point_close((*x, *y), (10.376867, 7.25018));
+        assert_point_close((*width, *height), (3.3920727, 2.6932607));
+        let z_orders = inner.iter().map(z_order).collect::<Vec<_>>();
+        assert_eq!(z_orders, vec![2, 3, 4, 5]);
+        assert_eq!(
+            hit_test(&list, 7.0 * 96.0, (11.0 - 9.0) * 96.0),
+            Some(HitTestResult::Text {
+                shape_id: "visio/pages/page1.xml:3".into(),
+                position: 0,
+            })
+        );
+    }
+
+    #[test]
     fn corpus_smoke_reports_painted_and_placeholdered_shapes() {
         let Ok(directory) = std::env::var("VSDX_CORPUS_DIR") else {
             eprintln!(
