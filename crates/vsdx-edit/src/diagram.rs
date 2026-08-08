@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use vsdx_eval::{MutationContext, MutationOutcome, decide_mutation, evaluate};
+use vsdx_parse::{CellLocator, CellSheet, MutationGesture, ParseLimits};
+use vsdx_resolve::{Lookup, Resolver};
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, Doc, Map, MapPrelim, MapRef, Out, ReadTxn, Transact,
     TransactionMut, WriteTxn,
@@ -46,10 +49,14 @@ pub(crate) fn seed_doc(
         page.insert(&mut txn, "sourcePartPath", path.as_str());
         let shape_order = page.insert(&mut txn, "shapes", ArrayPrelim::default());
         if let Some(sheet) = package.page_contents.get(path) {
+            let resolver = Resolver::new(package);
             for shape in sheet.shapes() {
                 let shape_id = format!("{id}:shape:{}", shape.id);
                 shape_order.push_back(&mut txn, shape_id.as_str());
-                seed_shape(&sheets, &mut txn, &shape_id, shape)?;
+                let resolved = resolver
+                    .resolve_shape(path, shape.id)
+                    .map_err(|error| EditError::InvalidState(error.to_string()))?;
+                seed_shape(&sheets, &mut txn, &shape_id, shape, &resolved)?;
             }
         }
     }
@@ -61,6 +68,7 @@ fn seed_shape(
     txn: &mut TransactionMut<'_>,
     id: &str,
     shape: &vsdx_parse::Shape,
+    resolved: &vsdx_resolve::ResolvedShape,
 ) -> EditResult<()> {
     let map = sheets.insert(txn, id, MapPrelim::default());
     map.insert(txn, "id", id);
@@ -69,14 +77,16 @@ fn seed_shape(
         map.insert(txn, "name", name.as_str());
     }
     let cells = map.insert(txn, "cells", MapPrelim::default());
-    for cell in shape.cells() {
-        seed_cell(
-            &cells,
-            txn,
-            &cell.name,
-            cell.formula.as_deref(),
-            cell.value.as_deref(),
-        );
+    for (name, value) in &resolved.cells {
+        if let Lookup::Found(cell) = value {
+            seed_cell(
+                &cells,
+                txn,
+                name,
+                cell.cell.formula.as_deref(),
+                cell.cell.value.as_deref(),
+            );
+        }
     }
     Ok(())
 }
@@ -113,21 +123,26 @@ impl DiagramSession {
     ) -> EditResult<CellFormulaReceipt> {
         let formula = formula.into();
         let mut txn = self.transact_for(context);
-        let cell = cell_map(&mut txn, page_id, shape_id, cell_name)?;
+        let context_for_policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
+        let target = match decide_mutation(
+            &context_for_policy,
+            context_for_policy.locator(cell_name),
+            gesture_for_cell(cell_name),
+            formula.clone(),
+            &ParseLimits::default(),
+        ) {
+            MutationOutcome::Allowed { target, .. } => target.cell_name,
+            MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                return Err(EditError::InvalidState(reason));
+            }
+        };
+        let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
         let before = map_string(&cell, &txn, "formula");
-        if before
-            .as_deref()
-            .is_some_and(|current| current.trim_start().starts_with("GUARD("))
-        {
-            return Err(EditError::InvalidState(format!(
-                "cell {cell_name:?} is guarded"
-            )));
-        }
         cell.insert(&mut txn, "formula", formula.as_str());
         Ok(CellFormulaReceipt {
             page_id: page_id.to_owned(),
             shape_id: shape_id.to_owned(),
-            cell_name: cell_name.to_owned(),
+            cell_name: target,
             before,
             after: formula,
         })
@@ -168,7 +183,7 @@ impl DiagramSession {
         shape_id: &str,
         to_index: u32,
     ) -> EditResult<ShapeReceipt> {
-        reorder(&self.doc, context, page_id, shape_id, to_index)
+        reorder(self, context, page_id, shape_id, to_index)
     }
     pub fn reorder_page(
         &self,
@@ -176,7 +191,7 @@ impl DiagramSession {
         page_id: &str,
         to_index: u32,
     ) -> EditResult<ShapeReceipt> {
-        reorder_page(&self.doc, context, page_id, to_index)
+        reorder_page(self, context, page_id, to_index)
     }
 
     pub fn add_shape(
@@ -237,11 +252,175 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
             )));
         }
     }
-    required_array(&txn, PAGE_ORDER)?;
+    let order = required_array(&txn, PAGE_ORDER)?;
     for root in [PAGES, SHEETS, STORIES] {
         required_map(&txn, root)?;
     }
+    let pages = required_map(&txn, PAGES)?;
+    let sheets = required_map(&txn, SHEETS)?;
+    for index in 0..order.len(&txn) {
+        let page_id = array_string(&order, &txn, index)
+            .ok_or_else(|| EditError::InvalidState("page order contains non-string".to_owned()))?;
+        let page = map_ref(&pages, &txn, &page_id)?;
+        required_string(&page, &txn, "id")?;
+        required_string(&page, &txn, "sourcePartPath")?;
+        let shapes = map_array(&page, &txn, "shapes")?;
+        for shape_index in 0..shapes.len(&txn) {
+            let shape_id = array_string(&shapes, &txn, shape_index).ok_or_else(|| {
+                EditError::InvalidState("shape order contains non-string".to_owned())
+            })?;
+            let shape = map_ref(&sheets, &txn, &shape_id)?;
+            required_string(&shape, &txn, "id")?;
+            if map_number(&shape, &txn, "sourceId").is_none() {
+                return Err(EditError::InvalidState("missing source ID".to_owned()));
+            }
+            let cells = map_map(&shape, &txn, "cells")?;
+            for (name, cell) in cells.iter(&txn) {
+                let Out::YMap(cell) = cell else {
+                    return Err(EditError::InvalidState("cell is not a map".to_owned()));
+                };
+                if required_string(&cell, &txn, "name")? != name {
+                    return Err(EditError::InvalidState(
+                        "cell name does not match map key".to_owned(),
+                    ));
+                }
+                for field in ["formula", "value"] {
+                    if cell.get(&txn, field).is_some() && map_string(&cell, &txn, field).is_none() {
+                        return Err(EditError::InvalidState(format!(
+                            "cell {field} is not a string"
+                        )));
+                    }
+                }
+            }
+        }
+    }
     Ok(())
+}
+
+pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<()> {
+    validate_doc(staged)?;
+    let before = protected_formulas(before)?;
+    let after = protected_formulas(staged)?;
+    for (key, formula) in before {
+        if after.get(&key) != Some(&formula) {
+            return Err(EditError::InvalidState(format!(
+                "remote update changes protected cell {key}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn next_id_counter(doc: &Doc, client_id: u64) -> u64 {
+    let txn = doc.transact();
+    let Some(sheets) = txn.get_map(SHEETS) else {
+        return 0;
+    };
+    sheets
+        .iter(&txn)
+        .filter_map(|(_, value)| match value {
+            Out::YMap(shape) => map_string(&shape, &txn, "id"),
+            _ => None,
+        })
+        .filter_map(|id| {
+            id.rsplit_once(':').and_then(|(prefix, counter)| {
+                prefix
+                    .ends_with(&format!(":{client_id}"))
+                    .then(|| counter.parse::<u64>().ok())
+                    .flatten()
+            })
+        })
+        .max()
+        .and_then(|counter| counter.checked_add(1))
+        .unwrap_or(0)
+}
+
+fn protected_formulas(doc: &Doc) -> EditResult<std::collections::BTreeMap<String, String>> {
+    let txn = doc.transact();
+    let pages = required_map(&txn, PAGES)?;
+    let sheets = required_map(&txn, SHEETS)?;
+    let mut protected = std::collections::BTreeMap::new();
+    for (page_id, page) in pages.iter(&txn) {
+        let Out::YMap(page) = page else { continue };
+        let order = map_array(&page, &txn, "shapes")?;
+        for index in 0..order.len(&txn) {
+            let Some(shape_id) = array_string(&order, &txn, index) else {
+                continue;
+            };
+            let shape = map_ref(&sheets, &txn, &shape_id)?;
+            let cells = map_map(&shape, &txn, "cells")?;
+            let values = cells
+                .iter(&txn)
+                .filter_map(|(name, cell)| match cell {
+                    Out::YMap(cell) => Some((
+                        name.to_string(),
+                        map_string(&cell, &txn, "formula")
+                            .or_else(|| map_string(&cell, &txn, "value")),
+                    )),
+                    _ => None,
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            for (name, cell) in cells.iter(&txn) {
+                let Out::YMap(cell) = cell else { continue };
+                let formula = map_string(&cell, &txn, "formula");
+                let locked = lock_target(name).is_some_and(|_| {
+                    values
+                        .get(name)
+                        .and_then(|value| value.as_deref())
+                        .is_some_and(|value| value.trim_start_matches('=') == "1")
+                });
+                let protected_target = lock_target(name).is_none()
+                    && [
+                        "LockMoveX",
+                        "LockMoveY",
+                        "LockWidth",
+                        "LockHeight",
+                        "LockAspect",
+                        "LockTextEdit",
+                        "LockFormat",
+                        "LockDelete",
+                    ]
+                    .iter()
+                    .any(|lock| {
+                        lock_target(lock) == Some(name)
+                            && values
+                                .get(*lock)
+                                .and_then(|value| value.as_deref())
+                                .is_some_and(|value| value == "1")
+                    });
+                if locked || protected_target || formula.as_deref().is_some_and(is_guarded) {
+                    protected.insert(
+                        format!("{page_id}/{shape_id}/{name}"),
+                        formula.unwrap_or_default(),
+                    );
+                }
+            }
+        }
+    }
+    Ok(protected)
+}
+
+fn lock_target(lock: &str) -> Option<&str> {
+    match lock {
+        "LockMoveX" => Some("PinX"),
+        "LockMoveY" => Some("PinY"),
+        "LockWidth" => Some("Width"),
+        "LockHeight" => Some("Height"),
+        "LockAspect" => Some("Width"),
+        "LockTextEdit" => Some("Text"),
+        "LockFormat" | "LockDelete" => None,
+        _ => None,
+    }
+}
+
+fn is_guarded(formula: &str) -> bool {
+    vsdx_eval::parse(formula.trim_start_matches('='), &ParseLimits::default())
+        .map(|expression| {
+            format!("{expression:?}")
+                .to_ascii_uppercase()
+                .contains("GUARD")
+        })
+        .unwrap_or(false)
 }
 
 fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
@@ -319,18 +498,13 @@ fn cell_map(
         .ok_or_else(|| EditError::CellNotFound(name.to_owned()))
 }
 fn reorder(
-    doc: &Doc,
+    session: &DiagramSession,
     context: &EditCtx,
     page_id: &str,
     shape_id: &str,
     to: u32,
 ) -> EditResult<ShapeReceipt> {
-    let mut txn = match context.origin {
-        crate::EditOrigin::Local => doc.transact_mut_with(0_u64),
-        crate::EditOrigin::Agent => doc.transact_mut_with("vsdx:agent"),
-        crate::EditOrigin::Remote => doc.transact_mut_with(crate::REMOTE_ORIGIN),
-        crate::EditOrigin::System => doc.transact_mut_with("vsdx:system"),
-    };
+    let mut txn = session.transact_for(context);
     let pages = txn
         .get_map(PAGES)
         .ok_or_else(|| EditError::InvalidState("missing pages map".to_owned()))?;
@@ -352,13 +526,13 @@ fn reorder(
         to_index: Some(to),
     })
 }
-fn reorder_page(doc: &Doc, context: &EditCtx, page_id: &str, to: u32) -> EditResult<ShapeReceipt> {
-    let mut txn = match context.origin {
-        crate::EditOrigin::Local => doc.transact_mut_with(0_u64),
-        crate::EditOrigin::Agent => doc.transact_mut_with("vsdx:agent"),
-        crate::EditOrigin::Remote => doc.transact_mut_with(crate::REMOTE_ORIGIN),
-        crate::EditOrigin::System => doc.transact_mut_with("vsdx:system"),
-    };
+fn reorder_page(
+    session: &DiagramSession,
+    context: &EditCtx,
+    page_id: &str,
+    to: u32,
+) -> EditResult<ShapeReceipt> {
+    let mut txn = session.transact_for(context);
     let order = txn
         .get_array(PAGE_ORDER)
         .ok_or_else(|| EditError::InvalidState("missing page order".to_owned()))?;
@@ -377,6 +551,111 @@ fn reorder_page(doc: &Doc, context: &EditCtx, page_id: &str, to: u32) -> EditRes
         from_index: Some(from),
         to_index: Some(to),
     })
+}
+
+struct CrdtMutationContext {
+    page_id: u32,
+    shape_id: u32,
+    formulas: std::collections::BTreeMap<String, String>,
+    values: std::collections::BTreeMap<String, String>,
+}
+
+impl CrdtMutationContext {
+    fn new(txn: &TransactionMut<'_>, page_id: &str, shape_id: &str) -> EditResult<Self> {
+        let pages = required_map(txn, PAGES)?;
+        map_ref(&pages, txn, page_id)?;
+        let sheets = required_map(txn, SHEETS)?;
+        let shape = map_ref(&sheets, txn, shape_id)?;
+        let cells = map_map(&shape, txn, "cells")?;
+        let mut formulas = std::collections::BTreeMap::new();
+        let mut values = std::collections::BTreeMap::new();
+        for (name, cell) in cells.iter(txn) {
+            let Out::YMap(cell) = cell else { continue };
+            if let Some(formula) = map_string(&cell, txn, "formula") {
+                formulas.insert(name.to_string(), formula);
+            }
+            if let Some(value) = map_string(&cell, txn, "value") {
+                values.insert(name.to_string(), value);
+            }
+        }
+        Ok(Self {
+            page_id: page_id
+                .trim_start_matches("page:")
+                .parse()
+                .unwrap_or_default(),
+            shape_id: map_number(&shape, txn, "sourceId").unwrap_or_default() as u32,
+            formulas,
+            values,
+        })
+    }
+
+    fn locator(&self, cell_name: &str) -> CellLocator {
+        CellLocator {
+            sheet: CellSheet::Page(self.page_id),
+            shape_id: Some(self.shape_id),
+            section: None,
+            row: None,
+            cell_name: cell_name.to_owned(),
+        }
+    }
+}
+
+impl MutationContext for CrdtMutationContext {
+    fn current_formula(&self, locator: &CellLocator) -> Result<Option<String>, String> {
+        if locator.sheet != CellSheet::Page(self.page_id) || locator.shape_id != Some(self.shape_id)
+        {
+            return Err("cross-sheet mutation targets are not supported".to_owned());
+        }
+        Ok(self.formulas.get(&locator.cell_name).cloned())
+    }
+
+    fn resolve_reference(
+        &self,
+        from: &CellLocator,
+        reference: &str,
+    ) -> Result<CellLocator, String> {
+        if reference.contains('!') {
+            return Err("cross-sheet SETATREF targets are not supported".to_owned());
+        }
+        if !self.formulas.contains_key(reference) && !self.values.contains_key(reference) {
+            return Err(format!("SETATREF target does not exist: {reference}"));
+        }
+        Ok(CellLocator {
+            cell_name: reference.to_owned(),
+            ..from.clone()
+        })
+    }
+
+    fn lock_enabled(&self, _locator: &CellLocator, lock: &str) -> Result<bool, String> {
+        if lock.is_empty() {
+            return Ok(false);
+        }
+        let formula = self.formulas.get(lock).or_else(|| self.values.get(lock));
+        let Some(formula) = formula else {
+            return Ok(false);
+        };
+        match evaluate(
+            formula.trim_start_matches('='),
+            &self.formulas,
+            &ParseLimits::default(),
+        ) {
+            vsdx_eval::Evaluation::Evaluated(value) => match value.value {
+                vsdx_eval::Value::Number(number) => Ok(number.number == 1.0),
+                vsdx_eval::Value::Color(_) => Err(format!("cannot evaluate {lock}")),
+            },
+            _ => Err(format!("cannot evaluate {lock}")),
+        }
+    }
+}
+
+fn gesture_for_cell(cell_name: &str) -> MutationGesture {
+    match cell_name {
+        "PinX" => MutationGesture::MoveX,
+        "PinY" => MutationGesture::MoveY,
+        "Width" => MutationGesture::ResizeWidth,
+        "Height" => MutationGesture::ResizeHeight,
+        _ => MutationGesture::CellEdit,
+    }
 }
 fn required_map<T: ReadTxn>(txn: &T, name: &str) -> EditResult<MapRef> {
     txn.get_map(name)

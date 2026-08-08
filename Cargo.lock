@@ -252,7 +252,9 @@ dependencies = [
 name = "betteroffice-vsdx-edit"
 version = "0.0.4"
 dependencies = [
+ "betteroffice-vsdx-eval",
  "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
  "js-sys",
  "serde",
  "serde_json",

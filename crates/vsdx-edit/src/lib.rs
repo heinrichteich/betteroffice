@@ -30,6 +30,7 @@ const BOOTSTRAP_CLIENT_ID: u64 = (1_u64 << 53) - 1;
 pub const MAX_SAFE_CLIENT_ID: u64 = BOOTSTRAP_CLIENT_ID - 1;
 pub const MAX_UPDATE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
+const MAX_STATE_VECTOR_BYTES: usize = 1024 * 1024;
 
 pub struct DiagramSession {
     pub(crate) doc: Doc,
@@ -74,10 +75,11 @@ impl DiagramSession {
         hydrate_doc(&doc, &baseline)?;
         diagram::validate_doc(&doc)?;
         let undo = DiagramUndoManager::new(&doc, client_id)?;
+        let id_counter = diagram::next_id_counter(&doc, client_id);
         Ok(Self {
             doc,
             client_id,
-            id_counter: AtomicU64::new(0),
+            id_counter: AtomicU64::new(id_counter),
             undo: RefCell::new(undo),
         })
     }
@@ -93,10 +95,11 @@ impl DiagramSession {
         hydrate_doc(&doc, update)?;
         diagram::validate_doc(&doc)?;
         let undo = DiagramUndoManager::new(&doc, client_id)?;
+        let id_counter = diagram::next_id_counter(&doc, client_id);
         Ok(Self {
             doc,
             client_id,
-            id_counter: AtomicU64::new(0),
+            id_counter: AtomicU64::new(id_counter),
             undo: RefCell::new(undo),
         })
     }
@@ -133,7 +136,9 @@ impl DiagramSession {
             .transact_mut_with(REMOTE_ORIGIN)
             .apply_update(incoming)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        diagram::validate_doc(&staged)?;
+        // Remote bytes are trusted only after decoding and schema/policy validation on a staged clone;
+        // this rejects malformed state and protected-cell rewrites, but cannot authenticate an author.
+        diagram::validate_remote_update(&self.doc, &staged)?;
         self.doc
             .transact_mut_with(REMOTE_ORIGIN)
             .apply_update(decode_update_v1(bytes).map_err(EditError::InvalidUpdate)?)
@@ -233,6 +238,11 @@ fn decode_update_v1(bytes: &[u8]) -> Result<Update, String> {
     Ok(update)
 }
 fn decode_state_vector_v1(bytes: &[u8]) -> Result<StateVector, String> {
+    if bytes.len() > MAX_STATE_VECTOR_BYTES {
+        return Err(format!(
+            "state vector exceeds {MAX_STATE_VECTOR_BYTES} bytes"
+        ));
+    }
     validate_state_vector_entry_count(bytes)?;
     let mut decoder = DecoderV1::from(bytes);
     let vector = StateVector::decode(&mut decoder).map_err(|error| error.to_string())?;
@@ -274,4 +284,267 @@ fn validate_state_vector_entry_count(bytes: &[u8]) -> Result<(), String> {
         return Err("state vector entry count exceeds its payload".to_owned());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yrs::{Any, Array, ArrayPrelim, Map, MapPrelim, Transact};
+
+    fn session() -> DiagramSession {
+        let doc = doc_with_client_id(7);
+        let mut txn = doc.transact_mut_with(HYDRATE_ORIGIN);
+        let meta = txn.get_or_insert_map(META);
+        meta.insert(&mut txn, "schemaVersion", 1.0);
+        meta.insert(&mut txn, "fingerprint", "test");
+        meta.insert(
+            &mut txn,
+            "packageJson",
+            Any::Buffer(std::sync::Arc::from([])),
+        );
+        let pages = txn.get_or_insert_map(PAGES);
+        let sheets = txn.get_or_insert_map(SHEETS);
+        let order = txn.get_or_insert_array(PAGE_ORDER);
+        txn.get_or_insert_map(STORIES);
+        for page_id in ["page:1", "page:2"] {
+            order.push_back(&mut txn, page_id);
+            let page = pages.insert(&mut txn, page_id, MapPrelim::default());
+            page.insert(&mut txn, "id", page_id);
+            page.insert(&mut txn, "sourcePartPath", format!("/{page_id}"));
+            page.insert(&mut txn, "shapes", ArrayPrelim::default());
+        }
+        for (id, page_id) in [("page:1:shape:1", "page:1"), ("page:1:shape:2", "page:1")] {
+            let shape = sheets.insert(&mut txn, id, MapPrelim::default());
+            shape.insert(&mut txn, "id", id);
+            shape.insert(&mut txn, "sourceId", 1.0);
+            shape.insert(&mut txn, "cells", MapPrelim::default());
+            let page = match pages.get(&txn, page_id) {
+                Some(yrs::Out::YMap(page)) => page,
+                _ => unreachable!(),
+            };
+            let shapes = match page.get(&txn, "shapes") {
+                Some(yrs::Out::YArray(shapes)) => shapes,
+                _ => unreachable!(),
+            };
+            shapes.push_back(&mut txn, id);
+        }
+        drop(txn);
+        DiagramSession {
+            undo: std::cell::RefCell::new(DiagramUndoManager::new(&doc, 7).unwrap()),
+            doc,
+            client_id: 7,
+            id_counter: AtomicU64::new(0),
+        }
+    }
+
+    fn add_cell(session: &DiagramSession, name: &str, formula: Option<&str>, value: Option<&str>) {
+        let mut txn = session.doc.transact_mut_with(HYDRATE_ORIGIN);
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = match sheets.get(&txn, "page:1:shape:1") {
+            Some(yrs::Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        let cells = match shape.get(&txn, "cells") {
+            Some(yrs::Out::YMap(cells)) => cells,
+            _ => unreachable!(),
+        };
+        let cell = cells.insert(&mut txn, name, MapPrelim::default());
+        cell.insert(&mut txn, "name", name);
+        if let Some(formula) = formula {
+            cell.insert(&mut txn, "formula", formula);
+        }
+        if let Some(value) = value {
+            cell.insert(&mut txn, "value", value);
+        }
+    }
+
+    #[test]
+    fn guards_refuse_all_formula_spellings() {
+        for formula in ["GUARD(1)", "=GUARD(1)", "guard(1)", "IF(1, GUARD(1), 0)"] {
+            let session = session();
+            add_cell(&session, "Width", Some(formula), None);
+            assert!(
+                session
+                    .set_cell_formula(
+                        &EditCtx::local("a"),
+                        "page:1",
+                        "page:1:shape:1",
+                        "Width",
+                        "2"
+                    )
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn matching_locks_refuse_move_and_resize() {
+        let session = session();
+        add_cell(&session, "PinX", Some("1"), None);
+        add_cell(&session, "PinY", Some("1"), None);
+        add_cell(&session, "LockMoveX", Some("1"), None);
+        assert!(
+            session
+                .move_shape(&EditCtx::local("a"), "page:1", "page:1:shape:1", "2", "3")
+                .is_err()
+        );
+        add_cell(&session, "Width", Some("1"), None);
+        add_cell(&session, "Height", Some("1"), None);
+        add_cell(&session, "LockWidth", Some("1"), None);
+        assert!(
+            session
+                .resize_shape(&EditCtx::local("a"), "page:1", "page:1:shape:1", "2", "3")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn setatref_writes_only_the_resolved_target() {
+        let session = session();
+        add_cell(&session, "Width", Some("SETATREF(Target)"), None);
+        add_cell(&session, "Target", Some("1"), None);
+        let receipt = session
+            .resize_shape(&EditCtx::local("a"), "page:1", "page:1:shape:1", "2", "3")
+            .unwrap_err();
+        assert!(receipt.to_string().contains("Height"));
+        let receipt = session
+            .set_cell_formula(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                "Width",
+                "2",
+            )
+            .unwrap();
+        assert_eq!(receipt.cell_name, "Target");
+        let snapshot = session.snapshot().unwrap();
+        let cells = &snapshot.pages[0].shapes[0].cells;
+        assert_eq!(
+            cells
+                .iter()
+                .find(|cell| cell.name == "Width")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("SETATREF(Target)")
+        );
+        assert_eq!(
+            cells
+                .iter()
+                .find(|cell| cell.name == "Target")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn inherited_guard_materialized_in_the_crdt_refuses_edits() {
+        let session = session();
+        add_cell(&session, "Width", Some("GUARD(1)"), None);
+        assert!(
+            session
+                .resize_shape(&EditCtx::local("a"), "page:1", "page:1:shape:1", "2", "3")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn local_reorders_are_undoable() {
+        let session = session();
+        session
+            .reorder_shape(&EditCtx::local("a"), "page:1", "page:1:shape:1", 1)
+            .unwrap();
+        session.add_undo_barrier();
+        assert!(session.undo());
+        session
+            .reorder_page(&EditCtx::local("a"), "page:1", 1)
+            .unwrap();
+        session.add_undo_barrier();
+        assert!(session.undo());
+    }
+
+    #[test]
+    fn reopen_preserves_the_next_local_shape_id() {
+        let session = session();
+        let draft = ShapeDraft {
+            source_id: 9,
+            name: None,
+            cells: Vec::new(),
+        };
+        let first = session
+            .add_shape(&EditCtx::local("a"), "page:1", &draft)
+            .unwrap();
+        let reopened =
+            DiagramSession::open_from_update(&session.encode_state_as_update_v1(), 7).unwrap();
+        let second = reopened
+            .add_shape(&EditCtx::local("a"), "page:1", &draft)
+            .unwrap();
+        assert_ne!(first.shape_id, second.shape_id);
+        assert_eq!(reopened.snapshot().unwrap().pages[0].shapes.len(), 4);
+    }
+
+    #[test]
+    fn remote_protected_formula_rewrite_is_rejected_but_legitimate_update_is_accepted() {
+        let session = session();
+        add_cell(&session, "Width", Some("GUARD(1)"), None);
+        let attacker = doc_with_client_id(9);
+        hydrate_doc(&attacker, &session.encode_state_as_update_v1()).unwrap();
+        let mut txn = attacker.transact_mut_with(9_u64);
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = match sheets.get(&txn, "page:1:shape:1") {
+            Some(yrs::Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        let cells = match shape.get(&txn, "cells") {
+            Some(yrs::Out::YMap(cells)) => cells,
+            _ => unreachable!(),
+        };
+        let width = match cells.get(&txn, "Width") {
+            Some(yrs::Out::YMap(cell)) => cell,
+            _ => unreachable!(),
+        };
+        width.insert(&mut txn, "formula", "2");
+        drop(txn);
+        let update = attacker
+            .transact()
+            .encode_diff_v1(&session.doc.transact().state_vector());
+        assert!(session.apply_update_v1(&update).is_err());
+        assert_eq!(
+            session.snapshot().unwrap().pages[0].shapes[0]
+                .cells
+                .iter()
+                .find(|cell| cell.name == "Width")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("GUARD(1)")
+        );
+        let legitimate = doc_with_client_id(10);
+        hydrate_doc(&legitimate, &session.encode_state_as_update_v1()).unwrap();
+        let mut txn = legitimate.transact_mut_with(10_u64);
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = match sheets.get(&txn, "page:1:shape:1") {
+            Some(yrs::Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        let cells = match shape.get(&txn, "cells") {
+            Some(yrs::Out::YMap(cells)) => cells,
+            _ => unreachable!(),
+        };
+        let cell = cells.insert(&mut txn, "PinX", MapPrelim::default());
+        cell.insert(&mut txn, "name", "PinX");
+        cell.insert(&mut txn, "formula", "2");
+        drop(txn);
+        let update = legitimate
+            .transact()
+            .encode_diff_v1(&session.doc.transact().state_vector());
+        assert!(session.apply_update_v1(&update).is_ok());
+    }
+
+    #[test]
+    fn state_vectors_are_limited_before_decode() {
+        assert!(decode_state_vector_v1(&vec![0; MAX_STATE_VECTOR_BYTES + 1]).is_err());
+    }
 }

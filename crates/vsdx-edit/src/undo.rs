@@ -14,16 +14,19 @@ pub struct DiagramUndoManager {
 
 impl DiagramUndoManager {
     pub(crate) fn new(doc: &Doc, client_id: u64) -> EditResult<Self> {
-        let txn = doc.transact();
-        let order = txn
-            .get_array(PAGE_ORDER)
-            .ok_or_else(|| EditError::InvalidState("missing page order".to_owned()))?;
-        let mut roots = vec![
-            txn.get_map(META),
-            txn.get_map(PAGES),
-            txn.get_map(SHEETS),
-            txn.get_map(STORIES),
-        ];
+        let (order, mut roots) = {
+            let txn = doc.transact();
+            let order = txn
+                .get_array(PAGE_ORDER)
+                .ok_or_else(|| EditError::InvalidState("missing page order".to_owned()))?;
+            let roots = vec![
+                txn.get_map(META),
+                txn.get_map(PAGES),
+                txn.get_map(SHEETS),
+                txn.get_map(STORIES),
+            ];
+            (order, roots)
+        };
         if roots.iter().any(Option::is_none) {
             return Err(EditError::InvalidState("missing diagram root".to_owned()));
         }
