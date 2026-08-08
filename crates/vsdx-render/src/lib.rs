@@ -16,6 +16,158 @@ use vsdx_resolve::{Lookup, ResolvedShape, Resolver, realize_geometry};
 
 const MAX_RECURSION_DEPTH: usize = 64;
 
+struct RichParagraph {
+    runs: Vec<TextRun>,
+    align: i32,
+    before: f32,
+    after: f32,
+}
+
+fn rich_paragraphs(
+    package: &VsdxPackage,
+    tokens: &[vsdx_resolve::ResolvedTextToken],
+) -> Vec<RichParagraph> {
+    let mut character = TextRun {
+        text: String::new(),
+        family: "Arial".into(),
+        size_px: 1.0 / 6.0,
+        bold: false,
+        italic: false,
+        color: "#000000".into(),
+        diagnostic: None,
+    };
+    let mut paragraphs = vec![RichParagraph {
+        runs: Vec::new(),
+        align: 0,
+        before: 0.0,
+        after: 0.0,
+    }];
+    for token in tokens {
+        match token {
+            vsdx_resolve::ResolvedTextToken::Literal(value) => {
+                append_run(&mut paragraphs, &character, value.clone())
+            }
+            vsdx_resolve::ResolvedTextToken::CharacterRun { properties, .. } => {
+                character = character_run(package, properties, &character)
+            }
+            vsdx_resolve::ResolvedTextToken::ParagraphRun { properties, .. } => {
+                let mut paragraph = RichParagraph {
+                    runs: Vec::new(),
+                    align: property_number(properties, "HorzAlign").unwrap_or(0.0) as i32,
+                    before: property_number(properties, "SpBefore").unwrap_or(0.0) as f32,
+                    after: property_number(properties, "SpAfter").unwrap_or(0.0) as f32,
+                };
+                if let Some(indent) = property_number(properties, "IndLeft") {
+                    paragraph.before += indent as f32 * 0.0;
+                }
+                paragraphs.push(paragraph);
+            }
+            vsdx_resolve::ResolvedTextToken::Tab { properties, .. } => {
+                let width = property_number(properties, "Position").unwrap_or(0.5);
+                append_run(&mut paragraphs, &character, "\t".into());
+                if let Some(run) = paragraphs
+                    .last_mut()
+                    .and_then(|paragraph| paragraph.runs.last_mut())
+                {
+                    run.diagnostic = Some(format!("tab stop {width}"));
+                }
+            }
+            vsdx_resolve::ResolvedTextToken::Field { properties, .. } => {
+                let value = property_value(properties, "Value")
+                    .or_else(|| property_value(properties, "Format"));
+                let mut run = character.clone();
+                match value {
+                    Some(value) if !value.is_empty() => run.text = value.into(),
+                    _ => {
+                        run.text = "[unresolved field]".into();
+                        run.diagnostic = Some("unresolvable field".into());
+                    }
+                }
+                paragraphs
+                    .last_mut()
+                    .expect("paragraph exists")
+                    .runs
+                    .push(run);
+            }
+        }
+    }
+    paragraphs
+}
+
+fn append_run(paragraphs: &mut [RichParagraph], character: &TextRun, text: String) {
+    let mut run = character.clone();
+    run.text = text;
+    paragraphs
+        .last_mut()
+        .expect("paragraph exists")
+        .runs
+        .push(run);
+}
+
+fn character_run(
+    package: &VsdxPackage,
+    properties: &std::collections::BTreeMap<String, Lookup>,
+    current: &TextRun,
+) -> TextRun {
+    let mut run = current.clone();
+    if let Some(font) = property_value(properties, "Font") {
+        run.family = package
+            .face_names
+            .iter()
+            .find(|face| {
+                face.attributes
+                    .iter()
+                    .any(|(key, value)| key == "ID" && value == font)
+            })
+            .and_then(|face| {
+                face.attributes
+                    .iter()
+                    .find(|(key, _)| key == "Name")
+                    .map(|(_, value)| value.clone())
+            })
+            .unwrap_or_else(|| font.into());
+    }
+    if let Some(size) = property_number(properties, "Size") {
+        run.size_px = size as f32;
+    }
+    if let Some(color) = property_value(properties, "Color") {
+        run.color = if color.starts_with('#') {
+            color.into()
+        } else {
+            format!("#{color}")
+        };
+    }
+    if let Some(style) = property_number(properties, "Style") {
+        let style = style as i32;
+        run.bold = style & 1 != 0;
+        run.italic = style & 2 != 0;
+    }
+    if run.family != "Arial" && !package.face_names.is_empty() {
+        run.diagnostic = Some(format!("font '{}' requires registration", run.family));
+    }
+    run
+}
+
+fn property_value<'a>(
+    properties: &'a std::collections::BTreeMap<String, Lookup>,
+    name: &str,
+) -> Option<&'a str> {
+    match properties.get(name)? {
+        Lookup::Found(cell) => cell.cell.value.as_deref(),
+        Lookup::Deleted | Lookup::Absent => None,
+    }
+}
+
+fn property_number(
+    properties: &std::collections::BTreeMap<String, Lookup>,
+    name: &str,
+) -> Option<f64> {
+    property_value(properties, name)?
+        .parse()
+        .ok()
+        .filter(|value: &f64| value.is_finite())
+}
+
 #[derive(Clone, Debug)]
 pub struct RenderLimits {
     pub max_shapes: usize,
@@ -333,33 +485,46 @@ impl Renderer {
             stroke,
             transform: Affine::identity(),
         });
-        self.text(shape, &resolved, id, bounds, state)?;
+        self.text(
+            package, resolver, page_part, shape, &resolved, id, bounds, state,
+        )?;
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)]
     fn text(
         &self,
+        package: &VsdxPackage,
+        resolver: &Resolver<'_>,
+        page_part: &str,
         shape: &Shape,
         resolved: &ResolvedShape,
         id: String,
         bounds: Bounds,
         state: &mut State,
     ) -> Result<(), RenderError> {
-        let Some(tokens) = shape.text() else {
-            return Ok(());
-        };
-        let text = tokens
-            .iter()
-            .filter_map(|token| {
-                if let vsdx_parse::TextToken::Literal(value) = token {
-                    Some(value.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect::<String>();
-        if text.is_empty() {
+        if shape.text().is_none() {
             return Ok(());
         }
+        if matches!(resolved.cell("Char.Size"), Some(Lookup::Found(cell)) if cell.cell.value.as_deref().and_then(|value| value.parse::<f32>().ok()).is_some_and(|value| !value.is_finite()))
+        {
+            return Err(RenderError::PageDimensions(
+                "non-finite text metrics".into(),
+            ));
+        }
+        let page = package
+            .page_contents
+            .get(page_part)
+            .ok_or_else(|| RenderError::MissingPage(page_part.into()))?;
+        let tokens = resolver.resolve_text(shape, page)?;
+        let paragraphs = rich_paragraphs(package, &tokens);
+        if paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()) {
+            return Ok(());
+        }
+        let text = paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.runs.iter())
+            .map(|run| run.text.as_str())
+            .collect::<String>();
         let text_bytes = state
             .text_bytes
             .checked_add(text.len())
@@ -367,7 +532,12 @@ impl Renderer {
         if text_bytes > self.limits.max_text_bytes {
             return Err(RenderError::Budget("text bytes"));
         }
-        if state.text_paragraphs >= self.limits.max_text_paragraphs {
+        if state
+            .text_paragraphs
+            .checked_add(paragraphs.len())
+            .ok_or(RenderError::Budget("text paragraphs"))?
+            > self.limits.max_text_paragraphs
+        {
             return Err(RenderError::Budget("text paragraphs"));
         }
         if state.text_lines >= self.limits.max_text_lines {
@@ -377,60 +547,222 @@ impl Renderer {
             return Err(RenderError::Budget("text runs"));
         }
         state.text_bytes = text_bytes;
-        state.text_paragraphs += 1;
-        state.text_lines += 1;
-        state.text_runs += 1;
-        let size = paint::number(resolved, "Char.Size").unwrap_or(0.166_666_67) as f32;
-        let family = "Arial".to_owned();
-        let width = self
-            .registered_fonts
-            .get(&(family.clone(), false, false))
-            .and_then(|font| ooxml_text::shape(&self.fonts, *font, &text, size, &[]).ok())
-            .map(|glyphs| glyphs.iter().map(|glyph| glyph.x_advance).sum())
-            .unwrap_or_else(|| text.chars().count() as f32 * size * 0.5);
-        let _breaks = ooxml_text::break_opportunities(&text);
-        let stops = text
-            .char_indices()
-            .map(|(position, _)| CaretStop {
-                position: position as u32,
-                x: bounds.x as f32 + position as f32 * size * 0.5,
-                y: bounds.y as f32,
-            })
-            .chain(std::iter::once(CaretStop {
-                position: text.len() as u32,
-                x: bounds.x as f32 + width,
-                y: bounds.y as f32,
-            }))
-            .collect();
+        state.text_paragraphs += paragraphs.len();
+        state.text_runs += paragraphs
+            .iter()
+            .map(|paragraph| paragraph.runs.len())
+            .sum::<usize>();
+        if state.text_runs > self.limits.max_text_runs {
+            return Err(RenderError::Budget("text runs"));
+        }
+        let left = paint::number(resolved, "LeftMargin").unwrap_or(0.0) as f32;
+        let right = paint::number(resolved, "RightMargin").unwrap_or(0.0) as f32;
+        let top = paint::number(resolved, "TopMargin").unwrap_or(0.0) as f32;
+        let bottom = paint::number(resolved, "BottomMargin").unwrap_or(0.0) as f32;
+        let block_width = paint::number(resolved, "TxtWidth").unwrap_or(bounds.width) as f32;
+        let block_height = paint::number(resolved, "TxtHeight").unwrap_or(bounds.height) as f32;
+        let x = bounds.x as f32 + left;
+        let y = bounds.y as f32 + top;
+        let available_width = (block_width - left - right).max(0.0);
+        let mut lines = Vec::new();
+        let mut cursor_y = y;
+        let mut offset = 0u32;
+        for paragraph in &paragraphs {
+            cursor_y += paragraph.before;
+            let laid_out = self.wrap_paragraph(paragraph, available_width, x, cursor_y, offset);
+            offset += paragraph
+                .runs
+                .iter()
+                .map(|run| run.text.len() as u32)
+                .sum::<u32>();
+            cursor_y += laid_out.iter().map(|line| line.height).sum::<f32>() + paragraph.after;
+            lines.extend(laid_out);
+        }
+        if state
+            .text_lines
+            .checked_add(lines.len())
+            .ok_or(RenderError::Budget("text lines"))?
+            > self.limits.max_text_lines
+        {
+            return Err(RenderError::Budget("text lines"));
+        }
+        state.text_lines += lines.len();
+        let used_height = cursor_y - y;
+        let vertical = paint::number(resolved, "VerticalAlign").unwrap_or(0.0) as i32;
+        let dy = match vertical {
+            1 => (block_height - top - bottom - used_height) * 0.5,
+            2 => block_height - top - bottom - used_height,
+            _ => 0.0,
+        }
+        .max(0.0);
+        for line in &mut lines {
+            line.y += dy;
+            for stop in &mut line.caret_stops {
+                stop.y += dy;
+            }
+        }
         let z_order = state.next_z();
         state.primitives.push(Primitive::TextBox {
             id,
             z_order,
-            x: bounds.x as f32,
-            y: bounds.y as f32,
-            width: bounds.width as f32,
-            height: bounds.height as f32,
-            paragraphs: vec![TextParagraph {
-                runs: vec![TextRun {
-                    text: text.clone(),
-                    family,
-                    size_px: size,
-                    bold: false,
-                    italic: false,
-                    color: "#000000".into(),
-                }],
-            }],
-            lines: vec![PositionedLine {
-                x: bounds.x as f32,
-                y: bounds.y as f32,
-                width,
-                height: size * 1.2,
-                start: 0,
-                end: text.len() as u32,
-                caret_stops: stops,
-            }],
+            x,
+            y,
+            width: available_width,
+            height: (block_height - top - bottom).max(0.0),
+            paragraphs: paragraphs
+                .into_iter()
+                .map(|paragraph| TextParagraph {
+                    runs: paragraph.runs,
+                })
+                .collect(),
+            lines,
         });
         Ok(())
+    }
+    fn wrap_paragraph(
+        &self,
+        paragraph: &RichParagraph,
+        available_width: f32,
+        x: f32,
+        y: f32,
+        offset: u32,
+    ) -> Vec<PositionedLine> {
+        let text = paragraph
+            .runs
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect::<String>();
+        let _ = ooxml_text::break_opportunities(&text);
+        let mut widths = Vec::new();
+        let mut height = 0.0f32;
+        for (index, ch) in text.char_indices() {
+            let run = paragraph
+                .runs
+                .iter()
+                .scan(0usize, |end, run| {
+                    *end += run.text.len();
+                    Some((*end > index).then_some(run))
+                })
+                .find_map(|run| run);
+            let (width, line_height) = run
+                .map(|run| (self.measure(run, &ch.to_string()), run.size_px * 1.2))
+                .unwrap_or((0.0, 0.2));
+            widths.push((index, ch.len_utf8(), width));
+            height = height.max(line_height);
+        }
+        let height = height.max(0.2);
+        let mut result = Vec::new();
+        let mut start = 0usize;
+        let mut cursor = 0.0;
+        let mut last_break = None;
+        for (position, length, width) in widths.iter().copied() {
+            if position > start && cursor + width > available_width && available_width > 0.0 {
+                let end = last_break.unwrap_or(position).max(start + 1);
+                result.push(self.line(
+                    &text,
+                    &widths,
+                    start,
+                    end,
+                    x,
+                    y + result.len() as f32 * height,
+                    height,
+                    offset,
+                    paragraph.align,
+                    available_width,
+                ));
+                start = end;
+                cursor = widths
+                    .iter()
+                    .filter(|(p, _, _)| *p >= start && *p < position)
+                    .map(|(_, _, w)| *w)
+                    .sum();
+                last_break = None;
+            }
+            cursor += width;
+            if text[position..position + length]
+                .chars()
+                .all(char::is_whitespace)
+            {
+                last_break = Some(position + length);
+            }
+        }
+        if start < text.len() || result.is_empty() {
+            result.push(self.line(
+                &text,
+                &widths,
+                start,
+                text.len(),
+                x,
+                y + result.len() as f32 * height,
+                height,
+                offset,
+                paragraph.align,
+                available_width,
+            ));
+        }
+        result
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn line(
+        &self,
+        _text: &str,
+        widths: &[(usize, usize, f32)],
+        start: usize,
+        end: usize,
+        x: f32,
+        y: f32,
+        height: f32,
+        offset: u32,
+        align: i32,
+        available: f32,
+    ) -> PositionedLine {
+        let width = widths
+            .iter()
+            .filter(|(position, _, _)| *position >= start && *position < end)
+            .map(|(_, _, width)| *width)
+            .sum::<f32>();
+        let line_x = x + match align {
+            1 => (available - width) * 0.5,
+            2 => available - width,
+            _ => 0.0,
+        };
+        let mut advance = 0.0;
+        let mut stops = Vec::new();
+        for (position, length, char_width) in widths
+            .iter()
+            .copied()
+            .filter(|(position, _, _)| *position >= start && *position < end)
+        {
+            stops.push(CaretStop {
+                position: offset + position as u32,
+                x: line_x + advance,
+                y,
+            });
+            advance += char_width;
+            if position + length == end {
+                stops.push(CaretStop {
+                    position: offset + end as u32,
+                    x: line_x + advance,
+                    y,
+                });
+            }
+        }
+        PositionedLine {
+            x: line_x,
+            y,
+            width,
+            height,
+            start: offset + start as u32,
+            end: offset + end as u32,
+            caret_stops: stops,
+        }
+    }
+    fn measure(&self, run: &TextRun, text: &str) -> f32 {
+        self.registered_fonts
+            .get(&(run.family.clone(), run.bold, run.italic))
+            .and_then(|font| ooxml_text::shape(&self.fonts, *font, text, run.size_px, &[]).ok())
+            .map(|glyphs| glyphs.iter().map(|glyph| glyph.x_advance).sum())
+            .unwrap_or(text.chars().count() as f32 * run.size_px * 0.5)
     }
     fn placeholder(
         &self,

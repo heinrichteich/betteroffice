@@ -195,6 +195,8 @@ pub struct TextRun {
     pub bold: bool,
     pub italic: bool,
     pub color: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
