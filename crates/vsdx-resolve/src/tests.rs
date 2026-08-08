@@ -456,6 +456,27 @@ fn inh_skips_each_inherited_layer_until_a_concrete_cell() {
         Lookup::Found(cell) => assert_eq!(cell.cell.formula.as_deref(), Some("Inh")),
         value => panic!("expected unresolved Inh, got {value:?}"),
     }
+
+    let defaulted = shape(5, vec![ShapeChild::Cell(formula_cell("LocPinX", "Inh"))]);
+    add_page(&mut package, defaulted);
+    let resolved = Resolver::new(&package).resolve_shape("page", 5).unwrap();
+    match &resolved.cells["LocPinX"] {
+        Lookup::Found(cell) => {
+            assert_eq!(cell.cell.formula.as_deref(), Some("Width * 0.5"));
+            assert_eq!(cell.provenance, Provenance::Default);
+        }
+        value => panic!("expected documented default, got {value:?}"),
+    }
+
+    let concrete = shape(6, vec![ShapeChild::Cell(formula_cell("LocPinX", "Inh"))]);
+    add_page(&mut package, concrete);
+    package
+        .document_sheet
+        .get_or_insert_with(|| sheet(None, vec![]))
+        .children
+        .push(SheetChild::Cell(cell("LocPinX", "7")));
+    let resolved = Resolver::new(&package).resolve_shape("page", 6).unwrap();
+    assert_eq!(found(&resolved, "LocPinX"), ("7", Provenance::Document));
 }
 
 #[test]
@@ -730,6 +751,37 @@ fn text_markers_fields_and_style_rows_are_merged() {
     assert!(matches!(
         tokens[3],
         ResolvedTextToken::Field { index: 0, .. }
+    ));
+}
+
+#[test]
+fn section_references_use_one_based_indices_and_user_values() {
+    let mut package = package();
+    let scratch = row(0, vec![cell("X", "3")]);
+    let mut user = row(0, vec![cell("Value", "4")]);
+    user.name = Some("ScaleFactor".into());
+    let character = row(0, vec![cell("Case", "5")]);
+    let shape = shape(
+        1,
+        vec![
+            ShapeChild::Section(section("Scratch", vec![scratch])),
+            ShapeChild::Section(section("User", vec![user])),
+            ShapeChild::Section(section("Character", vec![character])),
+        ],
+    );
+    add_page(&mut package, shape);
+    let resolved = Resolver::new(&package).resolve_shape("page", 1).unwrap();
+    assert!(matches!(
+        resolved.cell("Scratch.X1"),
+        Some(Lookup::Found(_))
+    ));
+    assert!(matches!(
+        resolved.cell("User.ScaleFactor"),
+        Some(Lookup::Found(_))
+    ));
+    assert!(matches!(
+        resolved.cell("Character.Case"),
+        Some(Lookup::Found(_))
     ));
 }
 

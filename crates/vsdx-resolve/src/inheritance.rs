@@ -18,11 +18,12 @@ impl<'a> Resolver<'a> {
     pub fn new(package: &'a VsdxPackage) -> Self {
         Self {
             package,
-            defaults: BTreeMap::new(),
+            defaults: documented_display_defaults(),
         }
     }
     pub fn with_defaults(mut self, defaults: impl IntoIterator<Item = Cell>) -> Self {
-        self.defaults = defaults.into_iter().map(|c| (c.name.clone(), c)).collect();
+        self.defaults
+            .extend(defaults.into_iter().map(|c| (c.name.clone(), c)));
         self
     }
     pub fn resolve_shape(
@@ -298,9 +299,6 @@ impl<'a> Resolver<'a> {
                 return found(cell, provenance);
             }
         }
-        if let Some(cell) = inherited {
-            return Lookup::Found(cell);
-        }
         self.defaults
             .get(name)
             .map(|cell| ResolvedCell {
@@ -308,6 +306,7 @@ impl<'a> Resolver<'a> {
                 provenance: Provenance::Default,
             })
             .map(Lookup::Found)
+            .or_else(|| inherited.map(Lookup::Found))
             .unwrap_or(Lookup::Absent)
     }
     fn resolve_section(
@@ -436,6 +435,31 @@ impl<'a> Resolver<'a> {
         }
         out
     }
+}
+
+/// Documented transform defaults: https://learn.microsoft.com/en-us/office/client-developer/visio/cells-visio-shapesheet-reference
+fn documented_display_defaults() -> BTreeMap<String, Cell> {
+    [
+        ("LocPinX", "Width * 0.5"),
+        ("LocPinY", "Height * 0.5"),
+        ("TxtPinX", "Width * 0.5"),
+        ("TxtPinY", "Height * 0.5"),
+    ]
+    .into_iter()
+    .map(|(name, formula)| {
+        (
+            name.into(),
+            Cell {
+                name: name.into(),
+                formula: Some(formula.into()),
+                value: None,
+                unit: None,
+                del: false,
+                other_attrs: Vec::new(),
+            },
+        )
+    })
+    .collect()
 }
 
 fn found(cell: &Cell, provenance: Provenance) -> Lookup {

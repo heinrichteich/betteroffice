@@ -95,8 +95,7 @@ impl References for ResolvedShape {
         }
     }
     fn exhausted_inheritance(&self, name: &str) -> bool {
-        self.cells
-            .get(name)
+        self.cell(name)
             .and_then(|lookup| match lookup {
                 Lookup::Found(value) => value.cell.formula.as_deref(),
                 Lookup::Deleted | Lookup::Absent => None,

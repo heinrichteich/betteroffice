@@ -73,20 +73,35 @@ impl ResolvedShape {
                         .and_then(|name| self.sections.get(name))
                 })?;
             let (row, cell) = reference.split_once('.').map_or_else(
-                || {
-                    section.rows.get(&format!("N:{reference}")).map_or_else(
-                        || {
-                            let split = reference
-                                .char_indices()
-                                .rev()
-                                .take_while(|(_, c)| c.is_ascii_digit())
-                                .last()
-                                .map_or(reference.len(), |(index, _)| index);
-                            let (cell, index) = reference.split_at(split);
-                            (section.rows.get(&format!("IX:{index}")), cell)
-                        },
-                        |row| (Some(row), "X"),
-                    )
+                || match section.rows.get(&format!("N:{reference}")) {
+                    Some(row) => (
+                        Some(row),
+                        if section.name == "User" { "Value" } else { "X" },
+                    ),
+                    None if !reference.chars().any(|c| c.is_ascii_digit()) => {
+                        (section.rows.get("IX:0"), reference)
+                    }
+                    None => {
+                        let split = reference
+                            .char_indices()
+                            .rev()
+                            .take_while(|(_, c)| c.is_ascii_digit())
+                            .last()
+                            .map_or(reference.len(), |(index, _)| index);
+                        let (cell, index) = reference.split_at(split);
+                        let row = index
+                            .parse::<u32>()
+                            .ok()
+                            .and_then(|index| {
+                                if section.name == "Scratch" {
+                                    index.checked_sub(1)
+                                } else {
+                                    Some(index)
+                                }
+                            })
+                            .and_then(|index| section.rows.get(&format!("IX:{index}")));
+                        (row, cell)
+                    }
                 },
                 |(row, cell)| (section.rows.get(&format!("N:{row}")), cell),
             );
