@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const CONTRACT_VERSION: u32 = 1;
 
+/// Replay primitives in ascending `z_order` (back-to-front); hit test in descending order.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VsdxDisplayList {

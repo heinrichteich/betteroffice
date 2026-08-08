@@ -210,6 +210,16 @@ impl Renderer {
         let geometry = resolved.sections.get("Geometry").map(realize_geometry);
         let child_shapes = shape.shapes().collect::<Vec<_>>();
         if !child_shapes.is_empty() {
+            let group_transform = bounds_affine(
+                bounds,
+                child_coordinate_extent(
+                    package,
+                    resolver,
+                    references,
+                    page_part,
+                    child_shapes.iter().copied(),
+                ),
+            );
             let start = state.primitives.len();
             for child in child_shapes {
                 self.layout_shape(
@@ -224,7 +234,7 @@ impl Renderer {
             }
             let mut children = state.primitives.split_off(start);
             for primitive in &mut children {
-                bake_group_transform(primitive, bounds);
+                bake_group_transform(primitive, group_transform);
             }
             let z_order = state.next_z();
             state.primitives.push(Primitive::Group {
@@ -265,7 +275,7 @@ impl Renderer {
                     y: 0.0,
                     width: bounds.width as f32,
                     height: bounds.height as f32,
-                    transform: bounds_affine(bounds),
+                    transform: bounds_affine(bounds, None),
                 });
                 return Ok(());
             }
@@ -456,8 +466,7 @@ impl Renderer {
         Ok(())
     }
 }
-fn bake_group_transform(primitive: &mut Primitive, group: Bounds) {
-    let matrix = bounds_affine(group);
+fn bake_group_transform(primitive: &mut Primitive, matrix: Affine) {
     match primitive {
         Primitive::Shape {
             path, transform, ..
@@ -497,7 +506,7 @@ fn bake_group_transform(primitive: &mut Primitive, group: Bounds) {
             ..
         } => {
             for child in primitives {
-                bake_group_transform(child, group);
+                bake_group_transform(child, matrix);
             }
             *transform = Affine::identity();
         }
@@ -527,8 +536,8 @@ fn transform_rect(x: &mut f32, y: &mut f32, width: &mut f32, height: &mut f32, m
     *width = max_x - min_x;
     *height = max_y - min_y;
 }
-fn transform_command(command: &mut ooxml_drawingml::GeometryPathCommand, group: Bounds) {
-    transform_affine(command, bounds_affine(group));
+fn transform_command(command: &mut ooxml_drawingml::GeometryPathCommand, bounds: Bounds) {
+    transform_affine(command, bounds_affine(bounds, None));
 }
 fn transform_affine(command: &mut ooxml_drawingml::GeometryPathCommand, matrix: Affine) {
     use ooxml_drawingml::GeometryPathCommand::*;
@@ -557,14 +566,17 @@ fn transform_affine(command: &mut ooxml_drawingml::GeometryPathCommand, matrix: 
         Close => {}
     }
 }
-fn bounds_affine(group: Bounds) -> Affine {
+fn bounds_affine(group: Bounds, child_extent: Option<(f64, f64)>) -> Affine {
     let loc_x = group.loc_pin_x;
     let loc_y = group.loc_pin_y;
     let pin_x = group.x + group.loc_pin_x;
     let pin_y = group.y + group.loc_pin_y;
     let (sin, cos) = group.angle.sin_cos();
-    let sx = if group.flip_x { -1.0 } else { 1.0 };
-    let sy = if group.flip_y { -1.0 } else { 1.0 };
+    let (scale_x, scale_y) = child_extent
+        .map(|(width, height)| (group.width / width, group.height / height))
+        .unwrap_or((1.0, 1.0));
+    let sx = scale_x * if group.flip_x { -1.0 } else { 1.0 };
+    let sy = scale_y * if group.flip_y { -1.0 } else { 1.0 };
     Affine {
         a: (cos * sx) as f32,
         b: (sin * sx) as f32,
@@ -573,6 +585,35 @@ fn bounds_affine(group: Bounds) -> Affine {
         e: (pin_x - cos * sx * loc_x + sin * sy * loc_y) as f32,
         f: (pin_y - sin * sx * loc_x - cos * sy * loc_y) as f32,
     }
+}
+fn child_coordinate_extent<'a>(
+    package: &VsdxPackage,
+    resolver: &Resolver<'_>,
+    references: Option<&PageShapeReferences>,
+    page_part: &str,
+    shapes: impl Iterator<Item = &'a Shape>,
+) -> Option<(f64, f64)> {
+    let bounds = shapes
+        .filter_map(|shape| {
+            resolver
+                .resolve_shape(page_part, shape.id)
+                .ok()
+                .and_then(|resolved| bounds(package, references, &resolved, shape.id))
+        })
+        .collect::<Vec<_>>();
+    let min_x = bounds.iter().map(|bounds| bounds.x).reduce(f64::min)?;
+    let min_y = bounds.iter().map(|bounds| bounds.y).reduce(f64::min)?;
+    let max_x = bounds
+        .iter()
+        .map(|bounds| bounds.x + bounds.width)
+        .reduce(f64::max)?;
+    let max_y = bounds
+        .iter()
+        .map(|bounds| bounds.y + bounds.height)
+        .reduce(f64::max)?;
+    let width = max_x - min_x;
+    let height = max_y - min_y;
+    (width > 0.0 && height > 0.0).then_some((width, height))
 }
 struct State {
     count: usize,
@@ -957,11 +998,19 @@ fn path_hit(
             inside = !inside;
         }
     }
+    let closed = path
+        .iter()
+        .any(|command| matches!(command, ooxml_drawingml::GeometryPathCommand::Close));
     fill && inside
         || stroke_width > 0.0
             && points.windows(2).any(|segment| {
                 point_segment_distance(x, y, segment[0], segment[1]) <= stroke_width / 2.0
             })
+        || stroke_width > 0.0
+            && closed
+            && points.len() > 1
+            && point_segment_distance(x, y, points[points.len() - 1], points[0])
+                <= stroke_width / 2.0
 }
 fn point_segment_distance(x: f32, y: f32, (ax, ay): (f32, f32), (bx, by): (f32, f32)) -> f32 {
     let dx = bx - ax;
@@ -1461,6 +1510,31 @@ mod tests {
     }
 
     #[test]
+    fn group_non_uniformly_scales_children_before_rotation_and_flip() {
+        let child = shape(2, 0.0, 0.0);
+        let mut group = group(1, 10.0, 20.0, vec![child]);
+        with_cell(&mut group, "Width", "4");
+        with_cell(&mut group, "Height", "3");
+        with_cell(
+            &mut group,
+            "Angle",
+            &std::f64::consts::FRAC_PI_2.to_string(),
+        );
+        with_cell(&mut group, "FlipX", "1");
+        let list = render(vec![group]);
+        let Primitive::Group { primitives, .. } = &list.primitives[0] else {
+            unreachable!()
+        };
+        let Primitive::Shape { path, .. } = &primitives[0] else {
+            unreachable!()
+        };
+        let GeometryPathCommand::Line { x, y } = path[1] else {
+            unreachable!()
+        };
+        assert_point_close((x as f32, y as f32), (10.0, 16.0));
+    }
+
+    #[test]
     fn affine_inversion_round_trips_and_degenerate_matrices_are_safe() {
         let matrix = Affine {
             a: -1.5,
@@ -1942,6 +2016,17 @@ mod tests {
     }
 
     #[test]
+    fn closed_path_stroke_hits_its_implicit_closing_segment() {
+        let path = vec![
+            GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+            GeometryPathCommand::Line { x: 1.0, y: 0.0 },
+            GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+            GeometryPathCommand::Close,
+        ];
+        assert!(path_hit(&path, Affine::identity(), false, 0.1, 0.5, 0.5));
+    }
+
+    #[test]
     fn foundation_display_list_matches_golden_contract() {
         let package = vsdx_parse::parse_vsdx(include_bytes!(
             "../../vsdx-parse/tests/fixtures/foundation.vsdx"
@@ -1979,7 +2064,9 @@ mod tests {
                     .shapes()
                     .flat_map(|shape| shape_ids(page, shape))
                     .collect::<std::collections::BTreeSet<_>>();
-                let mut page_painted = std::collections::BTreeSet::new();
+                let mut page_shapes = std::collections::BTreeSet::new();
+                let mut page_text = std::collections::BTreeSet::new();
+                let mut page_images = std::collections::BTreeSet::new();
                 let mut page_placeholders = std::collections::BTreeSet::new();
                 let mut page_groups = std::collections::BTreeSet::new();
                 let mut text_shapes = std::collections::BTreeSet::new();
@@ -1992,15 +2079,25 @@ mod tests {
                 );
                 count_primitives(
                     &list.primitives,
-                    &mut page_painted,
+                    &mut page_shapes,
+                    &mut page_text,
+                    &mut page_images,
                     &mut page_placeholders,
                     &mut page_groups,
                     &mut reasons,
                 );
-                assert!(page_painted.is_disjoint(&page_placeholders));
-                assert!(page_painted.is_disjoint(&page_groups));
+                assert!(page_shapes.is_disjoint(&page_placeholders));
+                assert!(page_shapes.is_disjoint(&page_groups));
                 assert!(page_placeholders.is_disjoint(&page_groups));
-                let actual = page_painted
+                let actual = page_shapes
+                    .union(&page_text)
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>();
+                let actual = actual
+                    .union(&page_images)
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>();
+                let actual = actual
                     .union(&page_placeholders)
                     .cloned()
                     .collect::<std::collections::BTreeSet<_>>();
@@ -2009,9 +2106,9 @@ mod tests {
                     .cloned()
                     .collect::<std::collections::BTreeSet<_>>();
                 assert_eq!(actual, expected);
-                assert!(text_shapes.is_subset(&page_painted));
-                assert!(image_shapes.is_subset(&page_painted));
-                painted += page_painted.len();
+                assert_eq!(page_text, text_shapes);
+                assert_eq!(page_images, image_shapes);
+                painted += page_shapes.len() + page_text.len() + page_images.len();
                 placeholders += page_placeholders.len();
                 groups += page_groups.len();
             }
@@ -2023,17 +2120,23 @@ mod tests {
 
     fn count_primitives(
         primitives: &[Primitive],
-        painted: &mut std::collections::BTreeSet<String>,
+        shapes: &mut std::collections::BTreeSet<String>,
+        text: &mut std::collections::BTreeSet<String>,
+        images: &mut std::collections::BTreeSet<String>,
         placeholders: &mut std::collections::BTreeSet<String>,
         groups: &mut std::collections::BTreeSet<String>,
         reasons: &mut BTreeMap<String, usize>,
     ) {
         for primitive in primitives {
             match primitive {
-                Primitive::Shape { id, .. }
-                | Primitive::Image { id, .. }
-                | Primitive::TextBox { id, .. } => {
-                    painted.insert(id.clone());
+                Primitive::Shape { id, .. } => {
+                    shapes.insert(id.clone());
+                }
+                Primitive::TextBox { id, .. } => {
+                    text.insert(id.clone());
+                }
+                Primitive::Image { id, .. } => {
+                    images.insert(id.clone());
                 }
                 Primitive::Placeholder { id, reason, .. } => {
                     placeholders.insert(id.clone());
@@ -2041,7 +2144,15 @@ mod tests {
                 }
                 Primitive::Group { id, primitives, .. } => {
                     groups.insert(id.clone());
-                    count_primitives(primitives, painted, placeholders, groups, reasons)
+                    count_primitives(
+                        primitives,
+                        shapes,
+                        text,
+                        images,
+                        placeholders,
+                        groups,
+                        reasons,
+                    )
                 }
             }
         }
