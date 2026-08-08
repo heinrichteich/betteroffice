@@ -104,7 +104,25 @@ fn js_error(error: impl std::fmt::Display) -> JsValue {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_vsdx_json;
+    use super::{VsdxDocument, VsdxRenderer, parse_vsdx_json};
+    use vsdx_edit::EditCtx;
+    use yrs::{Map, MapPrelim, Out, ReadTxn, Transact};
+
+    fn add_formula(document: &VsdxDocument, name: &str, formula: &str) {
+        let mut txn = document.session().yrs_doc().transact_mut();
+        let sheets = txn.get_map("vsdx:sheets").unwrap();
+        let shape = match sheets.get(&txn, "page:1:shape:1") {
+            Some(Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        let cells = match shape.get(&txn, "cells") {
+            Some(Out::YMap(cells)) => cells,
+            _ => unreachable!(),
+        };
+        let cell = cells.insert(&mut txn, name, MapPrelim::default());
+        cell.insert(&mut txn, "name", name);
+        cell.insert(&mut txn, "formula", formula);
+    }
 
     #[test]
     fn parse_vsdx_json_round_trips_a_fixture() {
@@ -113,5 +131,32 @@ mod tests {
         ))
         .unwrap();
         assert!(json.contains("pagePartPaths"));
+    }
+
+    #[test]
+    fn layout_page_json_uses_the_current_collaborative_state() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        add_formula(&document, "PinX", "1");
+        add_formula(&document, "PinY", "1");
+        add_formula(&document, "Width", "1");
+        add_formula(&document, "Height", "1");
+        let mut renderer = VsdxRenderer::new();
+        let before = renderer.layout_page_json(&document, 0).unwrap();
+        document
+            .session()
+            .set_cell_formula(
+                &EditCtx::local("test"),
+                "page:1",
+                "page:1:shape:1",
+                "Width",
+                "10",
+            )
+            .unwrap();
+        let after = renderer.layout_page_json(&document, 0).unwrap();
+        assert_ne!(before, after);
     }
 }

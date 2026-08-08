@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use vsdx_eval::{MutationContext, MutationOutcome, decide_mutation, evaluate};
-use vsdx_parse::{CellLocator, CellRow, CellSheet, MutationGesture, ParseLimits};
+use vsdx_parse::{
+    Cell, CellLocator, CellRow, CellSheet, MutationGesture, ParseLimits, RowChild, SectionChild,
+    Shape, ShapeChild, ShapesChild, SheetChild,
+};
 use vsdx_resolve::{Lookup, Resolver};
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, Doc, Map, MapPrelim, MapRef, Out, ReadTxn, Transact,
@@ -23,6 +26,8 @@ pub(crate) fn seed_doc(
 ) -> EditResult<()> {
     let package_json =
         serde_json::to_vec(package).map_err(|error| EditError::Json(error.to_string()))?;
+    let package_bytes =
+        vsdx_parse::write_vsdx(package).map_err(|error| EditError::Parse(error.to_string()))?;
     let mut txn = doc.transact_mut_with("vsdx:bootstrap");
     let meta = txn.get_or_insert_map(META);
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
@@ -31,6 +36,11 @@ pub(crate) fn seed_doc(
         &mut txn,
         "packageJson",
         Any::Buffer(Arc::from(package_json)),
+    );
+    meta.insert(
+        &mut txn,
+        "packageBytes",
+        Any::Buffer(Arc::from(package_bytes)),
     );
     meta.insert(&mut txn, "pageWidth", 0.0);
     meta.insert(&mut txn, "pageHeight", 0.0);
@@ -74,10 +84,107 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage>
             "unsupported diagram schema version".to_owned(),
         ));
     }
-    let Some(Out::Any(Any::Buffer(bytes))) = meta.get(&txn, "packageJson") else {
-        return Err(EditError::InvalidState("missing package data".to_owned()));
+    let mut package = match meta.get(&txn, "packageBytes") {
+        Some(Out::Any(Any::Buffer(bytes))) => vsdx_parse::parse_vsdx(&bytes)
+            .map_err(|error| EditError::InvalidState(error.to_string()))?,
+        _ => {
+            let Some(Out::Any(Any::Buffer(bytes))) = meta.get(&txn, "packageJson") else {
+                return Err(EditError::InvalidState("missing package data".to_owned()));
+            };
+            serde_json::from_slice(&bytes)
+                .map_err(|error| EditError::InvalidState(error.to_string()))?
+        }
     };
-    serde_json::from_slice(&bytes).map_err(|error| EditError::InvalidState(error.to_string()))
+    materialize_snapshot(&mut package, &snapshot_doc(doc)?);
+    Ok(package)
+}
+
+fn materialize_snapshot(package: &mut vsdx_parse::VsdxPackage, snapshot: &DiagramSnapshot) {
+    for page in &snapshot.pages {
+        let Some(sheet) = package.page_contents.get_mut(&page.source_part_path) else {
+            continue;
+        };
+        for shape in &page.shapes {
+            materialize_shapes(&mut sheet.children, shape);
+        }
+    }
+}
+
+fn materialize_shapes(children: &mut [SheetChild], snapshot: &ShapeSnapshot) {
+    for child in children {
+        if let SheetChild::Shapes(shapes) = child {
+            for shape in shapes {
+                if let ShapesChild::Shape(shape) = shape {
+                    materialize_shape(shape, snapshot);
+                }
+            }
+        }
+    }
+}
+
+fn materialize_shape(shape: &mut Shape, snapshot: &ShapeSnapshot) {
+    if shape.id == snapshot.source_id {
+        for cell in &snapshot.cells {
+            materialize_cell(shape, cell);
+        }
+    }
+    for child in &snapshot.children {
+        for value in &mut shape.children {
+            if let ShapeChild::Shapes(shapes) = value {
+                for value in shapes {
+                    if let ShapesChild::Shape(shape) = value {
+                        materialize_shape(shape, child);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn materialize_cell(shape: &mut Shape, snapshot: &CellSnapshot) {
+    let locator = &snapshot.locator;
+    let target = match &locator.section {
+        None => shape.children.iter_mut().find_map(|child| match child {
+            ShapeChild::Cell(cell) if cell.name == locator.cell_name => Some(cell),
+            _ => None,
+        }),
+        Some(section_name) => shape.children.iter_mut().find_map(|child| {
+            let ShapeChild::Section(section) = child else {
+                return None;
+            };
+            if section.name != *section_name {
+                return None;
+            }
+            section.children.iter_mut().find_map(|child| {
+                let SectionChild::Row(row) = child else {
+                    return None;
+                };
+                let row_matches = match &locator.row {
+                    Some(CellRow::Index(index)) => row.index == Some(*index),
+                    Some(CellRow::Name(name)) => row.name.as_deref() == Some(name),
+                    None => false,
+                };
+                row_matches.then(|| {
+                    row.children.iter_mut().find_map(|child| match child {
+                        RowChild::Cell(cell) if cell.name == locator.cell_name => Some(cell),
+                        _ => None,
+                    })
+                })?
+            })
+        }),
+    };
+    if let Some(cell) = target {
+        cell.formula = snapshot.formula.clone();
+    } else if locator.section.is_none() {
+        shape.children.push(ShapeChild::Cell(Cell {
+            name: locator.cell_name.clone(),
+            formula: snapshot.formula.clone(),
+            value: snapshot.value.clone(),
+            unit: None,
+            del: false,
+            other_attrs: Vec::new(),
+        }));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -588,7 +695,11 @@ fn protected_formulas(doc: &Doc) -> EditResult<std::collections::BTreeMap<String
                                 .and_then(|value| value.as_deref())
                                 .is_some_and(|value| lock_is_enabled(value, &values))
                     });
-                if locked || protected_target || formula.as_deref().is_some_and(is_guarded) {
+                if locked
+                    || protected_target
+                    || formula.as_deref().is_some_and(is_guarded)
+                    || formula.as_deref().is_some_and(is_setatref)
+                {
                     protected.insert(
                         format!("{page_id}/{shape_id}/{name}"),
                         formula.unwrap_or_default(),
@@ -633,11 +744,19 @@ fn lock_target(lock: &str) -> Option<&str> {
 }
 
 fn is_guarded(formula: &str) -> bool {
+    formula_contains(formula, "GUARD")
+}
+
+fn is_setatref(formula: &str) -> bool {
+    formula_contains(formula, "SETATREF")
+}
+
+fn formula_contains(formula: &str, name: &str) -> bool {
     vsdx_eval::parse(formula.trim_start_matches('='), &ParseLimits::default())
         .map(|expression| {
             format!("{expression:?}")
                 .to_ascii_uppercase()
-                .contains("GUARD")
+                .contains(name)
         })
         .unwrap_or(false)
 }
