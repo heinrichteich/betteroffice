@@ -606,15 +606,8 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
 
 pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<()> {
     validate_doc(staged)?;
-    let before = protected_formulas(before)?;
-    let after = protected_formulas(staged)?;
-    for (key, formula) in before {
-        if after.get(&key) != Some(&formula) {
-            return Err(EditError::InvalidState(format!(
-                "remote update changes protected cell {key}"
-            )));
-        }
-    }
+    validate_immutable_metadata(before, staged)?;
+    validate_formula_mutations(before, staged)?;
     Ok(())
 }
 
@@ -642,123 +635,80 @@ pub(crate) fn next_id_counter(doc: &Doc, client_id: u64) -> u64 {
         .unwrap_or(0)
 }
 
-fn protected_formulas(doc: &Doc) -> EditResult<std::collections::BTreeMap<String, String>> {
-    let txn = doc.transact();
-    let pages = required_map(&txn, PAGES)?;
-    let sheets = required_map(&txn, SHEETS)?;
-    let mut protected = std::collections::BTreeMap::new();
-    for (page_id, page) in pages.iter(&txn) {
+fn validate_immutable_metadata(before: &Doc, staged: &Doc) -> EditResult<()> {
+    let before_txn = before.transact();
+    let staged_txn = staged.transact();
+    let before_meta = required_map(&before_txn, META)?;
+    let staged_meta = required_map(&staged_txn, META)?;
+    for key in ["fingerprint", "packageJson", "packageBytes"] {
+        if before_meta.get(&before_txn, key) != staged_meta.get(&staged_txn, key) {
+            return Err(EditError::InvalidState(format!(
+                "remote update changes immutable diagram metadata {key}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_formula_mutations(before: &Doc, staged: &Doc) -> EditResult<()> {
+    let before_txn = before.transact();
+    let staged_txn = staged.transact();
+    let pages = required_map(&before_txn, PAGES)?;
+    let sheets = required_map(&before_txn, SHEETS)?;
+    for (page_id, page) in pages.iter(&before_txn) {
         let Out::YMap(page) = page else { continue };
-        let order = map_array(&page, &txn, "shapes")?;
-        for index in 0..order.len(&txn) {
-            let Some(shape_id) = array_string(&order, &txn, index) else {
-                continue;
-            };
-            let shape = map_ref(&sheets, &txn, &shape_id)?;
-            let cells = map_map(&shape, &txn, "cells")?;
-            let values = cells
-                .iter(&txn)
-                .filter_map(|(name, cell)| match cell {
-                    Out::YMap(cell) => Some((
-                        name.to_string(),
-                        map_string(&cell, &txn, "formula")
-                            .or_else(|| map_string(&cell, &txn, "value")),
-                    )),
-                    _ => None,
-                })
-                .collect::<std::collections::BTreeMap<_, _>>();
-            for (name, cell) in cells.iter(&txn) {
+        let order = map_array(&page, &before_txn, "shapes")?;
+        for index in 0..order.len(&before_txn) {
+            let shape_id = array_string(&order, &before_txn, index).ok_or_else(|| {
+                EditError::InvalidState("shape order contains non-string".to_owned())
+            })?;
+            let shape = map_ref(&sheets, &before_txn, &shape_id)?;
+            let cells = map_map(&shape, &before_txn, "cells")?;
+            let context = CrdtMutationContext::new(&before_txn, page_id, &shape_id)?;
+            let staged_shape = required_map(&staged_txn, SHEETS)
+                .and_then(|sheets| map_ref(&sheets, &staged_txn, &shape_id))?;
+            let staged_cells = map_map(&staged_shape, &staged_txn, "cells")?;
+            for (key, cell) in cells.iter(&before_txn) {
                 let Out::YMap(cell) = cell else { continue };
-                let formula = map_string(&cell, &txn, "formula");
-                let locked = lock_target(name).is_some_and(|_| {
-                    values
-                        .get(name)
-                        .and_then(|value| value.as_deref())
-                        .is_some_and(|value| lock_is_enabled(value, &values))
-                });
-                let protected_target = lock_target(name).is_none()
-                    && [
-                        "LockMoveX",
-                        "LockMoveY",
-                        "LockWidth",
-                        "LockHeight",
-                        "LockAspect",
-                        "LockTextEdit",
-                        "LockFormat",
-                        "LockDelete",
-                    ]
-                    .iter()
-                    .any(|lock| {
-                        lock_target(lock) == Some(name)
-                            && values
-                                .get(*lock)
-                                .and_then(|value| value.as_deref())
-                                .is_some_and(|value| lock_is_enabled(value, &values))
-                    });
-                if locked
-                    || protected_target
-                    || formula.as_deref().is_some_and(is_guarded)
-                    || formula.as_deref().is_some_and(is_setatref)
-                {
-                    protected.insert(
-                        format!("{page_id}/{shape_id}/{name}"),
-                        formula.unwrap_or_default(),
-                    );
+                let before_formula = map_string(&cell, &before_txn, "formula");
+                let after_formula =
+                    staged_cells
+                        .get(&staged_txn, key)
+                        .and_then(|cell| match cell {
+                            Out::YMap(cell) => map_string(&cell, &staged_txn, "formula"),
+                            _ => None,
+                        });
+                if before_formula == after_formula {
+                    continue;
+                }
+                let formula = after_formula.ok_or_else(|| {
+                    EditError::InvalidState(format!(
+                        "remote update removes formula from {page_id}/{shape_id}/{key}"
+                    ))
+                })?;
+                let locator = context.locator(cell_locator(&cell, &before_txn, 0, 0)?);
+                match decide_mutation(
+                    &context,
+                    locator.clone(),
+                    gesture_for_cell(&locator.cell_name),
+                    formula,
+                    &ParseLimits::default(),
+                ) {
+                    MutationOutcome::Allowed { target, .. } if target == locator => {}
+                    MutationOutcome::Allowed { .. } => {
+                        return Err(EditError::InvalidState(format!(
+                            "remote update bypasses formula redirect at {page_id}/{shape_id}/{key}"
+                        )));
+                    }
+                    MutationOutcome::Refused { reason }
+                    | MutationOutcome::Unsupported { reason } => {
+                        return Err(EditError::InvalidState(reason));
+                    }
                 }
             }
         }
     }
-    Ok(protected)
-}
-
-fn lock_is_enabled(
-    value: &str,
-    formulas: &std::collections::BTreeMap<String, Option<String>>,
-) -> bool {
-    let formulas = formulas
-        .iter()
-        .filter_map(|(name, formula)| {
-            formula
-                .as_ref()
-                .map(|formula| (name.clone(), formula.clone()))
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    matches!(
-        evaluate(value.trim_start_matches('='), &formulas, &ParseLimits::default()),
-        vsdx_eval::Evaluation::Evaluated(result)
-            if matches!(result.value, vsdx_eval::Value::Number(number) if number.number == 1.0)
-    )
-}
-
-fn lock_target(lock: &str) -> Option<&str> {
-    match lock {
-        "LockMoveX" => Some("PinX"),
-        "LockMoveY" => Some("PinY"),
-        "LockWidth" => Some("Width"),
-        "LockHeight" => Some("Height"),
-        "LockAspect" => Some("Width"),
-        "LockTextEdit" => Some("Text"),
-        "LockFormat" | "LockDelete" => None,
-        _ => None,
-    }
-}
-
-fn is_guarded(formula: &str) -> bool {
-    formula_contains(formula, "GUARD")
-}
-
-fn is_setatref(formula: &str) -> bool {
-    formula_contains(formula, "SETATREF")
-}
-
-fn formula_contains(formula: &str, name: &str) -> bool {
-    vsdx_eval::parse(formula.trim_start_matches('='), &ParseLimits::default())
-        .map(|expression| {
-            format!("{expression:?}")
-                .to_ascii_uppercase()
-                .contains(name)
-        })
-        .unwrap_or(false)
+    Ok(())
 }
 
 fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
@@ -973,7 +923,7 @@ struct CrdtMutationContext {
 }
 
 impl CrdtMutationContext {
-    fn new(txn: &TransactionMut<'_>, page_id: &str, shape_id: &str) -> EditResult<Self> {
+    fn new<T: ReadTxn>(txn: &T, page_id: &str, shape_id: &str) -> EditResult<Self> {
         let pages = required_map(txn, PAGES)?;
         map_ref(&pages, txn, page_id)?;
         let sheets = required_map(txn, SHEETS)?;
