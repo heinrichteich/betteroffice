@@ -5,7 +5,9 @@ use crate::VsdxError;
 pub const MAX_PATCH_EDITS: usize = 16_384;
 pub const MAX_PATCH_BYTES: usize = 16 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceSpan {
     pub offset: usize,
@@ -28,6 +30,7 @@ pub struct AttributeSpan {
 pub struct ElementSpan {
     pub name: String,
     pub span: SourceSpan,
+    pub start_tag: SourceSpan,
     pub attributes: BTreeMap<String, AttributeSpan>,
 }
 
@@ -144,6 +147,10 @@ pub(crate) fn scan_element_spans(source: &[u8]) -> Result<Vec<ElementSpan>, Vsdx
                         offset,
                         length: token.end + 1 - offset,
                     },
+                    start_tag: SourceSpan {
+                        offset,
+                        length: token.end + 1 - offset,
+                    },
                     attributes,
                 });
             }
@@ -153,6 +160,10 @@ pub(crate) fn scan_element_spans(source: &[u8]) -> Result<Vec<ElementSpan>, Vsdx
                         spans.push(ElementSpan {
                             name,
                             span: SourceSpan {
+                                offset: start,
+                                length: token.end + 1 - start,
+                            },
+                            start_tag: SourceSpan {
                                 offset: start,
                                 length: token.end + 1 - start,
                             },

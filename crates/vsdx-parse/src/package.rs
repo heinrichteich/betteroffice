@@ -8,8 +8,46 @@ use crate::patch::{
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
 use crate::sheet::{parse_records, parse_sheet};
 use crate::xml::{ParseBudget, XmlElement, XmlNode, parse_xml};
-use crate::{ParseLimits, Sheet, VsdxError};
+use crate::{CellAttribute, ParseLimits, Sheet, VsdxError};
 use ooxml_drawingml::Theme;
+
+/// Identifies the ShapeSheet containing a semantic cell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CellSheet {
+    Document,
+    Page(u32),
+    Master(u32),
+}
+
+/// Identifies a row within a ShapeSheet section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CellRow {
+    Index(u32),
+    Name(String),
+}
+
+/// Stable semantic identity for a ShapeSheet cell.
+///
+/// Future CRDT entities can retain this locator and add their entity identity
+/// alongside it without exposing lexical source spans.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellLocator {
+    pub sheet: CellSheet,
+    pub shape_id: Option<u32>,
+    pub section: Option<String>,
+    pub row: Option<CellRow>,
+    pub cell_name: String,
+}
+
+/// A semantic cell edit. `formula` and `value` independently select attributes to write.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticCellEdit {
+    pub locator: CellLocator,
+    pub formula: Option<String>,
+    pub value: Option<String>,
+}
+
+type PendingInsertion = (crate::SourceSpan, u8, Vec<(CellAttribute, String)>);
 
 pub fn parse_vsdx(data: &[u8]) -> Result<VsdxPackage, VsdxError> {
     parse_vsdx_with_limits(data, &ParseLimits::default())
@@ -328,13 +366,14 @@ pub fn write_vsdx(package: &VsdxPackage) -> Result<Vec<u8>, VsdxError> {
     .map_err(VsdxError::Container)
 }
 
-/// Applies existing Cell@V and Cell@F attribute edits without mutating `package`.
+/// Applies Cell@V and Cell@F attribute edits without mutating `package`.
 pub fn save_cell_edits(package: &VsdxPackage, edits: &[CellEdit]) -> Result<Vec<u8>, VsdxError> {
     if edits.len() > MAX_PATCH_EDITS {
         return Err(VsdxError::PatchLimit { kind: "editCount" });
     }
     let mut replacement_bytes = 0_usize;
     let mut validated = Vec::with_capacity(edits.len());
+    let mut insertions: BTreeMap<(&str, crate::SourceSpan), PendingInsertion> = BTreeMap::new();
     for edit in edits {
         if !is_shapesheet_part(package, &edit.part_path) {
             return Err(VsdxError::InvalidCellEdit {
@@ -364,23 +403,66 @@ pub fn save_cell_edits(package: &VsdxPackage, edits: &[CellEdit]) -> Result<Vec<
                 part: edit.part_path.clone(),
                 message: "span is not an existing Cell".to_owned(),
             })?;
-        let attribute = cell.attributes.get(edit.attribute.name()).ok_or_else(|| {
-            VsdxError::InvalidCellEdit {
-                part: edit.part_path.clone(),
-                message: format!("Cell@{} does not exist", edit.attribute.name()),
+        if let Some(attribute) = cell.attributes.get(edit.attribute.name()) {
+            let replacement = escape_attribute_value(&edit.value, attribute.quote)?;
+            replacement_bytes = replacement_bytes
+                .checked_add(replacement.len())
+                .ok_or(VsdxError::PatchLimit { kind: "editBytes" })?;
+            validated.push((
+                part.path.as_str(),
+                SpanEdit {
+                    span: attribute.value,
+                    replacement,
+                },
+            ));
+        } else {
+            let quote = cell
+                .attributes
+                .values()
+                .next()
+                .map(|attribute| attribute.quote)
+                .ok_or_else(|| VsdxError::InvalidCellEdit {
+                    part: edit.part_path.clone(),
+                    message: "Cell has no attribute quote style".to_owned(),
+                })?;
+            let entry = insertions
+                .entry((part.path.as_str(), cell.span))
+                .or_insert_with(|| {
+                    let end = cell.start_tag.end().expect("scanner span cannot overflow");
+                    let offset = if part.bytes[end - 2] == b'/' {
+                        end - 2
+                    } else {
+                        end - 1
+                    };
+                    (crate::SourceSpan { offset, length: 0 }, quote, Vec::new())
+                });
+            if entry
+                .2
+                .iter()
+                .any(|(attribute, _)| *attribute == edit.attribute)
+            {
+                return Err(VsdxError::InvalidCellEdit {
+                    part: edit.part_path.clone(),
+                    message: format!("duplicate Cell@{} edit", edit.attribute.name()),
+                });
             }
-        })?;
-        let replacement = escape_attribute_value(&edit.value, attribute.quote)?;
+            entry.2.push((edit.attribute, edit.value.clone()));
+        }
+    }
+    for ((path, _), (span, quote, attributes)) in insertions {
+        let mut replacement = Vec::new();
+        for (attribute, value) in attributes {
+            replacement.push(b' ');
+            replacement.extend_from_slice(attribute.name().as_bytes());
+            replacement.push(b'=');
+            replacement.push(quote);
+            replacement.extend_from_slice(&escape_attribute_value(&value, quote)?);
+            replacement.push(quote);
+        }
         replacement_bytes = replacement_bytes
             .checked_add(replacement.len())
             .ok_or(VsdxError::PatchLimit { kind: "editBytes" })?;
-        validated.push((
-            part.path.as_str(),
-            SpanEdit {
-                span: attribute.value,
-                replacement,
-            },
-        ));
+        validated.push((path, SpanEdit { span, replacement }));
     }
     if replacement_bytes > MAX_PATCH_BYTES {
         return Err(VsdxError::PatchLimit { kind: "editBytes" });
@@ -401,6 +483,123 @@ pub fn save_cell_edits(package: &VsdxPackage, edits: &[CellEdit]) -> Result<Vec<
     let bytes = write_vsdx(&output)?;
     parse_vsdx(&bytes)?;
     Ok(bytes)
+}
+
+/// Resolves semantic cell edits to package-local lexical provenance and saves them.
+pub fn save_semantic_cell_edits(
+    package: &VsdxPackage,
+    edits: &[SemanticCellEdit],
+) -> Result<Vec<u8>, VsdxError> {
+    let mut lexical = Vec::new();
+    for edit in edits {
+        let (part_path, cell_span) = resolve_cell_locator(package, &edit.locator)?;
+        if let Some(formula) = &edit.formula {
+            lexical.push(CellEdit {
+                part_path: part_path.clone(),
+                cell_span,
+                attribute: CellAttribute::Formula,
+                value: formula.clone(),
+            });
+        }
+        if let Some(value) = &edit.value {
+            lexical.push(CellEdit {
+                part_path,
+                cell_span,
+                attribute: CellAttribute::Value,
+                value: value.clone(),
+            });
+        }
+    }
+    save_cell_edits(package, &lexical)
+}
+
+fn resolve_cell_locator(
+    package: &VsdxPackage,
+    locator: &CellLocator,
+) -> Result<(String, crate::SourceSpan), VsdxError> {
+    let path = match locator.sheet {
+        CellSheet::Document => Some(package.document_part_path.clone()),
+        CellSheet::Page(id) => package
+            .page_part_ids
+            .iter()
+            .find_map(|(path, candidate)| (*candidate == id).then(|| path.clone())),
+        CellSheet::Master(id) => package
+            .master_part_ids
+            .iter()
+            .find_map(|(path, candidate)| (*candidate == id).then(|| path.clone())),
+    }
+    .ok_or_else(|| VsdxError::InvalidCellEdit {
+        part: format!("{:?}", locator.sheet),
+        message: "sheet does not exist".to_owned(),
+    })?;
+    let part = package
+        .parts
+        .iter()
+        .find(|part| part.path == path)
+        .expect("catalogued part exists");
+    let cell = part
+        .spans
+        .iter()
+        .filter(|span| {
+            local_name(&span.name) == "Cell"
+                && attribute_equals(&part.bytes, span, "N", &locator.cell_name)
+        })
+        .find(|cell| {
+            let nearest = |name: &str| {
+                part.spans
+                    .iter()
+                    .filter(|parent| {
+                        local_name(&parent.name) == name && contains(parent.span, cell.span)
+                    })
+                    .min_by_key(|parent| parent.span.length)
+            };
+            let shape_matches = match (locator.shape_id, nearest("Shape")) {
+                (None, None) => true,
+                (Some(id), Some(shape)) => {
+                    attribute_equals(&part.bytes, shape, "ID", &id.to_string())
+                }
+                _ => false,
+            };
+            let section_matches = match (&locator.section, nearest("Section")) {
+                (None, None) => true,
+                (Some(name), Some(section)) => attribute_equals(&part.bytes, section, "N", name),
+                _ => false,
+            };
+            let row_matches = match (&locator.row, nearest("Row")) {
+                (None, None) => true,
+                (Some(CellRow::Index(index)), Some(row)) => {
+                    attribute_equals(&part.bytes, row, "IX", &index.to_string())
+                }
+                (Some(CellRow::Name(name)), Some(row)) => {
+                    attribute_equals(&part.bytes, row, "N", name)
+                }
+                _ => false,
+            };
+            shape_matches && section_matches && row_matches
+        })
+        .ok_or_else(|| VsdxError::InvalidCellEdit {
+            part: path.clone(),
+            message: "semantic cell does not exist".to_owned(),
+        })?;
+    Ok((path, cell.span))
+}
+
+fn local_name(name: &str) -> &str {
+    name.rsplit_once(':').map_or(name, |(_, name)| name)
+}
+
+fn contains(parent: crate::SourceSpan, child: crate::SourceSpan) -> bool {
+    parent.offset < child.offset
+        && parent
+            .end()
+            .is_some_and(|end| child.end().is_some_and(|child_end| child_end <= end))
+}
+
+fn attribute_equals(source: &[u8], span: &crate::ElementSpan, name: &str, expected: &str) -> bool {
+    span.attributes.get(name).is_some_and(|attribute| {
+        source.get(attribute.value.offset..attribute.value.end().unwrap_or(0))
+            == Some(expected.as_bytes())
+    })
 }
 
 fn is_shapesheet_part(package: &VsdxPackage, path: &str) -> bool {
@@ -495,6 +694,28 @@ mod tests {
         }
     }
 
+    fn package_with_page_xml(xml: &[u8]) -> (VsdxPackage, String) {
+        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        let mut parts = unzip_parts(source).unwrap();
+        let path = parse_vsdx(source).unwrap().page_part_paths.remove(0);
+        parts
+            .iter_mut()
+            .find(|(candidate, _)| candidate == &path)
+            .unwrap()
+            .1 = xml.to_vec();
+        (parse_vsdx(&rezip_parts(&parts).unwrap()).unwrap(), path)
+    }
+
+    fn cell_span(package: &VsdxPackage, part_path: &str) -> SourceSpan {
+        package
+            .element_spans(part_path)
+            .unwrap()
+            .iter()
+            .find(|span| span.name == "Cell")
+            .unwrap()
+            .span
+    }
+
     fn assert_only_span_changed(
         before: &[u8],
         after: &[u8],
@@ -540,6 +761,48 @@ mod tests {
         for span in spans {
             assert_eq!(bytes[span.span.offset], b'<');
             assert_eq!(bytes[span.span.offset + span.span.length - 1], b'>');
+        }
+    }
+
+    #[test]
+    fn records_exact_spans_for_shapesheet_entities_and_mixed_text() {
+        let source = b"<PageContents><Shapes><Shape ID='7'><Section N='Geometry'><Row IX='2'><Cell N='X'/></Row></Section><Text>before<cp IX='0'/>after</Text></Shape></Shapes></PageContents>";
+        let spans = scan_element_spans(source).unwrap();
+        for (name, expected) in [
+            (
+                "Shape",
+                "<Shape ID='7'><Section N='Geometry'><Row IX='2'><Cell N='X'/></Row></Section><Text>before<cp IX='0'/>after</Text></Shape>",
+            ),
+            (
+                "Section",
+                "<Section N='Geometry'><Row IX='2'><Cell N='X'/></Row></Section>",
+            ),
+            ("Row", "<Row IX='2'><Cell N='X'/></Row>"),
+            ("Cell", "<Cell N='X'/>"),
+            ("Text", "<Text>before<cp IX='0'/>after</Text>"),
+        ] {
+            let span = spans.iter().find(|span| span.name == name).unwrap().span;
+            assert_eq!(
+                &source[span.offset..span.end().unwrap()],
+                expected.as_bytes(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn inserts_missing_cell_attributes_with_existing_quote_style() {
+        for (xml, edits, expected) in [
+            (b"<PageContents><Shapes><Shape ID='1'><Cell N='X' F='a'/></Shape></Shapes></PageContents>".as_slice(), vec![(CellAttribute::Value, "v")], "<Cell N='X' F='a' V='v'/>"),
+            (b"<PageContents><Shapes><Shape ID='1'><Cell N='X' V='v'/></Shape></Shapes></PageContents>".as_slice(), vec![(CellAttribute::Formula, "a")], "<Cell N='X' V='v' F='a'/>"),
+            (b"<PageContents><Shapes><Shape ID='1'><Cell N='X'/></Shape></Shapes></PageContents>".as_slice(), vec![(CellAttribute::Formula, "a"), (CellAttribute::Value, "v")], "<Cell N='X' F='a' V='v'/>"),
+        ] {
+            let (package, path) = package_with_page_xml(xml);
+            let span = cell_span(&package, &path);
+            let edits = edits.into_iter().map(|(attribute, value)| CellEdit { part_path: path.clone(), cell_span: span, attribute, value: value.to_owned() }).collect::<Vec<_>>();
+            let saved = save_cell_edits(&package, &edits).unwrap();
+            let part = unzip_parts(&saved).unwrap().into_iter().find(|(candidate, _)| candidate == &path).unwrap().1;
+            assert!(std::str::from_utf8(&part).unwrap().contains(expected));
         }
     }
 
@@ -620,7 +883,7 @@ mod tests {
     #[test]
     fn saves_real_corpus_cells_without_rewriting_other_parts() {
         let Some(directory) = std::env::var_os("VSDX_CORPUS_DIR") else {
-            eprintln!("WARNING: VSDX corpus test skipped; VSDX_CORPUS_DIR is unset");
+            eprintln!("SKIPPED REVIEW CORPUS TEST: VSDX_CORPUS_DIR is unset");
             return;
         };
         for name in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
@@ -766,6 +1029,73 @@ mod tests {
             Err(VsdxError::PatchLimit { kind: "editBytes" })
         ));
         assert_eq!(package.part_bytes(part_path), Some(before.as_slice()));
+    }
+
+    #[test]
+    fn failed_edits_after_a_valid_edit_leave_the_package_unchanged() {
+        let (mut package, part_path) = package_with_page_xml(
+            b"<PageContents><Shapes><Shape ID='1'><Cell N='Valid' V='old'/><Cell N='Invalid'/></Shape></Shapes></PageContents>",
+        );
+        let invalid_span = package
+            .element_spans(&part_path)
+            .unwrap()
+            .iter()
+            .find(|span| {
+                span.name == "Cell"
+                    && span.attributes.contains_key("N")
+                    && !span.attributes.contains_key("V")
+            })
+            .unwrap()
+            .span;
+        package
+            .parts
+            .iter_mut()
+            .find(|part| part.path == part_path)
+            .unwrap()
+            .spans
+            .iter_mut()
+            .find(|span| span.span == invalid_span)
+            .unwrap()
+            .attributes
+            .clear();
+        let valid = first_value_edit(&package, &part_path, "valid");
+        let before = package.part_bytes(&part_path).unwrap().to_vec();
+        let stale = CellEdit {
+            cell_span: SourceSpan {
+                offset: usize::MAX,
+                length: 0,
+            },
+            ..valid.clone()
+        };
+        let invalid_insertion = CellEdit {
+            part_path: part_path.clone(),
+            cell_span: invalid_span,
+            attribute: CellAttribute::Formula,
+            value: "x".to_owned(),
+        };
+        let cases = vec![
+            vec![valid.clone(), valid.clone()],
+            vec![
+                valid.clone(),
+                CellEdit {
+                    value: "x".repeat(MAX_PATCH_BYTES),
+                    ..valid.clone()
+                },
+            ],
+            vec![
+                valid.clone(),
+                CellEdit {
+                    value: "bad\0".to_owned(),
+                    ..valid.clone()
+                },
+            ],
+            vec![valid.clone(), stale],
+            vec![valid.clone(), invalid_insertion],
+        ];
+        for edits in cases {
+            assert!(save_cell_edits(&package, &edits).is_err());
+            assert_eq!(package.part_bytes(&part_path), Some(before.as_slice()));
+        }
     }
 
     #[test]
