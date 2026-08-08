@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use ooxml_drawingml::Theme;
 use serde::{Deserialize, Serialize};
 
+use crate::patch::ElementSpan;
 use crate::{Relationship, Sheet, XmlRecord};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,7 +55,15 @@ impl VsdxPackage {
         self.parts.push(PackagePart {
             path: path.into(),
             bytes,
+            spans: Vec::new(),
         });
+    }
+
+    pub fn element_spans(&self, path: &str) -> Option<&[ElementSpan]> {
+        self.parts
+            .iter()
+            .find(|part| part.path == path)
+            .map(|part| part.spans.as_slice())
     }
 }
 
@@ -62,4 +71,5 @@ impl VsdxPackage {
 pub(crate) struct PackagePart {
     pub path: String,
     pub bytes: Vec<u8>,
+    pub spans: Vec<ElementSpan>,
 }

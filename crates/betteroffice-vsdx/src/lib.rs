@@ -1,6 +1,6 @@
 //! Typed native facade for inspecting VSDX diagrams.
 
-use vsdx_parse::{ParseLimits, Shape, VsdxError, VsdxPackage};
+use vsdx_parse::{CellEdit, ParseLimits, Shape, VsdxError, VsdxPackage};
 use vsdx_resolve::{ResolveError, ResolvedShape, Resolver};
 
 #[derive(Debug)]
@@ -39,6 +39,9 @@ impl Diagram {
     }
     pub fn package(&self) -> &VsdxPackage {
         &self.package
+    }
+    pub fn save_cell_edits(&self, edits: &[CellEdit]) -> Result<Vec<u8>> {
+        Ok(vsdx_parse::save_cell_edits(&self.package, edits)?)
     }
     pub fn pages(&self) -> impl Iterator<Item = Page<'_>> {
         self.package.page_contents.keys().map(|part| Page {

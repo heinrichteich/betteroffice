@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::model::{PackagePart, VsdxPackage};
+use crate::patch::{
+    CellEdit, SpanEdit, apply_span_edits, escape_attribute_value, scan_element_spans,
+};
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
 use crate::sheet::{parse_records, parse_sheet};
 use crate::xml::{ParseBudget, XmlElement, XmlNode, parse_xml};
@@ -142,7 +145,11 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         master_contents,
         parts: source_parts
             .into_iter()
-            .map(|(path, bytes)| PackagePart { path, bytes })
+            .map(|(path, bytes)| PackagePart {
+                spans: scan_element_spans(&bytes),
+                path,
+                bytes,
+            })
             .collect(),
     })
 }
@@ -308,6 +315,60 @@ pub fn write_vsdx(package: &VsdxPackage) -> Result<Vec<u8>, VsdxError> {
     .map_err(VsdxError::Container)
 }
 
+/// Applies existing Cell@V and Cell@F attribute edits without mutating `package`.
+pub fn save_cell_edits(package: &VsdxPackage, edits: &[CellEdit]) -> Result<Vec<u8>, VsdxError> {
+    let mut part_edits: BTreeMap<&str, Vec<SpanEdit>> = BTreeMap::new();
+    for edit in edits {
+        let part = package
+            .parts
+            .iter()
+            .find(|part| part.path == edit.part_path)
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: edit.part_path.clone(),
+                message: "part does not exist".to_owned(),
+            })?;
+        let cell = part
+            .spans
+            .iter()
+            .find(|span| {
+                span.name
+                    .rsplit_once(':')
+                    .map_or(span.name.as_str(), |(_, name)| name)
+                    == "Cell"
+                    && span.span == edit.cell_span
+            })
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: edit.part_path.clone(),
+                message: "span is not an existing Cell".to_owned(),
+            })?;
+        let attribute = cell.attributes.get(edit.attribute.name()).ok_or_else(|| {
+            VsdxError::InvalidCellEdit {
+                part: edit.part_path.clone(),
+                message: format!("Cell@{} does not exist", edit.attribute.name()),
+            }
+        })?;
+        part_edits
+            .entry(part.path.as_str())
+            .or_default()
+            .push(SpanEdit {
+                span: attribute.value,
+                replacement: escape_attribute_value(&edit.value, attribute.quote)?,
+            });
+    }
+    let mut output = package.clone();
+    for (path, edits) in part_edits {
+        let part = output
+            .parts
+            .iter_mut()
+            .find(|part| part.path == path)
+            .expect("validated source part");
+        part.bytes = apply_span_edits(&part.bytes, &edits)?;
+    }
+    let bytes = write_vsdx(&output)?;
+    parse_vsdx(&bytes)?;
+    Ok(bytes)
+}
+
 fn load_relationships<'a>(
     source: &str,
     parts: &HashMap<&str, &[u8]>,
@@ -364,7 +425,162 @@ mod tests {
     use super::*;
     use crate::sheet::serialize_sheet;
     use crate::xml::{XmlNode, parse_xml};
+    use crate::{CellAttribute, CellEdit, Shape, SourceSpan};
     use ooxml_opc::{rezip_parts, unzip_parts};
+
+    fn first_value_edit(package: &VsdxPackage, part_path: &str, value: &str) -> CellEdit {
+        let cell = package
+            .element_spans(part_path)
+            .unwrap()
+            .iter()
+            .find(|span| {
+                span.name
+                    .rsplit_once(':')
+                    .map_or(span.name.as_str(), |(_, name)| name)
+                    == "Cell"
+                    && span.attributes.contains_key("V")
+            })
+            .unwrap();
+        CellEdit {
+            part_path: part_path.to_owned(),
+            cell_span: cell.span,
+            attribute: CellAttribute::Value,
+            value: value.to_owned(),
+        }
+    }
+
+    fn assert_only_span_changed(
+        before: &[u8],
+        after: &[u8],
+        span: SourceSpan,
+        replacement_length: usize,
+    ) {
+        assert_eq!(&before[..span.offset], &after[..span.offset]);
+        assert_eq!(
+            &before[span.offset + span.length..],
+            &after[span.offset + replacement_length..]
+        );
+    }
+
+    fn sheet_has_value(sheet: &Sheet, value: &str) -> bool {
+        sheet
+            .cells()
+            .any(|cell| cell.value.as_deref() == Some(value))
+            || sheet.shapes().any(|shape| shape_has_value(shape, value))
+    }
+
+    fn shape_has_value(shape: &Shape, value: &str) -> bool {
+        shape
+            .cells()
+            .any(|cell| cell.value.as_deref() == Some(value))
+            || shape.sections().any(|section| {
+                section
+                    .rows()
+                    .flat_map(crate::Row::cells)
+                    .any(|cell| cell.value.as_deref() == Some(value))
+            })
+            || shape.shapes().any(|shape| shape_has_value(shape, value))
+    }
+
+    #[test]
+    fn saves_cell_value_without_rewriting_other_parts_or_lexical_spans() {
+        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        let package = parse_vsdx(source).unwrap();
+        let part_path = package.page_part_paths.first().unwrap();
+        let edit = first_value_edit(&package, part_path, "patched");
+        let before: BTreeMap<_, _> = unzip_parts(source).unwrap().into_iter().collect();
+        let saved = save_cell_edits(&package, std::slice::from_ref(&edit)).unwrap();
+        let after: BTreeMap<_, _> = unzip_parts(&saved).unwrap().into_iter().collect();
+        for (path, bytes) in &before {
+            if path == &edit.part_path {
+                let original = package.part_bytes(path).unwrap();
+                let cell = package
+                    .element_spans(path)
+                    .unwrap()
+                    .iter()
+                    .find(|span| span.span == edit.cell_span)
+                    .unwrap();
+                assert_only_span_changed(
+                    original,
+                    &after[path],
+                    cell.attributes["V"].value,
+                    edit.value.len(),
+                );
+            } else {
+                assert_eq!(&after[path], bytes, "{path}");
+            }
+        }
+        let reparsed = parse_vsdx(&saved).unwrap();
+        assert!(
+            reparsed
+                .page_contents
+                .values()
+                .any(|sheet| sheet_has_value(sheet, "patched"))
+        );
+    }
+
+    #[test]
+    fn saves_real_corpus_cells_without_rewriting_other_parts() {
+        let Some(directory) = std::env::var_os("VSDX_CORPUS_DIR") else {
+            eprintln!("WARNING: VSDX corpus test skipped; VSDX_CORPUS_DIR is unset");
+            return;
+        };
+        for name in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
+            let source = std::fs::read(std::path::Path::new(&directory).join(name)).unwrap();
+            let package = parse_vsdx(&source).unwrap();
+            let part_path = package.page_part_paths.first().unwrap();
+            let edit = first_value_edit(&package, part_path, "0");
+            let before: BTreeMap<_, _> = unzip_parts(&source).unwrap().into_iter().collect();
+            let saved = save_cell_edits(&package, &[edit]).unwrap();
+            let after: BTreeMap<_, _> = unzip_parts(&saved).unwrap().into_iter().collect();
+            for (path, bytes) in before {
+                if path != part_path.as_str() {
+                    assert_eq!(after[&path], bytes, "{name}: {path}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cell_edits_preserve_quotes_escape_values_and_are_transactional() {
+        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        let package = parse_vsdx(source).unwrap();
+        let part_path = package.page_part_paths.first().unwrap();
+        let mut edit = first_value_edit(&package, part_path, "<&\"'");
+        let cell = package
+            .element_spans(part_path)
+            .unwrap()
+            .iter()
+            .find(|span| span.span == edit.cell_span)
+            .unwrap();
+        assert_eq!(cell.attributes["V"].quote, b'\'');
+        let saved = save_cell_edits(&package, &[edit.clone()]).unwrap();
+        let mut parts: BTreeMap<_, _> = unzip_parts(&saved).unwrap().into_iter().collect();
+        let part = parts.remove(part_path).unwrap();
+        assert!(
+            std::str::from_utf8(&part)
+                .unwrap()
+                .contains("V='&lt;&amp;&quot;&apos;'")
+        );
+        let reparsed = parse_vsdx(&saved).unwrap();
+        assert!(
+            reparsed
+                .page_contents
+                .values()
+                .any(|sheet| sheet_has_value(sheet, "<&\"'"))
+        );
+
+        edit.cell_span.offset = usize::MAX;
+        let before = package.part_bytes(part_path).unwrap().to_vec();
+        assert!(matches!(
+            save_cell_edits(
+                &package,
+                &[first_value_edit(&package, part_path, "ok"), edit]
+            ),
+            Err(VsdxError::InvalidCellEdit { .. })
+        ));
+        assert_eq!(package.part_bytes(part_path).unwrap(), before);
+    }
 
     #[test]
     fn rejects_incomplete_theme_parts() {

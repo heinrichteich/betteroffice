@@ -22,4 +22,10 @@ pub enum VsdxError {
     ResourceLimit { part: String, kind: &'static str },
     #[error("invalid relationship target {target} from {source_part}")]
     InvalidRelationship { source_part: String, target: String },
+    #[error("invalid lexical patch span")]
+    InvalidSpan,
+    #[error("lexical patch limit {kind} exceeded")]
+    PatchLimit { kind: &'static str },
+    #[error("invalid cell edit in {part}: {message}")]
+    InvalidCellEdit { part: String, message: String },
 }
