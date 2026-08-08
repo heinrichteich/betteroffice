@@ -117,27 +117,38 @@ impl<'a> Resolver<'a> {
         page: &Sheet,
     ) -> Result<Vec<ResolvedTextToken>, ResolveError> {
         let resolved = self.resolve_shape_ref(shape, page)?;
-        Ok(shape
+        self.resolve_text_in_context(shape, page, &resolved)
+    }
+    pub fn resolve_text_in_context(
+        &self,
+        shape: &Shape,
+        page: &Sheet,
+        resolved: &ResolvedShape,
+    ) -> Result<Vec<ResolvedTextToken>, ResolveError> {
+        let masters = self.master_chain(shape, page)?;
+        let tokens = shape
             .text()
+            .or_else(|| masters.iter().find_map(|(_, master)| master.text()));
+        Ok(tokens
             .unwrap_or_default()
             .iter()
             .map(|token| match token {
                 TextToken::Literal(value) => ResolvedTextToken::Literal(value.clone()),
                 TextToken::CharacterRun(index) => ResolvedTextToken::CharacterRun {
                     index: *index,
-                    properties: row_cells(&resolved, "Character", *index),
+                    properties: row_cells(resolved, "Character", *index),
                 },
                 TextToken::ParagraphRun(index) => ResolvedTextToken::ParagraphRun {
                     index: *index,
-                    properties: row_cells(&resolved, "Paragraph", *index),
+                    properties: row_cells(resolved, "Paragraph", *index),
                 },
                 TextToken::Tab(index) => ResolvedTextToken::Tab {
                     index: *index,
-                    properties: row_cells(&resolved, "Tabs", *index),
+                    properties: row_cells(resolved, "Tabs", *index),
                 },
                 TextToken::Field(index) => ResolvedTextToken::Field {
                     index: *index,
-                    properties: row_cells(&resolved, "Field", *index),
+                    properties: row_cells(resolved, "Field", *index),
                 },
             })
             .collect())

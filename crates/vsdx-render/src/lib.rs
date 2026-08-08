@@ -562,9 +562,6 @@ impl Renderer {
         bounds: Bounds,
         state: &mut State,
     ) -> Result<(), RenderError> {
-        if shape.text().is_none() {
-            return Ok(());
-        }
         if matches!(resolved.cell("Char.Size"), Some(Lookup::Found(cell)) if cell.cell.value.as_deref().and_then(|value| value.parse::<f32>().ok()).is_some_and(|value| !value.is_finite()))
         {
             return Err(RenderError::PageDimensions(
@@ -572,10 +569,12 @@ impl Renderer {
             ));
         }
         let page = package
-            .page_contents
+            .page_part_ids
             .get(page_part)
+            .and_then(|id| package.page_sheets.get(id))
+            .or_else(|| package.page_contents.get(page_part))
             .ok_or_else(|| RenderError::MissingPage(page_part.into()))?;
-        let tokens = resolver.resolve_text(shape, page)?;
+        let tokens = resolver.resolve_text_in_context(shape, page, resolved)?;
         let mut paragraphs = rich_paragraphs(self, package, resolved, &tokens);
         if paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()) {
             return Ok(());

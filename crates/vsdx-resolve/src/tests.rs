@@ -1114,6 +1114,55 @@ fn text_markers_fields_and_style_rows_are_merged() {
 }
 
 #[test]
+fn text_uses_effective_page_or_document_rows_and_master_stream() {
+    let mut package = package();
+    package.page_sheets.insert(
+        1,
+        sheet(
+            Some(1),
+            vec![SheetChild::Section(section(
+                "Character",
+                vec![row(0, vec![cell("Font", "page")])],
+            ))],
+        ),
+    );
+    package.document_sheet = Some(sheet(
+        None,
+        vec![SheetChild::Section(section(
+            "Paragraph",
+            vec![row(0, vec![cell("IndLeft", "document")])],
+        ))],
+    ));
+    let mut local = shape(1, vec![]);
+    local.master = Some(7);
+    add_page(&mut package, local.clone());
+    add_master(
+        &mut package,
+        7,
+        shape(
+            7,
+            vec![ShapeChild::Text(vec![
+                TextToken::CharacterRun(0),
+                TextToken::Literal("master text".into()),
+                TextToken::ParagraphRun(0),
+            ])],
+        ),
+    );
+    let page = package.page_sheets.get(&1).unwrap();
+    let resolved = Resolver::new(&package).resolve_shape("page", 1).unwrap();
+    let tokens = Resolver::new(&package)
+        .resolve_text_in_context(&local, page, &resolved)
+        .unwrap();
+    assert!(
+        matches!(tokens[0], ResolvedTextToken::CharacterRun { ref properties, .. } if matches!(&properties["Font"], Lookup::Found(cell) if cell.cell.value.as_deref() == Some("page")))
+    );
+    assert_eq!(tokens[1], ResolvedTextToken::Literal("master text".into()));
+    assert!(
+        matches!(tokens[2], ResolvedTextToken::ParagraphRun { ref properties, .. } if matches!(&properties["IndLeft"], Lookup::Found(cell) if cell.cell.value.as_deref() == Some("document")))
+    );
+}
+
+#[test]
 fn section_references_use_one_based_indices_and_user_values() {
     let mut package = package();
     let scratch = row(0, vec![cell("X", "3")]);
