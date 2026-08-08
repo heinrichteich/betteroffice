@@ -483,6 +483,21 @@ mod tests {
     }
 
     #[test]
+    fn records_source_spans_for_shapesheet_entities() {
+        let package = parse_vsdx(include_bytes!("../tests/fixtures/foundation.vsdx")).unwrap();
+        let part_path = package.page_part_paths.first().unwrap();
+        let bytes = package.part_bytes(part_path).unwrap();
+        let spans = package.element_spans(part_path).unwrap();
+        for name in ["Shape", "Section", "Row", "Cell", "Text"] {
+            assert!(spans.iter().any(|span| span.name == name), "{name}");
+        }
+        for span in spans {
+            assert_eq!(bytes[span.span.offset], b'<');
+            assert_eq!(bytes[span.span.offset + span.span.length - 1], b'>');
+        }
+    }
+
+    #[test]
     fn saves_cell_value_without_rewriting_other_parts_or_lexical_spans() {
         let source = include_bytes!("../tests/fixtures/foundation.vsdx");
         let package = parse_vsdx(source).unwrap();
@@ -516,6 +531,43 @@ mod tests {
                 .page_contents
                 .values()
                 .any(|sheet| sheet_has_value(sheet, "patched"))
+        );
+    }
+
+    #[test]
+    fn saves_existing_cell_formula() {
+        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        let package = parse_vsdx(source).unwrap();
+        let part_path = package.page_part_paths.first().unwrap();
+        let cell = package
+            .element_spans(part_path)
+            .unwrap()
+            .iter()
+            .find(|span| {
+                span.name == "Cell"
+                    && span.attributes.contains_key("F")
+                    && span.attributes.contains_key("V")
+            })
+            .unwrap();
+        let saved = save_cell_edits(
+            &package,
+            &[CellEdit {
+                part_path: part_path.to_owned(),
+                cell_span: cell.span,
+                attribute: CellAttribute::Formula,
+                value: "Width*3".to_owned(),
+            }],
+        )
+        .unwrap();
+        let reparsed = parse_vsdx(&saved).unwrap();
+        assert!(
+            reparsed
+                .page_contents
+                .values()
+                .flat_map(Sheet::shapes)
+                .any(|shape| shape
+                    .cells()
+                    .any(|cell| cell.formula.as_deref() == Some("Width*3")))
         );
     }
 
