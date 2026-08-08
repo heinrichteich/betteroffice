@@ -1546,6 +1546,23 @@ mod tests {
         (package, path)
     }
 
+    fn shape_bytes_by_id(package: &VsdxPackage, path: &str) -> BTreeMap<u32, Vec<u8>> {
+        let bytes = package.part_bytes(path).unwrap();
+        let part = package.parts.iter().find(|part| part.path == path).unwrap();
+        package
+            .element_spans(path)
+            .unwrap()
+            .iter()
+            .filter(|span| local_name(&span.name) == "Shape")
+            .map(|span| {
+                (
+                    shape_id(part, span).unwrap(),
+                    bytes[span.span.offset..span.span.end().unwrap()].to_vec(),
+                )
+            })
+            .collect()
+    }
+
     fn cell_span(package: &VsdxPackage, part_path: &str) -> SourceSpan {
         package
             .element_spans(part_path)
@@ -1719,6 +1736,31 @@ mod tests {
     }
 
     #[test]
+    fn adding_a_relationship_bearing_shape_is_rejected_without_changing_the_package() {
+        let (package, path) =
+            package_with_page_xml(b"<PageContents><Shapes><Shape ID='1'/></Shapes></PageContents>");
+        let page_id = package.page_part_ids[&path];
+        let before: BTreeMap<_, _> = package
+            .parts
+            .iter()
+            .map(|part| (part.path.clone(), part.bytes.clone()))
+            .collect();
+        assert!(matches!(
+            save_structural_edits(
+                &package,
+                &[StructuralEdit::AddShape {
+                    page_id,
+                    shape_xml: b"<Shape><ForeignData><Rel r:id='missing' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'/></ForeignData></Shape>".to_vec(),
+                }],
+            ),
+            Err(VsdxError::InvalidCellEdit { message, .. }) if message == "new shape fragments cannot contain relationship references"
+        ));
+        for part in &package.parts {
+            assert_eq!(part.bytes, before[&part.path], "{}", part.path);
+        }
+    }
+
+    #[test]
     fn adding_a_shape_rejects_id_exhaustion() {
         let (package, path) = package_with_page_xml(
             b"<PageContents><Shapes><Shape ID='4294967295'/></Shapes></PageContents>",
@@ -1737,7 +1779,7 @@ mod tests {
     }
 
     #[test]
-    fn structural_edits_only_mutate_the_page_shapes_container_in_grouped_pages() {
+    fn structural_edits_preserve_group_boundaries_in_nested_groups_fixture() {
         let (package, path) = nested_groups_package();
         let page_id = package.page_part_ids[&path];
         let original = package.part_bytes(&path).unwrap();
@@ -1779,30 +1821,34 @@ mod tests {
         )
         .unwrap();
         let deleted = parse_vsdx(&deleted).unwrap();
+        let deleted_bytes = deleted.part_bytes(&path).unwrap();
+        for id in [1, 2, 3, 4, 5] {
+            assert!(!shape_bytes_by_id(&deleted, &path).contains_key(&id));
+        }
         assert!(
-            !deleted
-                .part_bytes(&path)
-                .unwrap()
-                .windows(b"<Shape ID='1'".len())
-                .any(|window| window == b"<Shape ID='1'")
+            !deleted_bytes
+                .windows(b"<Connect ".len())
+                .any(|window| window == b"<Connect ")
         );
+        validate_structure(&deleted).unwrap();
 
-        let source = b"<PageContents><Shapes><Shape ID='1' Type='Group'><Shapes><Shape ID='2'/></Shapes></Shape><Shape ID='3'/></Shapes></PageContents>";
-        let (package, path) = package_with_page_xml(source);
-        let page_id = package.page_part_ids[&path];
         let reordered = save_structural_edits(
             &package,
             &[StructuralEdit::ReorderShape {
                 page_id,
-                shape_id: 3,
+                shape_id: 0,
                 before_shape_id: Some(1),
             }],
         )
         .unwrap();
-        assert_eq!(
-            parse_vsdx(&reordered).unwrap().part_bytes(&path).unwrap(),
-            b"<PageContents><Shapes><Shape ID='3'/><Shape ID='1' Type='Group'><Shapes><Shape ID='2'/></Shapes></Shape></Shapes></PageContents>"
+        let reordered = parse_vsdx(&reordered).unwrap();
+        let reordered_bytes = reordered.part_bytes(&path).unwrap();
+        assert!(
+            reordered_bytes
+                .windows(b"<Shape ID='0' Type='Shape'><Text>page sibling</Text></Shape><Shape ID='1'".len())
+                .any(|window| window == b"<Shape ID='0' Type='Shape'><Text>page sibling</Text></Shape><Shape ID='1'")
         );
+        assert_eq!(shape_bytes_by_id(&reordered, &path)[&1], group_bytes);
     }
 
     #[test]
@@ -2476,6 +2522,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{file}: no page with two shapes"));
             let page_id = package.page_part_ids[page_path];
             let shapes: Vec<_> = page.shapes().collect();
+            let shape_ids: Vec<_> = shapes.iter().map(|shape| shape.id).collect();
+            let shape_bytes = shape_bytes_by_id(&package, page_path);
             let operations = [
                 (
                     "add",
@@ -2507,6 +2555,39 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{file} {operation}: {error}"));
                 validate_structure(&reparsed)
                     .unwrap_or_else(|error| panic!("{file} {operation}: {error}"));
+                let after_page = &reparsed.page_contents[page_path];
+                let after_ids: Vec<_> = after_page.shapes().map(|shape| shape.id).collect();
+                match operation {
+                    "add" => {
+                        assert_eq!(after_ids.len(), shape_ids.len() + 1, "{file} add");
+                        assert_eq!(
+                            after_ids.last(),
+                            Some(&(shape_bytes.keys().max().unwrap() + 1))
+                        );
+                    }
+                    "delete" => {
+                        assert_eq!(after_ids.len(), shape_ids.len() - 1, "{file} delete");
+                        assert!(!after_ids.contains(&shape_ids[0]), "{file} delete");
+                        assert!(after_page.connects().all(|connect| {
+                            connect.from_sheet != shape_ids[0] && connect.to_sheet != shape_ids[0]
+                        }));
+                    }
+                    "reorder" => {
+                        let mut expected = shape_ids[1..].to_vec();
+                        expected.push(shape_ids[0]);
+                        assert_eq!(after_ids, expected, "{file} reorder");
+                    }
+                    _ => unreachable!(),
+                }
+                let after_shape_bytes = shape_bytes_by_id(&reparsed, page_path);
+                for (id, bytes) in &shape_bytes {
+                    if operation != "delete" || *id != shape_ids[0] {
+                        assert_eq!(
+                            after_shape_bytes[id], *bytes,
+                            "{file} {operation} shape {id}"
+                        );
+                    }
+                }
                 let before = unzip_parts(&source).unwrap();
                 let after = unzip_parts(&saved).unwrap();
                 for (part, bytes) in before {
