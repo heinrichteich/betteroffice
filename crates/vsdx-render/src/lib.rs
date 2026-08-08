@@ -149,6 +149,9 @@ impl Renderer {
                 &mut state,
             )?;
         }
+        for primitive in &mut state.primitives {
+            bake_group_transform(primitive, Affine::identity());
+        }
         let list = VsdxDisplayList {
             contract_version: CONTRACT_VERSION,
             width: page_width as f32 * PIXELS_PER_INCH,
@@ -232,16 +235,13 @@ impl Renderer {
                     state,
                 )?;
             }
-            let mut children = state.primitives.split_off(start);
-            for primitive in &mut children {
-                bake_group_transform(primitive, group_transform);
-            }
+            let children = state.primitives.split_off(start);
             let z_order = state.next_z();
             state.primitives.push(Primitive::Group {
                 id,
                 z_order,
                 primitives: children,
-                transform: Affine::identity(),
+                transform: group_transform,
             });
             return Ok(());
         }
@@ -505,6 +505,7 @@ fn bake_group_transform(primitive: &mut Primitive, matrix: Affine) {
             transform,
             ..
         } => {
+            let matrix = matrix.compose(*transform);
             for child in primitives {
                 bake_group_transform(child, matrix);
             }
@@ -566,15 +567,24 @@ fn transform_affine(command: &mut ooxml_drawingml::GeometryPathCommand, matrix: 
         Close => {}
     }
 }
-fn bounds_affine(group: Bounds, child_extent: Option<(f64, f64)>) -> Affine {
+fn bounds_affine(group: Bounds, child_extent: Option<ChildCoordinateExtent>) -> Affine {
     let loc_x = group.loc_pin_x;
     let loc_y = group.loc_pin_y;
     let pin_x = group.x + group.loc_pin_x;
     let pin_y = group.y + group.loc_pin_y;
     let (sin, cos) = group.angle.sin_cos();
-    let (scale_x, scale_y) = child_extent
-        .map(|(width, height)| (group.width / width, group.height / height))
-        .unwrap_or((1.0, 1.0));
+    // Visio documents the lower-left local origin, but not how to derive a group child scale.
+    // Use the conservative selection-extent ratio and translate that documented origin.
+    let (origin_x, origin_y, scale_x, scale_y) = child_extent
+        .map(|extent| {
+            (
+                extent.x,
+                extent.y,
+                group.width / extent.width,
+                group.height / extent.height,
+            )
+        })
+        .unwrap_or((0.0, 0.0, 1.0, 1.0));
     let sx = scale_x * if group.flip_x { -1.0 } else { 1.0 };
     let sy = scale_y * if group.flip_y { -1.0 } else { 1.0 };
     Affine {
@@ -582,9 +592,15 @@ fn bounds_affine(group: Bounds, child_extent: Option<(f64, f64)>) -> Affine {
         b: (sin * sx) as f32,
         c: (-sin * sy) as f32,
         d: (cos * sy) as f32,
-        e: (pin_x - cos * sx * loc_x + sin * sy * loc_y) as f32,
-        f: (pin_y - sin * sx * loc_x - cos * sy * loc_y) as f32,
+        e: (pin_x - cos * sx * (loc_x + origin_x) + sin * sy * (loc_y + origin_y)) as f32,
+        f: (pin_y - sin * sx * (loc_x + origin_x) - cos * sy * (loc_y + origin_y)) as f32,
     }
+}
+struct ChildCoordinateExtent {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 }
 fn child_coordinate_extent<'a>(
     package: &VsdxPackage,
@@ -592,7 +608,7 @@ fn child_coordinate_extent<'a>(
     references: Option<&PageShapeReferences>,
     page_part: &str,
     shapes: impl Iterator<Item = &'a Shape>,
-) -> Option<(f64, f64)> {
+) -> Option<ChildCoordinateExtent> {
     let bounds = shapes
         .filter_map(|shape| {
             resolver
@@ -613,7 +629,12 @@ fn child_coordinate_extent<'a>(
         .reduce(f64::max)?;
     let width = max_x - min_x;
     let height = max_y - min_y;
-    (width > 0.0 && height > 0.0).then_some((width, height))
+    (width > 0.0 && height > 0.0).then_some(ChildCoordinateExtent {
+        x: min_x,
+        y: min_y,
+        width,
+        height,
+    })
 }
 struct State {
     count: usize,
@@ -1264,6 +1285,27 @@ mod tests {
     }
 
     #[test]
+    fn group_child_extent_origin_maps_to_the_group_lower_left_corner() {
+        let matrix = bounds_affine(
+            Bounds {
+                x: 10.0,
+                y: 20.0,
+                width: 8.0,
+                height: 12.0,
+                ..Default::default()
+            },
+            Some(ChildCoordinateExtent {
+                x: 2.0,
+                y: 3.0,
+                width: 4.0,
+                height: 6.0,
+            }),
+        );
+        assert_point_close(matrix.apply_point(2.0, 3.0), (10.0, 20.0));
+        assert_point_close(matrix.apply_point(6.0, 9.0), (18.0, 32.0));
+    }
+
+    #[test]
     fn shape_transform_rotates_and_flips_about_its_local_pin() {
         let mut rotated = shape(1, 3.0, 4.0);
         rotated.children.push(ShapeChild::Cell(cell(
@@ -1331,7 +1373,7 @@ mod tests {
         };
         assert_eq!(*transform, Affine::identity());
         assert!(
-            matches!(path[0], GeometryPathCommand::Move { x, y } if (x - 10.0).abs() < 1e-9 && (y - 19.0).abs() < 1e-9)
+            matches!(path[0], GeometryPathCommand::Move { x, y } if (x - 10.0).abs() < 1e-9 && (y - 20.0).abs() < 1e-9)
         );
     }
 
@@ -1367,8 +1409,8 @@ mod tests {
             b: std::f32::consts::FRAC_1_SQRT_2,
             c: -std::f32::consts::FRAC_1_SQRT_2,
             d: std::f32::consts::FRAC_1_SQRT_2,
-            e: 10.0,
-            f: 20.0,
+            e: 10.707_107,
+            f: 17.878_68,
         };
         let corners =
             [(1.0, 2.0), (2.0, 2.0), (1.0, 3.0), (2.0, 3.0)].map(|(x, y)| matrix.apply_point(x, y));
@@ -1449,8 +1491,8 @@ mod tests {
                 b: std::f32::consts::FRAC_1_SQRT_2,
                 c: -std::f32::consts::FRAC_1_SQRT_2,
                 d: std::f32::consts::FRAC_1_SQRT_2,
-                e: 10.0,
-                f: 20.0,
+                e: 10.707_107,
+                f: 17.878_68,
             }
             .apply_point(x, y)
         });
@@ -1494,8 +1536,8 @@ mod tests {
             b: 1.0,
             c: 1.0,
             d: 0.0,
-            e: 10.0,
-            f: 20.0,
+            e: 7.0,
+            f: 18.0,
         };
         let inner = Affine {
             a: 0.0,
@@ -1503,7 +1545,7 @@ mod tests {
             c: -1.0,
             d: 0.0,
             e: 2.0,
-            f: 3.0,
+            f: 4.0,
         };
         let expected = outer.compose(inner).apply_point(1.0, 0.0);
         assert_point_close((x as f32, y as f32), expected);
@@ -1746,7 +1788,7 @@ mod tests {
         );
         let list = render(vec![parent]);
         assert_eq!(
-            hit_test(&list, 96.0 * 4.5, 768.0 - 96.0 * 6.5),
+            hit_test(&list, 96.0 * 4.5, 768.0 - 96.0 * 5.5),
             Some(HitTestResult::Shape {
                 shape_id: "page:2".into()
             })
@@ -2078,14 +2120,18 @@ mod tests {
         let GeometryPathCommand::Move { x, y } = path[0] else {
             unreachable!()
         };
-        assert_point_close((x as f32, y as f32), (6.8900614, 9.442028));
+        // These values were calculated by hand from the composed outer and inner affine,
+        // M = [[-0.94190204, 1.8844845, 10.021151], [-1.1970047, 0.27151108, 11.018823]].
+        // Each expected AABB is min/max(M(corner)) for the original source rectangle;
+        // the image corners and text caret are direct substitutions into that same affine.
+        assert_point_close((x as f32, y as f32), (10.021151, 11.018823));
         let Primitive::TextBox { lines, .. } = &inner[1] else {
             unreachable!()
         };
-        assert_point_close((lines[0].x, lines[0].y), (6.8900614, 9.442028));
+        assert_point_close((lines[0].x, lines[0].y), (10.021151, 11.018823));
         assert_point_close(
             (lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
-            (6.811569, 9.342278),
+            (9.942658, 10.919072),
         );
         let Primitive::Image {
             x,
@@ -2104,10 +2150,10 @@ mod tests {
             transform.apply_point(*x, *y + *height),
             transform.apply_point(*x + *width, *y + *height),
         ];
-        assert_point_close(corners[0], (6.8907413, 7.3195295));
-        assert_point_close(corners[1], (5.948839, 6.1225248));
-        assert_point_close(corners[2], (10.65971, 7.8625517));
-        assert_point_close(corners[3], (9.717808, 6.665547));
+        assert_point_close(corners[0], (10.0218315, 8.896324));
+        assert_point_close(corners[1], (9.079929, 7.6993194));
+        assert_point_close(corners[2], (13.7908, 9.439346));
+        assert_point_close(corners[3], (12.848899, 8.242341));
         let Primitive::Placeholder {
             x,
             y,
@@ -2118,12 +2164,12 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_point_close((*x, *y), (10.376867, 7.25018));
-        assert_point_close((*width, *height), (3.3920727, 2.6932607));
+        assert_point_close((*x, *y), (13.7908, 9.439346));
+        assert_point_close((*width, *height), (2.8263874, 1.4685163));
         let z_orders = inner.iter().map(z_order).collect::<Vec<_>>();
         assert_eq!(z_orders, vec![2, 3, 4, 5]);
         assert_eq!(
-            hit_test(&list, 7.0 * 96.0, (11.0 - 9.0) * 96.0),
+            hit_test(&list, 10.021151 * 96.0, (11.0 - 11.018823) * 96.0),
             Some(HitTestResult::Text {
                 shape_id: "visio/pages/page1.xml:3".into(),
                 position: 0,
