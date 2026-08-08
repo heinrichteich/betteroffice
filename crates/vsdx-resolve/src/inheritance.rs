@@ -45,6 +45,40 @@ impl<'a> Resolver<'a> {
             .unwrap_or(page_contents);
         self.resolve_shape_ref(shape, page)
     }
+    pub fn resolve_shape_in_sheet(
+        &self,
+        shape: &Shape,
+        sheet: &Sheet,
+    ) -> Result<ResolvedShape, ResolveError> {
+        self.resolve_shape_ref(shape, sheet)
+    }
+    pub fn resolve_page_shapes(
+        &self,
+        page_part: &str,
+    ) -> Result<BTreeMap<u32, ResolvedShape>, ResolveError> {
+        let page_contents = self
+            .package
+            .page_contents
+            .get(page_part)
+            .ok_or_else(|| ResolveError::MissingPage(page_part.into()))?;
+        let mut shapes = BTreeMap::new();
+        for shape in page_contents.shapes() {
+            self.resolve_page_shape_tree(page_part, shape, &mut shapes)?;
+        }
+        Ok(shapes)
+    }
+    fn resolve_page_shape_tree(
+        &self,
+        page_part: &str,
+        shape: &Shape,
+        shapes: &mut BTreeMap<u32, ResolvedShape>,
+    ) -> Result<(), ResolveError> {
+        shapes.insert(shape.id, self.resolve_shape(page_part, shape.id)?);
+        for child in shape.shapes() {
+            self.resolve_page_shape_tree(page_part, child, shapes)?;
+        }
+        Ok(())
+    }
     pub fn resolve_text(
         &self,
         shape: &Shape,
@@ -415,7 +449,13 @@ fn found(cell: &Cell, provenance: Provenance) -> Lookup {
     }
 }
 fn find_shape(sheet: &Sheet, id: u32) -> Option<&Shape> {
-    sheet.shapes().find(|s| s.id == id)
+    sheet.shapes().find_map(|shape| find_shape_in(shape, id))
+}
+fn find_shape_in(shape: &Shape, id: u32) -> Option<&Shape> {
+    if shape.id == id {
+        return Some(shape);
+    }
+    shape.shapes().find_map(|child| find_shape_in(child, id))
 }
 fn based_on(sheet: &Sheet) -> Option<u32> {
     sheet

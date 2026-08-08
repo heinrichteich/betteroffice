@@ -57,6 +57,38 @@ pub struct ResolvedShape {
 }
 
 impl ResolvedShape {
+    pub fn cell(&self, name: &str) -> Option<&Lookup> {
+        self.cells.get(name).or_else(|| {
+            let (section, reference) = name.split_once('.')?;
+            let section = self
+                .sections
+                .get(section)
+                .or_else(|| {
+                    self.sections
+                        .get(section.trim_end_matches(|c: char| c.is_ascii_digit()))
+                })
+                .or_else(|| {
+                    section
+                        .strip_suffix('s')
+                        .and_then(|name| self.sections.get(name))
+                })?;
+            let (row, cell) = reference.split_once('.').map_or_else(
+                || {
+                    let split = reference
+                        .char_indices()
+                        .rev()
+                        .take_while(|(_, c)| c.is_ascii_digit())
+                        .last()
+                        .map_or(reference.len(), |(index, _)| index);
+                    let (cell, index) = reference.split_at(split);
+                    (section.rows.get(&format!("IX:{index}")), cell)
+                },
+                |(row, cell)| (section.rows.get(&format!("N:{row}")), cell),
+            );
+            row.and_then(|row| row.cells.get(cell))
+        })
+    }
+
     /// Returns the shape's explicit theme selection, when it has one.
     pub fn theme_index(&self) -> Option<u32> {
         self.index_cell("ThemeIndex")
