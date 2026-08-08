@@ -333,8 +333,8 @@ pub fn save_cell_edits(package: &VsdxPackage, edits: &[CellEdit]) -> Result<Vec<
     if edits.len() > MAX_PATCH_EDITS {
         return Err(VsdxError::PatchLimit { kind: "editCount" });
     }
-    let mut part_edits: BTreeMap<&str, Vec<SpanEdit>> = BTreeMap::new();
     let mut replacement_bytes = 0_usize;
+    let mut validated = Vec::with_capacity(edits.len());
     for edit in edits {
         if !is_shapesheet_part(package, &edit.part_path) {
             return Err(VsdxError::InvalidCellEdit {
@@ -374,16 +374,20 @@ pub fn save_cell_edits(package: &VsdxPackage, edits: &[CellEdit]) -> Result<Vec<
         replacement_bytes = replacement_bytes
             .checked_add(replacement.len())
             .ok_or(VsdxError::PatchLimit { kind: "editBytes" })?;
-        if replacement_bytes > MAX_PATCH_BYTES {
-            return Err(VsdxError::PatchLimit { kind: "editBytes" });
-        }
-        part_edits
-            .entry(part.path.as_str())
-            .or_default()
-            .push(SpanEdit {
+        validated.push((
+            part.path.as_str(),
+            SpanEdit {
                 span: attribute.value,
                 replacement,
-            });
+            },
+        ));
+    }
+    if replacement_bytes > MAX_PATCH_BYTES {
+        return Err(VsdxError::PatchLimit { kind: "editBytes" });
+    }
+    let mut part_edits: BTreeMap<&str, Vec<SpanEdit>> = BTreeMap::new();
+    for (path, edit) in validated {
+        part_edits.entry(path).or_default().push(edit);
     }
     let mut output = package.clone();
     for (path, edits) in part_edits {
