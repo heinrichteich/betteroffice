@@ -66,6 +66,20 @@ pub(crate) fn seed_doc(
     Ok(())
 }
 
+pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage> {
+    let txn = doc.transact();
+    let meta = required_map(&txn, META)?;
+    if map_number(&meta, &txn, "schemaVersion") != Some(SCHEMA_VERSION) {
+        return Err(EditError::InvalidState(
+            "unsupported diagram schema version".to_owned(),
+        ));
+    }
+    let Some(Out::Any(Any::Buffer(bytes))) = meta.get(&txn, "packageJson") else {
+        return Err(EditError::InvalidState("missing package data".to_owned()));
+    };
+    serde_json::from_slice(&bytes).map_err(|error| EditError::InvalidState(error.to_string()))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn seed_shape(
     sheets: &MapRef,

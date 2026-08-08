@@ -16,6 +16,9 @@ mod diagram;
 mod model;
 mod undo;
 
+#[cfg(feature = "wasm")]
+pub mod wasm;
+
 pub use model::*;
 pub use undo::DiagramUndoManager;
 
@@ -106,6 +109,9 @@ impl DiagramSession {
 
     pub fn client_id(&self) -> u64 {
         self.client_id
+    }
+    pub fn package(&self) -> EditResult<vsdx_parse::VsdxPackage> {
+        diagram::package_from_doc(&self.doc)
     }
     pub fn yrs_doc(&self) -> &Doc {
         &self.doc
