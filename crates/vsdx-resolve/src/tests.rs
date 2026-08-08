@@ -88,14 +88,107 @@ fn row(index: u32, cells: Vec<Cell>) -> Row {
 }
 
 fn deleted_row(index: u32) -> Row {
+    deleted_row_with_cells(index, vec![])
+}
+
+fn deleted_row_with_cells(index: u32, cells: Vec<Cell>) -> Row {
     Row {
         index: Some(index),
         name: None,
         local_name: None,
         row_type: None,
         del: true,
-        children: vec![],
+        children: cells.into_iter().map(RowChild::Cell).collect(),
         other_attrs: vec![],
+    }
+}
+
+#[test]
+fn deleted_style_rows_do_not_contribute_cells() {
+    let mut package = package();
+    package.style_sheets = vec![sheet(
+        Some(1),
+        vec![SheetChild::Section(section(
+            "Character",
+            vec![deleted_row_with_cells(
+                0,
+                vec![cell("Leaked", "style"), deleted_cell("Shared")],
+            )],
+        ))],
+    )];
+    package.page_sheets.insert(
+        1,
+        sheet(
+            None,
+            vec![SheetChild::Section(section(
+                "Character",
+                vec![row(0, vec![cell("Shared", "page")])],
+            ))],
+        ),
+    );
+    let mut local = shape(
+        1,
+        vec![ShapeChild::Section(section(
+            "Character",
+            vec![row(0, vec![])],
+        ))],
+    );
+    local.text_style = Some(1);
+    add_page(&mut package, local);
+
+    let resolved = Resolver::new(&package).resolve_shape("page", 1).unwrap();
+    let cells = &resolved.sections["Character"].rows["IX:0"].cells;
+    assert!(!cells.contains_key("Leaked"));
+    match &cells["Shared"] {
+        Lookup::Found(value) => {
+            assert_eq!(value.cell.value.as_deref(), Some("page"));
+            assert_eq!(value.provenance, Provenance::Page);
+        }
+        value => panic!("expected page cell, got {value:?}"),
+    }
+}
+
+#[test]
+fn deleted_master_rows_do_not_suppress_lower_live_cells() {
+    let mut package = package();
+    package.page_sheets.insert(
+        1,
+        sheet(
+            None,
+            vec![SheetChild::Section(section(
+                "Character",
+                vec![row(0, vec![cell("Char", "page")])],
+            ))],
+        ),
+    );
+    let mut local = shape(
+        1,
+        vec![ShapeChild::Section(section(
+            "Character",
+            vec![row(0, vec![])],
+        ))],
+    );
+    local.master = Some(1);
+    add_page(&mut package, local);
+    add_master(
+        &mut package,
+        1,
+        shape(
+            1,
+            vec![ShapeChild::Section(section(
+                "Character",
+                vec![deleted_row_with_cells(0, vec![cell("Char", "master")])],
+            ))],
+        ),
+    );
+
+    let resolved = Resolver::new(&package).resolve_shape("page", 1).unwrap();
+    match &resolved.sections["Character"].rows["IX:0"].cells["Char"] {
+        Lookup::Found(value) => {
+            assert_eq!(value.cell.value.as_deref(), Some("page"));
+            assert_eq!(value.provenance, Provenance::Page);
+        }
+        value => panic!("expected page cell, got {value:?}"),
     }
 }
 

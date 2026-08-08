@@ -340,20 +340,26 @@ impl<'a> Resolver<'a> {
                 continue;
             }
             let mut names = HashSet::new();
-            for (_, row) in &rows {
+            for (_, row) in rows
+                .iter()
+                .filter(|(_, row)| row.is_none_or(|row| !row.del))
+            {
                 if let Some(row) = row {
                     names.extend(row.cells().map(|c| c.name.clone()));
                 }
             }
             let mut cells = BTreeMap::new();
             for cell_name in names {
-                let lookup = rows.iter().find_map(|(p, row)| {
-                    row.and_then(|row| {
-                        row.cells()
-                            .find(|c| c.name == cell_name)
-                            .map(|c| found(c, *p))
-                    })
-                });
+                let lookup = rows
+                    .iter()
+                    .filter(|(_, row)| row.is_none_or(|row| !row.del))
+                    .find_map(|(p, row)| {
+                        row.and_then(|row| {
+                            row.cells()
+                                .find(|c| c.name == cell_name)
+                                .map(|c| found(c, *p))
+                        })
+                    });
                 cells.insert(cell_name, lookup.unwrap_or(Lookup::Absent));
             }
             out.rows.insert(

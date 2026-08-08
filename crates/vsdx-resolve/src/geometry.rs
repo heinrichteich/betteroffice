@@ -22,6 +22,7 @@ pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
                     Lookup::Deleted | Lookup::Absent => None,
                 })
                 .and_then(|v| v.parse::<f64>().ok())
+                .filter(|value| value.is_finite())
         };
         let mut required = |names: &[&str]| -> Option<Vec<f64>> {
             let mut values = Vec::with_capacity(names.len());
@@ -46,7 +47,7 @@ pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
             (Some(x), Some(y)) => (x, y),
             _ => {
                 for n in ["X", "Y"] {
-                    if row.cells.contains_key(n) {
+                    if row.cells.contains_key(n) && value(n).is_none() {
                         out.issues.push(GeometryIssue::UnevaluatedCell {
                             row_type: ty.into(),
                             cell: n.into(),
@@ -435,6 +436,30 @@ mod tests {
             geometry.issues,
             vec![GeometryIssue::UnsupportedRowType("NURBSTo".into())]
         );
+    }
+
+    #[test]
+    fn geometry_rejects_non_finite_cached_values() {
+        for value in ["NaN", "inf", "1e999"] {
+            let section = ResolvedSection {
+                name: "Geometry".into(),
+                deleted: false,
+                rows: BTreeMap::from([(
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", value), cell("Y", "2")]),
+                )]),
+            };
+            let geometry = realize_geometry(&section);
+            assert!(geometry.commands.is_empty(), "{value}");
+            assert_eq!(
+                geometry.issues,
+                vec![GeometryIssue::UnevaluatedCell {
+                    row_type: "MoveTo".into(),
+                    cell: "X".into(),
+                }],
+                "{value}"
+            );
+        }
     }
 
     #[test]
