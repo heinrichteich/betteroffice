@@ -18,7 +18,7 @@ pub struct Section {
     pub name: String,
     pub index: Option<u32>,
     pub del: bool,
-    pub rows: Vec<Row>,
+    pub children: Vec<SectionChild>,
     pub other_attrs: Vec<(String, String)>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -29,7 +29,7 @@ pub struct Row {
     pub local_name: Option<String>,
     pub row_type: Option<String>,
     pub del: bool,
-    pub cells: Vec<Cell>,
+    pub children: Vec<RowChild>,
     pub other_attrs: Vec<(String, String)>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -54,7 +54,31 @@ pub enum ShapeChild {
     Cell(Cell),
     Section(Section),
     Text(Vec<TextToken>),
-    Shapes(Vec<Shape>),
+    Shapes(Vec<ShapesChild>),
+    Unknown(OpaqueXml),
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SectionChild {
+    Row(Row),
+    Unknown(OpaqueXml),
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RowChild {
+    Cell(Cell),
+    Unknown(OpaqueXml),
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ShapesChild {
+    Shape(Shape),
+    Unknown(OpaqueXml),
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConnectsChild {
+    Connect(Connect),
     Unknown(OpaqueXml),
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -103,12 +127,40 @@ impl Shape {
             .iter()
             .filter_map(|child| {
                 if let ShapeChild::Shapes(values) = child {
-                    Some(values.iter())
+                    Some(values.iter().filter_map(|value| {
+                        if let ShapesChild::Shape(value) = value {
+                            Some(value)
+                        } else {
+                            None
+                        }
+                    }))
                 } else {
                     None
                 }
             })
             .flatten()
+    }
+}
+impl Section {
+    pub fn rows(&self) -> impl Iterator<Item = &Row> {
+        self.children.iter().filter_map(|child| {
+            if let SectionChild::Row(value) = child {
+                Some(value)
+            } else {
+                None
+            }
+        })
+    }
+}
+impl Row {
+    pub fn cells(&self) -> impl Iterator<Item = &Cell> {
+        self.children.iter().filter_map(|child| {
+            if let RowChild::Cell(value) = child {
+                Some(value)
+            } else {
+                None
+            }
+        })
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -135,13 +187,73 @@ pub struct Connect {
 #[serde(rename_all = "camelCase")]
 pub struct Sheet {
     pub id: Option<u32>,
-    pub cells: Vec<Cell>,
-    pub sections: Vec<Section>,
-    pub shapes: Vec<Shape>,
-    pub connects: Vec<Connect>,
-    pub has_shapes: bool,
-    pub has_connects: bool,
+    pub children: Vec<SheetChild>,
     pub other_attrs: Vec<(String, String)>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SheetChild {
+    Cell(Cell),
+    Section(Section),
+    Shapes(Vec<ShapesChild>),
+    Connects(Vec<ConnectsChild>),
+    Unknown(OpaqueXml),
+}
+impl Sheet {
+    pub fn cells(&self) -> impl Iterator<Item = &Cell> {
+        self.children.iter().filter_map(|child| {
+            if let SheetChild::Cell(value) = child {
+                Some(value)
+            } else {
+                None
+            }
+        })
+    }
+    pub fn sections(&self) -> impl Iterator<Item = &Section> {
+        self.children.iter().filter_map(|child| {
+            if let SheetChild::Section(value) = child {
+                Some(value)
+            } else {
+                None
+            }
+        })
+    }
+    pub fn shapes(&self) -> impl Iterator<Item = &Shape> {
+        self.children
+            .iter()
+            .filter_map(|child| {
+                if let SheetChild::Shapes(values) = child {
+                    Some(values.iter().filter_map(|value| {
+                        if let ShapesChild::Shape(value) = value {
+                            Some(value)
+                        } else {
+                            None
+                        }
+                    }))
+                } else {
+                    None
+                }
+            })
+            .flatten()
+    }
+    pub fn connects(&self) -> impl Iterator<Item = &Connect> {
+        self.children
+            .iter()
+            .filter_map(|child| {
+                if let SheetChild::Connects(values) = child {
+                    Some(values.iter().filter_map(|value| {
+                        if let ConnectsChild::Connect(value) = value {
+                            Some(value)
+                        } else {
+                            None
+                        }
+                    }))
+                } else {
+                    None
+                }
+            })
+            .flatten()
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -170,23 +282,13 @@ pub(crate) fn parse_sheet(
         ..Sheet::default()
     };
     for child in elements(root) {
-        match child.local_name() {
-            "Cell" => sheet.cells.push(parse_cell(child, part, budget)?),
-            "Section" => sheet.sections.push(parse_section(child, part, budget)?),
-            "Shapes" => {
-                sheet.has_shapes = true;
-                for shape in elements(child).filter(|e| e.local_name() == "Shape") {
-                    sheet.shapes.push(parse_shape(shape, part, budget)?);
-                }
-            }
-            "Connects" => {
-                sheet.has_connects = true;
-                for connect in elements(child).filter(|e| e.local_name() == "Connect") {
-                    sheet.connects.push(parse_connect(connect, part)?);
-                }
-            }
-            _ => {}
-        }
+        sheet.children.push(match child.local_name() {
+            "Cell" => SheetChild::Cell(parse_cell(child, part, budget)?),
+            "Section" => SheetChild::Section(parse_section(child, part, budget)?),
+            "Shapes" => SheetChild::Shapes(parse_shapes(child, part, budget)?),
+            "Connects" => SheetChild::Connects(parse_connects(child, part)?),
+            _ => SheetChild::Unknown(opaque(child)),
+        });
     }
     Ok(sheet)
 }
@@ -229,12 +331,7 @@ fn parse_shape(
             "Cell" => ShapeChild::Cell(parse_cell(child, part, budget)?),
             "Section" => ShapeChild::Section(parse_section(child, part, budget)?),
             "Text" => ShapeChild::Text(parse_text(child, part)?),
-            "Shapes" => ShapeChild::Shapes(
-                elements(child)
-                    .filter(|e| e.local_name() == "Shape")
-                    .map(|e| parse_shape(e, part, budget))
-                    .collect::<Result<_, _>>()?,
-            ),
+            "Shapes" => ShapeChild::Shapes(parse_shapes(child, part, budget)?),
             _ => ShapeChild::Unknown(opaque(child)),
         });
     }
@@ -265,10 +362,12 @@ fn parse_section(
         name: required(element, "N", part)?,
         index: optional_u32(element, "IX", part)?,
         del: deleted(element),
-        rows: elements(element)
-            .filter(|e| e.local_name() == "Row")
-            .map(|e| parse_row(e, part, budget))
-            .collect::<Result<_, _>>()?,
+        children: elements(element)
+            .map(|child| match child.local_name() {
+                "Row" => Ok(SectionChild::Row(parse_row(child, part, budget)?)),
+                _ => Ok(SectionChild::Unknown(opaque(child))),
+            })
+            .collect::<Result<_, VsdxError>>()?,
         other_attrs: other(element, &["N", "IX", "Del"]),
     })
 }
@@ -284,12 +383,34 @@ fn parse_row(
         local_name: attr(element, "LocalName"),
         row_type: attr(element, "T"),
         del: deleted(element),
-        cells: elements(element)
-            .filter(|e| e.local_name() == "Cell")
-            .map(|e| parse_cell(e, part, budget))
-            .collect::<Result<_, _>>()?,
+        children: elements(element)
+            .map(|child| match child.local_name() {
+                "Cell" => Ok(RowChild::Cell(parse_cell(child, part, budget)?)),
+                _ => Ok(RowChild::Unknown(opaque(child))),
+            })
+            .collect::<Result<_, VsdxError>>()?,
         other_attrs: other(element, &["IX", "N", "LocalName", "T", "Del"]),
     })
+}
+fn parse_shapes(
+    element: &XmlElement,
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<Vec<ShapesChild>, VsdxError> {
+    elements(element)
+        .map(|child| match child.local_name() {
+            "Shape" => Ok(ShapesChild::Shape(parse_shape(child, part, budget)?)),
+            _ => Ok(ShapesChild::Unknown(opaque(child))),
+        })
+        .collect()
+}
+fn parse_connects(element: &XmlElement, part: &str) -> Result<Vec<ConnectsChild>, VsdxError> {
+    elements(element)
+        .map(|child| match child.local_name() {
+            "Connect" => Ok(ConnectsChild::Connect(parse_connect(child, part)?)),
+            _ => Ok(ConnectsChild::Unknown(opaque(child))),
+        })
+        .collect()
 }
 fn parse_text(element: &XmlElement, part: &str) -> Result<Vec<TextToken>, VsdxError> {
     element
@@ -407,25 +528,14 @@ pub(crate) fn serialize_sheet(root: &str, sheet: &Sheet) -> String {
         root_attrs.push(("ID".to_owned(), id.to_string()));
     }
     element_open(&mut output, root, &root_attrs);
-    for cell in &sheet.cells {
-        serialize_cell(&mut output, cell);
-    }
-    for section in &sheet.sections {
-        serialize_section(&mut output, section);
-    }
-    if sheet.has_shapes {
-        output.push_str("<Shapes>");
-        for shape in &sheet.shapes {
-            serialize_shape(&mut output, shape);
+    for child in &sheet.children {
+        match child {
+            SheetChild::Cell(value) => serialize_cell(&mut output, value),
+            SheetChild::Section(value) => serialize_section(&mut output, value),
+            SheetChild::Shapes(values) => serialize_shapes(&mut output, values),
+            SheetChild::Connects(values) => serialize_connects(&mut output, values),
+            SheetChild::Unknown(value) => serialize_opaque(&mut output, value),
         }
-        output.push_str("</Shapes>");
-    }
-    if sheet.has_connects {
-        output.push_str("<Connects>");
-        for connect in &sheet.connects {
-            serialize_connect(&mut output, connect);
-        }
-        output.push_str("</Connects>");
     }
     output.push_str("</");
     output.push_str(root);
@@ -482,8 +592,11 @@ fn serialize_section(output: &mut String, section: &Section) {
         a.push(("Del".to_owned(), "1".to_owned()))
     };
     element_open(output, "Section", &attrs(a, &section.other_attrs));
-    for row in &section.rows {
-        serialize_row(output, row);
+    for child in &section.children {
+        match child {
+            SectionChild::Row(value) => serialize_row(output, value),
+            SectionChild::Unknown(value) => serialize_opaque(output, value),
+        }
     }
     output.push_str("</Section>");
 }
@@ -498,8 +611,11 @@ fn serialize_row(output: &mut String, row: &Row) {
         a.push(("Del".to_owned(), "1".to_owned()))
     };
     element_open(output, "Row", &attrs(a, &row.other_attrs));
-    for cell in &row.cells {
-        serialize_cell(output, cell)
+    for child in &row.children {
+        match child {
+            RowChild::Cell(value) => serialize_cell(output, value),
+            RowChild::Unknown(value) => serialize_opaque(output, value),
+        }
     }
     output.push_str("</Row>");
 }
@@ -523,13 +639,7 @@ fn serialize_shape(output: &mut String, shape: &Shape) {
             ShapeChild::Cell(value) => serialize_cell(output, value),
             ShapeChild::Section(value) => serialize_section(output, value),
             ShapeChild::Text(value) => serialize_text(output, value),
-            ShapeChild::Shapes(values) => {
-                output.push_str("<Shapes>");
-                for value in values {
-                    serialize_shape(output, value)
-                }
-                output.push_str("</Shapes>")
-            }
+            ShapeChild::Shapes(values) => serialize_shapes(output, values),
             ShapeChild::Unknown(value) => serialize_opaque(output, value),
         }
     }
@@ -569,6 +679,28 @@ fn serialize_connect(output: &mut String, connect: &Connect) {
     number(&mut a, "ToPart", connect.to_part);
     element_open(output, "Connect", &attrs(a, &connect.other_attrs));
     output.push_str("</Connect>");
+}
+#[cfg(test)]
+fn serialize_shapes(output: &mut String, values: &[ShapesChild]) {
+    output.push_str("<Shapes>");
+    for value in values {
+        match value {
+            ShapesChild::Shape(value) => serialize_shape(output, value),
+            ShapesChild::Unknown(value) => serialize_opaque(output, value),
+        }
+    }
+    output.push_str("</Shapes>");
+}
+#[cfg(test)]
+fn serialize_connects(output: &mut String, values: &[ConnectsChild]) {
+    output.push_str("<Connects>");
+    for value in values {
+        match value {
+            ConnectsChild::Connect(value) => serialize_connect(output, value),
+            ConnectsChild::Unknown(value) => serialize_opaque(output, value),
+        }
+    }
+    output.push_str("</Connects>");
 }
 #[cfg(test)]
 fn serialize_opaque(output: &mut String, value: &OpaqueXml) {

@@ -287,6 +287,7 @@ mod tests {
     #[test]
     fn preserves_external_corpus_parts_when_available() {
         let Some(directory) = std::env::var_os("VSDX_CORPUS_DIR") else {
+            eprintln!("WARNING: VSDX corpus test skipped; VSDX_CORPUS_DIR is unset");
             return;
         };
         for file in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
@@ -313,7 +314,7 @@ mod tests {
     fn models_lossless_shapesheet_features() {
         let package = parse_vsdx(include_bytes!("../tests/fixtures/foundation.vsdx")).unwrap();
         let sheet = &package.page_contents["visio/pages/page1.xml"];
-        let shape = &sheet.shapes[0];
+        let shape = sheet.shapes().next().unwrap();
         assert!(
             shape
                 .cells()
@@ -328,9 +329,10 @@ mod tests {
             .sections()
             .find(|section| section.name == "Geometry")
             .unwrap();
-        assert_eq!(geometry.rows[1].name.as_deref(), Some("LineTo"));
-        assert_eq!(geometry.rows[2].index, Some(2));
-        assert!(geometry.rows[2].del);
+        let geometry_rows: Vec<_> = geometry.rows().collect();
+        assert_eq!(geometry_rows[1].name.as_deref(), Some("LineTo"));
+        assert_eq!(geometry_rows[2].index, Some(2));
+        assert!(geometry_rows[2].del);
         assert_eq!(
             shape.text(),
             Some(
@@ -346,11 +348,17 @@ mod tests {
                 .as_slice()
             )
         );
-        assert_eq!(sheet.connects[0].from_part, Some(9));
-        assert_eq!(sheet.connects[0].to_part, Some(3));
-        assert_eq!(package.page_sheets[&1].cells[0].name, "PageWidth");
-        assert_eq!(package.master_sheets[&1].cells[0].name, "PageHeight");
-        assert_eq!(geometry.rows[0].local_name.as_deref(), Some("Start"));
+        assert_eq!(sheet.connects().next().unwrap().from_part, Some(9));
+        assert_eq!(sheet.connects().next().unwrap().to_part, Some(3));
+        assert_eq!(
+            package.page_sheets[&1].cells().next().unwrap().name,
+            "PageWidth"
+        );
+        assert_eq!(
+            package.master_sheets[&1].cells().next().unwrap().name,
+            "PageHeight"
+        );
+        assert_eq!(geometry_rows[0].local_name.as_deref(), Some("Start"));
         assert!(
             shape
                 .cells()
@@ -370,11 +378,12 @@ mod tests {
             .sections()
             .find(|section| section.name == "User")
             .unwrap();
-        assert_eq!(user.rows[0].name.as_deref(), Some("visVersion"));
-        assert_eq!(user.rows[1].index, Some(3));
-        assert_eq!(user.rows[1].row_type.as_deref(), Some("UnknownRow"));
+        let user_rows: Vec<_> = user.rows().collect();
+        assert_eq!(user_rows[0].name.as_deref(), Some("visVersion"));
+        assert_eq!(user_rows[1].index, Some(3));
+        assert_eq!(user_rows[1].row_type.as_deref(), Some("UnknownRow"));
         assert_eq!(
-            user.rows[1].cells[0].other_attrs,
+            user_rows[1].cells().next().unwrap().other_attrs,
             [("UnknownAttr".to_owned(), "kept".to_owned())]
         );
         let written = write_vsdx(&package).unwrap();
@@ -391,6 +400,7 @@ mod tests {
             "foundation.vsdx",
         );
         let Some(directory) = std::env::var_os("VSDX_CORPUS_DIR") else {
+            eprintln!("WARNING: VSDX corpus comparator skipped; VSDX_CORPUS_DIR is unset");
             return;
         };
         for file in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
@@ -602,11 +612,14 @@ mod tests {
             .unwrap();
         page.1 = br#"<v:PageContents xmlns:v='urn:visio'><v:Shapes><v:Shape ID='1' Del='1'><v:Cell N='PinX' Del='1'/><v:Section N='Geometry' Del='1'><v:Row IX='0' Del='1'/></v:Section></v:Shape></v:Shapes></v:PageContents>"#.to_vec();
         let package = parse_vsdx(&rezip_parts(&parts).unwrap()).unwrap();
-        let shape = &package.page_contents["visio/pages/page1.xml"].shapes[0];
+        let shape = package.page_contents["visio/pages/page1.xml"]
+            .shapes()
+            .next()
+            .unwrap();
         assert!(shape.del);
         assert!(shape.cells().next().unwrap().del);
         assert!(shape.sections().next().unwrap().del);
-        assert!(shape.sections().next().unwrap().rows[0].del);
+        assert!(shape.sections().next().unwrap().rows().next().unwrap().del);
     }
 
     #[test]
