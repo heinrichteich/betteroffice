@@ -5,7 +5,7 @@ mod layout;
 mod paint;
 
 pub use display_list::*;
-pub use layout::{PIXELS_PER_INCH, final_paint_transform, to_canvas};
+pub use layout::{PIXELS_PER_INCH, final_paint_transform, to_canvas, to_canvas_length};
 
 use std::collections::BTreeMap;
 
@@ -45,7 +45,7 @@ fn rich_paragraphs(
     let mut character = TextRun {
         text: String::new(),
         family: "sans-serif".into(),
-        size_px: 1.0 / 6.0,
+        size_in: 1.0 / 6.0,
         bold: false,
         italic: false,
         color: "currentColor".into(),
@@ -112,15 +112,15 @@ fn rich_paragraphs(
                 {
                     let position = property_number(properties, "Position");
                     let alignment = property_number(properties, "Alignment").unwrap_or(0.0) as i32;
-                    run.diagnostic = position.is_none().then(|| {
-                        "tab stop missing Position; used documented DefaultTabStop 0.5 in".into()
-                    });
+                    let default_interval =
+                        property_number(&resolved.cells, "DefaultTabStop").unwrap_or(0.5) as f32;
+                    run.diagnostic = position.is_none().then(|| format!(
+                        "tab stop missing Position; used renderer policy DefaultTabStop {default_interval} in"
+                    ));
                     run.tab = Some(TabStop {
                         position: position.unwrap_or(0.0) as f32,
                         alignment,
-                        default_interval: position.is_none().then(|| {
-                            property_number(&resolved.cells, "DefaultTabStop").unwrap_or(0.5) as f32
-                        }),
+                        default_interval: position.is_none().then_some(default_interval),
                     });
                 }
             }
@@ -226,7 +226,7 @@ fn character_run(
             .unwrap_or_else(|| font.into());
     }
     if let Some(size) = property_number(properties, "Size") {
-        run.size_px = size as f32;
+        run.size_in = size as f32;
     }
     if properties.contains_key("Color") {
         match text_colour(package, references, resolved, shape_id, properties) {
@@ -257,11 +257,16 @@ fn character_run(
     if let Some(letter_spacing) = property_number(properties, "Letterspace") {
         run.letter_spacing = letter_spacing as f32 / 1440.0;
     }
-    if property_value(properties, "Font").is_some() {
-        run.diagnostic = renderer
-            .font_for(&run.family, run.bold, run.italic)
-            .is_none()
-            .then(|| format!("unregistered font '{}'", run.family));
+    if renderer
+        .font_for(&run.family, run.bold, run.italic)
+        .is_none()
+        && !run
+            .diagnostic
+            .as_deref()
+            .is_some_and(|diagnostic| diagnostic.contains("unregistered font"))
+    {
+        let family = run.family.clone();
+        append_diagnostic(&mut run, format!("unregistered font '{family}'"));
     }
     run
 }
@@ -918,7 +923,7 @@ impl Renderer {
                             } else {
                                 0.0
                             },
-                        run.size_px * 1.2,
+                        run.size_in * 1.2,
                     )
                 })
                 .unwrap_or((0.0, 0.2));
@@ -1079,23 +1084,28 @@ impl Renderer {
             caret_stops: stops,
         }
     }
-    /// Uses the requested face, then same-family style variants, never another family.
+    /// Uses the effective face, then its style variants, then Arial and sans-serif.
     fn font_for(&self, family: &str, bold: bool, italic: bool) -> Option<ooxml_text::FontId> {
-        [
-            (bold, italic),
-            (bold, false),
-            (false, italic),
-            (false, false),
-        ]
-        .into_iter()
-        .find_map(|(bold, italic)| self.registered_fonts.get(&(family.into(), bold, italic)))
-        .copied()
+        std::iter::once(family)
+            .chain(["Arial", "sans-serif"])
+            .flat_map(|family| {
+                [
+                    (bold, italic),
+                    (bold, false),
+                    (false, italic),
+                    (false, false),
+                ]
+                .into_iter()
+                .map(move |(bold, italic)| (family.into(), bold, italic))
+            })
+            .find_map(|key| self.registered_fonts.get(&key))
+            .copied()
     }
     fn measure(&self, run: &TextRun, text: &str) -> f32 {
         self.font_for(&run.family, run.bold, run.italic)
-            .and_then(|font| ooxml_text::shape(&self.fonts, font, text, run.size_px, &[]).ok())
+            .and_then(|font| ooxml_text::shape(&self.fonts, font, text, run.size_in, &[]).ok())
             .map(|glyphs| glyphs.iter().map(|glyph| glyph.x_advance).sum())
-            .unwrap_or(text.chars().count() as f32 * run.size_px * 0.5)
+            .unwrap_or(text.chars().count() as f32 * run.size_in * 0.5)
     }
     fn measure_text(&self, paragraph: &RichParagraph, start: usize, text: &str) -> f32 {
         text.char_indices()
@@ -1519,7 +1529,7 @@ fn primitives_finite(primitives: &[Primitive]) -> bool {
                 })
                 && paragraphs
                     .iter()
-                    .all(|paragraph| paragraph.runs.iter().all(|run| run.size_px.is_finite()))
+                    .all(|paragraph| paragraph.runs.iter().all(|run| run.size_in.is_finite()))
         }
         Primitive::Placeholder {
             x,
@@ -2001,6 +2011,24 @@ mod tests {
     }
 
     #[test]
+    fn font_size_round_trips_in_inches_and_paints_in_pixels() {
+        let mut shape = text_shape(vec![TextToken::Literal("a".into())]);
+        shape.children.push(text_section(
+            "Character",
+            vec![row(0, "", vec![cell("Size", "0.25")])],
+        ));
+        let list = render(vec![shape]);
+        let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        assert_eq!(paragraphs[0].runs[0].size_in, 0.25);
+        assert_eq!(
+            to_canvas_length(list.paint_transform, paragraphs[0].runs[0].size_in),
+            24.0
+        );
+    }
+
+    #[test]
     fn tabs_advance_to_effective_stops_and_align_following_text() {
         for (alignment, expected_start) in [(0, 4.0), (1, 3.0), (2, 2.0)] {
             let mut shape = text_shape(vec![
@@ -2039,7 +2067,7 @@ mod tests {
     }
 
     #[test]
-    fn undefined_tab_uses_documented_default_interval_with_diagnostic() {
+    fn undefined_tab_uses_actual_default_interval_with_renderer_policy_diagnostic() {
         let mut shape = text_shape(vec![
             TextToken::CharacterRun(0),
             TextToken::Literal("a".into()),
@@ -2050,6 +2078,7 @@ mod tests {
             "Tabs",
             vec![row(0, "", vec![cell("Position", "0.25")])],
         ));
+        with_cell(&mut shape, "DefaultTabStop", "0.75");
         let list = render(vec![shape]);
         let Primitive::TextBox {
             paragraphs, lines, ..
@@ -2058,12 +2087,11 @@ mod tests {
             unreachable!()
         };
         assert!(
-            paragraphs[0].runs[1]
-                .diagnostic
-                .as_deref()
-                .is_some_and(|diagnostic| diagnostic.contains("DefaultTabStop 0.5 in"))
+            paragraphs[0].runs[1].diagnostic.as_deref().is_some_and(
+                |diagnostic| diagnostic.contains("renderer policy DefaultTabStop 0.75 in")
+            )
         );
-        assert!((lines[0].caret_stops[2].x - 1.5).abs() < 0.001);
+        assert!((lines[0].caret_stops[2].x - 1.75).abs() < 0.001);
     }
 
     #[test]
@@ -2091,7 +2119,10 @@ mod tests {
             runs.iter().map(|run| run.text.as_str()).collect::<String>(),
             " before resolved middle [unresolved field] after "
         );
-        assert_eq!(runs[1].diagnostic, None);
+        assert_eq!(
+            runs[1].diagnostic.as_deref(),
+            Some("unregistered font 'sans-serif'")
+        );
         assert!(
             runs[3]
                 .diagnostic
@@ -2254,6 +2285,18 @@ mod tests {
         assert_eq!(
             paragraphs[0].runs[0].diagnostic.as_deref(),
             Some("unregistered font '99'")
+        );
+    }
+
+    #[test]
+    fn unregistered_default_font_records_a_diagnostic() {
+        let list = render(vec![text_shape(vec![TextToken::Literal("a".into())])]);
+        let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        assert_eq!(
+            paragraphs[0].runs[0].diagnostic.as_deref(),
+            Some("unregistered font 'sans-serif'")
         );
     }
 
@@ -3021,7 +3064,7 @@ mod tests {
     #[test]
     fn rejects_unknown_contract() {
         let list = VsdxDisplayList {
-            contract_version: 2,
+            contract_version: 3,
             width: 0.0,
             height: 0.0,
             paint_transform: final_paint_transform(0.0),

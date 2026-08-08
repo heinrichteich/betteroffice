@@ -1,7 +1,7 @@
 use ooxml_drawingml::GeometryPathCommand;
 use serde::{Deserialize, Serialize};
 
-pub const CONTRACT_VERSION: u32 = 1;
+pub const CONTRACT_VERSION: u32 = 2;
 
 /// Replay primitives in ascending `z_order` (back-to-front); hit test in descending order.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -191,7 +191,8 @@ pub struct TextParagraph {
 pub struct TextRun {
     pub text: String,
     pub family: String,
-    pub size_px: f32,
+    /// Font size in Visio inches; apply `paint_transform` to obtain pixels.
+    pub size_in: f32,
     pub bold: bool,
     pub italic: bool,
     #[serde(default)]

@@ -19,3 +19,7 @@ pub fn to_canvas(transform: PaintTransform, x: f32, y: f32) -> (f32, f32) {
         transform.b * x + transform.d * y + transform.f,
     )
 }
+
+pub fn to_canvas_length(transform: PaintTransform, length: f32) -> f32 {
+    length * transform.a.hypot(transform.b)
+}
