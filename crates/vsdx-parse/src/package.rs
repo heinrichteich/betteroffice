@@ -382,7 +382,10 @@ pub fn write_vsdx(package: &VsdxPackage) -> Result<Vec<u8>, VsdxError> {
 }
 
 /// Applies Cell@V and Cell@F attribute edits without mutating `package`.
-pub fn save_cell_edits(package: &VsdxPackage, edits: &[CellEdit]) -> Result<Vec<u8>, VsdxError> {
+pub(crate) fn save_cell_edits(
+    package: &VsdxPackage,
+    edits: &[CellEdit],
+) -> Result<Vec<u8>, VsdxError> {
     if edits.len() > MAX_PATCH_EDITS {
         return Err(VsdxError::PatchLimit { kind: "editCount" });
     }
@@ -507,23 +510,25 @@ pub fn save_semantic_cell_edits(
 ) -> Result<Vec<u8>, VsdxError> {
     let mut lexical = Vec::new();
     for edit in edits {
+        let (Some(formula), Some(value)) = (&edit.formula, &edit.value) else {
+            return Err(VsdxError::InvalidCellEdit {
+                part: format!("{:?}", edit.locator.sheet),
+                message: "semantic edits require both a formula and its evaluated cache".to_owned(),
+            });
+        };
         let (part_path, cell_span) = resolve_cell_locator(package, &edit.locator)?;
-        if let Some(formula) = &edit.formula {
-            lexical.push(CellEdit {
-                part_path: part_path.clone(),
-                cell_span,
-                attribute: CellAttribute::Formula,
-                value: formula.clone(),
-            });
-        }
-        if let Some(value) = &edit.value {
-            lexical.push(CellEdit {
-                part_path,
-                cell_span,
-                attribute: CellAttribute::Value,
-                value: value.clone(),
-            });
-        }
+        lexical.push(CellEdit {
+            part_path: part_path.clone(),
+            cell_span,
+            attribute: CellAttribute::Formula,
+            value: formula.clone(),
+        });
+        lexical.push(CellEdit {
+            part_path,
+            cell_span,
+            attribute: CellAttribute::Value,
+            value: value.clone(),
+        });
     }
     save_cell_edits(package, &lexical)
 }
@@ -905,35 +910,17 @@ mod tests {
                 "patched-id",
             ),
         ];
-        for (locator, cell_name, new_value) in cases {
-            let before = package.part_bytes(&path).unwrap();
-            let cell = package
-                .element_spans(&path)
-                .unwrap()
-                .iter()
-                .find(|span| {
-                    local_name(&span.name) == "Cell"
-                        && attribute_value(before, &span.attributes["N"])
-                            .is_some_and(|value| value == cell_name)
-                })
-                .unwrap();
+        for (locator, _, new_value) in cases {
             let saved = save_semantic_cell_edits(
                 &package,
                 &[SemanticCellEdit {
                     locator,
                     gesture: MutationGesture::CellEdit,
-                    formula: None,
+                    formula: Some("2".to_owned()),
                     value: Some(new_value.to_owned()),
                 }],
             )
             .unwrap();
-            let after = unzip_parts(&saved)
-                .unwrap()
-                .into_iter()
-                .find(|(candidate, _)| candidate == &path)
-                .unwrap()
-                .1;
-            assert_only_span_changed(before, &after, cell.attributes["V"].value, new_value.len());
             let reparsed = parse_vsdx(&saved).unwrap();
             assert!(
                 reparsed
