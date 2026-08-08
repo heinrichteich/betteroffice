@@ -2205,9 +2205,13 @@ mod tests {
     fn scan_policy_formulas(formulas: Vec<(String, &str)>, counts: &mut CorpusPolicyCounts) {
         let references = formulas
             .iter()
+            .filter(|(_, formula)| !formula.eq_ignore_ascii_case("Inh"))
             .map(|(name, formula)| (name.clone(), (*formula).to_owned()))
             .collect::<BTreeMap<_, _>>();
         for (name, formula) in formulas {
+            if formula.eq_ignore_ascii_case("Inh") {
+                continue;
+            }
             let Ok(expression) = parse(formula, &limits()) else {
                 continue;
             };
