@@ -1750,7 +1750,7 @@ mod tests {
             assert_point_close((*x, *y), (1.1, 1.1));
             assert_point_close((*width, *height), (0.7, 0.8));
             assert!((lines[0].y - expected_y).abs() < 1e-5);
-            assert!(lines[0].height < 1.0);
+            assert!((lines[0].height - 0.2).abs() < 1e-5);
         }
     }
 
