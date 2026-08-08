@@ -5,12 +5,12 @@ use crate::xml::{ParseBudget, XmlElement, parse_xml};
 
 pub mod relationship_types {
     pub const DOCUMENT: &str = "http://schemas.microsoft.com/visio/2010/relationships/document";
-    pub const PAGES: &str = "/pages";
-    pub const MASTERS: &str = "/masters";
-    pub const THEME: &str = "/theme";
-    pub const WINDOWS: &str = "/windows";
-    pub const PAGE: &str = "/page";
-    pub const MASTER: &str = "/master";
+    pub const PAGES: &str = "http://schemas.microsoft.com/visio/2010/relationships/pages";
+    pub const MASTERS: &str = "http://schemas.microsoft.com/visio/2010/relationships/masters";
+    pub const THEME: &str = "http://schemas.microsoft.com/visio/2010/relationships/theme";
+    pub const WINDOWS: &str = "http://schemas.microsoft.com/visio/2010/relationships/windows";
+    pub const PAGE: &str = "http://schemas.microsoft.com/visio/2010/relationships/page";
+    pub const MASTER: &str = "http://schemas.microsoft.com/visio/2010/relationships/master";
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,8 +31,8 @@ pub struct Relationship {
     pub resolved_target: Option<String>,
 }
 impl Relationship {
-    pub fn has_type(&self, suffix: &str) -> bool {
-        self.relationship_type.ends_with(suffix)
+    pub fn has_type(&self, relationship_type: &str) -> bool {
+        self.relationship_type == relationship_type
     }
 }
 

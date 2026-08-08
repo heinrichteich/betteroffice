@@ -189,7 +189,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn preserves_every_corpus_part_byte_for_byte() {
+    fn round_trips_committed_fixture_parts_in_order_and_byte_for_byte() {
         let source = include_bytes!("../tests/fixtures/foundation.vsdx");
         let written = write_vsdx(&parse_vsdx(source).unwrap()).unwrap();
         assert_eq!(unzip_parts(&written).unwrap(), unzip_parts(source).unwrap());
@@ -217,12 +217,12 @@ mod tests {
     #[test]
     fn discovers_parts_only_through_relationships() {
         let package = rezip_parts(&[
-            ("[Content_Types].xml".to_owned(), br#"<Types><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
             ("_rels/.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec()),
             ("visio/document.xml".to_owned(), b"<VisioDocument/>".to_vec()),
-            ("visio/_rels/document.xml.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='x/pages' Target='pages/pages.xml'/></Relationships>"#.to_vec()),
+            ("visio/_rels/document.xml.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/pages' Target='pages/pages.xml'/></Relationships>"#.to_vec()),
             ("visio/pages/pages.xml".to_owned(), b"<Pages/>".to_vec()),
-            ("visio/pages/_rels/pages.xml.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='x/page' Target='page9.xml'/></Relationships>"#.to_vec()),
+            ("visio/pages/_rels/pages.xml.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page9.xml'/></Relationships>"#.to_vec()),
             ("visio/pages/page9.xml".to_owned(), b"<PageContents/>".to_vec()),
         ]).unwrap();
         let parsed = parse_vsdx(&package).unwrap();
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn rejects_dangling_relationship_targets() {
         let package = rezip_parts(&[
-            ("[Content_Types].xml".to_owned(), br#"<Types><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
             (
                 "_rels/.rels".to_owned(),
                 br#"<Relationships><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec(),
@@ -248,12 +248,12 @@ mod tests {
     #[test]
     fn validates_reachable_page_relationship_parts() {
         let package = rezip_parts(&[
-            ("[Content_Types].xml".to_owned(), br#"<Types><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
             ("_rels/.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec()),
             ("visio/document.xml".to_owned(), b"<VisioDocument/>".to_vec()),
-            ("visio/_rels/document.xml.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='x/pages' Target='pages/pages.xml'/></Relationships>"#.to_vec()),
+            ("visio/_rels/document.xml.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/pages' Target='pages/pages.xml'/></Relationships>"#.to_vec()),
             ("visio/pages/pages.xml".to_owned(), b"<Pages/>".to_vec()),
-            ("visio/pages/_rels/pages.xml.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='x/page' Target='page1.xml'/></Relationships>"#.to_vec()),
+            ("visio/pages/_rels/pages.xml.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page1.xml'/></Relationships>"#.to_vec()),
             ("visio/pages/page1.xml".to_owned(), b"<PageContents/>".to_vec()),
             ("visio/pages/_rels/page1.xml.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='x/image' Target='javascript:x'/></Relationships>"#.to_vec()),
         ]).unwrap();
@@ -272,7 +272,7 @@ mod tests {
         ] {
             let package = rezip_parts(&[(
                 "[Content_Types].xml".to_owned(),
-                format!("<Types><Override PartName='/visio/document.xml' ContentType='{content_type}'/></Types>").into_bytes(),
+                format!("<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='{content_type}'/></Types>").into_bytes(),
             )]).unwrap();
             assert!(matches!(
                 parse_vsdx(&package),
@@ -281,7 +281,7 @@ mod tests {
         }
         let package = rezip_parts(&[(
             "[Content_Types].xml".to_owned(),
-            br#"<Types><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/><Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/></Types>"#.to_vec(),
+            br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/><Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/></Types>"#.to_vec(),
         )]).unwrap();
         assert!(matches!(
             parse_vsdx(&package),
@@ -298,7 +298,7 @@ mod tests {
         .unwrap();
         assert!(parse_vsdx(&missing).is_err());
         let wrong = rezip_parts(&[
-            ("[Content_Types].xml".to_owned(), br#"<Types><Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/></Types>"#.to_vec()),
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/></Types>"#.to_vec()),
             ("visio/document.xml".to_owned(), b"<VisioDocument/>".to_vec()),
         ]).unwrap();
         assert!(matches!(
