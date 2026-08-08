@@ -250,6 +250,9 @@ impl<R: References> Engine<'_, R> {
                 if b.unit != Unit::Number {
                     return err("exponent must be dimensionless");
                 };
+                if a.unit != Unit::Number && b.number.fract() != 0.0 {
+                    return err("dimensional powers require an integral exponent");
+                }
                 numeric_result(a.number.powf(b.number), a.unit, guarded)
             }
             Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
@@ -295,10 +298,10 @@ impl<R: References> Engine<'_, R> {
         if upper == "RGB" {
             return self.rgb(args, d);
         }
-        if upper == "MSOTINT" {
-            return unsupported("MSOTINT requires documented Visio tint semantics");
-        }
-        if matches!(upper.as_str(), "LUMDIFF" | "SHADE" | "TINT" | "SAT") {
+        if matches!(
+            upper.as_str(),
+            "LUMDIFF" | "MSOTINT" | "SHADE" | "TINT" | "SAT"
+        ) {
             return self.color_function(&upper, args, d);
         }
         if upper == "IF" {
@@ -576,7 +579,7 @@ impl<R: References> Engine<'_, R> {
         let Some((first, second)) = args.first().zip(args.get(1)) else {
             return err(format!("{name} requires two arguments"));
         };
-        let (_color, _color_guarded) = match color_value(self.expr(first, d)) {
+        let (color, color_guarded) = match color_value(self.expr(first, d)) {
             Ok(value) => value,
             Err(error) => return error,
         };
@@ -584,16 +587,23 @@ impl<R: References> Engine<'_, R> {
             // Visio does not document enough of these colour-model semantics to render them honestly.
             return unsupported(format!("{name} is not implemented"));
         }
-        let (amount, _amount_guarded) = match numeric(self.expr(second, d)) {
+        let (amount, amount_guarded) = match numeric(self.expr(second, d)) {
             Ok(value) => value,
             Err(error) => return error,
         };
         match name {
-            "TINT" => {
+            "TINT" | "MSOTINT" => {
                 if amount.unit != Unit::Number || amount.number.fract() != 0.0 {
-                    return err("TINT amount must be a dimensionless integer");
+                    return err(format!("{name} amount must be a dimensionless integer"));
                 }
-                unsupported("TINT requires Visio HLS colour semantics")
+                let color = if name == "TINT" {
+                    tint(color, amount.number)
+                } else if !(-100.0..=100.0).contains(&amount.number) {
+                    return err("MSOTINT percentage must be between -100 and 100");
+                } else {
+                    mso_tint(color, amount.number)
+                };
+                result(Value::Color(color), color_guarded || amount_guarded)
             }
             _ => unreachable!(),
         }
@@ -663,12 +673,63 @@ fn parse_color(hex: &str) -> Option<Color> {
     })
 }
 fn saturation(color: Color) -> f64 {
-    let high = f64::from(color.red.max(color.green).max(color.blue));
-    let low = f64::from(color.red.min(color.green).min(color.blue));
-    if high == 0.0 {
-        0.0
+    rgb_to_hls(color).1
+}
+fn tint(color: Color, amount: f64) -> Color {
+    let (hue, saturation, luminosity) = rgb_to_hls(color);
+    hls_to_rgb(hue, saturation, (luminosity + amount).clamp(0.0, 240.0))
+}
+fn mso_tint(color: Color, percentage: f64) -> Color {
+    let (hue, saturation, luminosity) = rgb_to_hls(color);
+    let luminosity = if percentage < 0.0 {
+        luminosity + (-percentage / 100.0) * (240.0 - luminosity)
     } else {
-        (high - low) / high
+        luminosity * (1.0 - percentage / 100.0)
+    };
+    hls_to_rgb(hue, saturation, luminosity)
+}
+fn rgb_to_hls(color: Color) -> (f64, f64, f64) {
+    let red = f64::from(color.red) / 255.0;
+    let green = f64::from(color.green) / 255.0;
+    let blue = f64::from(color.blue) / 255.0;
+    let high = red.max(green).max(blue);
+    let low = red.min(green).min(blue);
+    let delta = high - low;
+    let luminosity = (high + low) / 2.0;
+    if delta == 0.0 {
+        return (0.0, 0.0, luminosity * 240.0);
+    }
+    let saturation = delta / (1.0 - (2.0 * luminosity - 1.0).abs());
+    let hue = if high == red {
+        ((green - blue) / delta).rem_euclid(6.0)
+    } else if high == green {
+        (blue - red) / delta + 2.0
+    } else {
+        (red - green) / delta + 4.0
+    } / 6.0;
+    (hue * 240.0, saturation * 240.0, luminosity * 240.0)
+}
+fn hls_to_rgb(hue: f64, saturation: f64, luminosity: f64) -> Color {
+    let hue = hue / 240.0;
+    let saturation = saturation / 240.0;
+    let luminosity = luminosity / 240.0;
+    let chroma = (1.0 - (2.0 * luminosity - 1.0).abs()) * saturation;
+    let x = chroma * (1.0 - ((hue * 6.0).rem_euclid(2.0) - 1.0).abs());
+    let (red, green, blue) = match (hue * 6.0).floor() as i32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let offset = luminosity - chroma / 2.0;
+    let channel = |value: f64| ((value + offset) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Color {
+        red: channel(red),
+        green: channel(green),
+        blue: channel(blue),
+        alpha: None,
     }
 }
 
@@ -963,6 +1024,10 @@ mod tests {
             evaluate("1 in + 1 deg", &BTreeMap::new(), &limits()),
             Evaluation::Error(_)
         ));
+        assert!(matches!(
+            evaluate("4 in ^ 0.5", &BTreeMap::new(), &limits()),
+            Evaluation::Error(_)
+        ));
     }
 
     #[test]
@@ -1033,6 +1098,15 @@ mod tests {
             }
         );
         assert_eq!(
+            color("THEMEVAL(6)", Some(&theme)),
+            Color {
+                red: 16,
+                green: 32,
+                blue: 48,
+                alpha: None
+            }
+        );
+        assert_eq!(
             color("THEMEVAL(\"AccentColor4\",RGB(4,5,6))", None),
             Color {
                 red: 4,
@@ -1043,6 +1117,10 @@ mod tests {
         );
         assert!(matches!(
             evaluate("THEMEVAL(\"AccentColor4\")", &BTreeMap::new(), &limits()),
+            Evaluation::Unsupported(_)
+        ));
+        assert!(matches!(
+            evaluate("THEMEVAL()", &BTreeMap::new(), &limits()),
             Evaluation::Unsupported(_)
         ));
         assert_eq!(
@@ -1097,19 +1175,44 @@ mod tests {
     }
 
     #[test]
-    fn rejects_undocumented_colour_transforms() {
+    fn evaluates_documented_colour_transforms() {
         for formula in [
             "LUMDIFF(RGB(255,255,255),RGB(0,0,0))",
             "SHADE(RGB(100,150,200),0.5)",
-            "TINT(RGB(100,150,200),20)",
-            "MSOTINT(RGB(100,150,200),0.5)",
         ] {
             assert!(matches!(
                 evaluate(formula, &BTreeMap::new(), &limits()),
                 Evaluation::Unsupported(_)
             ));
         }
-        assert_eq!(number("SAT(RGB(255,0,0))").number, 1.0);
+        assert_eq!(number("SAT(RGB(255,0,0))").number, 240.0);
+        assert_eq!(
+            color("TINT(RGB(255,0,0),20)", None),
+            Color {
+                red: 255,
+                green: 43,
+                blue: 43,
+                alpha: None
+            }
+        );
+        assert_eq!(
+            color("MSOTINT(RGB(255,0,0),-50)", None),
+            Color {
+                red: 255,
+                green: 128,
+                blue: 128,
+                alpha: None
+            }
+        );
+        assert_eq!(
+            color("MSOTINT(RGB(255,0,0),50)", None),
+            Color {
+                red: 128,
+                green: 0,
+                blue: 0,
+                alpha: None
+            }
+        );
     }
 
     #[test]
