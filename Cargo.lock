@@ -263,6 +263,7 @@ dependencies = [
  "betteroffice-drawingml",
  "betteroffice-vsdx-parse",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

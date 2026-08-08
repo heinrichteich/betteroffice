@@ -5,6 +5,9 @@ mod inheritance;
 mod model;
 mod text;
 
+#[cfg(test)]
+mod tests;
+
 pub use geometry::*;
 pub use inheritance::*;
 pub use model::*;
