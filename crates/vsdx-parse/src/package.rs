@@ -581,12 +581,25 @@ mod tests {
             let source = std::fs::read(std::path::Path::new(&directory).join(name)).unwrap();
             let package = parse_vsdx(&source).unwrap();
             let part_path = package.page_part_paths.first().unwrap();
-            let edit = first_value_edit(&package, part_path, "0");
+            let edit = first_value_edit(&package, part_path, "patched");
             let before: BTreeMap<_, _> = unzip_parts(&source).unwrap().into_iter().collect();
-            let saved = save_cell_edits(&package, &[edit]).unwrap();
+            let saved = save_cell_edits(&package, std::slice::from_ref(&edit)).unwrap();
             let after: BTreeMap<_, _> = unzip_parts(&saved).unwrap().into_iter().collect();
             for (path, bytes) in before {
-                if path != part_path.as_str() {
+                if path == part_path.as_str() {
+                    let cell = package
+                        .element_spans(&path)
+                        .unwrap()
+                        .iter()
+                        .find(|span| span.span == edit.cell_span)
+                        .unwrap();
+                    assert_only_span_changed(
+                        &bytes,
+                        &after[&path],
+                        cell.attributes["V"].value,
+                        edit.value.len(),
+                    );
+                } else {
                     assert_eq!(after[&path], bytes, "{name}: {path}");
                 }
             }
