@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::model::{PackagePart, VsdxPackage};
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
 use crate::sheet::{parse_records, parse_sheet};
-use crate::xml::{ParseBudget, XmlElement, parse_xml};
+use crate::xml::{ParseBudget, XmlElement, XmlNode, parse_xml};
 use crate::{ParseLimits, Sheet, VsdxError};
+use ooxml_drawingml::Theme;
 
 pub fn parse_vsdx(data: &[u8]) -> Result<VsdxPackage, VsdxError> {
     parse_vsdx_with_limits(data, &ParseLimits::default())
@@ -109,6 +110,16 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
     );
     let page_contents = parse_part_sheets(&page_part_paths, &mut xml_parts, &mut budget)?;
     let master_contents = parse_part_sheets(&master_part_paths, &mut xml_parts, &mut budget)?;
+    let themes = theme_part_paths
+        .iter()
+        .enumerate()
+        .filter_map(|(index, path)| {
+            xml_parts
+                .get(path)
+                .and_then(parse_theme)
+                .map(|theme| ((index + 1) as u32, theme))
+        })
+        .collect();
     Ok(VsdxPackage {
         document_part_path: document_path,
         pages_part_path,
@@ -116,6 +127,7 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         page_part_paths,
         master_part_paths,
         theme_part_paths,
+        themes,
         windows_part_path,
         relationships,
         document_sheet,
@@ -133,6 +145,35 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
             .map(|(path, bytes)| PackagePart { path, bytes })
             .collect(),
     })
+}
+
+fn parse_theme(root: &XmlElement) -> Option<Theme> {
+    let scheme = root
+        .children_named("themeElements")
+        .next()?
+        .children_named("clrScheme")
+        .next()?;
+    let mut theme = Theme {
+        name: root.attribute("name").unwrap_or("Office Theme").to_owned(),
+        ..Theme::default()
+    };
+    for slot in [
+        "dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5",
+        "accent6", "hlink", "folHlink",
+    ] {
+        let Some(value) = scheme.children_named(slot).next().and_then(|slot| {
+            slot.children.iter().find_map(|child| match child {
+                XmlNode::Element(value) => value
+                    .attribute("lastClr")
+                    .or_else(|| value.attribute("val")),
+                XmlNode::Text(_) => None,
+            })
+        }) else {
+            continue;
+        };
+        theme.color_scheme.set(slot, value.to_owned());
+    }
+    Some(theme)
 }
 
 fn catalog_part_ids(

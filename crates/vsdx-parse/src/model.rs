@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use ooxml_drawingml::Theme;
 use serde::{Deserialize, Serialize};
 
 use crate::{Relationship, Sheet, XmlRecord};
@@ -13,6 +14,7 @@ pub struct VsdxPackage {
     pub page_part_paths: Vec<String>,
     pub master_part_paths: Vec<String>,
     pub theme_part_paths: Vec<String>,
+    pub themes: BTreeMap<u32, Theme>,
     pub windows_part_path: Option<String>,
     pub relationships: BTreeMap<String, Vec<Relationship>>,
     pub document_sheet: Option<Sheet>,

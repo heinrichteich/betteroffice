@@ -1,10 +1,10 @@
 //! Bounded baseline ShapeSheet evaluation. Unsupported formulas never use cached values.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ooxml_drawingml::{ColorValue, Theme, get_theme_color, resolve_color_value_to_hex_with_theme};
 use thiserror::Error;
-use vsdx_parse::ParseLimits;
+use vsdx_parse::{ParseLimits, VsdxPackage};
 use vsdx_resolve::{Lookup, ResolvedShape};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -100,7 +100,7 @@ pub fn parse(input: &str, limits: &ParseLimits) -> Result<Expr, Diagnostic> {
     if input.trim().eq_ignore_ascii_case("No Formula") {
         return Ok(Expr::Call("No Formula".into(), Vec::new()));
     }
-    Parser::new(input, limits.max_formula_depth).parse()
+    Parser::new(input, limits.max_formula_depth, limits.max_formula_nodes).parse()
 }
 pub fn evaluate(input: &str, refs: &impl References, limits: &ParseLimits) -> Evaluation {
     evaluate_with_theme(input, refs, limits, None)
@@ -119,6 +119,8 @@ pub fn evaluate_with_theme(
             limits,
             theme,
             active: HashSet::new(),
+            memo: HashMap::new(),
+            steps: 0,
         }
         .expr(&expr, 0),
         Err(error) => Evaluation::Error(error),
@@ -139,14 +141,32 @@ pub fn evaluate_with_shape_themes(
     evaluate_with_theme(input, refs, limits, theme)
 }
 
+/// Evaluates with themes parsed from the VSDX package. ThemeIndex is one-based in relationship order;
+/// ColorSchemeIndex is used only when ThemeIndex is absent.
+pub fn evaluate_with_shape_package_theme(
+    input: &str,
+    refs: &impl References,
+    limits: &ParseLimits,
+    shape: &ResolvedShape,
+    package: &VsdxPackage,
+) -> Evaluation {
+    evaluate_with_shape_themes(input, refs, limits, shape, &package.themes)
+}
+
 struct Engine<'a, R> {
     refs: &'a R,
     limits: &'a ParseLimits,
     theme: Option<&'a Theme>,
     active: HashSet<String>,
+    memo: HashMap<String, Evaluation>,
+    steps: usize,
 }
 impl<R: References> Engine<'_, R> {
     fn expr(&mut self, expr: &Expr, depth: usize) -> Evaluation {
+        self.steps += 1;
+        if self.steps > self.limits.max_formula_steps {
+            return err("formula evaluation step limit exceeded");
+        }
         if depth > self.limits.max_formula_depth {
             return err("formula depth limit exceeded");
         }
@@ -154,6 +174,9 @@ impl<R: References> Engine<'_, R> {
             Expr::Number(n, u) => number(*n, *u),
             Expr::String(_) => unsupported("string values are not display numbers"),
             Expr::Reference(name) => {
+                if let Some(value) = self.memo.get(name) {
+                    return value.clone();
+                }
                 if !self.active.insert(name.clone()) {
                     return err(format!("reference cycle at {name}"));
                 }
@@ -165,6 +188,7 @@ impl<R: References> Engine<'_, R> {
                     None => err(format!("unresolved reference {name}")),
                 };
                 self.active.remove(name);
+                self.memo.insert(name.clone(), result.clone());
                 result
             }
             Expr::Unary(v) => match numeric(self.expr(v, depth + 1)) {
@@ -289,8 +313,34 @@ impl<R: References> Engine<'_, R> {
         if upper == "RGB" {
             return self.rgb(args, d);
         }
+        if upper == "MSOTINT" {
+            return unsupported("MSOTINT requires documented Visio tint semantics");
+        }
         if matches!(upper.as_str(), "LUMDIFF" | "SHADE" | "TINT" | "SAT") {
             return self.color_function(&upper, args, d);
+        }
+        if upper == "IF" {
+            if args.len() != 3 {
+                return err("IF requires three arguments");
+            }
+            let (condition, guarded) = match numeric(self.expr(&args[0], d)) {
+                Ok(value) => value,
+                Err(error) => return error,
+            };
+            return match self.expr(
+                if condition.number != 0. {
+                    &args[1]
+                } else {
+                    &args[2]
+                },
+                d,
+            ) {
+                Evaluation::Evaluated(mut value) => {
+                    value.guarded |= guarded;
+                    Evaluation::Evaluated(value)
+                }
+                other => other,
+            };
         }
         let vals: Result<Vec<_>, _> = args.iter().map(|a| numeric(self.expr(a, d))).collect();
         let vals = match vals {
@@ -308,13 +358,6 @@ impl<R: References> Engine<'_, R> {
             }
         };
         match upper.as_str() {
-            "IF" if vals.len() == 3 => {
-                if vals[0].number != 0. {
-                    numeric_result(vals[1].number, vals[1].unit, guarded)
-                } else {
-                    numeric_result(vals[2].number, vals[2].unit, guarded)
-                }
-            }
             "AND" => numeric_result(
                 if vals.iter().all(|v| v.number != 0.) {
                     1.
@@ -381,6 +424,8 @@ impl<R: References> Engine<'_, R> {
                 |v| {
                     if v.number < 0. {
                         err("square root of negative number")
+                    } else if v.unit != Unit::Number {
+                        unsupported("SQRT of dimensional values is not implemented")
                     } else {
                         numeric_result(v.number.sqrt(), v.unit, guarded)
                     }
@@ -412,7 +457,7 @@ impl<R: References> Engine<'_, R> {
                 }
                 numeric_result(vals[0].number.atan2(vals[1].number), Unit::Radians, guarded)
             }
-            "PI" if vals.is_empty() => numeric_result(std::f64::consts::PI, Unit::Number, guarded),
+            "PI" if vals.is_empty() => numeric_result(std::f64::consts::PI, Unit::Radians, guarded),
             "MOD" if vals.len() == 2 => {
                 if vals[0].unit != vals[1].unit {
                     return err("incompatible units");
@@ -439,6 +484,12 @@ impl<R: References> Engine<'_, R> {
         if components.len() != 3 {
             return err("RGB requires three arguments");
         }
+        if components
+            .iter()
+            .any(|(value, _)| value.unit != Unit::Number)
+        {
+            return err("RGB channels must be dimensionless");
+        }
         // Visio RGB takes 8-bit channels; out-of-range inputs are conservatively saturated.
         let channel = |value: f64| value.round().clamp(0.0, 255.0) as u8;
         result(
@@ -452,19 +503,40 @@ impl<R: References> Engine<'_, R> {
         )
     }
     fn themeval(&mut self, args: &[Expr], d: usize) -> Evaluation {
+        if args.is_empty() {
+            return unsupported("THEMEVAL host-cell lookup requires theme-cell context");
+        }
         let Some(theme) = self.theme else {
             return args.get(1).map_or_else(
                 || unsupported("THEMEVAL has no resolvable theme"),
                 |arg| self.expr(arg, d),
             );
         };
-        let Some(Expr::String(name)) = args.first() else {
-            return args.get(1).map_or_else(
-                || unsupported("THEMEVAL requires a theme value name"),
-                |arg| self.expr(arg, d),
-            );
+        let name = match args.first() {
+            Some(Expr::String(name)) => name.clone(),
+            Some(expr) => match numeric(self.expr(expr, d)) {
+                Ok((value, _)) if value.unit == Unit::Number && value.number.fract() == 0.0 => {
+                    match value.number as i32 {
+                        1 => "Dark".to_owned(),
+                        2 => "Light".to_owned(),
+                        3 => "AccentColor1".to_owned(),
+                        4 => "AccentColor2".to_owned(),
+                        5 => "AccentColor3".to_owned(),
+                        6 => "AccentColor4".to_owned(),
+                        7 => "AccentColor5".to_owned(),
+                        8 => "AccentColor6".to_owned(),
+                        _ => {
+                            return unsupported("THEMEVAL colour-scheme index must be 1 through 8");
+                        }
+                    }
+                }
+                Ok(_) => return unsupported("THEMEVAL requires a string or integer theme value"),
+                Err(error) => return error,
+            },
+            None => unreachable!(),
         };
-        let slot = match name.as_str() {
+        let name = name.as_str();
+        let slot = match name {
             "BackgroundColor" => "lt1",
             "Light" => "lt1",
             "FillColor" => "accent1",
@@ -506,51 +578,40 @@ impl<R: References> Engine<'_, R> {
         )
     }
     fn color_function(&mut self, name: &str, args: &[Expr], d: usize) -> Evaluation {
-        let Some((first, second)) = args.first().zip(args.get(1)) else {
-            return err(format!("{name} requires two arguments"));
-        };
-        let (color, color_guarded) = match color_value(self.expr(first, d)) {
-            Ok(value) => value,
-            Err(error) => return error,
-        };
-        if name == "LUMDIFF" {
-            let (other, other_guarded) = match color_value(self.expr(second, d)) {
+        if name == "SAT" {
+            let Some(first) = args.first() else {
+                return err("SAT requires one argument");
+            };
+            if args.len() != 1 {
+                return err("SAT requires one argument");
+            }
+            let (color, guarded) = match color_value(self.expr(first, d)) {
                 Ok(value) => value,
                 Err(error) => return error,
             };
-            // LUMDIFF is the absolute difference of relative luminance.
-            return numeric_result(
-                (luminance(color) - luminance(other)).abs(),
-                Unit::Number,
-                color_guarded || other_guarded,
-            );
+            return numeric_result(saturation(color), Unit::Number, guarded);
         }
-        let (amount, amount_guarded) = match numeric(self.expr(second, d)) {
+        let Some((first, second)) = args.first().zip(args.get(1)) else {
+            return err(format!("{name} requires two arguments"));
+        };
+        let (_color, _color_guarded) = match color_value(self.expr(first, d)) {
             Ok(value) => value,
             Err(error) => return error,
         };
-        let guarded = color_guarded || amount_guarded;
+        if matches!(name, "LUMDIFF" | "SHADE") {
+            // Visio does not document enough of these colour-model semantics to render them honestly.
+            return unsupported(format!("{name} is not implemented"));
+        }
+        let (amount, _amount_guarded) = match numeric(self.expr(second, d)) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
         match name {
-            "SHADE" => {
-                // Visio's exact shade transfer is undocumented here; use a conservative channel multiplier.
-                result(
-                    Value::Color(adjust_lightness(color, amount.number, false)),
-                    guarded,
-                )
-            }
             "TINT" => {
-                // Tint linearly moves each channel toward white.
-                result(
-                    Value::Color(adjust_lightness(color, amount.number, true)),
-                    guarded,
-                )
-            }
-            "SAT" => {
-                // Saturation is scaled around luminance.
-                result(
-                    Value::Color(adjust_saturation(color, amount.number)),
-                    guarded,
-                )
+                if amount.unit != Unit::Number || amount.number.fract() != 0.0 {
+                    return err("TINT amount must be a dimensionless integer");
+                }
+                unsupported("TINT requires Visio HLS colour semantics")
             }
             _ => unreachable!(),
         }
@@ -619,42 +680,13 @@ fn parse_color(hex: &str) -> Option<Color> {
         alpha: None,
     })
 }
-fn luminance(color: Color) -> f64 {
-    (0.2126 * f64::from(color.red)
-        + 0.7152 * f64::from(color.green)
-        + 0.0722 * f64::from(color.blue))
-        / 255.0
-}
-fn adjust_lightness(color: Color, amount: f64, tint: bool) -> Color {
-    let adjust = |channel: u8| {
-        let channel = f64::from(channel);
-        (if tint {
-            channel + (255.0 - channel) * amount
-        } else {
-            channel * amount
-        })
-        .clamp(0.0, 255.0)
-        .round() as u8
-    };
-    Color {
-        red: adjust(color.red),
-        green: adjust(color.green),
-        blue: adjust(color.blue),
-        alpha: color.alpha,
-    }
-}
-fn adjust_saturation(color: Color, amount: f64) -> Color {
-    let lum = luminance(color) * 255.0;
-    let adjust = |channel: u8| {
-        (lum + (f64::from(channel) - lum) * amount)
-            .clamp(0.0, 255.0)
-            .round() as u8
-    };
-    Color {
-        red: adjust(color.red),
-        green: adjust(color.green),
-        blue: adjust(color.blue),
-        alpha: color.alpha,
+fn saturation(color: Color) -> f64 {
+    let high = f64::from(color.red.max(color.green).max(color.blue));
+    let low = f64::from(color.red.min(color.green).min(color.blue));
+    if high == 0.0 {
+        0.0
+    } else {
+        (high - low) / high
     }
 }
 
@@ -668,20 +700,25 @@ enum Tok {
     R,
     Comma,
     End,
+    Invalid(String),
 }
 struct Parser<'a> {
     chars: std::iter::Peekable<std::str::Chars<'a>>,
     current: Tok,
     depth: usize,
     max: usize,
+    nodes: usize,
+    max_nodes: usize,
 }
 impl<'a> Parser<'a> {
-    fn new(s: &'a str, max: usize) -> Self {
+    fn new(s: &'a str, max: usize, max_nodes: usize) -> Self {
         let mut p = Self {
             chars: s.chars().peekable(),
             current: Tok::End,
             depth: 0,
             max,
+            nodes: 0,
+            max_nodes,
         };
         p.next();
         p
@@ -694,6 +731,16 @@ impl<'a> Parser<'a> {
             });
         }
         Ok(e)
+    }
+    fn node(&mut self) -> Result<(), Diagnostic> {
+        self.nodes += 1;
+        if self.nodes > self.max_nodes {
+            Err(Diagnostic {
+                message: "formula AST node limit exceeded".into(),
+            })
+        } else {
+            Ok(())
+        }
     }
     fn next(&mut self) {
         self.current = self.lex()
@@ -752,7 +799,9 @@ impl<'a> Parser<'a> {
                 while self.chars.peek().is_some_and(|x| x.is_ascii_alphabetic()) {
                     u.push(self.chars.next().unwrap());
                 }
-                let (unit, scale) = unit(&u).unwrap_or((Unit::Number, 1.));
+                let Some((unit, scale)) = unit(&u) else {
+                    return Tok::Invalid(format!("unknown unit suffix {u}"));
+                };
                 n *= scale;
                 Tok::Number(n, unit)
             }
@@ -774,6 +823,7 @@ impl<'a> Parser<'a> {
         while let Tok::Op(op @ (Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge)) = self.current
         {
             self.next();
+            self.node()?;
             x = Expr::Binary(Box::new(x), op, Box::new(self.add()?));
         }
         Ok(x)
@@ -782,6 +832,7 @@ impl<'a> Parser<'a> {
         let mut x = self.mul()?;
         while let Tok::Op(op @ (Op::Add | Op::Sub)) = self.current {
             self.next();
+            self.node()?;
             x = Expr::Binary(Box::new(x), op, Box::new(self.mul()?));
         }
         Ok(x)
@@ -790,6 +841,7 @@ impl<'a> Parser<'a> {
         let mut x = self.pow()?;
         while let Tok::Op(op @ (Op::Mul | Op::Div)) = self.current {
             self.next();
+            self.node()?;
             x = Expr::Binary(Box::new(x), op, Box::new(self.pow()?));
         }
         Ok(x)
@@ -798,7 +850,11 @@ impl<'a> Parser<'a> {
         let x = self.primary()?;
         if self.current == Tok::Op(Op::Pow) {
             self.next();
-            Ok(Expr::Binary(Box::new(x), Op::Pow, Box::new(self.pow()?)))
+            self.depth += 1;
+            let right = self.pow()?;
+            self.depth -= 1;
+            self.node()?;
+            Ok(Expr::Binary(Box::new(x), Op::Pow, Box::new(right)))
         } else {
             Ok(x)
         }
@@ -812,15 +868,21 @@ impl<'a> Parser<'a> {
         match self.current.clone() {
             Tok::Number(n, u) => {
                 self.next();
+                self.node()?;
                 Ok(Expr::Number(n, u))
             }
             Tok::String(s) => {
                 self.next();
+                self.node()?;
                 Ok(Expr::String(s))
             }
             Tok::Op(Op::Sub) => {
                 self.next();
-                Ok(Expr::Unary(Box::new(self.primary()?)))
+                self.depth += 1;
+                let value = self.primary()?;
+                self.depth -= 1;
+                self.node()?;
+                Ok(Expr::Unary(Box::new(value)))
             }
             Tok::Ident(s) => {
                 self.next();
@@ -844,8 +906,10 @@ impl<'a> Parser<'a> {
                     }
                     self.next();
                     self.depth -= 1;
+                    self.node()?;
                     Ok(Expr::Call(s, a))
                 } else {
+                    self.node()?;
                     Ok(Expr::Reference(s))
                 }
             }
@@ -862,6 +926,7 @@ impl<'a> Parser<'a> {
                 self.depth -= 1;
                 Ok(x)
             }
+            Tok::Invalid(message) => Err(Diagnostic { message }),
             _ => Err(Diagnostic {
                 message: "expected expression".into(),
             }),
@@ -1066,17 +1131,19 @@ mod tests {
     }
 
     #[test]
-    fn evaluates_luminance_and_shading() {
-        assert!((number("LUMDIFF(RGB(255,255,255),RGB(0,0,0))").number - 1.0).abs() < 1e-12);
-        assert_eq!(
-            color("SHADE(RGB(100,150,200),0.5)", None),
-            Color {
-                red: 50,
-                green: 75,
-                blue: 100,
-                alpha: None
-            }
-        );
+    fn rejects_undocumented_colour_transforms() {
+        for formula in [
+            "LUMDIFF(RGB(255,255,255),RGB(0,0,0))",
+            "SHADE(RGB(100,150,200),0.5)",
+            "TINT(RGB(100,150,200),20)",
+            "MSOTINT(RGB(100,150,200),0.5)",
+        ] {
+            assert!(matches!(
+                evaluate(formula, &BTreeMap::new(), &limits()),
+                Evaluation::Unsupported(_)
+            ));
+        }
+        assert_eq!(number("SAT(RGB(255,0,0))").number, 1.0);
     }
 
     #[test]
@@ -1094,60 +1161,97 @@ mod tests {
     }
 
     #[test]
-    fn corpus_formulas_parse_without_panics() {
-        let Ok(directory) = std::env::var("VSDX_CORPUS_DIR") else {
-            return;
+    fn bounds_every_formula_recursion_and_node_count() {
+        let limits = ParseLimits {
+            max_formula_depth: 32,
+            max_formula_nodes: 128,
+            ..limits()
         };
-        let mut parsed = 0_usize;
-        let mut unsupported = 0_usize;
-        let mut failed = 0_usize;
-        let mut examples = Vec::new();
+        assert!(parse(&format!("1{}", "^1".repeat(64)), &limits).is_err());
+        assert!(parse(&format!("{}1", "-".repeat(64)), &limits).is_err());
+        assert!(
+            parse(
+                &std::iter::repeat_n("1", 256).collect::<Vec<_>>().join("+"),
+                &limits
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn memoizes_diamond_references_with_a_step_budget() {
+        let refs = BTreeMap::from([
+            ("A".into(), "B+B".into()),
+            ("B".into(), "C+C".into()),
+            ("C".into(), "D+D".into()),
+            ("D".into(), "1".into()),
+        ]);
+        let limits = ParseLimits {
+            max_formula_steps: 12,
+            ..limits()
+        };
+        assert!(matches!(
+            evaluate("A", &refs, &limits),
+            Evaluation::Evaluated(_)
+        ));
+    }
+
+    #[test]
+    fn corpus_formulas_report_honest_evaluation() {
+        let directory = std::env::var("VSDX_CORPUS_DIR")
+            .expect("VSDX_CORPUS_DIR must name the required VSDX corpus directory");
+        let directory = std::path::PathBuf::from(directory);
+        let files = ["lichtsysteme.vsdx", "soundplan.vsdx"];
+        for file in files {
+            assert!(
+                directory.join(file).is_file(),
+                "missing corpus file: {file}"
+            );
+        }
+        let mut ast_ok = 0_usize;
+        let mut statically_unsupported = 0_usize;
+        let mut eval_unsupported = 0_usize;
+        let mut errors = 0_usize;
+        let mut total = 0_usize;
         let mut unsupported_names = BTreeMap::new();
-        for entry in fs::read_dir(directory).expect("read corpus directory") {
-            let path = entry.expect("read corpus entry").path();
-            if path
-                .extension()
-                .is_none_or(|extension| !extension.eq_ignore_ascii_case("vsdx"))
-            {
-                continue;
-            }
+        for file in files {
+            let path = directory.join(file);
             let package = parse_vsdx(&fs::read(&path).expect("read corpus file"))
                 .expect("parse corpus package");
             for sheet in package
-                .page_contents
-                .values()
+                .document_sheet
+                .iter()
+                .chain(package.style_sheets.iter())
+                .chain(package.page_sheets.values())
+                .chain(package.master_sheets.values())
+                .chain(package.page_contents.values())
                 .chain(package.master_contents.values())
             {
                 for formula in formulas(sheet) {
-                    match parse(formula, &limits()) {
-                        Ok(expression) if has_unsupported(&expression) => {
-                            unsupported += 1;
+                    total += 1;
+                    if let Ok(expression) = parse(formula, &limits()) {
+                        ast_ok += 1;
+                        if has_unsupported(&expression) {
+                            statically_unsupported += 1;
                             collect_unsupported(&expression, &mut unsupported_names);
                         }
-                        Ok(_) => parsed += 1,
-                        Err(_) => {
-                            failed += 1;
-                            if examples.len() < 12 {
-                                examples.push(formula.to_owned());
-                            }
-                        }
+                    }
+                    match evaluate(formula, &BTreeMap::<String, String>::new(), &limits()) {
+                        Evaluation::Evaluated(_) => {}
+                        Evaluation::Unsupported(_) => eval_unsupported += 1,
+                        Evaluation::Error(_) => errors += 1,
                     }
                 }
             }
         }
         eprintln!(
-            "VSDX corpus formulas: parsed={parsed} unsupported={unsupported} failed={failed} total={}",
-            parsed + unsupported + failed
+            "VSDX corpus formulas: ast_ok={ast_ok} statically_unsupported={statically_unsupported} eval_unsupported={eval_unsupported} errors={errors} total={total}"
         );
-        eprintln!("VSDX corpus parse failures: {examples:?}");
         let mut top_unsupported = unsupported_names.into_iter().collect::<Vec<_>>();
         top_unsupported
             .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
         eprintln!("VSDX corpus top unsupported constructs: {top_unsupported:?}");
-        assert_eq!(
-            failed, 0,
-            "every corpus formula must parse or classify unsupported"
-        );
+        assert_eq!(total, 6_992, "corpus formula denominator changed");
     }
 
     fn formulas(sheet: &Sheet) -> Vec<&str> {
@@ -1210,10 +1314,6 @@ mod tests {
                         | "RGB"
                         | "THEMEVAL"
                         | "THEMEGUARD"
-                        | "LUMDIFF"
-                        | "SHADE"
-                        | "TINT"
-                        | "SAT"
                         | "_XFTRIGGER"
                         | "GUARD"
                 ) || args.iter().any(has_unsupported)

@@ -260,6 +260,7 @@ dependencies = [
 name = "betteroffice-vsdx-parse"
 version = "0.0.4"
 dependencies = [
+ "betteroffice-drawingml",
  "betteroffice-opc",
  "quick-xml",
  "serde",
