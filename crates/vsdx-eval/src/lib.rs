@@ -1,5 +1,17 @@
 //! Bounded baseline ShapeSheet evaluation. Unsupported formulas never use cached values.
 
+mod ast;
+mod colour;
+#[path = "tests.rs"]
+mod corpus;
+mod eval;
+mod tokenizer;
+mod units;
+
+pub use ast::{Expr, Op};
+pub use units::Unit;
+use units::unit;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ooxml_drawingml::{ColorValue, Theme, get_theme_color, resolve_color_value_to_hex_with_theme};
@@ -7,36 +19,6 @@ use thiserror::Error;
 use vsdx_parse::{ParseLimits, VsdxPackage};
 use vsdx_resolve::{Lookup, ResolvedShape};
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum Expr {
-    Number(f64, Unit),
-    String(String),
-    Reference(String),
-    Unary(Box<Expr>),
-    Binary(Box<Expr>, Op, Box<Expr>),
-    Call(String, Vec<Expr>),
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Op {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Pow,
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Unit {
-    Number,
-    Bool,
-    Inches,
-    Radians,
-}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Number {
     pub number: f64,
@@ -931,22 +913,6 @@ impl<'a> Parser<'a> {
                 message: "expected expression".into(),
             }),
         }
-    }
-}
-fn unit(s: &str) -> Option<(Unit, f64)> {
-    match s.to_ascii_lowercase().as_str() {
-        "" => Some((Unit::Number, 1.)),
-        "in" => Some((Unit::Inches, 1.)),
-        "cm" => Some((Unit::Inches, 1. / 2.54)),
-        "mm" => Some((Unit::Inches, 1. / 25.4)),
-        "pt" => Some((Unit::Inches, 1. / 72.)),
-        "pica" => Some((Unit::Inches, 1. / 6.)),
-        "ft" => Some((Unit::Inches, 12.)),
-        "m" => Some((Unit::Inches, 100. / 2.54)),
-        "deg" => Some((Unit::Radians, std::f64::consts::PI / 180.)),
-        "rad" => Some((Unit::Radians, 1.)),
-        "bool" => Some((Unit::Bool, 1.)),
-        _ => None,
     }
 }
 
