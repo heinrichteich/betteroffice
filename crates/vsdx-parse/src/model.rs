@@ -1,0 +1,43 @@
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::Relationship;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VsdxPackage {
+    pub document_part_path: String,
+    pub pages_part_path: Option<String>,
+    pub masters_part_path: Option<String>,
+    pub page_part_paths: Vec<String>,
+    pub master_part_paths: Vec<String>,
+    pub theme_part_paths: Vec<String>,
+    pub windows_part_path: Option<String>,
+    pub relationships: BTreeMap<String, Vec<Relationship>>,
+    #[serde(skip)]
+    pub(crate) parts: Vec<PackagePart>,
+}
+
+impl VsdxPackage {
+    pub fn part_bytes(&self, path: &str) -> Option<&[u8]> {
+        self.parts
+            .iter()
+            .find(|part| part.path == path)
+            .map(|part| part.bytes.as_slice())
+    }
+
+    pub fn replace_part(&mut self, path: &str, bytes: Vec<u8>) -> bool {
+        let Some(part) = self.parts.iter_mut().find(|part| part.path == path) else {
+            return false;
+        };
+        part.bytes = bytes;
+        true
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PackagePart {
+    pub path: String,
+    pub bytes: Vec<u8>,
+}
