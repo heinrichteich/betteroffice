@@ -59,64 +59,70 @@ pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
         };
         match ty {
             "MoveTo" => {
-                current = xy;
-                out.commands
-                    .push(GeometryPathCommand::Move { x: xy.0, y: xy.1 });
+                if push_checked(&mut out, GeometryPathCommand::Move { x: xy.0, y: xy.1 }, ty) {
+                    current = xy;
+                }
             }
             "LineTo" => {
-                current = xy;
-                out.commands
-                    .push(GeometryPathCommand::Line { x: xy.0, y: xy.1 });
+                if push_checked(&mut out, GeometryPathCommand::Line { x: xy.0, y: xy.1 }, ty) {
+                    current = xy;
+                }
             }
             "RelMoveTo" => {
-                current = (current.0 + xy.0, current.1 + xy.1);
-                out.commands.push(GeometryPathCommand::Move {
-                    x: current.0,
-                    y: current.1,
-                });
+                let end = (current.0 + xy.0, current.1 + xy.1);
+                if push_checked(
+                    &mut out,
+                    GeometryPathCommand::Move { x: end.0, y: end.1 },
+                    ty,
+                ) {
+                    current = end;
+                }
             }
             "RelLineTo" => {
-                current = (current.0 + xy.0, current.1 + xy.1);
-                out.commands.push(GeometryPathCommand::Line {
-                    x: current.0,
-                    y: current.1,
-                });
+                let end = (current.0 + xy.0, current.1 + xy.1);
+                if push_checked(
+                    &mut out,
+                    GeometryPathCommand::Line { x: end.0, y: end.1 },
+                    ty,
+                ) {
+                    current = end;
+                }
             }
             "ArcTo" => {
                 let Some(values) = required(&["A"]) else {
                     continue;
                 };
-                cubic_arc(&mut out.commands, current, xy, values[0]);
-                current = xy;
+                if emit_row(&mut out, |out| cubic_arc(out, current, xy, values[0], ty)) {
+                    current = xy;
+                }
             }
             "EllipticalArcTo" => {
                 let Some(values) = required(&["A", "B", "C", "D"]) else {
                     continue;
                 };
-                cubic_elliptical_arc(
-                    &mut out.commands,
-                    current,
-                    xy,
-                    values[0],
-                    values[1],
-                    values[2],
-                    values[3],
-                );
-                current = xy;
+                if emit_row(&mut out, |out| {
+                    cubic_elliptical_arc(
+                        out,
+                        current,
+                        xy,
+                        (values[0], values[1]),
+                        values[2],
+                        values[3],
+                        ty,
+                    )
+                }) {
+                    current = xy;
+                }
             }
             "Ellipse" => {
                 let Some(values) = required(&["A", "B", "C", "D"]) else {
                     continue;
                 };
-                cubic_ellipse(
-                    &mut out.commands,
-                    xy,
-                    values[0],
-                    values[1],
-                    values[2],
-                    values[3],
-                );
-                current = xy;
+                if emit_row(&mut out, |out| {
+                    cubic_ellipse(out, xy, values[0], values[1], values[2], values[3], ty)
+                }) {
+                    current = xy;
+                }
             }
             _ => out
                 .issues
@@ -126,18 +132,68 @@ pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
     out
 }
 
+fn emit_row(out: &mut RealizedGeometry, emit: impl FnOnce(&mut RealizedGeometry) -> bool) -> bool {
+    let command_count = out.commands.len();
+    if emit(out) {
+        true
+    } else {
+        out.commands.truncate(command_count);
+        false
+    }
+}
+
+fn push_checked(out: &mut RealizedGeometry, command: GeometryPathCommand, row_type: &str) -> bool {
+    let finite = match &command {
+        GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
+            x.is_finite() && y.is_finite()
+        }
+        GeometryPathCommand::Quad { cpx, cpy, x, y } => {
+            cpx.is_finite() && cpy.is_finite() && x.is_finite() && y.is_finite()
+        }
+        GeometryPathCommand::Cubic {
+            cp1x,
+            cp1y,
+            cp2x,
+            cp2y,
+            x,
+            y,
+        } => {
+            cp1x.is_finite()
+                && cp1y.is_finite()
+                && cp2x.is_finite()
+                && cp2y.is_finite()
+                && x.is_finite()
+                && y.is_finite()
+        }
+        GeometryPathCommand::Close => true,
+    };
+    if finite {
+        out.commands.push(command);
+    } else {
+        out.issues.push(GeometryIssue::UnevaluatedCell {
+            row_type: row_type.into(),
+            cell: "geometry".into(),
+        });
+    }
+    finite
+}
+
 fn cubic_arc(
-    commands: &mut Vec<GeometryPathCommand>,
+    out: &mut RealizedGeometry,
     start: (f64, f64),
     end: (f64, f64),
     bow: f64,
-) {
+    row_type: &str,
+) -> bool {
     let dx = end.0 - start.0;
     let dy = end.1 - start.1;
     let chord = dx.hypot(dy);
     if chord == 0.0 || bow == 0.0 {
-        commands.push(GeometryPathCommand::Line { x: end.0, y: end.1 });
-        return;
+        return push_checked(
+            out,
+            GeometryPathCommand::Line { x: end.0, y: end.1 },
+            row_type,
+        );
     }
     let radius = chord * chord / (8.0 * bow.abs()) + bow.abs() / 2.0;
     let midpoint = ((start.0 + end.0) / 2.0, (start.1 + end.1) / 2.0);
@@ -164,35 +220,45 @@ fn cubic_arc(
             .total_cmp(&angle_distance(a0 + right / 2.0, bow_angle))
     })
     .unwrap();
-    cubic_arc_segment(commands, center, radius, radius, 0.0, a0, sweep / 2.0);
     cubic_arc_segment(
-        commands,
+        out,
         center,
-        radius,
-        radius,
+        (radius, radius),
+        0.0,
+        a0,
+        sweep / 2.0,
+        row_type,
+    ) && cubic_arc_segment(
+        out,
+        center,
+        (radius, radius),
         0.0,
         a0 + sweep / 2.0,
         sweep / 2.0,
-    );
+        row_type,
+    )
 }
 
 fn cubic_elliptical_arc(
-    commands: &mut Vec<GeometryPathCommand>,
+    out: &mut RealizedGeometry,
     start: (f64, f64),
     end: (f64, f64),
-    through_x: f64,
-    through_y: f64,
+    through: (f64, f64),
     angle: f64,
     axis_ratio: f64,
-) {
+    row_type: &str,
+) -> bool {
     let original_end = end;
     let ratio = axis_ratio.abs();
     if ratio <= f64::EPSILON {
-        commands.push(GeometryPathCommand::Line {
-            x: original_end.0,
-            y: original_end.1,
-        });
-        return;
+        return push_checked(
+            out,
+            GeometryPathCommand::Line {
+                x: original_end.0,
+                y: original_end.1,
+            },
+            row_type,
+        );
     }
     let rotate = |point: (f64, f64)| {
         (
@@ -202,17 +268,20 @@ fn cubic_elliptical_arc(
     };
     let start = rotate(start);
     let end = rotate(end);
-    let through = rotate((through_x, through_y));
+    let through = rotate(through);
     let metric = |point: (f64, f64)| (point.0, point.1 * ratio * ratio);
     let delta_end = metric((end.0 - start.0, end.1 - start.1));
     let delta_through = metric((through.0 - start.0, through.1 - start.1));
     let determinant = 2.0 * (delta_end.0 * delta_through.1 - delta_end.1 * delta_through.0);
     if determinant.abs() <= f64::EPSILON {
-        commands.push(GeometryPathCommand::Line {
-            x: original_end.0,
-            y: original_end.1,
-        });
-        return;
+        return push_checked(
+            out,
+            GeometryPathCommand::Line {
+                x: original_end.0,
+                y: original_end.1,
+            },
+            row_type,
+        );
     }
     let squared = |point: (f64, f64)| point.0 * point.0 + ratio * ratio * point.1 * point.1;
     let end_difference = squared(end) - squared(start);
@@ -223,11 +292,14 @@ fn cubic_elliptical_arc(
     );
     let rx = squared((start.0 - center.0, start.1 - center.1)).sqrt();
     if rx <= f64::EPSILON {
-        commands.push(GeometryPathCommand::Line {
-            x: original_end.0,
-            y: original_end.1,
-        });
-        return;
+        return push_checked(
+            out,
+            GeometryPathCommand::Line {
+                x: original_end.0,
+                y: original_end.1,
+            },
+            row_type,
+        );
     }
     let ry = rx / ratio;
     let start_angle = ((start.1 - center.1) / ry).atan2((start.0 - center.0) / rx);
@@ -245,43 +317,61 @@ fn cubic_elliptical_arc(
         center.0 * angle.cos() - center.1 * angle.sin(),
         center.0 * angle.sin() + center.1 * angle.cos(),
     );
-    cubic_arc_segment(commands, center, rx, ry, angle, start_angle, through_sweep);
     cubic_arc_segment(
-        commands,
+        out,
         center,
-        rx,
-        ry,
+        (rx, ry),
+        angle,
+        start_angle,
+        through_sweep,
+        row_type,
+    ) && cubic_arc_segment(
+        out,
+        center,
+        (rx, ry),
         angle,
         start_angle + through_sweep,
         sweep - through_sweep,
-    );
+        row_type,
+    )
 }
 
 fn cubic_ellipse(
-    commands: &mut Vec<GeometryPathCommand>,
+    out: &mut RealizedGeometry,
     center: (f64, f64),
     axis_x: f64,
     axis_y: f64,
     other_axis_x: f64,
     other_axis_y: f64,
-) {
+    row_type: &str,
+) -> bool {
     let axis = (axis_x - center.0, axis_y - center.1);
     let other_axis = (other_axis_x - center.0, other_axis_y - center.1);
     let start = (center.0 + axis.0, center.1 + axis.1);
-    commands.push(GeometryPathCommand::Move {
-        x: start.0,
-        y: start.1,
-    });
+    if !push_checked(
+        out,
+        GeometryPathCommand::Move {
+            x: start.0,
+            y: start.1,
+        },
+        row_type,
+    ) {
+        return false;
+    }
     for quarter in 0..4 {
-        cubic_axis_arc_segment(
-            commands,
+        if !cubic_axis_arc_segment(
+            out,
             center,
             axis,
             other_axis,
             quarter as f64 * std::f64::consts::FRAC_PI_2,
             std::f64::consts::FRAC_PI_2,
-        );
+            row_type,
+        ) {
+            return false;
+        }
     }
+    true
 }
 
 fn angle_distance(left: f64, right: f64) -> f64 {
@@ -300,13 +390,14 @@ fn sweep_through(start: f64, end: f64, through: f64) -> f64 {
 }
 
 fn cubic_axis_arc_segment(
-    commands: &mut Vec<GeometryPathCommand>,
+    out: &mut RealizedGeometry,
     center: (f64, f64),
     axis: (f64, f64),
     other_axis: (f64, f64),
     start: f64,
     sweep: f64,
-) {
+    row_type: &str,
+) -> bool {
     let k = 4.0 / 3.0 * (sweep / 4.0).tan();
     let point = |t: f64| {
         (
@@ -324,25 +415,30 @@ fn cubic_axis_arc_segment(
     let p1 = point(start + sweep);
     let d0 = tangent(start);
     let d1 = tangent(start + sweep);
-    commands.push(GeometryPathCommand::Cubic {
-        cp1x: p0.0 + k * d0.0,
-        cp1y: p0.1 + k * d0.1,
-        cp2x: p1.0 - k * d1.0,
-        cp2y: p1.1 - k * d1.1,
-        x: p1.0,
-        y: p1.1,
-    });
+    push_checked(
+        out,
+        GeometryPathCommand::Cubic {
+            cp1x: p0.0 + k * d0.0,
+            cp1y: p0.1 + k * d0.1,
+            cp2x: p1.0 - k * d1.0,
+            cp2y: p1.1 - k * d1.1,
+            x: p1.0,
+            y: p1.1,
+        },
+        row_type,
+    )
 }
 
 fn cubic_arc_segment(
-    commands: &mut Vec<GeometryPathCommand>,
+    out: &mut RealizedGeometry,
     center: (f64, f64),
-    rx: f64,
-    ry: f64,
+    radii: (f64, f64),
     rotation: f64,
     start: f64,
     sweep: f64,
-) {
+    row_type: &str,
+) -> bool {
+    let (rx, ry) = radii;
     let count = (sweep.abs() / std::f64::consts::FRAC_PI_2).ceil().max(1.0) as usize;
     let step = sweep / count as f64;
     for index in 0..count {
@@ -365,15 +461,22 @@ fn cubic_arc_segment(
         let p1 = point(t1);
         let d0 = tangent(t0);
         let d1 = tangent(t1);
-        commands.push(GeometryPathCommand::Cubic {
-            cp1x: p0.0 + k * d0.0,
-            cp1y: p0.1 + k * d0.1,
-            cp2x: p1.0 - k * d1.0,
-            cp2y: p1.1 - k * d1.1,
-            x: p1.0,
-            y: p1.1,
-        });
+        if !push_checked(
+            out,
+            GeometryPathCommand::Cubic {
+                cp1x: p0.0 + k * d0.0,
+                cp1y: p0.1 + k * d0.1,
+                cp2x: p1.0 - k * d1.0,
+                cp2y: p1.1 - k * d1.1,
+                x: p1.0,
+                y: p1.1,
+            },
+            row_type,
+        ) {
+            return false;
+        }
     }
+    true
 }
 
 #[cfg(test)]
@@ -460,6 +563,118 @@ mod tests {
                 "{value}"
             );
         }
+    }
+
+    #[test]
+    fn geometry_rejects_non_finite_realized_relative_coordinates() {
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            rows: BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "1e308"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row("RelLineTo", vec![cell("X", "1e308"), cell("Y", "0")]),
+                ),
+            ]),
+        };
+        let geometry = realize_geometry(&section);
+        assert_eq!(
+            geometry.commands,
+            vec![GeometryPathCommand::Move { x: 1e308, y: 0.0 }]
+        );
+        assert_eq!(
+            geometry.issues,
+            vec![GeometryIssue::UnevaluatedCell {
+                row_type: "RelLineTo".into(),
+                cell: "geometry".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn arc_to_rejects_non_finite_derived_geometry() {
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            rows: BTreeMap::from([(
+                "IX:0".into(),
+                resolved_row(
+                    "ArcTo",
+                    vec![cell("X", "1e308"), cell("Y", "0"), cell("A", "1")],
+                ),
+            )]),
+        };
+        let geometry = realize_geometry(&section);
+        assert!(geometry.commands.is_empty());
+        assert_eq!(
+            geometry.issues,
+            vec![GeometryIssue::UnevaluatedCell {
+                row_type: "ArcTo".into(),
+                cell: "geometry".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn ellipse_rejects_non_finite_derived_geometry() {
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            rows: BTreeMap::from([(
+                "IX:0".into(),
+                resolved_row(
+                    "Ellipse",
+                    vec![
+                        cell("X", "-7e307"),
+                        cell("Y", "0"),
+                        cell("A", "0"),
+                        cell("B", "0"),
+                        cell("C", "1e308"),
+                        cell("D", "0"),
+                    ],
+                ),
+            )]),
+        };
+        let geometry = realize_geometry(&section);
+        assert!(geometry.commands.is_empty());
+        assert_eq!(
+            geometry.issues,
+            vec![GeometryIssue::UnevaluatedCell {
+                row_type: "Ellipse".into(),
+                cell: "geometry".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn geometry_emits_finite_commands_unchanged() {
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            rows: BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "1"), cell("Y", "2")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row("RelLineTo", vec![cell("X", "3"), cell("Y", "4")]),
+                ),
+            ]),
+        };
+        let geometry = realize_geometry(&section);
+        assert_eq!(
+            geometry.commands,
+            vec![
+                GeometryPathCommand::Move { x: 1.0, y: 2.0 },
+                GeometryPathCommand::Line { x: 4.0, y: 6.0 },
+            ]
+        );
+        assert!(geometry.issues.is_empty());
     }
 
     #[test]
