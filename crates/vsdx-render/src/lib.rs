@@ -257,16 +257,22 @@ fn character_run(
     if let Some(letter_spacing) = property_number(properties, "Letterspace") {
         run.letter_spacing = letter_spacing as f32 / 1440.0;
     }
-    if renderer
-        .font_for(&run.family, run.bold, run.italic)
-        .is_none()
-        && !run
-            .diagnostic
-            .as_deref()
-            .is_some_and(|diagnostic| diagnostic.contains("unregistered font"))
+    let exact_font =
+        renderer
+            .registered_fonts
+            .contains_key(&(run.family.clone(), run.bold, run.italic));
+    if !exact_font
+        && !run.diagnostic.as_deref().is_some_and(|diagnostic| {
+            diagnostic.contains("unregistered font") || diagnostic.contains("font substituted")
+        })
     {
         let family = run.family.clone();
-        append_diagnostic(&mut run, format!("unregistered font '{family}'"));
+        let diagnostic = if renderer.font_for(&family, run.bold, run.italic).is_some() {
+            format!("font substituted for '{family}'")
+        } else {
+            format!("unregistered font '{family}'")
+        };
+        append_diagnostic(&mut run, diagnostic);
     }
     run
 }
@@ -2123,11 +2129,19 @@ mod tests {
             runs[1].diagnostic.as_deref(),
             Some("unregistered font 'sans-serif'")
         );
+        assert_eq!(
+            text_diagnostic_category(runs[1].diagnostic.as_deref().unwrap()),
+            TextDiagnosticCategory::Fidelity
+        );
         assert!(
             runs[3]
                 .diagnostic
                 .as_deref()
                 .is_some_and(|reason| reason.contains("no Value cell"))
+        );
+        assert_eq!(
+            text_diagnostic_category(runs[3].diagnostic.as_deref().unwrap()),
+            TextDiagnosticCategory::Integrity
         );
     }
 
@@ -3216,11 +3230,20 @@ mod tests {
         let mut groups = 0usize;
         let mut reasons = BTreeMap::new();
         let mut text = TextCorpusStats::default();
+        let mut renderer = Renderer::default();
+        renderer
+            .register_font(
+                "sans-serif",
+                false,
+                false,
+                include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf").to_vec(),
+            )
+            .unwrap();
         for file in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
             let path = std::path::Path::new(&directory).join(file);
             let package = vsdx_parse::parse_vsdx(&std::fs::read(path).unwrap()).unwrap();
             for page in &package.page_part_paths {
-                let list = Renderer::default().layout_page(&package, page).unwrap();
+                let list = renderer.layout_page(&package, page).unwrap();
                 let json = serde_json::to_string(&list).unwrap();
                 assert!(!json.contains("NaN") && !json.contains("Infinity"));
                 let expected = package.page_contents[page]
@@ -3270,6 +3293,7 @@ mod tests {
                 assert_eq!(page_images, image_shapes);
                 let mut resolved_text = std::collections::BTreeSet::new();
                 assert_resolved_text(
+                    &renderer,
                     &package,
                     page,
                     &list.primitives,
@@ -3286,17 +3310,21 @@ mod tests {
             "VSDX corpus render: painted={painted} placeholdered={placeholders} group={groups} placeholder reasons={reasons:?}",
         );
         eprintln!(
-            "VSDX corpus text: full={} diagnostics={} paragraphs={} runs={} marker-only={} field-only={} style-inherited={} master-inherited={} diagnostic reasons={:?}",
-            text.full,
-            text.diagnostics,
+            "VSDX corpus text: shapes={} zero-integrity-diagnostics={} integrity diagnostics={} integrity reasons={:?} fidelity diagnostics={} fidelity reasons={:?} paragraphs={} runs={} marker-only={} field-only={} style-inherited={} master-inherited={}",
+            text.shapes,
+            text.zero_integrity_diagnostics,
+            text.integrity_diagnostics,
+            text.integrity_reasons,
+            text.fidelity_diagnostics,
+            text.fidelity_reasons,
             text.paragraphs,
             text.runs,
             text.marker_only,
             text.field_only,
             text.style_inherited,
             text.master_inherited,
-            text.diagnostic_reasons,
         );
+        assert_eq!(text.integrity_diagnostics, 0, "text-integrity diagnostics");
     }
 
     #[test]
@@ -3309,7 +3337,14 @@ mod tests {
         let list = Renderer::default().layout_page(&package, page).unwrap();
         let mut rendered = std::collections::BTreeSet::new();
         let mut stats = TextCorpusStats::default();
-        assert_resolved_text(&package, page, &list.primitives, &mut rendered, &mut stats);
+        assert_resolved_text(
+            &Renderer::default(),
+            &package,
+            page,
+            &list.primitives,
+            &mut rendered,
+            &mut stats,
+        );
         assert_eq!(stats.marker_only, 1);
         assert_eq!(stats.field_only, 1);
         assert_eq!(stats.style_inherited, 1);
@@ -3377,6 +3412,7 @@ mod tests {
     }
 
     fn assert_resolved_text(
+        renderer: &Renderer,
         package: &VsdxPackage,
         page_part: &str,
         primitives: &[Primitive],
@@ -3390,6 +3426,7 @@ mod tests {
         text_boxes_by_id(primitives, &mut text_boxes);
         for shape in page.shapes() {
             assert_shape_text(
+                renderer,
                 package,
                 &resolver,
                 references.as_ref(),
@@ -3405,6 +3442,7 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn assert_shape_text(
+        renderer: &Renderer,
         package: &VsdxPackage,
         resolver: &Resolver<'_>,
         references: Option<&PageShapeReferences>,
@@ -3459,14 +3497,7 @@ mod tests {
         }) {
             stats.style_inherited += 1;
         }
-        let expected = rich_paragraphs(
-            &Renderer::default(),
-            package,
-            references,
-            &resolved,
-            shape.id,
-            &tokens,
-        );
+        let expected = rich_paragraphs(renderer, package, references, &resolved, shape.id, &tokens);
         let expected_runs = expected
             .iter()
             .map(|paragraph| paragraph.runs.len())
@@ -3512,19 +3543,38 @@ mod tests {
                     actual_diagnostics, expected_diagnostics,
                     "{id}: diagnostic-run count"
                 );
-                if actual_diagnostics == 0 {
-                    stats.full += 1;
-                } else {
-                    stats.diagnostics += 1;
-                    for diagnostic in paragraphs
-                        .iter()
-                        .flat_map(|paragraph| &paragraph.runs)
-                        .filter_map(|run| run.diagnostic.as_deref())
-                    {
-                        *stats
-                            .diagnostic_reasons
-                            .entry(diagnostic.into())
-                            .or_default() += 1;
+                stats.shapes += 1;
+                let integrity_diagnostics = paragraphs
+                    .iter()
+                    .flat_map(|paragraph| &paragraph.runs)
+                    .filter_map(|run| run.diagnostic.as_deref())
+                    .filter(|diagnostic| {
+                        matches!(
+                            text_diagnostic_category(diagnostic),
+                            TextDiagnosticCategory::Integrity
+                        )
+                    })
+                    .count();
+                if integrity_diagnostics == 0 {
+                    stats.zero_integrity_diagnostics += 1;
+                }
+                for diagnostic in paragraphs
+                    .iter()
+                    .flat_map(|paragraph| &paragraph.runs)
+                    .filter_map(|run| run.diagnostic.as_deref())
+                {
+                    match text_diagnostic_category(diagnostic) {
+                        TextDiagnosticCategory::Integrity => {
+                            stats.integrity_diagnostics += 1;
+                            *stats
+                                .integrity_reasons
+                                .entry(diagnostic.into())
+                                .or_default() += 1;
+                        }
+                        TextDiagnosticCategory::Fidelity => {
+                            stats.fidelity_diagnostics += 1;
+                            *stats.fidelity_reasons.entry(diagnostic.into()).or_default() += 1;
+                        }
                     }
                 }
             }
@@ -3533,22 +3583,46 @@ mod tests {
         }
         for child in shape.shapes() {
             assert_shape_text(
-                package, resolver, references, page, page_part, child, text_boxes, rendered, stats,
+                renderer, package, resolver, references, page, page_part, child, text_boxes,
+                rendered, stats,
             );
         }
     }
 
     #[derive(Default)]
     struct TextCorpusStats {
-        full: usize,
-        diagnostics: usize,
+        shapes: usize,
+        zero_integrity_diagnostics: usize,
+        integrity_diagnostics: usize,
+        fidelity_diagnostics: usize,
         paragraphs: usize,
         runs: usize,
         marker_only: usize,
         field_only: usize,
         style_inherited: usize,
         master_inherited: usize,
-        diagnostic_reasons: BTreeMap<String, usize>,
+        integrity_reasons: BTreeMap<String, usize>,
+        fidelity_reasons: BTreeMap<String, usize>,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum TextDiagnosticCategory {
+        Integrity,
+        Fidelity,
+    }
+
+    fn text_diagnostic_category(diagnostic: &str) -> TextDiagnosticCategory {
+        if diagnostic.starts_with("font substituted")
+            || diagnostic.starts_with("unregistered font")
+            || diagnostic.starts_with("tab stop missing Position; used renderer policy")
+            || diagnostic == "justify falls back to left"
+            || diagnostic.starts_with("unresolvable Character.Pos")
+            || diagnostic.starts_with("unresolvable Character.Case")
+        {
+            TextDiagnosticCategory::Fidelity
+        } else {
+            TextDiagnosticCategory::Integrity
+        }
     }
 
     fn text_boxes_by_id<'a>(
