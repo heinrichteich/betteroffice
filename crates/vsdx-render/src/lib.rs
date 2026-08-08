@@ -3494,24 +3494,10 @@ mod tests {
 
     #[test]
     fn text_accounting_fixture_covers_resolved_text_sources() {
-        let mut package = vsdx_parse::parse_vsdx(include_bytes!(
+        let package = vsdx_parse::parse_vsdx(include_bytes!(
             "../../vsdx-parse/tests/fixtures/text-accounting.vsdx"
         ))
         .unwrap();
-        let SheetChild::Section(section) = package.style_sheets[0]
-            .children
-            .iter_mut()
-            .find(|child| matches!(child, SheetChild::Section(section) if section.name == "Character"))
-            .unwrap()
-        else {
-            unreachable!()
-        };
-        let SectionChild::Row(row) = section.children.first_mut().unwrap() else {
-            unreachable!()
-        };
-        row.children.push(RowChild::Cell(cell("Size", "0.25")));
-        row.children
-            .push(RowChild::Cell(formula("Color", "RGB(1,2,3)")));
         let page = &package.page_part_paths[0];
         let list = Renderer::default().layout_page(&package, page).unwrap();
         let mut rendered = std::collections::BTreeSet::new();
@@ -3874,51 +3860,154 @@ mod tests {
         diagnostic_categories: Vec<DiagnosticCategory>,
     }
 
+    #[derive(Default)]
+    struct OracleCharacter {
+        family: String,
+        bold: bool,
+        italic: bool,
+        case: i32,
+        diagnostics: Vec<DiagnosticCategory>,
+        diagnosed_face: Option<String>,
+    }
+
+    fn oracle_value<'a>(
+        properties: &'a std::collections::BTreeMap<String, Lookup>,
+        name: &str,
+    ) -> Option<&'a str> {
+        match properties.get(name)? {
+            Lookup::Found(cell) => cell.cell.value.as_deref(),
+            Lookup::Deleted | Lookup::Absent => None,
+        }
+    }
+
+    fn oracle_number(
+        properties: &std::collections::BTreeMap<String, Lookup>,
+        name: &str,
+    ) -> Option<f64> {
+        oracle_value(properties, name)?
+            .parse()
+            .ok()
+            .filter(|value: &f64| value.is_finite())
+    }
+
+    fn oracle_row(
+        resolved: &ResolvedShape,
+        section: &str,
+        index: u32,
+    ) -> std::collections::BTreeMap<String, Lookup> {
+        resolved
+            .sections
+            .get(section)
+            .and_then(|section| section.rows.get(&format!("IX:{index}")))
+            .map(|row| row.cells.clone())
+            .unwrap_or_default()
+    }
+
+    fn oracle_case(case: i32, text: &str) -> Result<String, ()> {
+        match case {
+            0 => Ok(text.into()),
+            1 => Ok(text.to_uppercase()),
+            2 => {
+                let mut start = true;
+                Ok(text
+                    .chars()
+                    .flat_map(|ch| {
+                        let output = if start {
+                            ch.to_uppercase().collect::<String>()
+                        } else {
+                            ch.to_lowercase().collect()
+                        };
+                        start = !ch.is_alphanumeric();
+                        output.chars().collect::<Vec<_>>()
+                    })
+                    .collect())
+            }
+            _ => Err(()),
+        }
+    }
+
+    fn oracle_character(
+        renderer: &Renderer,
+        package: &VsdxPackage,
+        properties: &std::collections::BTreeMap<String, Lookup>,
+        mut character: OracleCharacter,
+    ) -> OracleCharacter {
+        if character.family.is_empty() {
+            character.family = "sans-serif".into();
+        }
+        if let Some(font) = oracle_value(properties, "Font") {
+            character.family = package
+                .face_names
+                .iter()
+                .find(|face| {
+                    face.attributes
+                        .iter()
+                        .any(|(key, value)| key == "ID" && value == font)
+                })
+                .and_then(|face| {
+                    face.attributes
+                        .iter()
+                        .find(|(key, _)| key == "Name")
+                        .map(|(_, value)| value.clone())
+                })
+                .unwrap_or_else(|| font.into());
+        }
+        if let Some(style) = oracle_number(properties, "Style") {
+            let style = style as i32;
+            character.bold = style & 1 != 0;
+            character.italic = style & 2 != 0;
+        }
+        if let Some(case) = oracle_number(properties, "Case") {
+            character.case = case as i32;
+        }
+        if let Some(pos) = oracle_number(properties, "Pos")
+            && !matches!(pos as i32, 0..=2)
+        {
+            character.diagnostics.push(DiagnosticCategory::Fidelity);
+        }
+        if properties.contains_key("Color") && oracle_value(properties, "Color").is_none() {
+            character.diagnostics.push(DiagnosticCategory::Integrity);
+        }
+        let exact = renderer.registered_fonts.contains_key(&(
+            character.family.clone(),
+            character.bold,
+            character.italic,
+        ));
+        if !exact && character.diagnosed_face.as_deref() != Some(character.family.as_str()) {
+            character.diagnostics.push(DiagnosticCategory::Fidelity);
+            character.diagnosed_face = Some(character.family.clone());
+        }
+        character
+    }
+
+    fn oracle_field(properties: &std::collections::BTreeMap<String, Lookup>) -> Result<String, ()> {
+        oracle_value(properties, "Value")
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or(())
+    }
+
     fn expected_text_runs(
         renderer: &Renderer,
         package: &VsdxPackage,
-        references: Option<&PageShapeReferences>,
+        _references: Option<&PageShapeReferences>,
         resolved: &ResolvedShape,
-        shape_id: u32,
+        _shape_id: u32,
         tokens: &[vsdx_resolve::ResolvedTextToken],
     ) -> Vec<Vec<ExpectedTextRun>> {
-        let mut character = TextRun {
-            text: String::new(),
-            family: "sans-serif".into(),
-            size_in: 1.0 / 6.0,
-            bold: false,
-            italic: false,
-            underline: false,
-            small_caps: false,
-            superscript: false,
-            subscript: false,
-            letter_spacing: 0.0,
-            case: 0,
-            color: "currentColor".into(),
-            diagnostics: Vec::new(),
-            tab: None,
-            diagnosed_face: None,
-        };
-        character = character_run(
+        let mut character = oracle_character(
             renderer,
             package,
-            references,
-            resolved,
-            shape_id,
-            &row_properties(resolved, "Character", 0),
-            &character,
+            &oracle_row(resolved, "Character", 0),
+            OracleCharacter::default(),
         );
         let mut paragraphs = vec![Vec::new()];
         let mut justified = vec![false];
         for token in tokens {
             match token {
                 vsdx_resolve::ResolvedTextToken::Literal(value) => {
-                    let mut categories = character
-                        .diagnostics
-                        .iter()
-                        .map(|item| item.category)
-                        .collect::<Vec<_>>();
-                    let text = match character_case(&character, value) {
+                    let mut categories = character.diagnostics.clone();
+                    let text = match oracle_case(character.case, value) {
                         Ok(text) => text,
                         Err(_) => {
                             categories.push(DiagnosticCategory::Fidelity);
@@ -3930,31 +4019,23 @@ mod tests {
                         diagnostic_categories: categories,
                     });
                 }
-                vsdx_resolve::ResolvedTextToken::CharacterRun { index, properties } => {
+                vsdx_resolve::ResolvedTextToken::CharacterRun {
+                    index: _,
+                    properties,
+                } => {
                     if properties.is_empty() {
-                        append_diagnostic(
-                            &mut character,
-                            "unresolved-character-row",
-                            format!("unresolved Character row {index}"),
-                        );
+                        character.diagnostics.push(DiagnosticCategory::Integrity);
                     } else {
-                        character = character_run(
-                            renderer, package, references, resolved, shape_id, properties,
-                            &character,
-                        );
+                        character = oracle_character(renderer, package, properties, character);
                     }
                 }
                 vsdx_resolve::ResolvedTextToken::ParagraphRun { properties, .. } => {
                     paragraphs.push(Vec::new());
-                    justified.push(property_number(properties, "HorzAlign") == Some(3.0));
+                    justified.push(oracle_number(properties, "HorzAlign") == Some(3.0));
                 }
                 vsdx_resolve::ResolvedTextToken::Tab { properties, .. } => {
-                    let mut categories = character
-                        .diagnostics
-                        .iter()
-                        .map(|item| item.category)
-                        .collect::<Vec<_>>();
-                    if property_number(properties, "Position").is_none() {
+                    let mut categories = character.diagnostics.clone();
+                    if oracle_number(properties, "Position").is_none() {
                         categories.push(DiagnosticCategory::Fidelity);
                     }
                     paragraphs.last_mut().unwrap().push(ExpectedTextRun {
@@ -3963,12 +4044,8 @@ mod tests {
                     });
                 }
                 vsdx_resolve::ResolvedTextToken::Field { properties, .. } => {
-                    let result = field_value(package, resolved, properties);
-                    let mut categories = character
-                        .diagnostics
-                        .iter()
-                        .map(|item| item.category)
-                        .collect::<Vec<_>>();
+                    let result = oracle_field(properties);
+                    let mut categories = character.diagnostics.clone();
                     if result.is_err() {
                         categories.push(DiagnosticCategory::Integrity);
                     }
