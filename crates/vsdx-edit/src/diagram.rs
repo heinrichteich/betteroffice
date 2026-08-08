@@ -104,21 +104,74 @@ fn materialize_snapshot(package: &mut vsdx_parse::VsdxPackage, snapshot: &Diagra
         let Some(sheet) = package.page_contents.get_mut(&page.source_part_path) else {
             continue;
         };
-        for shape in &page.shapes {
-            materialize_shapes(&mut sheet.children, shape);
-        }
+        materialize_page_shapes(sheet, page);
     }
 }
 
-fn materialize_shapes(children: &mut [SheetChild], snapshot: &ShapeSnapshot) {
-    for child in children {
-        if let SheetChild::Shapes(shapes) = child {
-            for shape in shapes {
-                if let ShapesChild::Shape(shape) = shape {
-                    materialize_shape(shape, snapshot);
-                }
-            }
-        }
+fn materialize_page_shapes(sheet: &mut vsdx_parse::Sheet, page: &PageSnapshot) {
+    let originals = sheet
+        .shapes()
+        .cloned()
+        .map(|shape| (shape.id, shape))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut next_id = largest_shape_id(sheet);
+    let mut shapes = Vec::with_capacity(page.shapes.len());
+    for snapshot in &page.shapes {
+        let canonical_id = format!("{}:shape:{}", page.id, snapshot.source_id);
+        let mut shape = if snapshot.id == canonical_id {
+            originals
+                .get(&snapshot.source_id)
+                .cloned()
+                .unwrap_or_else(|| shape_from_snapshot(snapshot, &mut next_id))
+        } else {
+            shape_from_snapshot(snapshot, &mut next_id)
+        };
+        materialize_shape(&mut shape, snapshot);
+        shapes.push(ShapesChild::Shape(shape));
+    }
+    if let Some(SheetChild::Shapes(existing)) = sheet
+        .children
+        .iter_mut()
+        .find(|child| matches!(child, SheetChild::Shapes(_)))
+    {
+        *existing = shapes;
+    } else {
+        sheet.children.push(SheetChild::Shapes(shapes));
+    }
+}
+
+fn largest_shape_id(sheet: &vsdx_parse::Sheet) -> u32 {
+    sheet
+        .shapes()
+        .map(largest_shape_id_including_children)
+        .max()
+        .unwrap_or_default()
+}
+
+fn largest_shape_id_including_children(shape: &Shape) -> u32 {
+    shape
+        .shapes()
+        .map(largest_shape_id_including_children)
+        .max()
+        .unwrap_or_default()
+        .max(shape.id)
+}
+
+fn shape_from_snapshot(snapshot: &ShapeSnapshot, next_id: &mut u32) -> Shape {
+    *next_id = next_id.saturating_add(1);
+    Shape {
+        id: *next_id,
+        name: snapshot.name.clone(),
+        name_u: None,
+        shape_type: Some("Shape".to_owned()),
+        master: None,
+        master_shape: None,
+        line_style: None,
+        fill_style: None,
+        text_style: None,
+        children: Vec::new(),
+        del: false,
+        other_attrs: Vec::new(),
     }
 }
 
@@ -184,6 +237,70 @@ fn materialize_cell(shape: &mut Shape, snapshot: &CellSnapshot) {
             del: false,
             other_attrs: Vec::new(),
         }));
+    } else if let (Some(section_name), Some(row)) = (&locator.section, &locator.row) {
+        let cell = Cell {
+            name: locator.cell_name.clone(),
+            formula: snapshot.formula.clone(),
+            value: snapshot.value.clone(),
+            unit: None,
+            del: false,
+            other_attrs: Vec::new(),
+        };
+        let row_matches = |candidate: &vsdx_parse::Row| match row {
+            CellRow::Index(index) => candidate.index == Some(*index),
+            CellRow::Name(name) => candidate.name.as_deref() == Some(name),
+        };
+        if let Some(section) = shape.children.iter_mut().find_map(|child| match child {
+            ShapeChild::Section(section) if section.name == *section_name => Some(section),
+            _ => None,
+        }) {
+            if let Some(existing_row) = section.children.iter_mut().find_map(|child| match child {
+                SectionChild::Row(candidate) if row_matches(candidate) => Some(candidate),
+                _ => None,
+            }) {
+                existing_row.children.push(RowChild::Cell(cell));
+            } else {
+                section.children.push(SectionChild::Row(vsdx_parse::Row {
+                    index: match row {
+                        CellRow::Index(index) => Some(*index),
+                        CellRow::Name(_) => None,
+                    },
+                    name: match row {
+                        CellRow::Index(_) => None,
+                        CellRow::Name(name) => Some(name.clone()),
+                    },
+                    local_name: None,
+                    row_type: None,
+                    del: false,
+                    children: vec![RowChild::Cell(cell)],
+                    other_attrs: Vec::new(),
+                }));
+            }
+        } else {
+            shape
+                .children
+                .push(ShapeChild::Section(vsdx_parse::Section {
+                    name: section_name.clone(),
+                    index: None,
+                    del: false,
+                    children: vec![SectionChild::Row(vsdx_parse::Row {
+                        index: match row {
+                            CellRow::Index(index) => Some(*index),
+                            CellRow::Name(_) => None,
+                        },
+                        name: match row {
+                            CellRow::Index(_) => None,
+                            CellRow::Name(name) => Some(name.clone()),
+                        },
+                        local_name: None,
+                        row_type: None,
+                        del: false,
+                        children: vec![RowChild::Cell(cell)],
+                        other_attrs: Vec::new(),
+                    })],
+                    other_attrs: Vec::new(),
+                }));
+        }
     }
 }
 
@@ -464,6 +581,7 @@ impl DiagramSession {
             .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
         let shape = sheets.insert(&mut txn, id.as_str(), MapPrelim::default());
         shape.insert(&mut txn, "id", id.as_str());
+        shape.insert(&mut txn, "pageId", page_id);
         shape.insert(&mut txn, "sourceId", draft.source_id as f64);
         if let Some(name) = &draft.name {
             shape.insert(&mut txn, "name", name.as_str());
