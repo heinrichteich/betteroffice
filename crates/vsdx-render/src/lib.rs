@@ -24,6 +24,7 @@ struct RichParagraph {
 }
 
 fn rich_paragraphs(
+    renderer: &Renderer,
     package: &VsdxPackage,
     tokens: &[vsdx_resolve::ResolvedTextToken],
 ) -> Vec<RichParagraph> {
@@ -48,7 +49,7 @@ fn rich_paragraphs(
                 append_run(&mut paragraphs, &character, value.clone())
             }
             vsdx_resolve::ResolvedTextToken::CharacterRun { properties, .. } => {
-                character = character_run(package, properties, &character)
+                character = character_run(renderer, package, properties, &character)
             }
             vsdx_resolve::ResolvedTextToken::ParagraphRun { properties, .. } => {
                 let mut paragraph = RichParagraph {
@@ -105,6 +106,7 @@ fn append_run(paragraphs: &mut [RichParagraph], character: &TextRun, text: Strin
 }
 
 fn character_run(
+    renderer: &Renderer,
     package: &VsdxPackage,
     properties: &std::collections::BTreeMap<String, Lookup>,
     current: &TextRun,
@@ -142,8 +144,11 @@ fn character_run(
         run.bold = style & 1 != 0;
         run.italic = style & 2 != 0;
     }
-    if run.family != "Arial" && !package.face_names.is_empty() {
-        run.diagnostic = Some(format!("font '{}' requires registration", run.family));
+    if property_value(properties, "Font").is_some() {
+        run.diagnostic = renderer
+            .font_for(&run.family, run.bold, run.italic)
+            .is_none()
+            .then(|| format!("unregistered font '{}'", run.family));
     }
     run
 }
@@ -516,9 +521,19 @@ impl Renderer {
             .get(page_part)
             .ok_or_else(|| RenderError::MissingPage(page_part.into()))?;
         let tokens = resolver.resolve_text(shape, page)?;
-        let paragraphs = rich_paragraphs(package, &tokens);
+        let mut paragraphs = rich_paragraphs(self, package, &tokens);
         if paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()) {
             return Ok(());
+        }
+        for paragraph in &mut paragraphs {
+            if paragraph.align == 3
+                && let Some(run) = paragraph.runs.first_mut()
+            {
+                run.diagnostic = Some(match run.diagnostic.take() {
+                    Some(diagnostic) => format!("{diagnostic}; justify falls back to left"),
+                    None => "justify falls back to left".into(),
+                });
+            }
         }
         let text = paragraphs
             .iter()
@@ -568,6 +583,9 @@ impl Renderer {
         let mut cursor_y = y;
         let mut offset = 0u32;
         for paragraph in &paragraphs {
+            if paragraph.runs.is_empty() {
+                continue;
+            }
             cursor_y += paragraph.before;
             let laid_out = self.wrap_paragraph(paragraph, available_width, x, cursor_y, offset);
             offset += paragraph
@@ -632,7 +650,7 @@ impl Renderer {
             .iter()
             .map(|run| run.text.as_str())
             .collect::<String>();
-        let _ = ooxml_text::break_opportunities(&text);
+        let breaks = ooxml_text::break_opportunities(&text);
         let mut widths = Vec::new();
         let mut height = 0.0f32;
         for (index, ch) in text.char_indices() {
@@ -655,7 +673,26 @@ impl Renderer {
         let mut start = 0usize;
         let mut cursor = 0.0;
         let mut last_break = None;
+        let mut mandatory_break = None;
         for (position, length, width) in widths.iter().copied() {
+            if mandatory_break == Some(position) {
+                result.push(self.line(
+                    &text,
+                    &widths,
+                    start,
+                    position,
+                    x,
+                    y + result.len() as f32 * height,
+                    height,
+                    offset,
+                    paragraph.align,
+                    available_width,
+                ));
+                start = position;
+                cursor = 0.0;
+                last_break = None;
+                mandatory_break = None;
+            }
             if position > start && cursor + width > available_width && available_width > 0.0 {
                 let end = last_break.unwrap_or(position).max(start + 1);
                 result.push(self.line(
@@ -679,11 +716,13 @@ impl Renderer {
                 last_break = None;
             }
             cursor += width;
-            if text[position..position + length]
-                .chars()
-                .all(char::is_whitespace)
-            {
-                last_break = Some(position + length);
+            let next = position + length;
+            if let Some(opportunity) = breaks.iter().find(|item| item.byte_index == next) {
+                if opportunity.mandatory && next < text.len() {
+                    mandatory_break = Some(next);
+                } else {
+                    last_break = Some(next);
+                }
             }
         }
         if start < text.len() || result.is_empty() {
@@ -757,10 +796,21 @@ impl Renderer {
             caret_stops: stops,
         }
     }
+    /// Uses the requested face, then same-family style variants, never another family.
+    fn font_for(&self, family: &str, bold: bool, italic: bool) -> Option<ooxml_text::FontId> {
+        [
+            (bold, italic),
+            (bold, false),
+            (false, italic),
+            (false, false),
+        ]
+        .into_iter()
+        .find_map(|(bold, italic)| self.registered_fonts.get(&(family.into(), bold, italic)))
+        .copied()
+    }
     fn measure(&self, run: &TextRun, text: &str) -> f32 {
-        self.registered_fonts
-            .get(&(run.family.clone(), run.bold, run.italic))
-            .and_then(|font| ooxml_text::shape(&self.fonts, *font, text, run.size_px, &[]).ok())
+        self.font_for(&run.family, run.bold, run.italic)
+            .and_then(|font| ooxml_text::shape(&self.fonts, font, text, run.size_px, &[]).ok())
             .map(|glyphs| glyphs.iter().map(|glyph| glyph.x_advance).sum())
             .unwrap_or(text.chars().count() as f32 * run.size_px * 0.5)
     }
@@ -1563,6 +1613,19 @@ mod tests {
         Renderer::default().layout_page(&package, "page").unwrap()
     }
 
+    fn text_shape(tokens: Vec<TextToken>) -> Shape {
+        let mut shape = shape(1, 1.0, 1.0);
+        shape.children.push(ShapeChild::Text(tokens));
+        shape
+    }
+
+    fn text_box(list: &VsdxDisplayList) -> &Primitive {
+        list.primitives
+            .iter()
+            .find(|primitive| matches!(primitive, Primitive::TextBox { .. }))
+            .unwrap()
+    }
+
     fn shape_primitive(list: &VsdxDisplayList, id: u32) -> &Primitive {
         list.primitives.iter().find(|primitive| matches!(primitive, Primitive::Shape { id: actual, .. } if actual == &format!("page:{id}"))).unwrap()
     }
@@ -1614,6 +1677,104 @@ mod tests {
             path[0],
             GeometryPathCommand::Move { x: 2.0, y: 3.0 }
         ));
+    }
+
+    #[test]
+    fn word_wraps_at_uax14_opportunities_in_scene_inches() {
+        let mut shape = text_shape(vec![TextToken::Literal("a b".into())]);
+        with_cell(&mut shape, "TxtWidth", "0.18");
+        let list = render(vec![shape]);
+        let Primitive::TextBox { lines, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        assert_eq!(lines.len(), 2);
+        assert_eq!((lines[0].start, lines[0].end), (0, 2));
+        assert_eq!((lines[1].start, lines[1].end), (2, 3));
+    }
+
+    #[test]
+    fn paragraph_alignment_positions_lines_in_scene_inches() {
+        for (align, expected_x) in [(0, 1.0), (1, 1.458_333_4), (2, 1.916_666_6)] {
+            let mut shape = text_shape(vec![
+                TextToken::ParagraphRun(0),
+                TextToken::Literal("a".into()),
+            ]);
+            with_cell(&mut shape, "TxtWidth", "1");
+            shape.children.push(ShapeChild::Section(Section {
+                name: "Paragraph".into(),
+                index: None,
+                del: false,
+                children: vec![SectionChild::Row(row(
+                    0,
+                    "",
+                    vec![cell("HorzAlign", &align.to_string())],
+                ))],
+                other_attrs: vec![],
+            }));
+            let list = render(vec![shape]);
+            let Primitive::TextBox { lines, .. } = text_box(&list) else {
+                unreachable!()
+            };
+            assert!((lines[0].x - expected_x).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn vertical_alignment_and_margins_inset_text_in_scene_inches() {
+        for (align, expected_y) in [(0, 1.1), (1, 1.4), (2, 1.7)] {
+            let mut shape = text_shape(vec![TextToken::Literal("a".into())]);
+            let vertical = align.to_string();
+            for (name, value) in [
+                ("TxtWidth", "1"),
+                ("TxtHeight", "1"),
+                ("LeftMargin", "0.1"),
+                ("RightMargin", "0.2"),
+                ("TopMargin", "0.1"),
+                ("BottomMargin", "0.1"),
+                ("VerticalAlign", vertical.as_str()),
+            ] {
+                with_cell(&mut shape, name, value);
+            }
+            let list = render(vec![shape]);
+            let Primitive::TextBox {
+                x,
+                y,
+                width,
+                height,
+                lines,
+                ..
+            } = text_box(&list)
+            else {
+                unreachable!()
+            };
+            assert_point_close((*x, *y), (1.1, 1.1));
+            assert_point_close((*width, *height), (0.7, 0.8));
+            assert!((lines[0].y - expected_y).abs() < 1e-5);
+            assert!(lines[0].height < 1.0);
+        }
+    }
+
+    #[test]
+    fn unregistered_font_records_a_diagnostic() {
+        let mut shape = text_shape(vec![
+            TextToken::CharacterRun(0),
+            TextToken::Literal("a".into()),
+        ]);
+        shape.children.push(ShapeChild::Section(Section {
+            name: "Character".into(),
+            index: None,
+            del: false,
+            children: vec![SectionChild::Row(row(0, "", vec![cell("Font", "99")]))],
+            other_attrs: vec![],
+        }));
+        let list = render(vec![shape]);
+        let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        assert_eq!(
+            paragraphs[0].runs[0].diagnostic.as_deref(),
+            Some("unregistered font '99'")
+        );
     }
 
     #[test]
@@ -2438,7 +2599,7 @@ mod tests {
         };
         assert!(matches!(&inner[0], Primitive::Shape { id, .. } if id.ends_with(":3")));
         assert!(
-            matches!(&inner[1], Primitive::TextBox { id, lines, .. } if id.ends_with(":3") && lines.len() == 1)
+            matches!(&inner[1], Primitive::TextBox { id, lines, .. } if id.ends_with(":3") && lines.len() == 2)
         );
         assert!(
             matches!(&inner[2], Primitive::Image { id, asset_id, .. } if id.ends_with(":4") && asset_id == "visio/media/image1.png")
