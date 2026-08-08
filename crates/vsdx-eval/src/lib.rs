@@ -66,8 +66,26 @@ pub trait References {
     fn formula_in(&self, _sheet: Option<u32>, name: &str) -> Option<&str> {
         self.formula(name)
     }
+    fn formula_in_scoped(
+        &self,
+        sheet: Option<u32>,
+        scope: Option<&str>,
+        name: &str,
+    ) -> Option<&str> {
+        let name = scope.map_or_else(|| name.into(), |scope| format!("{scope}!{name}"));
+        self.formula_in(sheet, &name)
+    }
     fn value_in(&self, _sheet: Option<u32>, name: &str) -> Option<(&str, Option<&str>)> {
         self.value(name)
+    }
+    fn value_in_scoped(
+        &self,
+        sheet: Option<u32>,
+        scope: Option<&str>,
+        name: &str,
+    ) -> Option<(&str, Option<&str>)> {
+        let name = scope.map_or_else(|| name.into(), |scope| format!("{scope}!{name}"));
+        self.value_in(sheet, &name)
     }
     fn reference_key(&self, sheet: Option<u32>, name: &str) -> String {
         sheet.map_or_else(|| name.into(), |sheet| format!("Sheet.{sheet}!{name}"))
@@ -106,17 +124,34 @@ impl References for ResolvedShape {
 
 pub struct PageShapeReferences {
     shapes: BTreeMap<u32, ResolvedShape>,
+    page: ResolvedShape,
+    document: Option<ResolvedShape>,
 }
 impl PageShapeReferences {
     pub fn new(resolver: &Resolver<'_>, page: &str) -> Result<Self, ResolveError> {
+        let page_sheet = resolver
+            .package()
+            .page_part_ids
+            .get(page)
+            .and_then(|id| resolver.package().page_sheets.get(id))
+            .ok_or_else(|| ResolveError::MissingPage(page.into()))?;
         Ok(Self {
             shapes: resolver.resolve_page_shapes(page)?,
+            page: resolver.resolve_sheet(page_sheet)?,
+            document: resolver
+                .package()
+                .document_sheet
+                .as_ref()
+                .map(|sheet| resolver.resolve_sheet(sheet))
+                .transpose()?,
         })
     }
     pub fn for_shape(&self, current: u32) -> ShapeReferences<'_> {
         ShapeReferences {
             current,
             shapes: &self.shapes,
+            page: &self.page,
+            document: self.document.as_ref(),
         }
     }
     pub fn shape(&self, id: u32) -> Option<&ResolvedShape> {
@@ -127,17 +162,30 @@ impl PageShapeReferences {
 pub struct ShapeReferences<'a> {
     current: u32,
     shapes: &'a BTreeMap<u32, ResolvedShape>,
+    page: &'a ResolvedShape,
+    document: Option<&'a ResolvedShape>,
 }
 impl ShapeReferences<'_> {
-    fn lookup<'a>(&self, sheet: Option<u32>, name: &'a str) -> Option<(u32, &'a str)> {
-        let (sheet, name) = match name
+    fn target(&self, sheet: Option<u32>, name: &str) -> Option<&ResolvedShape> {
+        if let Some((scope, _)) = name.split_once('!') {
+            let sheet = match scope {
+                "ThePage" => self.page,
+                "TheDoc" => self.document?,
+                _ => return None,
+            };
+            return Some(sheet);
+        }
+        let sheet = match name
             .strip_prefix("Sheet.")
             .and_then(|name| name.split_once('!'))
         {
-            Some((sheet, name)) => (sheet.parse().ok()?, name),
-            None => (sheet.unwrap_or(self.current), name),
+            Some((sheet, _)) => sheet.parse().ok()?,
+            None => sheet.unwrap_or(self.current),
         };
-        self.shapes.contains_key(&sheet).then_some((sheet, name))
+        self.shapes.get(&sheet)
+    }
+    fn cell_name<'a>(&self, name: &'a str) -> &'a str {
+        name.split_once('!').map_or(name, |(_, name)| name)
     }
 }
 impl References for ShapeReferences<'_> {
@@ -148,23 +196,27 @@ impl References for ShapeReferences<'_> {
         self.value_in(None, name)
     }
     fn formula_in(&self, sheet: Option<u32>, name: &str) -> Option<&str> {
-        let (sheet, name) = self.lookup(sheet, name)?;
-        References::formula(self.shapes.get(&sheet)?, name)
+        References::formula(self.target(sheet, name)?, self.cell_name(name))
     }
     fn value_in(&self, sheet: Option<u32>, name: &str) -> Option<(&str, Option<&str>)> {
-        let (sheet, name) = self.lookup(sheet, name)?;
-        References::value(self.shapes.get(&sheet)?, name)
+        References::value(self.target(sheet, name)?, self.cell_name(name))
     }
     fn exhausted_inheritance(&self, name: &str) -> bool {
-        self.lookup(None, name).is_some_and(|(sheet, name)| {
-            References::exhausted_inheritance(self.shapes.get(&sheet).expect("checked shape"), name)
-        })
+        self.target(None, name)
+            .is_some_and(|shape| References::exhausted_inheritance(shape, self.cell_name(name)))
     }
     fn reference_key(&self, sheet: Option<u32>, name: &str) -> String {
-        self.lookup(sheet, name).map_or_else(
-            || sheet.map_or_else(|| name.into(), |sheet| format!("Sheet.{sheet}!{name}")),
-            |(sheet, name)| format!("Sheet.{sheet}!{name}"),
-        )
+        if name.starts_with("ThePage!") || name.starts_with("TheDoc!") {
+            return name.into();
+        }
+        let (sheet, name) = match name
+            .strip_prefix("Sheet.")
+            .and_then(|name| name.split_once('!'))
+        {
+            Some((prefix, name)) => (prefix.parse().ok().or(sheet), name),
+            None => (sheet, name),
+        };
+        sheet.map_or_else(|| name.into(), |sheet| format!("Sheet.{sheet}!{name}"))
     }
 }
 impl References for BTreeMap<String, String> {
@@ -261,6 +313,7 @@ fn evaluate_with_theme_at(
             memo: HashMap::new(),
             steps: 0,
             sheet: None,
+            scope: None,
             host: host.map(str::to_owned),
         }
         .expr(&expr, 0),
@@ -333,6 +386,7 @@ struct Engine<'a, R> {
     memo: HashMap<String, Evaluation>,
     steps: usize,
     sheet: Option<u32>,
+    scope: Option<&'static str>,
     host: Option<String>,
 }
 impl<R: References> Engine<'_, R> {
@@ -363,32 +417,45 @@ impl<R: References> Engine<'_, R> {
                 if name.eq_ignore_ascii_case("TRUE") {
                     return number(1., Unit::Bool);
                 }
-                let key = self.refs.reference_key(self.sheet, name);
+                let key_name = if name.contains('!') {
+                    name.clone()
+                } else {
+                    self.scope
+                        .map_or_else(|| name.clone(), |scope| format!("{scope}!{name}"))
+                };
+                let key = self.refs.reference_key(self.sheet, &key_name);
                 if let Some(value) = self.memo.get(&key) {
                     return value.clone();
                 }
                 if !self.active.insert(key.clone()) {
                     return err(format!("reference cycle at {key}"));
                 }
-                let (sheet, lookup) = match name
+                let (sheet, scope, lookup) = match name
                     .strip_prefix("Sheet.")
                     .and_then(|name| name.split_once('!'))
                 {
-                    Some((sheet, name)) => (sheet.parse().ok(), name),
-                    None => (self.sheet, name.as_str()),
+                    Some((sheet, name)) => (sheet.parse().ok(), None, name),
+                    None => match name.split_once('!') {
+                        Some(("ThePage", name)) => (None, Some("ThePage"), name),
+                        Some(("TheDoc", name)) => (None, Some("TheDoc"), name),
+                        _ => (self.sheet, self.scope, name.as_str()),
+                    },
                 };
-                let result = match self.refs.formula_in(sheet, lookup) {
+                let result = match self.refs.formula_in_scoped(sheet, scope, lookup) {
                     Some(formula) => match parse(formula, self.limits) {
                         Ok(e) => {
                             let previous = self.sheet;
+                            let previous_scope = self.scope;
                             self.sheet = sheet;
+                            self.scope = scope;
                             let result = self.expr(&e, depth + 1);
                             self.sheet = previous;
+                            self.scope = previous_scope;
                             result
                         }
                         Err(e) => Evaluation::Error(e),
                     },
-                    None => self.refs.value_in(sheet, lookup).map_or_else(
+                    None => self.refs.value_in_scoped(sheet, scope, lookup).map_or_else(
                         || err(format!("unresolved reference {name}")),
                         |(value, unit)| cell_value(value, unit),
                     ),
@@ -1250,7 +1317,7 @@ mod tests {
     use super::*;
     use std::fs;
     use vsdx_parse::{Cell, Shape, Sheet, parse_vsdx};
-    use vsdx_resolve::Resolver;
+    use vsdx_resolve::{Lookup, Provenance, ResolvedCell, ResolvedRow, ResolvedSection, Resolver};
 
     fn limits() -> ParseLimits {
         ParseLimits::default()
@@ -1307,6 +1374,88 @@ mod tests {
             evaluate("4 in ^ 0.5", &BTreeMap::new(), &limits()),
             Evaluation::Error(_)
         ));
+    }
+
+    #[test]
+    fn resolves_page_and_document_scope_references() {
+        fn value(value: &str) -> Lookup {
+            Lookup::Found(ResolvedCell {
+                cell: Cell {
+                    name: "Value".into(),
+                    formula: None,
+                    value: Some(value.into()),
+                    unit: None,
+                    del: false,
+                    other_attrs: Vec::new(),
+                },
+                provenance: Provenance::Local,
+            })
+        }
+        fn formula(name: &str, formula: &str) -> Lookup {
+            Lookup::Found(ResolvedCell {
+                cell: Cell {
+                    name: name.into(),
+                    formula: Some(formula.into()),
+                    value: None,
+                    unit: None,
+                    del: false,
+                    other_attrs: Vec::new(),
+                },
+                provenance: Provenance::Local,
+            })
+        }
+        let page = ResolvedShape {
+            cells: BTreeMap::from([
+                ("DrawingScale".into(), value("2")),
+                ("PageWidth".into(), formula("PageWidth", "DrawingScale*5")),
+            ]),
+            sections: BTreeMap::from([(
+                "User".into(),
+                ResolvedSection {
+                    name: "User".into(),
+                    rows: BTreeMap::from([(
+                        "N:x".into(),
+                        ResolvedRow {
+                            key: "N:x".into(),
+                            cells: BTreeMap::from([("Value".into(), value("7"))]),
+                            ..Default::default()
+                        },
+                    )]),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let document = ResolvedShape {
+            cells: BTreeMap::from([("DocScale".into(), value("3"))]),
+            ..Default::default()
+        };
+        let page_refs = PageShapeReferences {
+            shapes: BTreeMap::new(),
+            page,
+            document: Some(document),
+        };
+        let refs = page_refs.for_shape(1);
+        assert_eq!(number_with(&refs, "ThePage!DrawingScale").number, 2.0);
+        assert_eq!(number_with(&refs, "ThePage!PageWidth").number, 10.0);
+        assert_eq!(number_with(&refs, "TheDoc!DocScale").number, 3.0);
+        assert_eq!(number_with(&refs, "ThePage!User.x").number, 7.0);
+        for name in ["ThePage!Unknown", "TheDoc!Unknown"] {
+            assert!(matches!(
+                evaluate(name, &refs, &limits()),
+                Evaluation::Error(Diagnostic { message }) if message == format!("unresolved reference {name}")
+            ));
+        }
+    }
+
+    fn number_with(refs: &impl References, formula: &str) -> Number {
+        match evaluate(formula, refs, &limits()) {
+            Evaluation::Evaluated(Evaluated {
+                value: Value::Number(value),
+                ..
+            }) => value,
+            value => panic!("expected value, got {value:?}"),
+        }
     }
 
     #[test]
@@ -1761,8 +1910,7 @@ mod tests {
         eprintln!("VSDX corpus top other unsupported kinds: {top_unsupported_other:?}");
         let mut top_errors = measurement.error_kinds.into_iter().collect::<Vec<_>>();
         top_errors.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-        top_errors.truncate(20);
-        eprintln!("VSDX corpus top error kinds: {top_errors:?}");
+        eprintln!("VSDX corpus error histogram: {top_errors:?}");
         let mut top_references = measurement
             .unresolved_references
             .into_iter()

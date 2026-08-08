@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashSet};
 
-use vsdx_parse::{Cell, Row, Section, Shape, Sheet, TextToken, VsdxPackage};
+use vsdx_parse::{
+    Cell, Row, Section, Shape, ShapeChild, Sheet, SheetChild, TextToken, VsdxPackage,
+};
 
 use crate::text::row_cells;
 use crate::{
@@ -25,6 +27,9 @@ impl<'a> Resolver<'a> {
         self.defaults
             .extend(defaults.into_iter().map(|c| (c.name.clone(), c)));
         self
+    }
+    pub fn package(&self) -> &'a VsdxPackage {
+        self.package
     }
     pub fn resolve_shape(
         &self,
@@ -52,6 +57,32 @@ impl<'a> Resolver<'a> {
         sheet: &Sheet,
     ) -> Result<ResolvedShape, ResolveError> {
         self.resolve_shape_ref(shape, sheet)
+    }
+    /// Resolves a page or document ShapeSheet with document-level inheritance.
+    pub fn resolve_sheet(&self, sheet: &Sheet) -> Result<ResolvedShape, ResolveError> {
+        let shape = Shape {
+            id: 0,
+            name: None,
+            name_u: None,
+            shape_type: None,
+            master: None,
+            master_shape: None,
+            line_style: None,
+            fill_style: None,
+            text_style: None,
+            children: sheet
+                .children
+                .iter()
+                .filter_map(|child| match child {
+                    SheetChild::Cell(cell) => Some(ShapeChild::Cell(cell.clone())),
+                    SheetChild::Section(section) => Some(ShapeChild::Section(section.clone())),
+                    _ => None,
+                })
+                .collect(),
+            del: false,
+            other_attrs: Vec::new(),
+        };
+        self.resolve_shape_ref(&shape, sheet)
     }
     pub fn resolve_page_shapes(
         &self,
