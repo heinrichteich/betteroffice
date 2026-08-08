@@ -2201,6 +2201,75 @@ mod tests {
     }
 
     #[test]
+    fn structural_edits_preserve_external_corpus_parts_when_available() {
+        let Some(directory) = std::env::var_os("VSDX_CORPUS_DIR") else {
+            eprintln!("SKIPPED REVIEW CORPUS TEST: VSDX_CORPUS_DIR is unset");
+            return;
+        };
+        for file in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
+            let path = PathBuf::from(&directory).join(file);
+            assert!(path.is_file(), "missing corpus file: {}", path.display());
+            let source = std::fs::read(&path).unwrap();
+            let package = parse_vsdx(&source).unwrap();
+            let (page_path, page) = package
+                .page_contents
+                .iter()
+                .find(|(_, page)| page.shapes().count() >= 2)
+                .unwrap_or_else(|| panic!("{file}: no page with two shapes"));
+            let page_id = package.page_part_ids[page_path];
+            let shapes: Vec<_> = page.shapes().collect();
+            let operations = [
+                (
+                    "add",
+                    StructuralEdit::AddShape {
+                        page_id,
+                        shape_xml: b"<Shape/>".to_vec(),
+                    },
+                ),
+                (
+                    "delete",
+                    StructuralEdit::DeleteShape {
+                        page_id,
+                        shape_id: shapes[0].id,
+                    },
+                ),
+                (
+                    "reorder",
+                    StructuralEdit::ReorderShape {
+                        page_id,
+                        shape_id: shapes[0].id,
+                        before_shape_id: None,
+                    },
+                ),
+            ];
+            for (operation, edit) in operations {
+                let saved = save_structural_edits(&package, &[edit])
+                    .unwrap_or_else(|error| panic!("{file} {operation}: {error}"));
+                let reparsed = parse_vsdx(&saved)
+                    .unwrap_or_else(|error| panic!("{file} {operation}: {error}"));
+                validate_structure(&reparsed)
+                    .unwrap_or_else(|error| panic!("{file} {operation}: {error}"));
+                let before = unzip_parts(&source).unwrap();
+                let after = unzip_parts(&saved).unwrap();
+                for (part, bytes) in before {
+                    if &part != page_path {
+                        assert_eq!(
+                            after
+                                .iter()
+                                .find(|(candidate, _)| candidate == &part)
+                                .unwrap()
+                                .1,
+                            bytes,
+                            "{file} {operation}: {part}"
+                        );
+                    }
+                }
+                eprintln!("CORPUS {file} {operation}: PASS");
+            }
+        }
+    }
+
+    #[test]
     fn models_lossless_shapesheet_features() {
         let package = parse_vsdx(include_bytes!("../tests/fixtures/foundation.vsdx")).unwrap();
         let sheet = &package.page_contents["visio/pages/page1.xml"];
