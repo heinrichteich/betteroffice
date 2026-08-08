@@ -4,6 +4,7 @@ use vsdx_eval::{
     DocumentReferences, Evaluation, MutationContext, MutationOutcome, Value, decide_mutation,
     evaluate,
 };
+pub use vsdx_parse::StructuralEdit;
 use vsdx_parse::{Cell, ParseLimits, Shape, VsdxError, VsdxPackage};
 pub use vsdx_parse::{CellLocator, CellRow, CellSheet, MutationGesture, SemanticCellEdit};
 use vsdx_resolve::{ResolveError, ResolvedShape, Resolver};
@@ -87,6 +88,35 @@ impl Diagram {
             &self.package,
             &resolved,
         )?)
+    }
+    /// Deletes shapes after enforcing their effective LockDelete cells.
+    pub fn save_structural_edits(&self, edits: &[StructuralEdit]) -> Result<Vec<u8>> {
+        let context = PackageMutationContext {
+            package: &self.package,
+        };
+        for edit in edits {
+            let StructuralEdit::DeleteShape { page_id, shape_id } = edit;
+            let locator = CellLocator {
+                sheet: CellSheet::Page(*page_id),
+                shape_id: Some(*shape_id),
+                section: None,
+                row: None,
+                cell_name: "LockDelete".to_owned(),
+            };
+            match decide_mutation(
+                &context,
+                locator,
+                MutationGesture::Delete,
+                "0".to_owned(),
+                &ParseLimits::default(),
+            ) {
+                MutationOutcome::Allowed { .. } => {}
+                MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                    return Err(Error::Policy(reason));
+                }
+            }
+        }
+        Ok(vsdx_parse::save_structural_edits(&self.package, edits)?)
     }
     pub fn pages(&self) -> impl Iterator<Item = Page<'_>> {
         self.package.page_contents.keys().map(|part| Page {

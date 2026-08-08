@@ -154,7 +154,7 @@ fn lock_for(gesture: MutationGesture) -> Option<&'static str> {
         MutationGesture::ResizeAspect => Some("LockAspect"),
         MutationGesture::TextEdit => Some("LockTextEdit"),
         MutationGesture::Format => Some("LockFormat"),
-        MutationGesture::Delete => None,
+        MutationGesture::Delete => Some("LockDelete"),
     }
 }
 

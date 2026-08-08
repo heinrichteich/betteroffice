@@ -62,6 +62,12 @@ pub enum MutationGesture {
     Delete,
 }
 
+/// A page-local structural change applied atomically with any cell edits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StructuralEdit {
+    DeleteShape { page_id: u32, shape_id: u32 },
+}
+
 type PendingInsertion = (crate::SourceSpan, u8, Vec<(CellAttribute, String)>);
 
 struct NewCell {
@@ -749,6 +755,148 @@ pub fn save_semantic_cell_edits(
     }
 }
 
+/// Applies page-local structural edits through the lexical container fallback.
+///
+/// Deleting a shape also deletes every local Connect that names it. The source
+/// package is never changed; the result is accepted only after reparsing and
+/// referential-integrity validation.
+pub fn save_structural_edits(
+    package: &VsdxPackage,
+    edits: &[StructuralEdit],
+) -> Result<Vec<u8>, VsdxError> {
+    let mut by_part: BTreeMap<String, HashSet<u32>> = BTreeMap::new();
+    for edit in edits {
+        let StructuralEdit::DeleteShape { page_id, shape_id } = edit;
+        let path = package
+            .page_part_ids
+            .iter()
+            .find_map(|(path, id)| (*id == *page_id).then(|| path.clone()))
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: page_id.to_string(),
+                message: "page does not exist".to_owned(),
+            })?;
+        by_part.entry(path).or_default().insert(*shape_id);
+    }
+    let mut output = package.clone();
+    for (path, deleted) in by_part {
+        let part = package
+            .parts
+            .iter()
+            .find(|part| part.path == path)
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: path.clone(),
+                message: "part does not exist".to_owned(),
+            })?;
+        let shapes =
+            direct_child(part, "Shapes", None).ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: path.clone(),
+                message: "page has no Shapes container".to_owned(),
+            })?;
+        let mut replacements = vec![container_without(part, shapes, "Shape", |shape| {
+            shape
+                .attributes
+                .get("ID")
+                .and_then(|attribute| attribute_value(&part.bytes, attribute))
+                .and_then(|value| value.parse::<u32>().ok())
+                .is_some_and(|id| deleted.contains(&id))
+        })?];
+        if let Some(connects) = direct_child(part, "Connects", None) {
+            replacements.push(container_without(part, connects, "Connect", |connect| {
+                ["FromSheet", "ToSheet"].iter().any(|name| {
+                    connect
+                        .attributes
+                        .get(*name)
+                        .and_then(|attribute| attribute_value(&part.bytes, attribute))
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .is_some_and(|id| deleted.contains(&id))
+                })
+            })?);
+        }
+        let target = output
+            .parts
+            .iter_mut()
+            .find(|part| part.path == path)
+            .expect("validated source part");
+        target.bytes = apply_span_edits(&target.bytes, &replacements)?;
+    }
+    let bytes = write_vsdx(&output)?;
+    let reparsed = parse_vsdx(&bytes)?;
+    validate_structure(&reparsed)?;
+    Ok(bytes)
+}
+
+fn direct_child<'a>(
+    part: &'a PackagePart,
+    name: &str,
+    parent: Option<crate::SourceSpan>,
+) -> Option<&'a crate::ElementSpan> {
+    part.spans.iter().find(|candidate| {
+        local_name(&candidate.name) == name
+            && match parent {
+                Some(parent) => nearest_parent(part, candidate.span, "Shapes")
+                    .is_some_and(|owner| owner.span == parent),
+                None => nearest_parent(part, candidate.span, "PageContents").is_some(),
+            }
+    })
+}
+
+fn container_without(
+    part: &PackagePart,
+    container: &crate::ElementSpan,
+    child_name: &str,
+    remove: impl Fn(&crate::ElementSpan) -> bool,
+) -> Result<SpanEdit, VsdxError> {
+    let mut children: Vec<_> = part
+        .spans
+        .iter()
+        .filter(|candidate| {
+            local_name(&candidate.name) == child_name
+                && nearest_parent(part, candidate.span, &container.name)
+                    .is_some_and(|parent| parent.span == container.span)
+        })
+        .collect();
+    children.sort_by_key(|child| child.span.offset);
+    let mut replacement = Vec::new();
+    let mut cursor = container.span.offset;
+    for child in children {
+        if remove(child) {
+            replacement.extend_from_slice(&part.bytes[cursor..child.span.offset]);
+            cursor = child.span.end().ok_or(VsdxError::InvalidSpan)?;
+        }
+    }
+    replacement.extend_from_slice(
+        &part.bytes[cursor..container.span.end().ok_or(VsdxError::InvalidSpan)?],
+    );
+    Ok(SpanEdit {
+        span: container.span,
+        replacement,
+    })
+}
+
+/// Checks page-local shape IDs and connector endpoints after structural edits.
+pub fn validate_structure(package: &VsdxPackage) -> Result<(), VsdxError> {
+    for (path, sheet) in &package.page_contents {
+        let mut ids = HashSet::new();
+        for shape in sheet.shapes() {
+            if !ids.insert(shape.id) {
+                return Err(VsdxError::InvalidCellEdit {
+                    part: path.clone(),
+                    message: format!("duplicate shape ID {}", shape.id),
+                });
+            }
+        }
+        for connect in sheet.connects() {
+            if !ids.contains(&connect.from_sheet) || !ids.contains(&connect.to_sheet) {
+                return Err(VsdxError::InvalidCellEdit {
+                    part: path.clone(),
+                    message: "Connect references a missing shape".to_owned(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 enum LocalCell {
     Existing(String, crate::SourceSpan),
     New(String, crate::SourceSpan),
@@ -1185,6 +1333,27 @@ mod tests {
             .unwrap()
             .to_vec();
         assert_eq!(after, b"<PageContents><Shapes><Shape ID='1'><Section N='User'><Row N='New'><Cell N='Value' F='4' V='4'/></Row></Section></Shape></Shapes></PageContents>");
+    }
+
+    #[test]
+    fn deletes_a_shape_and_its_connects_without_rewriting_siblings() {
+        let source = b"<PageContents><Shapes><Shape ID='1'><Cell N='Keep' V='one'/></Shape><Shape ID='2'><Cell N='Keep' V='two'/></Shape><Shape ID='3'><Cell N='Keep' V='three'/></Shape></Shapes><Connects><Connect FromSheet='1' ToSheet='2'/><Connect FromSheet='2' ToSheet='3'/></Connects></PageContents>";
+        let (package, path) = package_with_page_xml(source);
+        let page_id = package.page_part_ids[&path];
+        let saved = save_structural_edits(
+            &package,
+            &[StructuralEdit::DeleteShape {
+                page_id,
+                shape_id: 2,
+            }],
+        )
+        .unwrap();
+        let after = parse_vsdx(&saved)
+            .unwrap()
+            .part_bytes(&path)
+            .unwrap()
+            .to_vec();
+        assert_eq!(after, b"<PageContents><Shapes><Shape ID='1'><Cell N='Keep' V='one'/></Shape><Shape ID='3'><Cell N='Keep' V='three'/></Shape></Shapes><Connects></Connects></PageContents>");
     }
 
     fn semantic_edit(page_id: u32, section: &str, row: CellRow) -> SemanticCellEdit {
