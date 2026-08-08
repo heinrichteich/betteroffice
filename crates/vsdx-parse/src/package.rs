@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::model::{PackagePart, VsdxPackage};
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
+use crate::sheet::{parse_records, parse_sheet};
 use crate::xml::{ParseBudget, parse_xml};
-use crate::{ParseLimits, VsdxError};
+use crate::{ParseLimits, Sheet, VsdxError};
 
 pub fn parse_vsdx(data: &[u8]) -> Result<VsdxPackage, VsdxError> {
     parse_vsdx_with_limits(data, &ParseLimits::default())
@@ -66,6 +67,21 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         validate_xml_part(&parts, path, &mut budget)?;
     }
     load_reachable_relationships(&parts, &mut relationships, &mut budget)?;
+    let document = parse_xml(parts[document_path.as_str()], &document_path, &mut budget)?;
+    let document_sheet = document
+        .children_named("DocumentSheet")
+        .next()
+        .map(|sheet| parse_sheet(sheet, &document_path, &mut budget))
+        .transpose()?;
+    let style_sheets = document
+        .children_named("StyleSheets")
+        .flat_map(|styles| styles.children_named("StyleSheet"))
+        .map(|style| parse_sheet(style, &document_path, &mut budget))
+        .collect::<Result<Vec<_>, _>>()?;
+    let colors = parse_records(document.children_named("Colors").next());
+    let face_names = parse_records(document.children_named("FaceNames").next());
+    let page_sheets = parse_part_sheets(&parts, &page_part_paths, &mut budget)?;
+    let master_sheets = parse_part_sheets(&parts, &master_part_paths, &mut budget)?;
     Ok(VsdxPackage {
         document_part_path: document_path,
         pages_part_path,
@@ -75,11 +91,37 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         theme_part_paths,
         windows_part_path,
         relationships,
+        document_sheet,
+        style_sheets,
+        colors,
+        face_names,
+        page_sheets,
+        master_sheets,
         parts: source_parts
             .into_iter()
             .map(|(path, bytes)| PackagePart { path, bytes })
             .collect(),
     })
+}
+
+fn parse_part_sheets(
+    parts: &HashMap<&str, &[u8]>,
+    paths: &[String],
+    budget: &mut ParseBudget<'_>,
+) -> Result<BTreeMap<String, Sheet>, VsdxError> {
+    paths
+        .iter()
+        .map(|path| {
+            let root = parse_xml(
+                parts
+                    .get(path.as_str())
+                    .ok_or_else(|| VsdxError::MissingPart(path.clone()))?,
+                path,
+                budget,
+            )?;
+            Ok((path.clone(), parse_sheet(&root, path, budget)?))
+        })
+        .collect()
 }
 
 fn load_reachable_relationships(
@@ -206,12 +248,82 @@ mod tests {
             let source = std::fs::read(&path).unwrap();
             let written = write_vsdx(&parse_vsdx(&source).unwrap()).unwrap();
             assert_eq!(
+                parse_vsdx(&written).unwrap().page_sheets,
+                parse_vsdx(&source).unwrap().page_sheets,
+                "{}",
+                path.display()
+            );
+            assert_eq!(
                 unzip_parts(&written).unwrap(),
                 unzip_parts(&source).unwrap(),
                 "{}",
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn models_lossless_shapesheet_features() {
+        let package = parse_vsdx(include_bytes!("../tests/fixtures/foundation.vsdx")).unwrap();
+        let sheet = &package.page_sheets["visio/pages/page1.xml"];
+        let shape = &sheet.shapes[0];
+        assert!(
+            shape
+                .cells
+                .iter()
+                .any(|cell| cell.name == "LineWeight" && cell.del)
+        );
+        assert!(
+            shape
+                .sections
+                .iter()
+                .any(|section| section.name == "Scratch" && section.del)
+        );
+        let geometry = shape
+            .sections
+            .iter()
+            .find(|section| section.name == "Geometry")
+            .unwrap();
+        assert_eq!(geometry.rows[1].name.as_deref(), Some("LineTo"));
+        assert_eq!(geometry.rows[2].index, Some(2));
+        assert!(geometry.rows[2].del);
+        let connection = shape
+            .sections
+            .iter()
+            .find(|section| section.name == "Connection")
+            .unwrap();
+        assert_eq!(connection.rows[0].row_type.as_deref(), Some("Connection"));
+        assert_eq!(
+            shape.text,
+            Some(vec![
+                crate::TextToken::Literal("Step ".to_owned()),
+                crate::TextToken::Field(0)
+            ])
+        );
+        assert_eq!(sheet.connects[0].from_part, Some(9));
+        assert_eq!(sheet.connects[0].to_part, Some(3));
+        let written = write_vsdx(&package).unwrap();
+        assert_eq!(
+            parse_vsdx(&written).unwrap().page_sheets,
+            package.page_sheets
+        );
+    }
+
+    #[test]
+    fn models_namespaced_deleted_sheet_content() {
+        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        let mut parts = unzip_parts(source).unwrap();
+        let page = parts
+            .iter_mut()
+            .find(|(path, _)| path == "visio/pages/page1.xml")
+            .unwrap();
+        page.1 = br#"<v:PageContents xmlns:v='urn:visio'><v:Shapes><v:Shape ID='1' Del='1'><v:Cell N='PinX' Del='1'/><v:Section N='Geometry' Del='1'><v:Row IX='0' Del='1'/></v:Section></v:Shape></v:Shapes></v:PageContents>"#.to_vec();
+        let package = parse_vsdx(&rezip_parts(&parts).unwrap()).unwrap();
+        let shape = &package.page_sheets["visio/pages/page1.xml"].shapes[0];
+        assert!(shape.del);
+        assert!(shape.cells[0].del);
+        assert!(shape.sections[0].del);
+        assert!(shape.sections[0].rows[0].del);
     }
 
     #[test]

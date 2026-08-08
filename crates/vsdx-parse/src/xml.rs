@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::HashSet;
 
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -75,11 +75,9 @@ impl<'a> ParseBudget<'a> {
             part,
         )
     }
-    #[allow(dead_code)]
     pub fn charge_cell(&mut self, part: &str) -> Result<(), VsdxError> {
         charge(&mut self.cells, 1, self.limits.max_cells, "cells", part)
     }
-    #[allow(dead_code)]
     pub fn charge_section(&mut self, part: &str) -> Result<(), VsdxError> {
         charge(
             &mut self.sections,
@@ -89,11 +87,9 @@ impl<'a> ParseBudget<'a> {
             part,
         )
     }
-    #[allow(dead_code)]
     pub fn charge_row(&mut self, part: &str) -> Result<(), VsdxError> {
         charge(&mut self.rows, 1, self.limits.max_rows, "rows", part)
     }
-    #[allow(dead_code)]
     pub fn charge_shape(&mut self, part: &str) -> Result<(), VsdxError> {
         charge(&mut self.shapes, 1, self.limits.max_shapes, "shapes", part)
     }
@@ -123,7 +119,7 @@ fn charge(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct XmlElement {
     pub name: String,
-    pub attributes: BTreeMap<String, String>,
+    pub attributes: Vec<(String, String)>,
     pub children: Vec<XmlNode>,
 }
 impl XmlElement {
@@ -131,7 +127,10 @@ impl XmlElement {
         local_name(&self.name)
     }
     pub fn attribute(&self, name: &str) -> Option<&str> {
-        self.attributes.get(name).map(String::as_str)
+        self.attributes
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
     }
     pub fn children_named<'a>(
         &'a self,
@@ -279,7 +278,8 @@ fn decode_element(
         .decode(start.name().as_ref())
         .map_err(|error| malformed(reader, part, error.to_string()))?
         .into_owned();
-    let mut attributes = BTreeMap::new();
+    let mut attributes = Vec::new();
+    let mut attribute_names = HashSet::new();
     let mut bytes = 0_usize;
     for (index, attribute) in start.attributes().enumerate() {
         if index >= budget.limits.max_attributes_per_element {
@@ -325,13 +325,14 @@ fn decode_element(
             "xmlTextBytes",
             part,
         )?;
-        if attributes.insert(key.clone(), value).is_some() {
+        if !attribute_names.insert(key.clone()) {
             return Err(malformed(
                 reader,
                 part,
                 format!("duplicate attribute {key}"),
             ));
         }
+        attributes.push((key, value));
     }
     Ok(XmlElement {
         name,

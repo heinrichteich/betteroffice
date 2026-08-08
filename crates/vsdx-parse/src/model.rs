@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Relationship;
+use crate::{Relationship, Sheet, XmlRecord};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,6 +15,12 @@ pub struct VsdxPackage {
     pub theme_part_paths: Vec<String>,
     pub windows_part_path: Option<String>,
     pub relationships: BTreeMap<String, Vec<Relationship>>,
+    pub document_sheet: Option<Sheet>,
+    pub style_sheets: Vec<Sheet>,
+    pub colors: Vec<XmlRecord>,
+    pub face_names: Vec<XmlRecord>,
+    pub page_sheets: BTreeMap<String, Sheet>,
+    pub master_sheets: BTreeMap<String, Sheet>,
     #[serde(skip)]
     pub(crate) parts: Vec<PackagePart>,
 }
