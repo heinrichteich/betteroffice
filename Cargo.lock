@@ -250,6 +250,7 @@ dependencies = [
 name = "betteroffice-vsdx-eval"
 version = "0.0.4"
 dependencies = [
+ "betteroffice-drawingml",
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-resolve",
  "thiserror",

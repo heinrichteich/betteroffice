@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use ooxml_drawingml::{ColorValue, Theme, get_theme_color, resolve_color_value_to_hex_with_theme};
 use thiserror::Error;
 use vsdx_parse::ParseLimits;
 use vsdx_resolve::{Lookup, ResolvedShape};
@@ -37,13 +38,30 @@ pub enum Unit {
     Radians,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Value {
+pub struct Number {
     pub number: f64,
     pub unit: Unit,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Color {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+    pub alpha: Option<u8>,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Value {
+    Number(Number),
+    Color(Color),
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct Evaluated {
+    pub value: Value,
+    pub guarded: bool,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub enum Evaluation {
-    Evaluated(Value),
+    Evaluated(Evaluated),
     Unsupported(String),
     Error(Diagnostic),
 }
@@ -85,20 +103,46 @@ pub fn parse(input: &str, limits: &ParseLimits) -> Result<Expr, Diagnostic> {
     Parser::new(input, limits.max_formula_depth).parse()
 }
 pub fn evaluate(input: &str, refs: &impl References, limits: &ParseLimits) -> Evaluation {
+    evaluate_with_theme(input, refs, limits, None)
+}
+/// Evaluates against the active theme selected for the shape/page by the caller.
+/// ThemeIndex and ColorSchemeIndex selection belongs to resolution, where the package is available.
+pub fn evaluate_with_theme(
+    input: &str,
+    refs: &impl References,
+    limits: &ParseLimits,
+    theme: Option<&Theme>,
+) -> Evaluation {
     match parse(input, limits) {
         Ok(expr) => Engine {
             refs,
             limits,
+            theme,
             active: HashSet::new(),
         }
         .expr(&expr, 0),
         Err(error) => Evaluation::Error(error),
     }
 }
+/// Evaluates using the shape's ThemeIndex, falling back to ColorSchemeIndex.
+pub fn evaluate_with_shape_themes(
+    input: &str,
+    refs: &impl References,
+    limits: &ParseLimits,
+    shape: &ResolvedShape,
+    themes: &BTreeMap<u32, Theme>,
+) -> Evaluation {
+    let theme = shape
+        .theme_index()
+        .or_else(|| shape.color_scheme_index())
+        .and_then(|index| themes.get(&index));
+    evaluate_with_theme(input, refs, limits, theme)
+}
 
 struct Engine<'a, R> {
     refs: &'a R,
     limits: &'a ParseLimits,
+    theme: Option<&'a Theme>,
     active: HashSet<String>,
 }
 impl<R: References> Engine<'_, R> {
@@ -107,7 +151,7 @@ impl<R: References> Engine<'_, R> {
             return err("formula depth limit exceeded");
         }
         match expr {
-            Expr::Number(n, u) => good(*n, *u),
+            Expr::Number(n, u) => number(*n, *u),
             Expr::String(_) => unsupported("string values are not display numbers"),
             Expr::Reference(name) => {
                 if !self.active.insert(name.clone()) {
@@ -123,8 +167,14 @@ impl<R: References> Engine<'_, R> {
                 self.active.remove(name);
                 result
             }
-            Expr::Unary(v) => match value(self.expr(v, depth + 1)) {
-                Ok(v) => good(-v.number, v.unit),
+            Expr::Unary(v) => match numeric(self.expr(v, depth + 1)) {
+                Ok((v, guarded)) => result(
+                    Value::Number(Number {
+                        number: -v.number,
+                        unit: v.unit,
+                    }),
+                    guarded,
+                ),
                 Err(r) => r,
             },
             Expr::Binary(a, op, b) => self.binary(a, *op, b, depth + 1),
@@ -132,39 +182,44 @@ impl<R: References> Engine<'_, R> {
         }
     }
     fn binary(&mut self, a: &Expr, op: Op, b: &Expr, d: usize) -> Evaluation {
-        let a = match value(self.expr(a, d)) {
+        let a = match numeric(self.expr(a, d)) {
             Ok(v) => v,
             Err(r) => return r,
         };
-        let b = match value(self.expr(b, d)) {
+        let b = match numeric(self.expr(b, d)) {
             Ok(v) => v,
             Err(r) => return r,
         };
+        let (a, a_guarded) = a;
+        let (b, b_guarded) = b;
+        let guarded = a_guarded || b_guarded;
         match op {
             Op::Add | Op::Sub => {
                 if a.unit != b.unit {
                     return err("incompatible units");
                 }
-                good(
+                numeric_result(
                     if op == Op::Add {
                         a.number + b.number
                     } else {
                         a.number - b.number
                     },
                     a.unit,
+                    guarded,
                 )
             }
             Op::Mul => {
                 if a.unit != Unit::Number && b.unit != Unit::Number {
                     err("cannot multiply dimensional values")
                 } else {
-                    good(
+                    numeric_result(
                         a.number * b.number,
                         if a.unit == Unit::Number {
                             b.unit
                         } else {
                             a.unit
                         },
+                        guarded,
                     )
                 }
             }
@@ -175,20 +230,21 @@ impl<R: References> Engine<'_, R> {
                 if b.unit != Unit::Number && a.unit != b.unit {
                     return err("incompatible units");
                 };
-                good(
+                numeric_result(
                     a.number / b.number,
                     if a.unit == b.unit {
                         Unit::Number
                     } else {
                         a.unit
                     },
+                    guarded,
                 )
             }
             Op::Pow => {
                 if b.unit != Unit::Number {
                     return err("exponent must be dimensionless");
                 };
-                good(a.number.powf(b.number), a.unit)
+                numeric_result(a.number.powf(b.number), a.unit, guarded)
             }
             Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
                 if a.unit != b.unit {
@@ -203,7 +259,7 @@ impl<R: References> Engine<'_, R> {
                     Op::Ge => a.number >= b.number,
                     _ => false,
                 };
-                good(if x { 1. } else { 0. }, Unit::Bool)
+                numeric_result(if x { 1. } else { 0. }, Unit::Bool, guarded)
             }
         }
     }
@@ -211,15 +267,38 @@ impl<R: References> Engine<'_, R> {
         let upper = name.to_ascii_uppercase();
         if matches!(
             upper.as_str(),
-            "GUARD" | "SETATREF" | "SETATREFEXPR" | "SETATREFEVAL" | "DEPENDSON"
+            "SETATREF" | "SETATREFEXPR" | "SETATREFEVAL" | "DEPENDSON"
         ) {
             return unsupported(format!("{upper} is outside the phase-4 evaluator"));
         }
-        let vals: Result<Vec<_>, _> = args.iter().map(|a| value(self.expr(a, d))).collect();
+        if upper == "GUARD" {
+            // Visio GUARD intercepts edits; display evaluation returns its argument. Mutation policy is phase 5.
+            return args
+                .first()
+                .map_or_else(|| err("missing argument"), |arg| guard(self.expr(arg, d)));
+        }
+        if matches!(upper.as_str(), "THEMEGUARD" | "_XFTRIGGER") {
+            // THEMEGUARD protects theme edits and _XFTRIGGER schedules recalculation; both are display-transparent.
+            return args
+                .first()
+                .map_or_else(|| err("missing argument"), |arg| self.expr(arg, d));
+        }
+        if upper == "THEMEVAL" {
+            return self.themeval(args, d);
+        }
+        if upper == "RGB" {
+            return self.rgb(args, d);
+        }
+        if matches!(upper.as_str(), "LUMDIFF" | "SHADE" | "TINT" | "SAT") {
+            return self.color_function(&upper, args, d);
+        }
+        let vals: Result<Vec<_>, _> = args.iter().map(|a| numeric(self.expr(a, d))).collect();
         let vals = match vals {
             Ok(v) => v,
             Err(r) => return r,
         };
+        let guarded = vals.iter().any(|(_, guarded)| *guarded);
+        let vals: Vec<Number> = vals.into_iter().map(|(value, _)| value).collect();
         let one = || vals.first().copied().ok_or_else(|| err("missing argument"));
         let same = || {
             if vals.iter().map(|v| v.unit).all(|u| u == vals[0].unit) {
@@ -231,30 +310,32 @@ impl<R: References> Engine<'_, R> {
         match upper.as_str() {
             "IF" if vals.len() == 3 => {
                 if vals[0].number != 0. {
-                    good(vals[1].number, vals[1].unit)
+                    numeric_result(vals[1].number, vals[1].unit, guarded)
                 } else {
-                    good(vals[2].number, vals[2].unit)
+                    numeric_result(vals[2].number, vals[2].unit, guarded)
                 }
             }
-            "AND" => good(
+            "AND" => numeric_result(
                 if vals.iter().all(|v| v.number != 0.) {
                     1.
                 } else {
                     0.
                 },
                 Unit::Bool,
+                guarded,
             ),
-            "OR" => good(
+            "OR" => numeric_result(
                 if vals.iter().any(|v| v.number != 0.) {
                     1.
                 } else {
                     0.
                 },
                 Unit::Bool,
+                guarded,
             ),
             "NOT" => one().map_or_else(
                 |r| r,
-                |v| good(if v.number == 0. { 1. } else { 0. }, Unit::Bool),
+                |v| numeric_result(if v.number == 0. { 1. } else { 0. }, Unit::Bool, guarded),
             ),
             "MIN" | "MAX" | "SUM" => {
                 if vals.is_empty() {
@@ -272,22 +353,36 @@ impl<R: References> Engine<'_, R> {
                         .map(|v| v.number)
                         .fold(f64::NEG_INFINITY, f64::max)
                 };
-                good(n, vals[0].unit)
+                numeric_result(n, vals[0].unit, guarded)
             }
-            "ABS" => one().map_or_else(|r| r, |v| good(v.number.abs(), v.unit)),
-            "INT" => one().map_or_else(|r| r, |v| good(v.number.floor(), v.unit)),
-            "TRUNC" => one().map_or_else(|r| r, |v| good(v.number.trunc(), v.unit)),
-            "SIGN" => one().map_or_else(|r| r, |v| good(v.number.signum(), Unit::Number)),
-            "ROUND" => one().map_or_else(|r| r, |v| good((v.number + 0.5).floor(), v.unit)),
-            "CEILING" => one().map_or_else(|r| r, |v| good(v.number.ceil(), v.unit)),
-            "FLOOR" => one().map_or_else(|r| r, |v| good(v.number.floor(), v.unit)),
+            "ABS" => one().map_or_else(|r| r, |v| numeric_result(v.number.abs(), v.unit, guarded)),
+            "INT" => {
+                one().map_or_else(|r| r, |v| numeric_result(v.number.floor(), v.unit, guarded))
+            }
+            "TRUNC" => {
+                one().map_or_else(|r| r, |v| numeric_result(v.number.trunc(), v.unit, guarded))
+            }
+            "SIGN" => one().map_or_else(
+                |r| r,
+                |v| numeric_result(v.number.signum(), Unit::Number, guarded),
+            ),
+            "ROUND" => one().map_or_else(
+                |r| r,
+                |v| numeric_result((v.number + 0.5).floor(), v.unit, guarded),
+            ),
+            "CEILING" => {
+                one().map_or_else(|r| r, |v| numeric_result(v.number.ceil(), v.unit, guarded))
+            }
+            "FLOOR" => {
+                one().map_or_else(|r| r, |v| numeric_result(v.number.floor(), v.unit, guarded))
+            }
             "SQRT" => one().map_or_else(
                 |r| r,
                 |v| {
                     if v.number < 0. {
                         err("square root of negative number")
                     } else {
-                        good(v.number.sqrt(), v.unit)
+                        numeric_result(v.number.sqrt(), v.unit, guarded)
                     }
                 },
             ),
@@ -297,7 +392,7 @@ impl<R: References> Engine<'_, R> {
                     if v.unit != Unit::Radians {
                         err("trigonometric argument must be an angle")
                     } else {
-                        good(
+                        numeric_result(
                             if upper == "SIN" {
                                 v.number.sin()
                             } else if upper == "COS" {
@@ -306,6 +401,7 @@ impl<R: References> Engine<'_, R> {
                                 v.number.tan()
                             },
                             Unit::Number,
+                            guarded,
                         )
                     }
                 },
@@ -314,9 +410,9 @@ impl<R: References> Engine<'_, R> {
                 if vals[0].unit != vals[1].unit {
                     return err("incompatible units");
                 }
-                good(vals[0].number.atan2(vals[1].number), Unit::Radians)
+                numeric_result(vals[0].number.atan2(vals[1].number), Unit::Radians, guarded)
             }
-            "PI" if vals.is_empty() => good(std::f64::consts::PI, Unit::Number),
+            "PI" if vals.is_empty() => numeric_result(std::f64::consts::PI, Unit::Number, guarded),
             "MOD" if vals.len() == 2 => {
                 if vals[0].unit != vals[1].unit {
                     return err("incompatible units");
@@ -324,16 +420,148 @@ impl<R: References> Engine<'_, R> {
                 if vals[1].number == 0. {
                     err("division by zero")
                 } else {
-                    good(vals[0].number.rem_euclid(vals[1].number), vals[0].unit)
+                    numeric_result(
+                        vals[0].number.rem_euclid(vals[1].number),
+                        vals[0].unit,
+                        guarded,
+                    )
                 }
             }
             _ => unsupported(format!("unsupported function {upper}")),
         }
     }
+    fn rgb(&mut self, args: &[Expr], d: usize) -> Evaluation {
+        let components: Result<Vec<_>, _> =
+            args.iter().map(|arg| numeric(self.expr(arg, d))).collect();
+        let Ok(components) = components else {
+            return components.unwrap_err();
+        };
+        if components.len() != 3 {
+            return err("RGB requires three arguments");
+        }
+        // Visio RGB takes 8-bit channels; out-of-range inputs are conservatively saturated.
+        let channel = |value: f64| value.round().clamp(0.0, 255.0) as u8;
+        result(
+            Value::Color(Color {
+                red: channel(components[0].0.number),
+                green: channel(components[1].0.number),
+                blue: channel(components[2].0.number),
+                alpha: None,
+            }),
+            components.iter().any(|(_, guarded)| *guarded),
+        )
+    }
+    fn themeval(&mut self, args: &[Expr], d: usize) -> Evaluation {
+        let Some(theme) = self.theme else {
+            return args.get(1).map_or_else(
+                || unsupported("THEMEVAL has no resolvable theme"),
+                |arg| self.expr(arg, d),
+            );
+        };
+        let Some(Expr::String(name)) = args.first() else {
+            return args.get(1).map_or_else(
+                || unsupported("THEMEVAL requires a theme value name"),
+                |arg| self.expr(arg, d),
+            );
+        };
+        let slot = match name.as_str() {
+            "BackgroundColor" => "lt1",
+            "Light" => "lt1",
+            "FillColor" => "accent1",
+            "FillColor2" => "accent2",
+            "LineColor" => "dk1",
+            "TextColor" => "dk1",
+            "AccentColor1" => "accent1",
+            "AccentColor2" => "accent2",
+            "AccentColor3" => "accent3",
+            "AccentColor4" => "accent4",
+            "AccentColor5" => "accent5",
+            "AccentColor6" => "accent6",
+            "VariantColor1" => "accent1",
+            "VariantColor2" => "accent2",
+            "VariantColor3" => "accent3",
+            "VariantColor4" => "accent4",
+            _ => {
+                return args.get(1).map_or_else(
+                    || unsupported("unresolvable THEMEVAL value"),
+                    |arg| self.expr(arg, d),
+                );
+            }
+        };
+        // Theme values use DrawingML colour slots; unknown named Visio theme values intentionally remain unsupported.
+        let color = ColorValue {
+            theme_color: Some(slot.to_ascii_lowercase()),
+            ..ColorValue::default()
+        };
+        let hex = resolve_color_value_to_hex_with_theme(Some(&color), Some(theme))
+            .or_else(|| Some(format!("#{}", get_theme_color(Some(theme), slot))));
+        hex.and_then(|hex| parse_color(&hex)).map_or_else(
+            || {
+                args.get(1).map_or_else(
+                    || unsupported("unresolvable THEMEVAL value"),
+                    |arg| self.expr(arg, d),
+                )
+            },
+            |color| result(Value::Color(color), false),
+        )
+    }
+    fn color_function(&mut self, name: &str, args: &[Expr], d: usize) -> Evaluation {
+        let Some((first, second)) = args.first().zip(args.get(1)) else {
+            return err(format!("{name} requires two arguments"));
+        };
+        let (color, color_guarded) = match color_value(self.expr(first, d)) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        if name == "LUMDIFF" {
+            let (other, other_guarded) = match color_value(self.expr(second, d)) {
+                Ok(value) => value,
+                Err(error) => return error,
+            };
+            // LUMDIFF is the absolute difference of relative luminance.
+            return numeric_result(
+                (luminance(color) - luminance(other)).abs(),
+                Unit::Number,
+                color_guarded || other_guarded,
+            );
+        }
+        let (amount, amount_guarded) = match numeric(self.expr(second, d)) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let guarded = color_guarded || amount_guarded;
+        match name {
+            "SHADE" => {
+                // Visio's exact shade transfer is undocumented here; use a conservative channel multiplier.
+                result(
+                    Value::Color(adjust_lightness(color, amount.number, false)),
+                    guarded,
+                )
+            }
+            "TINT" => {
+                // Tint linearly moves each channel toward white.
+                result(
+                    Value::Color(adjust_lightness(color, amount.number, true)),
+                    guarded,
+                )
+            }
+            "SAT" => {
+                // Saturation is scaled around luminance.
+                result(
+                    Value::Color(adjust_saturation(color, amount.number)),
+                    guarded,
+                )
+            }
+            _ => unreachable!(),
+        }
+    }
 }
-fn good(number: f64, unit: Unit) -> Evaluation {
+fn number(number: f64, unit: Unit) -> Evaluation {
+    numeric_result(number, unit, false)
+}
+fn numeric_result(number: f64, unit: Unit, guarded: bool) -> Evaluation {
     if number.is_finite() {
-        Evaluation::Evaluated(Value { number, unit })
+        result(Value::Number(Number { number, unit }), guarded)
     } else {
         err("non-finite result")
     }
@@ -346,10 +574,87 @@ fn err(message: impl Into<String>) -> Evaluation {
 fn unsupported(message: impl Into<String>) -> Evaluation {
     Evaluation::Unsupported(message.into())
 }
-fn value(result: Evaluation) -> Result<Value, Evaluation> {
+fn result(value: Value, guarded: bool) -> Evaluation {
+    Evaluation::Evaluated(Evaluated { value, guarded })
+}
+fn guard(result: Evaluation) -> Evaluation {
     match result {
-        Evaluation::Evaluated(v) => Ok(v),
+        Evaluation::Evaluated(mut value) => {
+            value.guarded = true;
+            Evaluation::Evaluated(value)
+        }
+        other => other,
+    }
+}
+fn numeric(result: Evaluation) -> Result<(Number, bool), Evaluation> {
+    match result {
+        Evaluation::Evaluated(Evaluated {
+            value: Value::Number(value),
+            guarded,
+        }) => Ok((value, guarded)),
+        Evaluation::Evaluated(_) => Err(err("colour used where a numeric value is required")),
         x => Err(x),
+    }
+}
+fn color_value(result: Evaluation) -> Result<(Color, bool), Evaluation> {
+    match result {
+        Evaluation::Evaluated(Evaluated {
+            value: Value::Color(value),
+            guarded,
+        }) => Ok((value, guarded)),
+        Evaluation::Evaluated(_) => Err(err("numeric value used where a colour is required")),
+        x => Err(x),
+    }
+}
+fn parse_color(hex: &str) -> Option<Color> {
+    let value = hex.strip_prefix('#').unwrap_or(hex);
+    if value.len() != 6 {
+        return None;
+    }
+    let packed = u32::from_str_radix(value, 16).ok()?;
+    Some(Color {
+        red: (packed >> 16) as u8,
+        green: (packed >> 8) as u8,
+        blue: packed as u8,
+        alpha: None,
+    })
+}
+fn luminance(color: Color) -> f64 {
+    (0.2126 * f64::from(color.red)
+        + 0.7152 * f64::from(color.green)
+        + 0.0722 * f64::from(color.blue))
+        / 255.0
+}
+fn adjust_lightness(color: Color, amount: f64, tint: bool) -> Color {
+    let adjust = |channel: u8| {
+        let channel = f64::from(channel);
+        (if tint {
+            channel + (255.0 - channel) * amount
+        } else {
+            channel * amount
+        })
+        .clamp(0.0, 255.0)
+        .round() as u8
+    };
+    Color {
+        red: adjust(color.red),
+        green: adjust(color.green),
+        blue: adjust(color.blue),
+        alpha: color.alpha,
+    }
+}
+fn adjust_saturation(color: Color, amount: f64) -> Color {
+    let lum = luminance(color) * 255.0;
+    let adjust = |channel: u8| {
+        (lum + (f64::from(channel) - lum) * amount)
+            .clamp(0.0, 255.0)
+            .round() as u8
+    };
+    Color {
+        red: adjust(color.red),
+        green: adjust(color.green),
+        blue: adjust(color.blue),
+        alpha: color.alpha,
     }
 }
 
@@ -589,9 +894,12 @@ mod tests {
     fn limits() -> ParseLimits {
         ParseLimits::default()
     }
-    fn number(formula: &str) -> Value {
+    fn number(formula: &str) -> Number {
         match evaluate(formula, &BTreeMap::new(), &limits()) {
-            Evaluation::Evaluated(value) => value,
+            Evaluation::Evaluated(Evaluated {
+                value: Value::Number(value),
+                ..
+            }) => value,
             value => panic!("expected value, got {value:?}"),
         }
     }
@@ -631,12 +939,144 @@ mod tests {
         assert_eq!(number("MOD(-3, 2)").number, 1.0);
         assert!((number("ATAN2(1, -1)").number - 3.0 * std::f64::consts::PI / 4.0).abs() < 1e-12);
         assert_eq!(number("ROUND(1.5)").number, 2.0);
-        for formula in ["GUARD(1)", "SETATREF(1)", "NotAFunction(1)"] {
+        for formula in ["SETATREF(1)", "NotAFunction(1)"] {
             assert!(matches!(
                 evaluate(formula, &BTreeMap::new(), &limits()),
                 Evaluation::Unsupported(_)
             ));
         }
+        assert!(matches!(
+            evaluate("GUARD(1)", &BTreeMap::new(), &limits()),
+            Evaluation::Evaluated(Evaluated { guarded: true, .. })
+        ));
+    }
+
+    fn color(formula: &str, theme: Option<&Theme>) -> Color {
+        match evaluate_with_theme(formula, &BTreeMap::new(), &limits(), theme) {
+            Evaluation::Evaluated(Evaluated {
+                value: Value::Color(value),
+                ..
+            }) => value,
+            value => panic!("expected colour, got {value:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluates_colours_and_wrappers() {
+        assert_eq!(
+            color("RGB(-1, 12.6, 300)", None),
+            Color {
+                red: 0,
+                green: 13,
+                blue: 255,
+                alpha: None
+            }
+        );
+        assert_eq!(
+            color("THEMEGUARD(RGB(1,2,3))", None),
+            Color {
+                red: 1,
+                green: 2,
+                blue: 3,
+                alpha: None
+            }
+        );
+        assert_eq!(number("_XFTRIGGER(7)").number, 7.0);
+        assert!(matches!(
+            evaluate("RGB(1,2,3)+1", &BTreeMap::new(), &limits()),
+            Evaluation::Error(_)
+        ));
+    }
+
+    #[test]
+    fn resolves_theme_values_or_uses_fallback() {
+        let mut theme = Theme::default();
+        theme.color_scheme.accent4 = "102030".to_owned();
+        assert_eq!(
+            color("THEMEVAL(\"AccentColor4\")", Some(&theme)),
+            Color {
+                red: 16,
+                green: 32,
+                blue: 48,
+                alpha: None
+            }
+        );
+        assert_eq!(
+            color("THEMEVAL(\"AccentColor4\",RGB(4,5,6))", None),
+            Color {
+                red: 4,
+                green: 5,
+                blue: 6,
+                alpha: None
+            }
+        );
+        assert!(matches!(
+            evaluate("THEMEVAL(\"AccentColor4\")", &BTreeMap::new(), &limits()),
+            Evaluation::Unsupported(_)
+        ));
+        assert_eq!(
+            color("THEMEGUARD(THEMEVAL(\"AccentColor4\"))", Some(&theme)),
+            Color {
+                red: 16,
+                green: 32,
+                blue: 48,
+                alpha: None
+            }
+        );
+    }
+
+    #[test]
+    fn selects_a_theme_from_shape_indices() {
+        let mut shape = ResolvedShape::default();
+        shape.cells.insert(
+            "ThemeIndex".into(),
+            Lookup::Found(vsdx_resolve::ResolvedCell {
+                cell: vsdx_parse::Cell {
+                    name: "ThemeIndex".into(),
+                    formula: None,
+                    value: Some("7".into()),
+                    unit: None,
+                    del: false,
+                    other_attrs: Vec::new(),
+                },
+                provenance: vsdx_resolve::Provenance::Local,
+            }),
+        );
+        let mut theme = Theme::default();
+        theme.color_scheme.accent1 = "A0B0C0".into();
+        let themes = BTreeMap::from([(7, theme)]);
+        assert_eq!(
+            evaluate_with_shape_themes(
+                "THEMEVAL(\"FillColor\")",
+                &BTreeMap::new(),
+                &limits(),
+                &shape,
+                &themes
+            ),
+            Evaluation::Evaluated(Evaluated {
+                value: Value::Color(Color {
+                    red: 160,
+                    green: 176,
+                    blue: 192,
+                    alpha: None
+                }),
+                guarded: false
+            })
+        );
+    }
+
+    #[test]
+    fn evaluates_luminance_and_shading() {
+        assert!((number("LUMDIFF(RGB(255,255,255),RGB(0,0,0))").number - 1.0).abs() < 1e-12);
+        assert_eq!(
+            color("SHADE(RGB(100,150,200),0.5)", None),
+            Color {
+                red: 50,
+                green: 75,
+                blue: 100,
+                alpha: None
+            }
+        );
     }
 
     #[test]
@@ -700,7 +1140,10 @@ mod tests {
             parsed + unsupported + failed
         );
         eprintln!("VSDX corpus parse failures: {examples:?}");
-        eprintln!("VSDX corpus unsupported functions: {unsupported_names:?}");
+        let mut top_unsupported = unsupported_names.into_iter().collect::<Vec<_>>();
+        top_unsupported
+            .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        eprintln!("VSDX corpus top unsupported constructs: {top_unsupported:?}");
         assert_eq!(
             failed, 0,
             "every corpus formula must parse or classify unsupported"
@@ -764,6 +1207,15 @@ mod tests {
                         | "SUM"
                         | "TRUNC"
                         | "SIGN"
+                        | "RGB"
+                        | "THEMEVAL"
+                        | "THEMEGUARD"
+                        | "LUMDIFF"
+                        | "SHADE"
+                        | "TINT"
+                        | "SAT"
+                        | "_XFTRIGGER"
+                        | "GUARD"
                 ) || args.iter().any(has_unsupported)
             }
             Expr::Unary(value) => has_unsupported(value),

@@ -15,6 +15,7 @@ categories = ["parser-implementations", "graphics"]
 name = "vsdx_eval"
 
 [dependencies]
+ooxml-drawingml.workspace = true
 thiserror = "2"
 vsdx-parse.workspace = true
 vsdx-resolve.workspace = true

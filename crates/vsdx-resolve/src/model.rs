@@ -56,6 +56,25 @@ pub struct ResolvedShape {
     pub sections: BTreeMap<String, ResolvedSection>,
 }
 
+impl ResolvedShape {
+    /// Returns the shape's explicit theme selection, when it has one.
+    pub fn theme_index(&self) -> Option<u32> {
+        self.index_cell("ThemeIndex")
+    }
+
+    /// Returns the shape's explicit colour-scheme selection, when it has one.
+    pub fn color_scheme_index(&self) -> Option<u32> {
+        self.index_cell("ColorSchemeIndex")
+    }
+
+    fn index_cell(&self, name: &str) -> Option<u32> {
+        match self.cells.get(name) {
+            Some(Lookup::Found(value)) => value.cell.value.as_deref()?.parse().ok(),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolvedTextToken {
     Literal(String),
