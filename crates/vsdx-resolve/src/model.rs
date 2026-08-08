@@ -37,6 +37,7 @@ pub enum Lookup {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedRow {
     pub key: String,
+    pub deleted: bool,
     pub row_type: Option<String>,
     pub cells: BTreeMap<String, Lookup>,
 }

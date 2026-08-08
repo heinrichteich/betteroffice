@@ -645,7 +645,16 @@ mod tests {
 
     #[test]
     fn enforces_exact_package_wide_sheet_budgets() {
-        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        let source = rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec()),
+            ("visio/document.xml".to_owned(), br#"<VisioDocument><DocumentSheet><Cell N='DocumentCell'/><Section N='DocumentSection'><Row IX='0'><Cell N='DocumentRowCell'/></Row></Section></DocumentSheet><StyleSheets><StyleSheet ID='1'><Cell N='StyleCell'/><Section N='StyleSection'><Row IX='0'><Cell N='StyleRowCell'/></Row></Section></StyleSheet></StyleSheets></VisioDocument>"#.to_vec()),
+            ("visio/_rels/document.xml.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/pages' Target='pages/pages.xml'/></Relationships>"#.to_vec()),
+            ("visio/pages/pages.xml".to_owned(), br#"<Pages><Page ID='1'/></Pages>"#.to_vec()),
+            ("visio/pages/_rels/pages.xml.rels".to_owned(), br#"<Relationships><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page1.xml'/></Relationships>"#.to_vec()),
+            ("visio/pages/page1.xml".to_owned(), br#"<PageContents><Cell N='PageCell'/><Section N='PageSection'><Row IX='0'><Cell N='PageRowCell'/></Row></Section><Shapes><Shape ID='1'><Cell N='ShapeCell'/><Section N='ShapeSection'><Row IX='0'><Cell N='ShapeRowCell0'/></Row><Row IX='1'><Cell N='ShapeRowCell1'/></Row></Section><Shapes><Shape ID='2'><Cell N='NestedShapeCell'/></Shape></Shapes></Shape></Shapes></PageContents>"#.to_vec()),
+        ]).unwrap();
+        // Fixture totals: 10 cells, 4 sections, 5 rows, 2 shapes.
         let limits_for = |kind: &str, value: usize| match kind {
             "cells" => ParseLimits {
                 max_cells: value,
@@ -665,15 +674,10 @@ mod tests {
             },
             _ => unreachable!(),
         };
-        for kind in ["cells", "sections", "rows", "shapes"] {
-            let mut minimum = 0;
-            while parse_vsdx_with_limits(source, &limits_for(kind, minimum)).is_err() {
-                minimum += 1;
-            }
-            assert!(minimum > 0, "fixture must exercise {kind}");
-            assert!(parse_vsdx_with_limits(source, &limits_for(kind, minimum)).is_ok());
+        for (kind, minimum) in [("cells", 10), ("sections", 4), ("rows", 5), ("shapes", 2)] {
+            assert!(parse_vsdx_with_limits(&source, &limits_for(kind, minimum)).is_ok());
             assert!(matches!(
-                parse_vsdx_with_limits(source, &limits_for(kind, minimum - 1)),
+                parse_vsdx_with_limits(&source, &limits_for(kind, minimum - 1)),
                 Err(VsdxError::ResourceLimit { kind: actual, .. }) if actual == kind
             ));
         }

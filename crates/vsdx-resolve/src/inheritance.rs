@@ -326,18 +326,19 @@ impl<'a> Resolver<'a> {
                     )
                 })
                 .collect();
-            if rows.iter().any(|(_, row)| row.is_some_and(|row| row.del)) {
+            let row = rows.iter().find_map(|(_, row)| *row);
+            let Some(row) = row else { continue };
+            if row.del {
                 out.rows.insert(
                     key.clone(),
                     ResolvedRow {
                         key,
+                        deleted: true,
                         ..Default::default()
                     },
                 );
                 continue;
             }
-            let row = rows.iter().find_map(|(_, row)| *row);
-            let Some(row) = row else { continue };
             let mut names = HashSet::new();
             for (_, row) in &rows {
                 if let Some(row) = row {
@@ -359,6 +360,7 @@ impl<'a> Resolver<'a> {
                 key.clone(),
                 ResolvedRow {
                     key,
+                    deleted: false,
                     row_type: row.row_type.clone(),
                     cells,
                 },

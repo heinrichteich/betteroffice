@@ -87,6 +87,85 @@ fn row(index: u32, cells: Vec<Cell>) -> Row {
     }
 }
 
+fn deleted_row(index: u32) -> Row {
+    Row {
+        index: Some(index),
+        name: None,
+        local_name: None,
+        row_type: None,
+        del: true,
+        children: vec![],
+        other_attrs: vec![],
+    }
+}
+
+#[test]
+fn row_deletion_uses_the_highest_priority_row_and_preserves_its_state() {
+    let mut package = package();
+    package.style_sheets = vec![sheet(
+        Some(1),
+        vec![SheetChild::Section(section(
+            "Character",
+            vec![deleted_row(0)],
+        ))],
+    )];
+
+    let mut local = shape(
+        1,
+        vec![ShapeChild::Section(section(
+            "Character",
+            vec![row(0, vec![cell("Char", "local")])],
+        ))],
+    );
+    local.text_style = Some(1);
+    let mut deleted = shape(
+        2,
+        vec![ShapeChild::Section(section(
+            "Character",
+            vec![deleted_row(0)],
+        ))],
+    );
+    deleted.text_style = Some(1);
+    let empty = shape(
+        3,
+        vec![ShapeChild::Section(section(
+            "Character",
+            vec![row(0, vec![])],
+        ))],
+    );
+    package.page_part_ids.insert("page".into(), 1);
+    package.page_contents.insert(
+        "page".into(),
+        sheet(
+            None,
+            vec![SheetChild::Shapes(vec![
+                vsdx_parse::ShapesChild::Shape(local),
+                vsdx_parse::ShapesChild::Shape(deleted),
+                vsdx_parse::ShapesChild::Shape(empty),
+            ])],
+        ),
+    );
+
+    let resolver = Resolver::new(&package);
+    let local = resolver.resolve_shape("page", 1).unwrap();
+    let local_row = &local.sections["Character"].rows["IX:0"];
+    assert!(!local_row.deleted);
+    match &local_row.cells["Char"] {
+        Lookup::Found(value) => assert_eq!(value.provenance, Provenance::Local),
+        value => panic!("expected local row cell, got {value:?}"),
+    }
+
+    let deleted = resolver.resolve_shape("page", 2).unwrap();
+    let deleted_row = &deleted.sections["Character"].rows["IX:0"];
+    assert!(deleted_row.deleted);
+    assert!(deleted_row.cells.is_empty());
+
+    let empty = resolver.resolve_shape("page", 3).unwrap();
+    let empty_row = &empty.sections["Character"].rows["IX:0"];
+    assert!(!empty_row.deleted);
+    assert!(empty_row.cells.is_empty());
+}
+
 fn found<'a>(shape: &'a crate::ResolvedShape, name: &str) -> (&'a str, Provenance) {
     match shape.cells.get(name) {
         Some(Lookup::Found(value)) => (value.cell.value.as_deref().unwrap(), value.provenance),

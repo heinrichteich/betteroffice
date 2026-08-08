@@ -147,75 +147,190 @@ fn cubic_arc(
     );
     let a0 = (start.1 - center.1).atan2(start.0 - center.0);
     let a1 = (end.1 - center.1).atan2(end.0 - center.0);
-    let mut sweep = a1 - a0;
-    if bow > 0.0 && sweep < 0.0 {
-        sweep += std::f64::consts::TAU;
-    }
-    if bow < 0.0 && sweep > 0.0 {
-        sweep -= std::f64::consts::TAU;
-    }
-    cubic_arc_segment(commands, center, radius, radius, 0.0, a0, sweep);
+    let bow_point = (
+        midpoint.0 + normal.0 * bow.abs(),
+        midpoint.1 + normal.1 * bow.abs(),
+    );
+    let bow_angle = (bow_point.1 - center.1).atan2(bow_point.0 - center.0);
+    let sweep = [
+        a1 - a0,
+        a1 - a0 + std::f64::consts::TAU,
+        a1 - a0 - std::f64::consts::TAU,
+    ]
+    .into_iter()
+    .min_by(|left, right| {
+        angle_distance(a0 + left / 2.0, bow_angle)
+            .total_cmp(&angle_distance(a0 + right / 2.0, bow_angle))
+    })
+    .unwrap();
+    cubic_arc_segment(commands, center, radius, radius, 0.0, a0, sweep / 2.0);
+    cubic_arc_segment(
+        commands,
+        center,
+        radius,
+        radius,
+        0.0,
+        a0 + sweep / 2.0,
+        sweep / 2.0,
+    );
 }
 
 fn cubic_elliptical_arc(
     commands: &mut Vec<GeometryPathCommand>,
     start: (f64, f64),
     end: (f64, f64),
-    a: f64,
-    b: f64,
+    through_x: f64,
+    through_y: f64,
     angle: f64,
-    eccentricity: f64,
+    axis_ratio: f64,
 ) {
-    let rx = a.abs();
-    let ry = (a.abs() * eccentricity.abs()).max(f64::EPSILON);
-    if rx <= f64::EPSILON || b.abs() <= f64::EPSILON {
-        commands.push(GeometryPathCommand::Line { x: end.0, y: end.1 });
+    let original_end = end;
+    let ratio = axis_ratio.abs();
+    if ratio <= f64::EPSILON {
+        commands.push(GeometryPathCommand::Line {
+            x: original_end.0,
+            y: original_end.1,
+        });
         return;
     }
+    let rotate = |point: (f64, f64)| {
+        (
+            point.0 * angle.cos() + point.1 * angle.sin(),
+            -point.0 * angle.sin() + point.1 * angle.cos(),
+        )
+    };
+    let start = rotate(start);
+    let end = rotate(end);
+    let through = rotate((through_x, through_y));
+    let metric = |point: (f64, f64)| (point.0, point.1 * ratio * ratio);
+    let delta_end = metric((end.0 - start.0, end.1 - start.1));
+    let delta_through = metric((through.0 - start.0, through.1 - start.1));
+    let determinant = 2.0 * (delta_end.0 * delta_through.1 - delta_end.1 * delta_through.0);
+    if determinant.abs() <= f64::EPSILON {
+        commands.push(GeometryPathCommand::Line {
+            x: original_end.0,
+            y: original_end.1,
+        });
+        return;
+    }
+    let squared = |point: (f64, f64)| point.0 * point.0 + ratio * ratio * point.1 * point.1;
+    let end_difference = squared(end) - squared(start);
+    let through_difference = squared(through) - squared(start);
     let center = (
-        start.0 + a * angle.cos() - b * angle.sin(),
-        start.1 + a * angle.sin() + b * angle.cos(),
+        (end_difference * delta_through.1 - delta_end.1 * through_difference) / determinant,
+        (delta_end.0 * through_difference - end_difference * delta_through.0) / determinant,
     );
+    let rx = squared((start.0 - center.0, start.1 - center.1)).sqrt();
+    if rx <= f64::EPSILON {
+        commands.push(GeometryPathCommand::Line {
+            x: original_end.0,
+            y: original_end.1,
+        });
+        return;
+    }
+    let ry = rx / ratio;
     let start_angle = ((start.1 - center.1) / ry).atan2((start.0 - center.0) / rx);
     let end_angle = ((end.1 - center.1) / ry).atan2((end.0 - center.0) / rx);
+    let through_angle = ((through.1 - center.1) / ry).atan2((through.0 - center.0) / rx);
+    let sweep = sweep_through(start_angle, end_angle, through_angle);
+    let through_sweep = if angle_distance(through_angle, start_angle) <= f64::EPSILON {
+        0.0
+    } else if sweep >= 0.0 {
+        (through_angle - start_angle).rem_euclid(std::f64::consts::TAU)
+    } else {
+        (through_angle - start_angle).rem_euclid(std::f64::consts::TAU) - std::f64::consts::TAU
+    };
+    let center = (
+        center.0 * angle.cos() - center.1 * angle.sin(),
+        center.0 * angle.sin() + center.1 * angle.cos(),
+    );
+    cubic_arc_segment(commands, center, rx, ry, angle, start_angle, through_sweep);
     cubic_arc_segment(
         commands,
         center,
         rx,
         ry,
         angle,
-        start_angle,
-        end_angle - start_angle,
+        start_angle + through_sweep,
+        sweep - through_sweep,
     );
 }
 
 fn cubic_ellipse(
     commands: &mut Vec<GeometryPathCommand>,
-    _xy: (f64, f64),
-    left: f64,
-    bottom: f64,
-    right: f64,
-    top: f64,
+    center: (f64, f64),
+    axis_x: f64,
+    axis_y: f64,
+    other_axis_x: f64,
+    other_axis_y: f64,
 ) {
-    let center = ((left + right) / 2.0, (bottom + top) / 2.0);
-    let rx = (right - left).abs() / 2.0;
-    let ry = (top - bottom).abs() / 2.0;
-    let start = (center.0 + rx, center.1);
+    let axis = (axis_x - center.0, axis_y - center.1);
+    let other_axis = (other_axis_x - center.0, other_axis_y - center.1);
+    let start = (center.0 + axis.0, center.1 + axis.1);
     commands.push(GeometryPathCommand::Move {
         x: start.0,
         y: start.1,
     });
     for quarter in 0..4 {
-        cubic_arc_segment(
+        cubic_axis_arc_segment(
             commands,
             center,
-            rx,
-            ry,
-            0.0,
+            axis,
+            other_axis,
             quarter as f64 * std::f64::consts::FRAC_PI_2,
             std::f64::consts::FRAC_PI_2,
         );
     }
+}
+
+fn angle_distance(left: f64, right: f64) -> f64 {
+    ((left - right + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI)
+        .abs()
+}
+
+fn sweep_through(start: f64, end: f64, through: f64) -> f64 {
+    let positive = (end - start).rem_euclid(std::f64::consts::TAU);
+    let to_through = (through - start).rem_euclid(std::f64::consts::TAU);
+    if to_through <= positive {
+        positive
+    } else {
+        positive - std::f64::consts::TAU
+    }
+}
+
+fn cubic_axis_arc_segment(
+    commands: &mut Vec<GeometryPathCommand>,
+    center: (f64, f64),
+    axis: (f64, f64),
+    other_axis: (f64, f64),
+    start: f64,
+    sweep: f64,
+) {
+    let k = 4.0 / 3.0 * (sweep / 4.0).tan();
+    let point = |t: f64| {
+        (
+            center.0 + axis.0 * t.cos() + other_axis.0 * t.sin(),
+            center.1 + axis.1 * t.cos() + other_axis.1 * t.sin(),
+        )
+    };
+    let tangent = |t: f64| {
+        (
+            -axis.0 * t.sin() + other_axis.0 * t.cos(),
+            -axis.1 * t.sin() + other_axis.1 * t.cos(),
+        )
+    };
+    let p0 = point(start);
+    let p1 = point(start + sweep);
+    let d0 = tangent(start);
+    let d1 = tangent(start + sweep);
+    commands.push(GeometryPathCommand::Cubic {
+        cp1x: p0.0 + k * d0.0,
+        cp1y: p0.1 + k * d0.1,
+        cp2x: p1.0 - k * d1.0,
+        cp2y: p1.1 - k * d1.1,
+        x: p1.0,
+        y: p1.1,
+    });
 }
 
 fn cubic_arc_segment(
@@ -280,6 +395,7 @@ mod tests {
     fn resolved_row(ty: &str, cells: Vec<Cell>) -> ResolvedRow {
         ResolvedRow {
             key: "IX:0".into(),
+            deleted: false,
             row_type: Some(ty.into()),
             cells: cells
                 .into_iter()
@@ -322,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn arc_to_uses_its_bow_for_cubic_controls() {
+    fn arc_to_bows_by_its_height_at_the_curve_midpoint() {
         let section = ResolvedSection {
             name: "Geometry".into(),
             deleted: false,
@@ -335,30 +451,21 @@ mod tests {
                     "IX:1".into(),
                     resolved_row(
                         "ArcTo",
-                        vec![cell("X", "2"), cell("Y", "0"), cell("A", "1")],
+                        vec![cell("X", "2"), cell("Y", "0"), cell("A", "0.5")],
                     ),
                 ),
             ]),
         };
         let geometry = realize_geometry(&section);
-        let GeometryPathCommand::Cubic {
-            cp1x,
-            cp1y,
-            cp2x,
-            cp2y,
-            x,
-            y,
-        } = geometry.commands[1]
-        else {
-            panic!("expected cubic")
-        };
-        assert!((cp1x - 0.0).abs() < 1e-12 && (cp1y + 0.5522847498307933).abs() < 1e-12);
-        assert!((cp2x - 0.44771525016920655).abs() < 1e-12 && (cp2y + 1.0).abs() < 1e-12);
-        assert!((x - 1.0).abs() < 1e-12 && (y + 1.0).abs() < 1e-12);
+        assert!(geometry.commands.iter().any(|command| matches!(
+            command,
+            GeometryPathCommand::Cubic { x, y, .. }
+                if (x - 1.0).abs() < 1e-12 && (y - 0.5).abs() < 1e-12
+        )));
     }
 
     #[test]
-    fn ellipse_uses_its_bounds_for_cubic_controls() {
+    fn ellipse_uses_center_and_axis_endpoints() {
         let section = ResolvedSection {
             name: "Geometry".into(),
             deleted: false,
@@ -367,12 +474,12 @@ mod tests {
                 resolved_row(
                     "Ellipse",
                     vec![
-                        cell("X", "0"),
-                        cell("Y", "0"),
-                        cell("A", "-1"),
-                        cell("B", "-1"),
-                        cell("C", "1"),
-                        cell("D", "1"),
+                        cell("X", "3"),
+                        cell("Y", "4"),
+                        cell("A", "5"),
+                        cell("B", "5"),
+                        cell("C", "2"),
+                        cell("D", "6"),
                     ],
                 ),
             )]),
@@ -380,22 +487,27 @@ mod tests {
         let geometry = realize_geometry(&section);
         assert!(matches!(
             geometry.commands[0],
-            GeometryPathCommand::Move { x: 1.0, y: 0.0 }
+            GeometryPathCommand::Move { x: 5.0, y: 5.0 }
         ));
-        let GeometryPathCommand::Cubic {
-            cp1x,
-            cp1y,
-            cp2x,
-            cp2y,
-            x,
-            y,
-        } = geometry.commands[1]
-        else {
-            panic!("expected cubic")
-        };
-        assert!((cp1x - 1.0).abs() < 1e-12 && (cp1y - 0.5522847498307933).abs() < 1e-12);
-        assert!((cp2x - 0.5522847498307935).abs() < 1e-12 && (cp2y - 1.0).abs() < 1e-12);
-        assert!(x.abs() < 1e-12 && (y - 1.0).abs() < 1e-12);
+        let endpoints = geometry
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                GeometryPathCommand::Move { x, y } => Some((*x, *y)),
+                GeometryPathCommand::Cubic { x, y, .. } => Some((*x, *y)),
+                GeometryPathCommand::Line { x, y } => Some((*x, *y)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(endpoints.len(), 5);
+        for (actual, expected) in
+            endpoints
+                .iter()
+                .zip([(5.0, 5.0), (2.0, 6.0), (1.0, 3.0), (4.0, 2.0), (5.0, 5.0)])
+        {
+            assert!((actual.0 - expected.0).abs() < 1e-12);
+            assert!((actual.1 - expected.1).abs() < 1e-12);
+        }
     }
 
     #[test]
@@ -426,5 +538,40 @@ mod tests {
                 cell: "D".into()
             }]
         );
+    }
+
+    #[test]
+    fn elliptical_arc_passes_through_its_control_point() {
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            rows: BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "2"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row(
+                        "EllipticalArcTo",
+                        vec![
+                            cell("X", "0"),
+                            cell("Y", "1"),
+                            cell("A", "1.4142135623730951"),
+                            cell("B", "0.7071067811865476"),
+                            cell("C", "0"),
+                            cell("D", "2"),
+                        ],
+                    ),
+                ),
+            ]),
+        };
+        let geometry = realize_geometry(&section);
+        assert!(geometry.commands.iter().any(|command| matches!(
+            command,
+            GeometryPathCommand::Cubic { x, y, .. }
+                if (x - std::f64::consts::SQRT_2).abs() < 1e-12
+                    && (y - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12
+        )));
     }
 }
