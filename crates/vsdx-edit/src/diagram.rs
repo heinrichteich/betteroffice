@@ -476,6 +476,7 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
                     value: map_string(&cell, &txn, "value"),
                 });
             }
+            snapshots.sort_by(|left, right| left.name.cmp(&right.name));
             shapes.push(ShapeSnapshot {
                 id: shape_id,
                 source_id: map_number(&shape, &txn, "sourceId")

@@ -547,4 +547,128 @@ mod tests {
     fn state_vectors_are_limited_before_decode() {
         assert!(decode_state_vector_v1(&vec![0; MAX_STATE_VECTOR_BYTES + 1]).is_err());
     }
+
+    #[test]
+    fn peers_converge_after_exchanging_updates() {
+        let seed = session();
+        add_cell(&seed, "Width", Some("1"), None);
+        add_cell(&seed, "PinX", Some("1"), None);
+        let state = seed.encode_state_as_update_v1();
+        let left = DiagramSession::open_from_update(&state, 11).unwrap();
+        let right = DiagramSession::open_from_update(&state, 12).unwrap();
+        left.set_cell_formula(
+            &EditCtx::local("left"),
+            "page:1",
+            "page:1:shape:1",
+            "Width",
+            "2",
+        )
+        .unwrap();
+        right
+            .set_cell_formula(
+                &EditCtx::local("right"),
+                "page:1",
+                "page:1:shape:1",
+                "PinX",
+                "3",
+            )
+            .unwrap();
+        let left_update = left
+            .encode_diff_v1(&right.encode_state_vector_v1())
+            .unwrap();
+        let right_update = right
+            .encode_diff_v1(&left.encode_state_vector_v1())
+            .unwrap();
+        left.apply_update_v1(&right_update).unwrap();
+        right.apply_update_v1(&left_update).unwrap();
+        assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+    }
+
+    #[test]
+    fn shared_seed_is_identical_for_distinct_clients() {
+        let source = include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx");
+        let first = DiagramSession::open(source, 17).unwrap();
+        let second = DiagramSession::open(source, 18).unwrap();
+        assert_eq!(
+            first.encode_state_as_update_v1(),
+            second.encode_state_as_update_v1()
+        );
+    }
+
+    #[test]
+    fn undo_keeps_remote_edits() {
+        let seed = session();
+        add_cell(&seed, "Width", Some("1"), None);
+        add_cell(&seed, "PinX", Some("1"), None);
+        let state = seed.encode_state_as_update_v1();
+        let local = DiagramSession::open_from_update(&state, 21).unwrap();
+        let remote = DiagramSession::open_from_update(&state, 22).unwrap();
+        local
+            .set_cell_formula(
+                &EditCtx::local("local"),
+                "page:1",
+                "page:1:shape:1",
+                "Width",
+                "2",
+            )
+            .unwrap();
+        local.add_undo_barrier();
+        remote
+            .set_cell_formula(
+                &EditCtx::local("remote"),
+                "page:1",
+                "page:1:shape:1",
+                "PinX",
+                "3",
+            )
+            .unwrap();
+        local
+            .apply_update_v1(
+                &remote
+                    .encode_diff_v1(&local.encode_state_vector_v1())
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(local.undo());
+        let cells = &local.snapshot().unwrap().pages[0].shapes[0].cells;
+        assert_eq!(
+            cells
+                .iter()
+                .find(|cell| cell.name == "Width")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            cells
+                .iter()
+                .find(|cell| cell.name == "PinX")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("3")
+        );
+    }
+
+    #[test]
+    fn malformed_updates_and_vectors_leave_the_document_unchanged() {
+        let session = session();
+        let before = session.encode_state_as_update_v1();
+        let mut trailing = before.clone();
+        trailing.push(0);
+        assert!(session.apply_update_v1(&trailing).is_err());
+        assert!(
+            session
+                .apply_update_v1(&vec![0; MAX_UPDATE_BYTES + 1])
+                .is_err()
+        );
+        assert!(session.encode_diff_v1(&[0, 0]).is_err());
+        assert!(
+            session
+                .encode_diff_v1(&vec![0; MAX_STATE_VECTOR_BYTES + 1])
+                .is_err()
+        );
+        assert_eq!(before, session.encode_state_as_update_v1());
+    }
 }
