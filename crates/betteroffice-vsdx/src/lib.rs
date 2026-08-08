@@ -1,6 +1,9 @@
 //! Typed native facade for inspecting VSDX diagrams.
 
-use vsdx_eval::{Evaluation, MutationContext, MutationOutcome, Value, decide_mutation, evaluate};
+use vsdx_eval::{
+    DocumentReferences, Evaluation, MutationContext, MutationOutcome, Value, decide_mutation,
+    evaluate,
+};
 use vsdx_parse::{Cell, ParseLimits, Shape, VsdxError, VsdxPackage};
 pub use vsdx_parse::{CellLocator, CellRow, CellSheet, MutationGesture, SemanticCellEdit};
 use vsdx_resolve::{ResolveError, ResolvedShape, Resolver};
@@ -66,12 +69,7 @@ impl Diagram {
                 formula,
                 &ParseLimits::default(),
             ) {
-                MutationOutcome::Allowed { target, formula }
-                | MutationOutcome::Redirected {
-                    to: target,
-                    formula,
-                    ..
-                } => {
+                MutationOutcome::Allowed { target, formula } => {
                     let value = context.evaluate_formula(&target, &formula)?;
                     resolved.push(SemanticCellEdit {
                         locator: target,
@@ -138,22 +136,53 @@ impl PackageMutationContext<'_> {
 
     fn evaluate_formula(&self, locator: &CellLocator, formula: &str) -> Result<String> {
         let resolver = Resolver::new(self.package);
-        let CellSheet::Page(_) = locator.sheet else {
-            return Err(Error::Policy(
-                "formula cache updates currently require a page ShapeSheet".to_owned(),
-            ));
+        let evaluation = match (&locator.sheet, locator.shape_id) {
+            (CellSheet::Page(_), Some(shape_id)) => {
+                let page = sheet_path(self.package, &locator.sheet).map_err(Error::Policy)?;
+                let references = vsdx_eval::PageShapeReferences::new(&resolver, &page)
+                    .map_err(|error| Error::Policy(error.to_string()))?;
+                evaluate(
+                    formula.trim_start_matches('='),
+                    &references.for_shape(shape_id),
+                    &ParseLimits::default(),
+                )
+            }
+            (CellSheet::Page(page_id), None) => {
+                let page = resolver.resolve_sheet(
+                    self.package
+                        .page_sheets
+                        .get(page_id)
+                        .ok_or_else(|| Error::Policy("page sheet does not exist".to_owned()))?,
+                )?;
+                let document = self
+                    .package
+                    .document_sheet
+                    .as_ref()
+                    .map(|sheet| resolver.resolve_sheet(sheet))
+                    .transpose()?;
+                evaluate(
+                    formula.trim_start_matches('='),
+                    &DocumentReferences::new(&page, document.as_ref()),
+                    &ParseLimits::default(),
+                )
+            }
+            (CellSheet::Document, None) => {
+                let document =
+                    resolver.resolve_sheet(self.package.document_sheet.as_ref().ok_or_else(
+                        || Error::Policy("document sheet does not exist".to_owned()),
+                    )?)?;
+                evaluate(
+                    formula.trim_start_matches('='),
+                    &DocumentReferences::new(&document, Some(&document)),
+                    &ParseLimits::default(),
+                )
+            }
+            (CellSheet::Master(_), _) | (CellSheet::Document, Some(_)) => {
+                return Err(Error::Policy(
+                    "formula cache updates do not support this sheet identity".to_owned(),
+                ));
+            }
         };
-        let shape_id = locator.shape_id.ok_or_else(|| {
-            Error::Policy("formula cache updates require a shape cell".to_owned())
-        })?;
-        let page = sheet_path(self.package, &locator.sheet).map_err(Error::Policy)?;
-        let references = vsdx_eval::PageShapeReferences::new(&resolver, &page)
-            .map_err(|error| Error::Policy(error.to_string()))?;
-        let evaluation = evaluate(
-            formula.trim_start_matches('='),
-            &references.for_shape(shape_id),
-            &ParseLimits::default(),
-        );
         match evaluation {
             Evaluation::Evaluated(value) => match value.value {
                 Value::Number(number) => Ok(number.number.to_string()),
@@ -232,7 +261,34 @@ impl MutationContext for PackageMutationContext<'_> {
         else {
             return Ok(false);
         };
-        Ok(cell.value.as_deref().is_some_and(|value| value != "0"))
+        let expression = cell
+            .formula
+            .as_deref()
+            .or(cell.value.as_deref())
+            .ok_or_else(|| {
+                format!("cannot evaluate {lock}: it has neither a formula nor a value")
+            })?;
+        let value = self
+            .evaluate_formula(
+                &CellLocator {
+                    sheet: locator.sheet.clone(),
+                    shape_id: locator.shape_id,
+                    section: None,
+                    row: None,
+                    cell_name: lock.to_owned(),
+                },
+                expression,
+            )
+            .map_err(|error| match error {
+                Error::Policy(reason) => format!("cannot evaluate {lock}: {reason}"),
+                Error::Parse(error) => error.to_string(),
+                Error::Resolve(error) => error.to_string(),
+            })?;
+        match value.as_str() {
+            "0" => Ok(false),
+            "1" => Ok(true),
+            _ => Err(format!("cannot evaluate {lock} as a boolean")),
+        }
     }
 }
 

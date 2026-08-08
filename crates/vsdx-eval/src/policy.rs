@@ -8,11 +8,6 @@ pub enum MutationOutcome {
         target: CellLocator,
         formula: String,
     },
-    Redirected {
-        from: CellLocator,
-        to: CellLocator,
-        formula: String,
-    },
     Refused {
         reason: String,
     },
@@ -36,78 +31,103 @@ pub fn decide(
     formula: String,
     limits: &ParseLimits,
 ) -> MutationOutcome {
+    const MAX_SETATREF_HOPS: usize = 10;
     let Some(lock) = lock_for(gesture) else {
         return MutationOutcome::Unsupported {
             reason: "structural edits are deferred to phase 5b-2".to_owned(),
         };
     };
-    match context.lock_enabled(&locator, lock) {
-        Ok(true) => {
+    let mut current = locator;
+    let mut visited = vec![current.clone()];
+    for hops in 0..=MAX_SETATREF_HOPS {
+        match context.lock_enabled(&current, lock) {
+            Ok(true) => {
+                return MutationOutcome::Refused {
+                    reason: format!("{lock} protects this {} gesture", gesture_name(gesture)),
+                };
+            }
+            Ok(false) => {}
+            Err(reason) => return MutationOutcome::Unsupported { reason },
+        }
+        let existing = match context.current_formula(&current) {
+            Ok(value) => value,
+            Err(reason) => return MutationOutcome::Unsupported { reason },
+        };
+        let Some(existing) = existing else {
+            return MutationOutcome::Allowed {
+                target: current,
+                formula,
+            };
+        };
+        let expression = match parse(existing.trim_start_matches('='), limits) {
+            Ok(expression) => expression,
+            Err(error) => {
+                return MutationOutcome::Unsupported {
+                    reason: format!("cannot inspect existing formula: {}", error.message),
+                };
+            }
+        };
+        if contains_call(&expression, "GUARD") {
             return MutationOutcome::Refused {
-                reason: format!("{lock} protects this {} gesture", gesture_name(gesture)),
+                reason: "GUARD protects the requested cell".to_owned(),
             };
         }
-        Ok(false) => {}
-        Err(reason) => return MutationOutcome::Unsupported { reason },
-    }
-    let existing = match context.current_formula(&locator) {
-        Ok(value) => value,
-        Err(reason) => return MutationOutcome::Unsupported { reason },
-    };
-    let Some(existing) = existing else {
-        return MutationOutcome::Allowed {
-            target: locator,
-            formula,
-        };
-    };
-    let expression = match parse(existing.trim_start_matches('='), limits) {
-        Ok(expression) => expression,
-        Err(error) => {
+        if contains_call(&expression, "SETATREFEXPR") || contains_call(&expression, "SETATREFEVAL")
+        {
             return MutationOutcome::Unsupported {
-                reason: format!("cannot inspect existing formula: {}", error.message),
+                reason: "SETATREFEXPR/SETATREFEVAL transformations are not implemented".to_owned(),
             };
         }
-    };
-    if contains_call(&expression, "GUARD") {
-        return MutationOutcome::Refused {
-            reason: "GUARD protects the requested cell".to_owned(),
+        let Expr::Call(name, arguments) = expression else {
+            if contains_call(&expression, "SETATREF") {
+                return MutationOutcome::Unsupported {
+                    reason: "SETATREF is only supported as the complete cell formula".to_owned(),
+                };
+            }
+            return MutationOutcome::Allowed {
+                target: current,
+                formula,
+            };
         };
+        if !name.eq_ignore_ascii_case("SETATREF") {
+            if contains_call(&Expr::Call(name, arguments), "SETATREF") {
+                return MutationOutcome::Unsupported {
+                    reason: "SETATREF is only supported as the complete cell formula".to_owned(),
+                };
+            }
+            return MutationOutcome::Allowed {
+                target: current,
+                formula,
+            };
+        }
+        let Some(Expr::Reference(reference)) = arguments.first() else {
+            return MutationOutcome::Unsupported {
+                reason: "SETATREF requires a cell-reference first argument".to_owned(),
+            };
+        };
+        if arguments.len() != 1 {
+            return MutationOutcome::Unsupported {
+                reason: "SETATREF set_expression handling is not implemented".to_owned(),
+            };
+        }
+        if hops == MAX_SETATREF_HOPS {
+            return MutationOutcome::Unsupported {
+                reason: "SETATREF redirect depth exceeds 10 hops".to_owned(),
+            };
+        }
+        let to = match context.resolve_reference(&current, reference) {
+            Ok(to) => to,
+            Err(reason) => return MutationOutcome::Unsupported { reason },
+        };
+        if visited.contains(&to) {
+            return MutationOutcome::Unsupported {
+                reason: "SETATREF redirect cycle detected".to_owned(),
+            };
+        }
+        visited.push(to.clone());
+        current = to;
     }
-    if contains_call(&expression, "SETATREFEXPR") || contains_call(&expression, "SETATREFEVAL") {
-        return MutationOutcome::Unsupported {
-            reason: "SETATREFEXPR/SETATREFEVAL transformations are not implemented".to_owned(),
-        };
-    }
-    let Expr::Call(name, arguments) = expression else {
-        return MutationOutcome::Allowed {
-            target: locator,
-            formula,
-        };
-    };
-    if !name.eq_ignore_ascii_case("SETATREF") {
-        return MutationOutcome::Allowed {
-            target: locator,
-            formula,
-        };
-    }
-    let Some(Expr::Reference(reference)) = arguments.first() else {
-        return MutationOutcome::Unsupported {
-            reason: "SETATREF requires a cell-reference first argument".to_owned(),
-        };
-    };
-    if arguments.len() != 1 {
-        return MutationOutcome::Unsupported {
-            reason: "SETATREF set_expression handling is not implemented".to_owned(),
-        };
-    }
-    match context.resolve_reference(&locator, reference) {
-        Ok(to) => MutationOutcome::Redirected {
-            from: locator,
-            to,
-            formula,
-        },
-        Err(reason) => MutationOutcome::Unsupported { reason },
-    }
+    unreachable!("redirect loop has a bounded return path")
 }
 
 fn contains_call(expression: &Expr, wanted: &str) -> bool {
@@ -134,7 +154,7 @@ fn lock_for(gesture: MutationGesture) -> Option<&'static str> {
         MutationGesture::ResizeAspect => Some("LockAspect"),
         MutationGesture::TextEdit => Some("LockTextEdit"),
         MutationGesture::Format => Some("LockFormat"),
-        MutationGesture::Delete => Some("LockDelete"),
+        MutationGesture::Delete => None,
     }
 }
 
@@ -220,7 +240,6 @@ mod tests {
             ("LockAspect", MutationGesture::ResizeAspect),
             ("LockTextEdit", MutationGesture::TextEdit),
             ("LockFormat", MutationGesture::Format),
-            ("LockDelete", MutationGesture::Delete),
         ] {
             let context = Context {
                 formulas: BTreeMap::new(),
@@ -247,5 +266,113 @@ mod tests {
                 MutationOutcome::Allowed { .. }
             ));
         }
+    }
+
+    #[test]
+    fn rejects_setatref_anywhere_except_a_single_root_redirect() {
+        for formula in [
+            "SETATREF(Target)+1",
+            "SETATREF(Target)+SETATREF(Other)",
+            "IF(1, SETATREF(Target), 0)",
+        ] {
+            let context = Context {
+                formulas: [("Width".to_owned(), formula.to_owned())]
+                    .into_iter()
+                    .collect(),
+                locks: BTreeSet::new(),
+            };
+            assert!(matches!(
+                decide(
+                    &context,
+                    locator(),
+                    MutationGesture::ResizeWidth,
+                    "2".to_owned(),
+                    &ParseLimits::default()
+                ),
+                MutationOutcome::Unsupported { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn rechecks_policy_at_each_redirect_target() {
+        let context = Context {
+            formulas: [
+                ("Width".to_owned(), "SETATREF(Target)".to_owned()),
+                ("Target".to_owned(), "GUARD(1)".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            locks: BTreeSet::new(),
+        };
+        assert!(matches!(
+            decide(
+                &context,
+                locator(),
+                MutationGesture::ResizeWidth,
+                "2".to_owned(),
+                &ParseLimits::default()
+            ),
+            MutationOutcome::Refused { .. }
+        ));
+    }
+
+    #[test]
+    fn resolves_redirect_chains_and_rejects_cycles_and_excessive_depth() {
+        let context = Context {
+            formulas: [
+                ("Width".to_owned(), "SETATREF(A)".to_owned()),
+                ("A".to_owned(), "SETATREF(B)".to_owned()),
+                ("B".to_owned(), "3".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            locks: BTreeSet::new(),
+        };
+        assert!(matches!(
+            decide(&context, locator(), MutationGesture::ResizeWidth, "2".to_owned(), &ParseLimits::default()),
+            MutationOutcome::Allowed { target, .. } if target.cell_name == "B"
+        ));
+
+        let cycle = Context {
+            formulas: [
+                ("Width".to_owned(), "SETATREF(A)".to_owned()),
+                ("A".to_owned(), "SETATREF(Width)".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            locks: BTreeSet::new(),
+        };
+        assert!(matches!(
+            decide(
+                &cycle,
+                locator(),
+                MutationGesture::ResizeWidth,
+                "2".to_owned(),
+                &ParseLimits::default()
+            ),
+            MutationOutcome::Unsupported { .. }
+        ));
+
+        let mut formulas = BTreeMap::new();
+        formulas.insert("Width".to_owned(), "SETATREF(A0)".to_owned());
+        for index in 0..10 {
+            formulas.insert(format!("A{index}"), format!("SETATREF(A{})", index + 1));
+        }
+        formulas.insert("A10".to_owned(), "3".to_owned());
+        let too_deep = Context {
+            formulas,
+            locks: BTreeSet::new(),
+        };
+        assert!(matches!(
+            decide(
+                &too_deep,
+                locator(),
+                MutationGesture::ResizeWidth,
+                "2".to_owned(),
+                &ParseLimits::default()
+            ),
+            MutationOutcome::Unsupported { .. }
+        ));
     }
 }
