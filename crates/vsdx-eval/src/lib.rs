@@ -1283,6 +1283,8 @@ mod tests {
         let mut errors = 0_usize;
         let mut total = 0_usize;
         let mut unsupported_names = BTreeMap::new();
+        let mut error_kinds = BTreeMap::<String, usize>::new();
+        let mut unresolved_references = BTreeMap::<String, usize>::new();
         for file in files {
             let path = directory.join(file);
             let package = parse_vsdx(&fs::read(&path).expect("read corpus file"))
@@ -1308,7 +1310,11 @@ mod tests {
                     match evaluate(formula, &BTreeMap::<String, String>::new(), &limits()) {
                         Evaluation::Evaluated(_) => {}
                         Evaluation::Unsupported(_) => eval_unsupported += 1,
-                        Evaluation::Error(_) => errors += 1,
+                        Evaluation::Error(error) => {
+                            errors += 1;
+                            let kind = classify_error(&error.message, &mut unresolved_references);
+                            *error_kinds.entry(kind).or_default() += 1;
+                        }
                     }
                 }
             }
@@ -1320,7 +1326,49 @@ mod tests {
         top_unsupported
             .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
         eprintln!("VSDX corpus top unsupported constructs: {top_unsupported:?}");
+        let mut top_errors = error_kinds.into_iter().collect::<Vec<_>>();
+        top_errors.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        top_errors.truncate(15);
+        eprintln!("VSDX corpus top error kinds: {top_errors:?}");
+        let mut top_references = unresolved_references.into_iter().collect::<Vec<_>>();
+        top_references
+            .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        top_references.truncate(15);
+        eprintln!("VSDX corpus top unresolved references: {top_references:?}");
         assert_eq!(total, 6_992, "corpus formula denominator changed");
+    }
+
+    fn classify_error(
+        message: &str,
+        unresolved_references: &mut BTreeMap<String, usize>,
+    ) -> String {
+        if let Some(name) = message.strip_prefix("unresolved reference ") {
+            *unresolved_references.entry(name.to_owned()).or_default() += 1;
+            if name.starts_with("Sheet.")
+                || matches!(name.split_once('!'), Some(("ThePage" | "TheDoc", _)))
+            {
+                return format!("unresolved cross-sheet reference: {name}");
+            }
+            return format!("unresolved cell reference: {name}");
+        }
+        if message == "colour used where a numeric value is required"
+            || message == "numeric value used where a colour is required"
+        {
+            return format!("type error: {message}");
+        }
+        if message == "missing argument" || message.contains(" requires ") {
+            return format!("arity error: {message}");
+        }
+        if message.contains("unit")
+            || message.contains("dimensional")
+            || message.contains("trigonometric argument")
+        {
+            return format!("unit/dimension error: {message}");
+        }
+        if message.contains("limit exceeded") {
+            return format!("budget/depth/step exceeded: {message}");
+        }
+        format!("other: {message}")
     }
 
     fn formulas(sheet: &Sheet) -> Vec<&str> {
