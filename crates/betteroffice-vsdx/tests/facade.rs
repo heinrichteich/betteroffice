@@ -1,4 +1,6 @@
-use betteroffice_vsdx::{CellLocator, CellSheet, Diagram, MutationGesture, SemanticCellEdit};
+use betteroffice_vsdx::{
+    CellLocator, CellSheet, Diagram, MutationGesture, SemanticCellEdit, StructuralEdit,
+};
 use ooxml_opc::{rezip_parts, unzip_parts};
 use std::collections::BTreeMap;
 
@@ -403,4 +405,132 @@ fn saves_a_semantic_cell_edit_without_source_spans() {
                 && cell.value.as_deref() == Some("42")
         })
     }));
+}
+
+#[test]
+fn mixed_cell_and_structural_edits_are_atomic() {
+    let (_, diagram, page_id) = diagram_with_page(
+        "<PageContents><Shapes><Shape ID='1'><Cell N='Width' V='1'/></Shape></Shapes></PageContents>",
+    );
+    let saved = diagram
+        .save_edits(
+            &[edit(page_id, 1, "Width", "2", MutationGesture::ResizeWidth)],
+            &[StructuralEdit::AddShape {
+                page_id,
+                shape_xml: b"<Shape><Cell N='Width' V='3'/></Shape>".to_vec(),
+            }],
+        )
+        .unwrap();
+    let reopened = Diagram::open(&saved).unwrap();
+    assert_eq!(reopened.pages().next().unwrap().shapes().count(), 2);
+    let page = reopened.pages().next().unwrap();
+    let first = page.shapes().next().unwrap();
+    assert!(first.model().cells().any(|cell| {
+        cell.name == "Width"
+            && cell.formula.as_deref() == Some("2")
+            && cell.value.as_deref() == Some("2")
+    }));
+
+    let (locked_source, locked, page_id) = diagram_with_page(
+        "<PageContents><Shapes><Shape ID='1'><Cell N='Width' V='1'/><Cell N='LockDelete' F='1' V='1'/></Shape></Shapes></PageContents>",
+    );
+    assert!(
+        locked
+            .save_edits(
+                &[edit(page_id, 1, "Width", "2", MutationGesture::ResizeWidth)],
+                &[StructuralEdit::DeleteShape {
+                    page_id,
+                    shape_id: 1,
+                }],
+            )
+            .is_err()
+    );
+    assert_eq!(
+        locked
+            .package()
+            .part_bytes("visio/pages/page1.xml")
+            .unwrap(),
+        parts(&locked_source)["visio/pages/page1.xml"]
+    );
+}
+
+#[test]
+fn lock_delete_refusals_leave_the_facade_package_unchanged() {
+    let local = "<PageContents><Shapes><Shape ID='1'><Cell N='LockDelete' F='1' V='1'/></Shape></Shapes></PageContents>";
+    let (_, diagram, page_id) = diagram_with_page(local);
+    let before = diagram
+        .package()
+        .part_bytes("visio/pages/page1.xml")
+        .unwrap()
+        .to_vec();
+    assert!(
+        diagram
+            .save_structural_edits(&[StructuralEdit::DeleteShape {
+                page_id,
+                shape_id: 1
+            }])
+            .is_err()
+    );
+    assert_eq!(
+        diagram
+            .package()
+            .part_bytes("visio/pages/page1.xml")
+            .unwrap(),
+        before
+    );
+
+    let (_, diagram, page_id) = diagram_with_parts(&[
+        (
+            "visio/pages/page1.xml",
+            "<PageContents><Shapes><Shape ID='1' Master='1' MasterShape='10'/></Shapes></PageContents>",
+        ),
+        (
+            "visio/masters/master1.xml",
+            "<MasterContents><Shapes><Shape ID='10'><Cell N='LockDelete' F='1' V='1'/></Shape></Shapes></MasterContents>",
+        ),
+    ]);
+    let before = diagram
+        .package()
+        .part_bytes("visio/pages/page1.xml")
+        .unwrap()
+        .to_vec();
+    assert!(
+        diagram
+            .save_structural_edits(&[StructuralEdit::DeleteShape {
+                page_id,
+                shape_id: 1
+            }])
+            .is_err()
+    );
+    assert_eq!(
+        diagram
+            .package()
+            .part_bytes("visio/pages/page1.xml")
+            .unwrap(),
+        before
+    );
+
+    let (_, diagram, page_id) = diagram_with_page(
+        "<PageContents><Shapes><Shape ID='1'><Cell N='LockDelete' F='Unknown(1)' V='0'/></Shape></Shapes></PageContents>",
+    );
+    let before = diagram
+        .package()
+        .part_bytes("visio/pages/page1.xml")
+        .unwrap()
+        .to_vec();
+    assert!(
+        diagram
+            .save_structural_edits(&[StructuralEdit::DeleteShape {
+                page_id,
+                shape_id: 1
+            }])
+            .is_err()
+    );
+    assert_eq!(
+        diagram
+            .package()
+            .part_bytes("visio/pages/page1.xml")
+            .unwrap(),
+        before
+    );
 }

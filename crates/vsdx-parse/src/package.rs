@@ -65,7 +65,21 @@ pub enum MutationGesture {
 /// A page-local structural change applied atomically with any cell edits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StructuralEdit {
-    DeleteShape { page_id: u32, shape_id: u32 },
+    /// Inserts a complete Shape fragment using the next unused page-local ID.
+    AddShape {
+        page_id: u32,
+        shape_xml: Vec<u8>,
+    },
+    DeleteShape {
+        page_id: u32,
+        shape_id: u32,
+    },
+    /// Moves a shape before `before_shape_id`, or to the end when it is absent.
+    ReorderShape {
+        page_id: u32,
+        shape_id: u32,
+        before_shape_id: Option<u32>,
+    },
 }
 
 type PendingInsertion = (crate::SourceSpan, u8, Vec<(CellAttribute, String)>);
@@ -764,9 +778,13 @@ pub fn save_structural_edits(
     package: &VsdxPackage,
     edits: &[StructuralEdit],
 ) -> Result<Vec<u8>, VsdxError> {
-    let mut by_part: BTreeMap<String, HashSet<u32>> = BTreeMap::new();
+    let mut by_part: BTreeMap<String, Vec<&StructuralEdit>> = BTreeMap::new();
     for edit in edits {
-        let StructuralEdit::DeleteShape { page_id, shape_id } = edit;
+        let page_id = match edit {
+            StructuralEdit::AddShape { page_id, .. }
+            | StructuralEdit::DeleteShape { page_id, .. }
+            | StructuralEdit::ReorderShape { page_id, .. } => page_id,
+        };
         let path = package
             .page_part_ids
             .iter()
@@ -775,10 +793,10 @@ pub fn save_structural_edits(
                 part: page_id.to_string(),
                 message: "page does not exist".to_owned(),
             })?;
-        by_part.entry(path).or_default().insert(*shape_id);
+        by_part.entry(path).or_default().push(edit);
     }
     let mut output = package.clone();
-    for (path, deleted) in by_part {
+    for (path, part_edits) in by_part {
         let part = package
             .parts
             .iter()
@@ -787,42 +805,225 @@ pub fn save_structural_edits(
                 part: path.clone(),
                 message: "part does not exist".to_owned(),
             })?;
-        let shapes =
-            direct_child(part, "Shapes", None).ok_or_else(|| VsdxError::InvalidCellEdit {
-                part: path.clone(),
-                message: "page has no Shapes container".to_owned(),
-            })?;
-        let mut replacements = vec![container_without(part, shapes, "Shape", |shape| {
-            shape
-                .attributes
-                .get("ID")
-                .and_then(|attribute| attribute_value(&part.bytes, attribute))
-                .and_then(|value| value.parse::<u32>().ok())
-                .is_some_and(|id| deleted.contains(&id))
-        })?];
-        if let Some(connects) = direct_child(part, "Connects", None) {
-            replacements.push(container_without(part, connects, "Connect", |connect| {
-                ["FromSheet", "ToSheet"].iter().any(|name| {
-                    connect
-                        .attributes
-                        .get(*name)
-                        .and_then(|attribute| attribute_value(&part.bytes, attribute))
-                        .and_then(|value| value.parse::<u32>().ok())
-                        .is_some_and(|id| deleted.contains(&id))
-                })
-            })?);
+        direct_child(part, "Shapes", None).ok_or_else(|| VsdxError::InvalidCellEdit {
+            part: path.clone(),
+            message: "page has no Shapes container".to_owned(),
+        })?;
+        let mut bytes = part.bytes.clone();
+        for edit in part_edits {
+            let current = PackagePart {
+                path: path.clone(),
+                bytes: bytes.clone(),
+                spans: scan_element_spans(&bytes)?,
+            };
+            let shapes =
+                direct_child(&current, "Shapes", None).expect("validated Shapes container");
+            let replacement = match edit {
+                StructuralEdit::AddShape { shape_xml, .. } => {
+                    add_shape(&current, shapes, shape_xml)?
+                }
+                StructuralEdit::DeleteShape { shape_id, .. } => {
+                    delete_shape(&current, shapes, *shape_id)?
+                }
+                StructuralEdit::ReorderShape {
+                    shape_id,
+                    before_shape_id,
+                    ..
+                } => reorder_shape(&current, shapes, *shape_id, *before_shape_id)?,
+            };
+            bytes = apply_span_edits(&bytes, &replacement)?;
         }
         let target = output
             .parts
             .iter_mut()
             .find(|part| part.path == path)
             .expect("validated source part");
-        target.bytes = apply_span_edits(&target.bytes, &replacements)?;
+        target.bytes = bytes;
     }
     let bytes = write_vsdx(&output)?;
     let reparsed = parse_vsdx(&bytes)?;
     validate_structure(&reparsed)?;
     Ok(bytes)
+}
+
+fn shape_children<'a>(
+    part: &'a PackagePart,
+    shapes: &crate::ElementSpan,
+) -> Vec<&'a crate::ElementSpan> {
+    let mut children: Vec<_> = part
+        .spans
+        .iter()
+        .filter(|candidate| {
+            local_name(&candidate.name) == "Shape"
+                && nearest_parent(part, candidate.span, &shapes.name)
+                    .is_some_and(|parent| parent.span == shapes.span)
+        })
+        .collect();
+    children.sort_by_key(|shape| shape.span.offset);
+    children
+}
+
+fn shape_id(part: &PackagePart, shape: &crate::ElementSpan) -> Option<u32> {
+    shape
+        .attributes
+        .get("ID")
+        .and_then(|attribute| attribute_value(&part.bytes, attribute))
+        .and_then(|value| value.parse().ok())
+}
+
+fn add_shape(
+    part: &PackagePart,
+    shapes: &crate::ElementSpan,
+    fragment: &[u8],
+) -> Result<Vec<SpanEdit>, VsdxError> {
+    let fragment_spans = scan_element_spans(fragment)?;
+    let root = fragment_spans
+        .iter()
+        .find(|span| span.span.offset == 0 && local_name(&span.name) == "Shape")
+        .ok_or_else(|| VsdxError::InvalidCellEdit {
+            part: part.path.clone(),
+            message: "new shape must be one complete Shape element".to_owned(),
+        })?;
+    if root.span.end() != Some(fragment.len()) {
+        return Err(VsdxError::InvalidCellEdit {
+            part: part.path.clone(),
+            message: "new shape fragment has trailing bytes".to_owned(),
+        });
+    }
+    let next_id = shape_children(part, shapes)
+        .iter()
+        .filter_map(|shape| shape_id(part, shape))
+        .max()
+        .map_or(Ok(1), |id| {
+            id.checked_add(1).ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: part.path.clone(),
+                message: "shape ID space is exhausted".to_owned(),
+            })
+        })?;
+    let mut new_shape = fragment.to_vec();
+    let id = next_id.to_string().into_bytes();
+    if let Some(attribute) = root.attributes.get("ID") {
+        new_shape = apply_span_edits(
+            &new_shape,
+            &[SpanEdit {
+                span: attribute.value,
+                replacement: id,
+            }],
+        )?;
+    } else {
+        let end = fragment[root.span.offset..root.span.end().ok_or(VsdxError::InvalidSpan)?]
+            .iter()
+            .position(|byte| *byte == b'>')
+            .map(|offset| root.span.offset + offset + 1)
+            .ok_or(VsdxError::InvalidSpan)?;
+        let offset = if new_shape.get(end - 2) == Some(&b'/') {
+            end - 2
+        } else {
+            end - 1
+        };
+        new_shape = apply_span_edits(
+            &new_shape,
+            &[SpanEdit {
+                span: crate::SourceSpan { offset, length: 0 },
+                replacement: format!(" ID='{next_id}'").into_bytes(),
+            }],
+        )?;
+    }
+    let end = shapes.span.end().ok_or(VsdxError::InvalidSpan)?;
+    let (span, replacement) = if part.bytes.get(end - 2..end) == Some(b"/>") {
+        (
+            crate::SourceSpan {
+                offset: end - 2,
+                length: 2,
+            },
+            [b">".as_slice(), new_shape.as_slice(), b"</Shapes>"].concat(),
+        )
+    } else {
+        let close = part.bytes[..end]
+            .iter()
+            .rposition(|byte| *byte == b'<')
+            .ok_or(VsdxError::InvalidSpan)?;
+        (
+            crate::SourceSpan {
+                offset: close,
+                length: 0,
+            },
+            new_shape,
+        )
+    };
+    Ok(vec![SpanEdit { span, replacement }])
+}
+
+fn delete_shape(
+    part: &PackagePart,
+    shapes: &crate::ElementSpan,
+    shape_id_to_delete: u32,
+) -> Result<Vec<SpanEdit>, VsdxError> {
+    let deleted = HashSet::from([shape_id_to_delete]);
+    let mut replacements = vec![container_without(part, shapes, "Shape", |shape| {
+        shape_id(part, shape).is_some_and(|id| deleted.contains(&id))
+    })?];
+    if let Some(connects) = direct_child(part, "Connects", None) {
+        replacements.push(container_without(part, connects, "Connect", |connect| {
+            ["FromSheet", "ToSheet"].iter().any(|name| {
+                connect
+                    .attributes
+                    .get(*name)
+                    .and_then(|attribute| attribute_value(&part.bytes, attribute))
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .is_some_and(|id| deleted.contains(&id))
+            })
+        })?);
+    }
+    Ok(replacements)
+}
+
+fn reorder_shape(
+    part: &PackagePart,
+    shapes: &crate::ElementSpan,
+    moving_id: u32,
+    before_id: Option<u32>,
+) -> Result<Vec<SpanEdit>, VsdxError> {
+    let children = shape_children(part, shapes);
+    let moving = children
+        .iter()
+        .find(|shape| shape_id(part, shape) == Some(moving_id))
+        .ok_or_else(|| VsdxError::InvalidCellEdit {
+            part: part.path.clone(),
+            message: format!("shape {moving_id} does not exist"),
+        })?;
+    let mut ordered: Vec<_> = children
+        .iter()
+        .copied()
+        .filter(|shape| shape.span != moving.span)
+        .collect();
+    let position = match before_id {
+        Some(id) => ordered
+            .iter()
+            .position(|shape| shape_id(part, shape) == Some(id))
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: part.path.clone(),
+                message: format!("shape {id} does not exist"),
+            })?,
+        None => ordered.len(),
+    };
+    ordered.insert(position, moving);
+    let mut replacement = Vec::new();
+    let mut cursor = shapes.span.offset;
+    for shape in children {
+        replacement.extend_from_slice(&part.bytes[cursor..shape.span.offset]);
+        let desired = ordered.remove(0);
+        replacement.extend_from_slice(
+            &part.bytes[desired.span.offset..desired.span.end().ok_or(VsdxError::InvalidSpan)?],
+        );
+        cursor = shape.span.end().ok_or(VsdxError::InvalidSpan)?;
+    }
+    replacement
+        .extend_from_slice(&part.bytes[cursor..shapes.span.end().ok_or(VsdxError::InvalidSpan)?]);
+    Ok(vec![SpanEdit {
+        span: shapes.span,
+        replacement,
+    }])
 }
 
 fn direct_child<'a>(
@@ -1354,6 +1555,99 @@ mod tests {
             .unwrap()
             .to_vec();
         assert_eq!(after, b"<PageContents><Shapes><Shape ID='1'><Cell N='Keep' V='one'/></Shape><Shape ID='3'><Cell N='Keep' V='three'/></Shape></Shapes><Connects></Connects></PageContents>");
+    }
+
+    #[test]
+    fn adds_shapes_with_page_local_ids_in_normal_and_self_closing_containers() {
+        for (source, expected) in [
+            (
+                b"<PageContents><Shapes><Shape ID='4'>one</Shape><Shape ID='7'>two</Shape></Shapes></PageContents>".as_slice(),
+                b"<PageContents><Shapes><Shape ID='4'>one</Shape><Shape ID='7'>two</Shape><Shape ID='8'><Cell N='Width' V='1'/></Shape></Shapes></PageContents>".as_slice(),
+            ),
+            (
+                b"<PageContents><Shapes/></PageContents>".as_slice(),
+                b"<PageContents><Shapes><Shape ID='1'><Cell N='Width' V='1'/></Shape></Shapes></PageContents>".as_slice(),
+            ),
+        ] {
+            let (package, path) = package_with_page_xml(source);
+            let page_id = package.page_part_ids[&path];
+            let saved = save_structural_edits(&package, &[StructuralEdit::AddShape { page_id, shape_xml: b"<Shape><Cell N='Width' V='1'/></Shape>".to_vec() }]).unwrap();
+            let saved = parse_vsdx(&saved).unwrap();
+            assert_eq!(saved.part_bytes(&path).unwrap(), expected);
+            validate_structure(&saved).unwrap();
+        }
+    }
+
+    #[test]
+    fn adding_a_shape_rejects_id_exhaustion() {
+        let (package, path) = package_with_page_xml(
+            b"<PageContents><Shapes><Shape ID='4294967295'/></Shapes></PageContents>",
+        );
+        let page_id = package.page_part_ids[&path];
+        assert!(
+            save_structural_edits(
+                &package,
+                &[StructuralEdit::AddShape {
+                    page_id,
+                    shape_xml: b"<Shape/>".to_vec()
+                }]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reorders_shapes_without_rewriting_any_shape_bytes() {
+        for (shape_id, before, expected) in [
+            (
+                1,
+                None,
+                b"<Shape ID='2'>two</Shape><Shape ID='3'>three</Shape><Shape ID='1'>one</Shape>"
+                    .as_slice(),
+            ),
+            (
+                3,
+                Some(1),
+                b"<Shape ID='3'>three</Shape><Shape ID='1'>one</Shape><Shape ID='2'>two</Shape>"
+                    .as_slice(),
+            ),
+            (
+                3,
+                Some(2),
+                b"<Shape ID='1'>one</Shape><Shape ID='3'>three</Shape><Shape ID='2'>two</Shape>"
+                    .as_slice(),
+            ),
+        ] {
+            let (package, path) = package_with_page_xml(b"<PageContents><Shapes><Shape ID='1'>one</Shape><Shape ID='2'>two</Shape><Shape ID='3'>three</Shape></Shapes></PageContents>");
+            let page_id = package.page_part_ids[&path];
+            let saved = save_structural_edits(
+                &package,
+                &[StructuralEdit::ReorderShape {
+                    page_id,
+                    shape_id,
+                    before_shape_id: before,
+                }],
+            )
+            .unwrap();
+            let saved = parse_vsdx(&saved).unwrap();
+            let after = saved.part_bytes(&path).unwrap();
+            assert_eq!(
+                after,
+                [
+                    b"<PageContents><Shapes>".as_slice(),
+                    expected,
+                    b"</Shapes></PageContents>"
+                ]
+                .concat()
+            );
+            for shape in [
+                b"<Shape ID='1'>one</Shape>".as_slice(),
+                b"<Shape ID='2'>two</Shape>",
+                b"<Shape ID='3'>three</Shape>",
+            ] {
+                assert!(after.windows(shape.len()).any(|window| window == shape));
+            }
+        }
     }
 
     fn semantic_edit(page_id: u32, section: &str, row: CellRow) -> SemanticCellEdit {

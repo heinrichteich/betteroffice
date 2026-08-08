@@ -49,6 +49,29 @@ impl Diagram {
     }
     /// Writes formulas to Cell@F and their evaluated numeric cache to Cell@V.
     pub fn save_cell_edits(&self, edits: &[SemanticCellEdit]) -> Result<Vec<u8>> {
+        let resolved = self.resolve_cell_edits(edits)?;
+        Ok(vsdx_parse::save_semantic_cell_edits(
+            &self.package,
+            &resolved,
+        )?)
+    }
+    /// Applies semantic and structural edits as one all-or-nothing save request.
+    pub fn save_edits(
+        &self,
+        cell_edits: &[SemanticCellEdit],
+        structural_edits: &[StructuralEdit],
+    ) -> Result<Vec<u8>> {
+        let resolved = self.resolve_cell_edits(cell_edits)?;
+        self.authorize_structural_edits(structural_edits)?;
+        let cell_saved = vsdx_parse::save_semantic_cell_edits(&self.package, &resolved)?;
+        let updated = vsdx_parse::parse_vsdx(&cell_saved)?;
+        Ok(vsdx_parse::save_structural_edits(
+            &updated,
+            structural_edits,
+        )?)
+    }
+
+    fn resolve_cell_edits(&self, edits: &[SemanticCellEdit]) -> Result<Vec<SemanticCellEdit>> {
         let context = PackageMutationContext {
             package: &self.package,
         };
@@ -84,18 +107,22 @@ impl Diagram {
                 }
             }
         }
-        Ok(vsdx_parse::save_semantic_cell_edits(
-            &self.package,
-            &resolved,
-        )?)
+        Ok(resolved)
     }
     /// Deletes shapes after enforcing their effective LockDelete cells.
     pub fn save_structural_edits(&self, edits: &[StructuralEdit]) -> Result<Vec<u8>> {
+        self.authorize_structural_edits(edits)?;
+        Ok(vsdx_parse::save_structural_edits(&self.package, edits)?)
+    }
+
+    fn authorize_structural_edits(&self, edits: &[StructuralEdit]) -> Result<()> {
         let context = PackageMutationContext {
             package: &self.package,
         };
         for edit in edits {
-            let StructuralEdit::DeleteShape { page_id, shape_id } = edit;
+            let StructuralEdit::DeleteShape { page_id, shape_id } = edit else {
+                continue;
+            };
             let locator = CellLocator {
                 sheet: CellSheet::Page(*page_id),
                 shape_id: Some(*shape_id),
@@ -116,7 +143,7 @@ impl Diagram {
                 }
             }
         }
-        Ok(vsdx_parse::save_structural_edits(&self.package, edits)?)
+        Ok(())
     }
     pub fn pages(&self) -> impl Iterator<Item = Page<'_>> {
         self.package.page_contents.keys().map(|part| Page {
