@@ -3457,10 +3457,24 @@ mod tests {
 
     #[test]
     fn text_accounting_fixture_covers_resolved_text_sources() {
-        let package = vsdx_parse::parse_vsdx(include_bytes!(
+        let mut package = vsdx_parse::parse_vsdx(include_bytes!(
             "../../vsdx-parse/tests/fixtures/text-accounting.vsdx"
         ))
         .unwrap();
+        let SheetChild::Section(section) = package.style_sheets[0]
+            .children
+            .iter_mut()
+            .find(|child| matches!(child, SheetChild::Section(section) if section.name == "Character"))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        let SectionChild::Row(row) = section.children.first_mut().unwrap() else {
+            unreachable!()
+        };
+        row.children.push(RowChild::Cell(cell("Size", "0.25")));
+        row.children
+            .push(RowChild::Cell(formula("Color", "RGB(1,2,3)")));
         let page = &package.page_part_paths[0];
         let list = Renderer::default().layout_page(&package, page).unwrap();
         let mut rendered = std::collections::BTreeSet::new();
@@ -3487,8 +3501,8 @@ mod tests {
         assert_eq!(text("2")[0].runs[0].text, "field value");
         let inherited = &text("3")[0].runs[0];
         assert_eq!(inherited.family, "Calibri");
-        assert_eq!(inherited.size_in, 1.0 / 6.0);
-        assert_eq!(inherited.color, "currentColor");
+        assert_eq!(inherited.size_in, 0.25);
+        assert_eq!(inherited.color, "#010203");
     }
 
     fn accounting_oracle_fixture() -> (VsdxDisplayList, Vec<Vec<ExpectedTextRun>>) {
