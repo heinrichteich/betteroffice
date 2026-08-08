@@ -72,6 +72,16 @@ struct NewCell {
     value: String,
 }
 
+struct NewContainerCell {
+    part_path: String,
+    owner_span: crate::SourceSpan,
+    section: Option<String>,
+    row: Option<CellRow>,
+    name: String,
+    formula: String,
+    value: String,
+}
+
 pub fn parse_vsdx(data: &[u8]) -> Result<VsdxPackage, VsdxError> {
     parse_vsdx_with_limits(data, &ParseLimits::default())
 }
@@ -396,13 +406,14 @@ pub(crate) fn save_cell_edits(
     package: &VsdxPackage,
     edits: &[CellEdit],
 ) -> Result<Vec<u8>, VsdxError> {
-    save_cell_edits_with_new_cells(package, edits, &[])
+    save_cell_edits_with_new_cells(package, edits, &[], &[])
 }
 
 fn save_cell_edits_with_new_cells(
     package: &VsdxPackage,
     edits: &[CellEdit],
     new_cells: &[NewCell],
+    new_container_cells: &[NewContainerCell],
 ) -> Result<Vec<u8>, VsdxError> {
     if edits.len() > MAX_PATCH_EDITS {
         return Err(VsdxError::PatchLimit { kind: "editCount" });
@@ -571,6 +582,96 @@ fn save_cell_edits_with_new_cells(
             .ok_or(VsdxError::PatchLimit { kind: "editBytes" })?;
         validated.push((part.path.as_str(), SpanEdit { span, replacement }));
     }
+    for new_cell in new_container_cells {
+        let part = package
+            .parts
+            .iter()
+            .find(|part| part.path == new_cell.part_path)
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: new_cell.part_path.clone(),
+                message: "part does not exist".to_owned(),
+            })?;
+        let owner = part
+            .spans
+            .iter()
+            .find(|span| span.span == new_cell.owner_span)
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: new_cell.part_path.clone(),
+                message: "local container owner does not exist".to_owned(),
+            })?;
+        let quote = owner
+            .attributes
+            .values()
+            .next()
+            .map(|attribute| attribute.quote)
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: new_cell.part_path.clone(),
+                message: "local container owner has no attribute quote style".to_owned(),
+            })?;
+        let end = owner.span.end().ok_or(VsdxError::InvalidSpan)?;
+        let (span, closes_owner) = if end >= 2 && part.bytes[end - 2..end] == *b"/>" {
+            (
+                crate::SourceSpan {
+                    offset: end - 2,
+                    length: 2,
+                },
+                true,
+            )
+        } else {
+            (
+                crate::SourceSpan {
+                    offset: part.bytes[..end]
+                        .iter()
+                        .rposition(|byte| *byte == b'<')
+                        .ok_or(VsdxError::InvalidSpan)?,
+                    length: 0,
+                },
+                false,
+            )
+        };
+        let mut replacement = Vec::new();
+        if closes_owner {
+            replacement.push(b'>');
+        }
+        if let Some(section) = &new_cell.section {
+            replacement.extend_from_slice(b"<Section N=");
+            push_quoted(&mut replacement, section, quote)?;
+            replacement.push(b'>');
+        }
+        if let Some(row) = &new_cell.row {
+            replacement.extend_from_slice(b"<Row ");
+            match row {
+                CellRow::Index(_) => replacement.extend_from_slice(b"IX="),
+                CellRow::Name(_) => replacement.extend_from_slice(b"N="),
+            }
+            let row_value = match row {
+                CellRow::Index(index) => index.to_string(),
+                CellRow::Name(name) => name.clone(),
+            };
+            push_quoted(&mut replacement, &row_value, quote)?;
+            replacement.push(b'>');
+        }
+        replacement.extend_from_slice(b"<Cell N=");
+        push_quoted(&mut replacement, &new_cell.name, quote)?;
+        replacement.extend_from_slice(b" F=");
+        push_quoted(&mut replacement, &new_cell.formula, quote)?;
+        replacement.extend_from_slice(b" V=");
+        push_quoted(&mut replacement, &new_cell.value, quote)?;
+        replacement.extend_from_slice(b"/>");
+        if new_cell.row.is_some() {
+            replacement.extend_from_slice(b"</Row>");
+        }
+        if new_cell.section.is_some() {
+            replacement.extend_from_slice(b"</Section>");
+        }
+        if closes_owner {
+            replacement.extend_from_slice(format!("</{}>", local_name(&owner.name)).as_bytes());
+        }
+        replacement_bytes = replacement_bytes
+            .checked_add(replacement.len())
+            .ok_or(VsdxError::PatchLimit { kind: "editBytes" })?;
+        validated.push((part.path.as_str(), SpanEdit { span, replacement }));
+    }
     if replacement_bytes > MAX_PATCH_BYTES {
         return Err(VsdxError::PatchLimit { kind: "editBytes" });
     }
@@ -599,6 +700,7 @@ pub fn save_semantic_cell_edits(
 ) -> Result<Vec<u8>, VsdxError> {
     let mut lexical = Vec::new();
     let mut new_cells = Vec::new();
+    let mut new_container_cells = Vec::new();
     for edit in edits {
         let (Some(formula), Some(value)) = (&edit.formula, &edit.value) else {
             return Err(VsdxError::InvalidCellEdit {
@@ -628,18 +730,29 @@ pub fn save_semantic_cell_edits(
                 formula: formula.clone(),
                 value: value.clone(),
             }),
+            LocalCell::NewContainer(part_path, owner_span, section, row) => new_container_cells
+                .push(NewContainerCell {
+                    part_path,
+                    owner_span,
+                    section,
+                    row,
+                    name: edit.locator.cell_name.clone(),
+                    formula: formula.clone(),
+                    value: value.clone(),
+                }),
         }
     }
-    if new_cells.is_empty() {
+    if new_cells.is_empty() && new_container_cells.is_empty() {
         save_cell_edits(package, &lexical)
     } else {
-        save_cell_edits_with_new_cells(package, &lexical, &new_cells)
+        save_cell_edits_with_new_cells(package, &lexical, &new_cells, &new_container_cells)
     }
 }
 
 enum LocalCell {
     Existing(String, crate::SourceSpan),
     New(String, crate::SourceSpan),
+    NewContainer(String, crate::SourceSpan, Option<String>, Option<CellRow>),
 }
 
 fn resolve_cell_locator(
@@ -725,6 +838,53 @@ fn resolve_cell_locator(
     if let Some(cell) = cell {
         return Ok(LocalCell::Existing(path, cell.span));
     }
+    if let (Some(section_name), Some(row)) = (&locator.section, &locator.row) {
+        let shape_matches = |candidate: &crate::ElementSpan| match locator.shape_id {
+            Some(id) => nearest_parent(part, candidate.span, "Shape")
+                .is_some_and(|shape| attribute_equals(&part.bytes, shape, "ID", &id.to_string())),
+            None => nearest_parent(part, candidate.span, "Shape").is_none(),
+        };
+        if let Some(existing_row) = part.spans.iter().find(|candidate| {
+            local_name(&candidate.name) == "Row"
+                && nearest_parent(part, candidate.span, "Section").is_some_and(|section| {
+                    attribute_equals(&part.bytes, section, "N", section_name)
+                })
+                && shape_matches(candidate)
+                && match row {
+                    CellRow::Index(index) => {
+                        attribute_equals(&part.bytes, candidate, "IX", &index.to_string())
+                    }
+                    CellRow::Name(name) => attribute_equals(&part.bytes, candidate, "N", name),
+                }
+        }) {
+            return Ok(LocalCell::New(path, existing_row.span));
+        }
+        if let Some(section) = part.spans.iter().find(|candidate| {
+            local_name(&candidate.name) == "Section"
+                && attribute_equals(&part.bytes, candidate, "N", section_name)
+                && shape_matches(candidate)
+        }) {
+            return Ok(LocalCell::NewContainer(
+                path,
+                section.span,
+                None,
+                Some(row.clone()),
+            ));
+        }
+        if let Some(shape) = part.spans.iter().find(|candidate| {
+            local_name(&candidate.name) == "Shape"
+                && locator.shape_id.is_some_and(|id| {
+                    attribute_equals(&part.bytes, candidate, "ID", &id.to_string())
+                })
+        }) {
+            return Ok(LocalCell::NewContainer(
+                path,
+                shape.span,
+                Some(section_name.clone()),
+                Some(row.clone()),
+            ));
+        }
+    }
     let owner_name = if locator.section.is_some() {
         "Row"
     } else if locator.shape_id.is_some() {
@@ -774,6 +934,13 @@ fn resolve_cell_locator(
         part: path,
         message: "semantic cell does not exist locally; creating inherited Section or Row is unsupported".to_owned(),
     })
+}
+
+fn push_quoted(output: &mut Vec<u8>, value: &str, quote: u8) -> Result<(), VsdxError> {
+    output.push(quote);
+    output.extend_from_slice(&escape_attribute_value(value, quote)?);
+    output.push(quote);
+    Ok(())
 }
 
 fn nearest_parent<'a>(
@@ -952,6 +1119,87 @@ mod tests {
         let saved = parse_vsdx(&saved).unwrap();
         let after = saved.part_bytes(&path).unwrap();
         assert_eq!(after, b"<PageContents><Shapes><Shape ID='1'><Cell N='Other' V='1'/><Cell N='Width' F='4' V='4'/></Shape></Shapes></PageContents>");
+    }
+
+    #[test]
+    fn inserts_cell_in_missing_row_without_rewriting_section_descendants() {
+        let source = b"<PageContents><Shapes><Shape ID='1'><Section N='User'><Row N='Keep'><Cell N='Value' V='old'/></Row></Section></Shape></Shapes></PageContents>";
+        let (package, path) = package_with_page_xml(source);
+        let page_id = package.page_part_ids[&path];
+        let saved = save_semantic_cell_edits(
+            &package,
+            &[semantic_edit(
+                page_id,
+                "User",
+                CellRow::Name("New".to_owned()),
+            )],
+        )
+        .unwrap();
+        let after = parse_vsdx(&saved)
+            .unwrap()
+            .part_bytes(&path)
+            .unwrap()
+            .to_vec();
+        assert_eq!(after, b"<PageContents><Shapes><Shape ID='1'><Section N='User'><Row N='Keep'><Cell N='Value' V='old'/></Row><Row N='New'><Cell N='Value' F='4' V='4'/></Row></Section></Shape></Shapes></PageContents>");
+    }
+
+    #[test]
+    fn inserts_cell_with_missing_section_and_row() {
+        let source = b"<PageContents><Shapes><Shape ID='1'><Cell N='Keep' V='old'/></Shape></Shapes></PageContents>";
+        let (package, path) = package_with_page_xml(source);
+        let page_id = package.page_part_ids[&path];
+        let saved = save_semantic_cell_edits(
+            &package,
+            &[semantic_edit(
+                page_id,
+                "User",
+                CellRow::Name("New".to_owned()),
+            )],
+        )
+        .unwrap();
+        let after = parse_vsdx(&saved)
+            .unwrap()
+            .part_bytes(&path)
+            .unwrap()
+            .to_vec();
+        assert_eq!(after, b"<PageContents><Shapes><Shape ID='1'><Cell N='Keep' V='old'/><Section N='User'><Row N='New'><Cell N='Value' F='4' V='4'/></Row></Section></Shape></Shapes></PageContents>");
+    }
+
+    #[test]
+    fn inserts_cell_into_self_closing_local_row() {
+        let source = b"<PageContents><Shapes><Shape ID='1'><Section N='User'><Row N='New'/></Section></Shape></Shapes></PageContents>";
+        let (package, path) = package_with_page_xml(source);
+        let page_id = package.page_part_ids[&path];
+        let saved = save_semantic_cell_edits(
+            &package,
+            &[semantic_edit(
+                page_id,
+                "User",
+                CellRow::Name("New".to_owned()),
+            )],
+        )
+        .unwrap();
+        let after = parse_vsdx(&saved)
+            .unwrap()
+            .part_bytes(&path)
+            .unwrap()
+            .to_vec();
+        assert_eq!(after, b"<PageContents><Shapes><Shape ID='1'><Section N='User'><Row N='New'><Cell N='Value' F='4' V='4'/></Row></Section></Shape></Shapes></PageContents>");
+    }
+
+    fn semantic_edit(page_id: u32, section: &str, row: CellRow) -> SemanticCellEdit {
+        SemanticCellEdit {
+            locator: CellLocator {
+                sheet: CellSheet::Page(page_id),
+                shape_id: Some(1),
+                section: Some(section.to_owned()),
+                row: Some(row),
+                cell_name: "Value".to_owned(),
+            },
+            gesture: MutationGesture::CellEdit,
+            formula: Some("4".to_owned()),
+            value: Some("4".to_owned()),
+        }
     }
 
     fn assert_only_span_changed(
