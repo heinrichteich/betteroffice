@@ -43,6 +43,7 @@ impl VsdxPackage {
             .map(|part| part.bytes.as_slice())
     }
 
+    /// Replaces bytes and invalidates lexical provenance.
     pub fn replace_part(&mut self, path: &str, bytes: Vec<u8>) -> bool {
         let Some(part) = self.parts.iter_mut().find(|part| part.path == path) else {
             return false;

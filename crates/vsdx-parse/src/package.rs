@@ -751,6 +751,17 @@ mod tests {
             Err(VsdxError::PatchLimit { kind: "editCount" })
         ));
         assert_eq!(package.part_bytes(part_path), Some(before.as_slice()));
+
+        let oversized = "x".repeat(MAX_PATCH_BYTES / 2 + 1);
+        let edits = [
+            first_value_edit(&package, part_path, &oversized),
+            first_value_edit(&package, part_path, &oversized),
+        ];
+        assert!(matches!(
+            save_cell_edits(&package, &edits),
+            Err(VsdxError::PatchLimit { kind: "editBytes" })
+        ));
+        assert_eq!(package.part_bytes(part_path), Some(before.as_slice()));
     }
 
     #[test]

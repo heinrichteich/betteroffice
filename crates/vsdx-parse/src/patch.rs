@@ -423,12 +423,13 @@ mod tests {
 
     #[test]
     fn scanner_ignores_non_markup_and_tracks_nested_elements() {
-        let source = b"<?pi value='>'?><Root><!-- <Cell V='x'/> --><![CDATA[<Cell> >]]><Cell V='x' /><Inner><Cell V='y'/></Inner></Root>";
+        let source = b"<?pi value='>'?><Root><!-- <Cell V='x'/> --><![CDATA[<Cell> >]]><Cell V='x' /><Inner><Deep><Cell V='y'/></Deep></Inner></Root>";
         let spans = scan_element_spans(source).unwrap();
         let cells: Vec<_> = spans.iter().filter(|span| span.name == "Cell").collect();
         assert_eq!(cells.len(), 2);
         assert_eq!(cells[0].span.length, b"<Cell V='x' />".len());
         assert!(spans.iter().any(|span| span.name == "Inner"));
+        assert!(spans.iter().any(|span| span.name == "Deep"));
         assert!(spans.iter().any(|span| span.name == "Root"));
     }
 
