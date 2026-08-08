@@ -22,7 +22,19 @@ Locked scope decisions:
 
 The reverse-engineering result. Every design choice below follows from it. Claims are tagged; `[fixture]` items **must be confirmed in phase 0 and this section corrected where real files disagree.**
 
-### Package graph `[spec]`
+### Corpus verification status
+
+Two real Visio-produced files (a 4-master single-page drawing with media, and a 3-master two-page drawing) were inspected in phase 0. **Every structural claim below was confirmed**, plus three findings that were not anticipated:
+
+1. **Attribute quoting is producer-dependent.** Both files use single-quoted XML attributes (`FromSheet='818'`). `quick-xml` handles this transparently, but the **lexical span patcher (Part 6) must never assume a quote character** when rewriting a cell in place — it must reuse the span's original quoting.
+2. **`Row T=` is not Geometry-exclusive.** `Row T='Connection'` appears inside `Section N='Connection'`. The row-type attribute is broader than the Geometry section; do not gate `T` parsing on section name.
+3. **Formulas are pervasive, not occasional.** 6,206 cells carry `F=` across just these two files. This confirms `F` is first-class and validates rejecting any model that stores only resolved rectangles.
+
+Observed geometry row types: `RelLineTo` (2404), `RelMoveTo` (601), `LineTo` (430), `Connection` (115), `ArcTo` (92), `MoveTo` (54), `EllipticalArcTo` (2). Observed sections: `Geometry`, `Character`, `Control`, `Connection`, `User`, `Layer`, `Scratch`, `Actions`. `Del='1'` occurs 22 times — the deleted-state modelling is load-bearing, not theoretical. Named rows (`Row N='TextPosition'`, `'visVersion'`, `'msvThemeOrder'`, …) coexist with indexed rows, as specified.
+
+The corpus is **not committed** — the source files are the user's own work diagrams. They live outside the repo as a local dev corpus with recorded provenance; committed fixtures will be generated once the real structure is understood. **No `.vsdm` is available**, so the kind-rejection test must use a synthetic package built by rewriting the content type.
+
+### Package graph `[verified]`
 
 `.vsdx` is an OPC zip whose payload is **Visio XML, not DrawingML**. There is no `p:sp`, no `a:prstGeom`, no OOXML shape tree.
 
@@ -41,7 +53,8 @@ visio/_rels/document.xml.rels        DocumentSheet, colors, fonts INLINE
 ```
 
 - **There is no `visio/styles.xml`.** Style sheets live inside `visio/document.xml` under `VisioDocument/StyleSheets`, alongside `DocumentSheet`, `Colors` and `FaceNames`. A plan that reaches for a separate styles part will not find one.
-- Root relationship type is the Visio family (`http://schemas.microsoft.com/visio/2010/relationships/document`), **not** `officeDocument`. `[fixture]` — confirm producer variants.
+- Root relationship type is the Visio family (`http://schemas.microsoft.com/visio/2010/relationships/document`), **not** `officeDocument`. `[verified]` — exact in both corpus files. Note `docProps/*` still use the standard OOXML relationship types, so the root `.rels` is mixed-family.
+- `visio/theme/theme1.xml` carries the **standard** OOXML theme content type (`application/vnd.openxmlformats-officedocument.theme+xml`) `[verified]` — so `ooxml_drawingml::Theme` is a genuinely appropriate target, even though the XML parser for it still has to be written.
 - **Resolve every part through relationships, never by assumed path.** Producers vary.
 - Content types distinguish `application/vnd.ms-visio.drawing.main+xml` from `…macroEnabled.main+xml` (and stencil/template variants).
 
