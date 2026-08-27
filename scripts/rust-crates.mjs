@@ -26,6 +26,7 @@ export const RUST_CRATES = [
   { name: 'betteroffice-pptx', dependency: 'betteroffice-pptx' },
   { name: 'betteroffice-vsdx-parse', dependency: 'vsdx-parse' },
   { name: 'betteroffice-vsdx-resolve', dependency: 'vsdx-resolve' },
+  { name: 'betteroffice-vsdx-eval', dependency: 'vsdx-eval' },
   { name: 'betteroffice-vsdx', dependency: 'betteroffice-vsdx' }
 ];
 

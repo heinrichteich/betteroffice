@@ -250,9 +250,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-vsdx-eval"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "thiserror",
+]
+
+[[package]]
 name = "betteroffice-vsdx-parse"
 version = "0.1.0"
 dependencies = [
+ "betteroffice-drawingml",
  "betteroffice-opc",
  "quick-xml",
  "serde",

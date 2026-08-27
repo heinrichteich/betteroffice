@@ -32,6 +32,7 @@ pptx-render = { package = "betteroffice-pptx-render", path = "crates/pptx-render
 betteroffice-pptx = { path = "crates/betteroffice-pptx", version = "0.1.0" }
 vsdx-parse = { package = "betteroffice-vsdx-parse", path = "crates/vsdx-parse", version = "0.1.0" }
 vsdx-resolve = { package = "betteroffice-vsdx-resolve", path = "crates/vsdx-resolve", version = "0.1.0" }
+vsdx-eval = { package = "betteroffice-vsdx-eval", path = "crates/vsdx-eval", version = "0.1.0" }
 betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.1.0" }
 
 [profile.release]
