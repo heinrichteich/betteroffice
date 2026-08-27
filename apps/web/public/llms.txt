@@ -55,6 +55,7 @@ The VSDX pipeline is in progress; its crates are published as they land:
 - [betteroffice-vsdx-parse](https://crates.io/crates/betteroffice-vsdx-parse): Visio XML parsing and part-preserving VSDX package writes.
 - [betteroffice-vsdx-resolve](https://crates.io/crates/betteroffice-vsdx-resolve): resolved ShapeSheet inheritance, text, and geometry.
 - [betteroffice-vsdx-eval](https://crates.io/crates/betteroffice-vsdx-eval): the bounded baseline ShapeSheet formula evaluator.
+- [betteroffice-vsdx-render](https://crates.io/crates/betteroffice-vsdx-render): the VSDX display-list compiler and hit testing.
 
 ## Python packages
 
