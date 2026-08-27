@@ -2,16 +2,77 @@ use std::sync::Arc;
 
 use ooxml_drawingml::{Theme, resolve_color_value_to_hex_with_theme};
 use pptx_parse::{RunProperties, TextBody};
+use yrs::branch::{Branch, BranchPtr};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{
-    Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextPrelim, TextRef, Transact, TransactionMut,
+    Any, Assoc, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, StickyIndex, Text,
+    TextPrelim, TextRef, Transact, TransactionMut,
 };
 
+use crate::model::validate_xml_text;
 use crate::{
-    DeckSession, EditError, EditResult, KIND, PARA_ID, PILCROW_KIND, ParagraphSnapshot, STORIES,
-    StorySnapshot, TextReceipt, TextRunSnapshot, TextStyle, TextStylePatch,
+    CaretAnchor, DeckSession, EditError, EditResult, KIND, PARA_ID, PILCROW_KIND,
+    ParagraphSnapshot, STORIES, StorySnapshot, TextReceipt, TextRunSnapshot, TextStyle,
+    TextStylePatch,
 };
+
+const UNDERLINE_TYPES: [&str; 18] = [
+    "none",
+    "words",
+    "sng",
+    "dbl",
+    "heavy",
+    "dotted",
+    "dottedHeavy",
+    "dash",
+    "dashHeavy",
+    "dashLong",
+    "dashLongHeavy",
+    "dotDash",
+    "dotDashHeavy",
+    "dotDotDash",
+    "dotDotDashHeavy",
+    "wavy",
+    "wavyHeavy",
+    "wavyDbl",
+];
+
+/// The values land in schema-typed attributes, so junk must fail the edit
+/// rather than the file.
+pub(crate) fn validate_style_values(
+    font_family: Option<&str>,
+    underline: Option<&str>,
+    color: Option<&str>,
+    font_size_pt: Option<f64>,
+) -> EditResult<()> {
+    if let Some(font_family) = font_family {
+        validate_xml_text(font_family)?;
+    }
+    if let Some(underline) = underline
+        && !UNDERLINE_TYPES.contains(&underline)
+    {
+        return Err(EditError::InvalidText(format!(
+            "unrecognized underline type {underline:?}"
+        )));
+    }
+    if let Some(color) = color {
+        let rgb = color.strip_prefix('#').unwrap_or(color);
+        if rgb.len() != 6 || !rgb.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(EditError::InvalidText(format!(
+                "color {color:?} must be a six-digit hex value"
+            )));
+        }
+    }
+    if let Some(size) = font_size_pt
+        && (!size.is_finite() || !(1.0..=4_000.0).contains(&size))
+    {
+        return Err(EditError::InvalidText(format!(
+            "font size {size}pt is outside the 1-4000pt range"
+        )));
+    }
+    Ok(())
+}
 
 pub(crate) fn seed_story(
     stories: &MapRef,
@@ -97,6 +158,38 @@ impl DeckSession {
         snapshot_story(&story, &txn, story_id)
     }
 
+    pub fn anchor_caret(&self, story_id: &str, index: u32) -> EditResult<CaretAnchor> {
+        let txn = self.doc.transact();
+        let story = story_ref(&txn, story_id)?;
+        let length = final_pilcrow_index(&story, &txn)?;
+        if index > length {
+            return Err(EditError::OutOfBounds { index, length });
+        }
+        let position = if index == 0 {
+            StickyIndex::from_type(&txn, &story, Assoc::Before)
+        } else {
+            story
+                .sticky_index(&txn, index, Assoc::After)
+                .ok_or(EditError::OutOfBounds { index, length })?
+        };
+        Ok(CaretAnchor {
+            story_id: story_id.to_owned(),
+            position,
+        })
+    }
+
+    pub fn resolve_caret_anchor(&self, anchor: &CaretAnchor) -> Option<u32> {
+        let txn = self.doc.transact();
+        let story = story_ref(&txn, &anchor.story_id).ok()?;
+        let offset = anchor.position.get_offset(&txn)?;
+        let expected = BranchPtr::from(<TextRef as AsRef<Branch>>::as_ref(&story));
+        if offset.branch != expected {
+            return None;
+        }
+        let length = final_pilcrow_index(&story, &txn).ok()?;
+        Some(offset.index.min(length))
+    }
+
     pub fn insert_text(
         &self,
         context: &crate::EditCtx,
@@ -105,6 +198,13 @@ impl DeckSession {
         text: &str,
         style: &TextStyle,
     ) -> EditResult<TextReceipt> {
+        validate_xml_text(text)?;
+        validate_style_values(
+            style.font_family.as_deref(),
+            style.underline.as_deref(),
+            style.color.as_deref(),
+            style.font_size_pt,
+        )?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
@@ -156,6 +256,12 @@ impl DeckSession {
         end: u32,
         patch: &TextStylePatch,
     ) -> EditResult<TextReceipt> {
+        validate_style_values(
+            patch.font_family.as_deref(),
+            patch.underline.as_deref(),
+            patch.color.as_deref(),
+            patch.font_size_pt,
+        )?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
@@ -201,6 +307,48 @@ impl DeckSession {
         pilcrow.insert(&mut txn, KIND, PILCROW_KIND);
         pilcrow.insert(&mut txn, PARA_ID, paragraph_id);
         pilcrow.insert(&mut txn, "level", 0_f64);
+        Ok(TextReceipt {
+            story_id: story_id.to_owned(),
+            start: index,
+            end: index + 1,
+            text: "\n".to_owned(),
+        })
+    }
+
+    pub fn delete_paragraph_break(
+        &self,
+        context: &crate::EditCtx,
+        story_id: &str,
+        index: u32,
+    ) -> EditResult<TextReceipt> {
+        let mut txn = self.transact_for(context);
+        let story = story_ref(&txn, story_id)?;
+        let final_pilcrow = final_pilcrow_index(&story, &txn)?;
+        if index >= final_pilcrow {
+            return Err(EditError::OutOfBounds {
+                index,
+                length: final_pilcrow,
+            });
+        }
+        let mut offset = 0;
+        let is_pilcrow = story.diff(&txn, YChange::identity).into_iter().any(|diff| {
+            let length = out_len(&diff.insert);
+            let found = offset == index
+                && matches!(
+                    diff.insert,
+                    Out::YMap(ref map)
+                        if map_string(map, &txn, KIND).as_deref() == Some(PILCROW_KIND)
+                );
+            offset += length;
+            found
+        });
+        if !is_pilcrow {
+            return Err(EditError::ParagraphBoundary {
+                start: index,
+                end: index.saturating_add(1),
+            });
+        }
+        story.remove_range(&mut txn, index, 1);
         Ok(TextReceipt {
             story_id: story_id.to_owned(),
             start: index,

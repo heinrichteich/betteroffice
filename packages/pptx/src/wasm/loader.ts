@@ -35,6 +35,12 @@ export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenPresentationOptions {
   clientId?: number;
   fonts?: ReadonlyArray<PptxFontFace>;
+  /**
+   * Opens from a collaboration update instead of parsing the file bytes.
+   * When the bytes are the file the update was seeded from, the session
+   * keeps them and `save()` works; any other bytes open without a source
+   * and `save()` throws.
+   */
   initialUpdate?: Uint8Array;
 }
 
@@ -46,6 +52,8 @@ export interface PresentationHandle extends CollaborationReplica {
   layoutSlide(slideIndex: number): SlideDisplayList;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(partPath: string): Uint8Array;
+  /** serialize the presentation back to .pptx bytes, edits included. */
+  save(): Uint8Array;
   insertText(storyId: string, index: number, text: string, style?: TextStyle): TextReceipt;
   deleteText(storyId: string, start: number, end: number): TextReceipt;
   formatText(storyId: string, start: number, end: number, patch: TextStylePatch): TextReceipt;
@@ -128,7 +136,8 @@ export function openPresentation(
       ? PptxDocument.openCollaborative(bytes, collaborationClientId)
       : PptxDocument.openCollaborativeFromUpdate(
           options.initialUpdate.slice(),
-          collaborationClientId
+          collaborationClientId,
+          bytes.slice()
         )
   );
   const renderer = construct(() => new PptxRenderer());
@@ -182,7 +191,7 @@ export function openPresentation(
         throw new Error(`pptx wasm returned unknown update origin ${origin}`);
       }
       pendingUpdates.push({
-        update: encoded.slice(1),
+        update: encoded.subarray(1),
         origin: origin === 0 ? 'local' : 'remote',
       });
     }
@@ -255,7 +264,10 @@ export function openPresentation(
       return jsonWasmCall(() => renderer.hitTestJson(x, y));
     },
     mediaBytes(partPath: string): Uint8Array {
-      return wasmCall(() => doc.mediaBytes(partPath).slice());
+      return wasmCall(() => doc.mediaBytes(partPath));
+    },
+    save(): Uint8Array {
+      return wasmCall(() => doc.saveBytes());
     },
     insertText(storyId, index, text, style = {}): TextReceipt {
       return jsonWasmCall(
@@ -352,20 +364,20 @@ export function openPresentation(
       return jsonWasmCall(() => doc.redoJson(), true);
     },
     encodeStateVector(): Uint8Array {
-      return wasmCall(() => doc.encodeStateVector().slice());
+      return wasmCall(() => doc.encodeStateVector());
     },
     encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array {
       return wasmCall(() =>
         remoteStateVector === undefined
-          ? doc.encodeStateAsUpdate().slice()
-          : doc.encodeDiff(remoteStateVector.slice()).slice()
+          ? doc.encodeStateAsUpdate()
+          : doc.encodeDiff(remoteStateVector)
       );
     },
     encodeDiff(remoteStateVector): Uint8Array {
-      return wasmCall(() => doc.encodeDiff(remoteStateVector.slice()).slice());
+      return wasmCall(() => doc.encodeDiff(remoteStateVector));
     },
     applyUpdate(update): DeckSnapshot {
-      return jsonWasmCall(() => doc.applyUpdateJson(update.slice()), true);
+      return jsonWasmCall(() => doc.applyUpdateJson(update), true);
     },
     onUpdate(listener): () => void {
       assertAlive();

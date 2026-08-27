@@ -18,6 +18,8 @@ pub struct PptxPackage {
     pub layouts: Vec<SlideLayout>,
     pub masters: Vec<SlideMaster>,
     pub themes: Vec<ThemePart>,
+    /// Absent from packages serialized before charts were parsed.
+    #[serde(default)]
     pub charts: Vec<ChartPart>,
     pub media: Vec<MediaPart>,
     pub relationships: BTreeMap<String, Vec<Relationship>>,
@@ -31,6 +33,12 @@ impl PptxPackage {
             .iter()
             .find(|part| part.path == path)
             .map(|part| part.bytes.as_slice())
+    }
+
+    /// False for packages recovered from a collaboration update, which carry
+    /// the parsed model but not the raw part bytes.
+    pub fn has_parts(&self) -> bool {
+        !self.parts.is_empty()
     }
 
     pub fn replace_part(&mut self, path: &str, bytes: Vec<u8>) -> bool {

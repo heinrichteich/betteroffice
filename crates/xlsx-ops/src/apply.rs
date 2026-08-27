@@ -28,6 +28,8 @@ pub enum OpError {
     DefinedNameNotRewritable { name: String },
     ChartRefNotRewritable { part: String },
     ChartAnchorNotMovable { part: String },
+    ChartNotFound { frame: String },
+    ChartFrameShifted { frame: String },
     InvalidStyle(String),
 }
 
@@ -51,6 +53,13 @@ impl fmt::Display for OpError {
             OpError::ChartAnchorNotMovable { part } => {
                 write!(f, "the anchor of {part} would leave the sheet grid")
             }
+            OpError::ChartNotFound { frame } => {
+                write!(f, "no chart frame on this sheet is named {frame}")
+            }
+            OpError::ChartFrameShifted { frame } => write!(
+                f,
+                "chart frame {frame} does not hold the chart part and anchor this op was recorded against; its drawing has changed"
+            ),
             OpError::InvalidStyle(message) => f.write_str(message),
         }
     }
@@ -128,6 +137,35 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
             Ok(InvertedOp(vec![Op::SetCharts {
                 sheet: *sheet,
                 charts: old,
+            }]))
+        }
+        Op::SetChartAnchor {
+            sheet,
+            frame,
+            part,
+            from,
+            to,
+        } => {
+            let sheet_ref = sheet_mut(wb, *sheet)?;
+            let chart = sheet_ref
+                .charts
+                .iter_mut()
+                .find(|chart| chart.frame_id() == *frame)
+                .ok_or_else(|| OpError::ChartNotFound {
+                    frame: frame.clone(),
+                })?;
+            if !chart.is_recorded_frame(part, *from) {
+                return Err(OpError::ChartFrameShifted {
+                    frame: frame.clone(),
+                });
+            }
+            chart.anchor = *to;
+            Ok(InvertedOp(vec![Op::SetChartAnchor {
+                sheet: *sheet,
+                frame: frame.clone(),
+                part: part.clone(),
+                from: *to,
+                to: *from,
             }]))
         }
         Op::MergeCells { sheet, range } => {
@@ -591,25 +629,10 @@ fn delete_cols(
     Ok(InvertedOp(inv))
 }
 
-/// remap every occupied cell through `op`, rebuilding storage. returns the
-/// cells whose address was dropped, for the inverse.
+/// remap every occupied cell through `op` in place. returns the cells whose
+/// address was dropped, for the inverse.
 fn shift_cells(s: &mut Sheet, op: &Op) -> Vec<(CellRef, Cell)> {
-    let old: Vec<(CellRef, Cell)> = s.iter_cells().map(|(r, c)| (r, c.clone())).collect();
-    let mut moved = Vec::new();
-    let mut dropped = Vec::new();
-    for (r, c) in &old {
-        match remap_ref(*r, op) {
-            Some(nr) => moved.push((nr, c.clone())),
-            None => dropped.push((*r, c.clone())),
-        }
-    }
-    for (r, _) in &old {
-        s.set_cell(*r, Cell::default());
-    }
-    for (nr, c) in moved {
-        s.set_cell(nr, c);
-    }
-    dropped
+    s.remap_cells(|at| remap_ref(at, op))
 }
 
 fn shift_row_heights_up(s: &mut Sheet, at: RowId, count: u32) {
@@ -1485,6 +1508,48 @@ mod tests {
         assert_eq!(wb, before);
     }
 
+    /// A dynamic-range name is ordinary, and the row it names sits nowhere
+    /// near the edit; the whole sheet used to be frozen by it all the same.
+    #[test]
+    fn a_name_the_formula_parser_cannot_read_still_accepts_the_edit() {
+        let mut wb = wb_one_sheet();
+        wb.sheets.push(Sheet::new("Other"));
+        wb.defined_names.push(DefinedName {
+            name: "Region".into(),
+            formula: "Sheet1!$A$1:INDEX(Sheet1!$A:$A,COUNTA(Sheet1!$A:$A))".into(),
+            local_sheet: None,
+            hidden: false,
+        });
+        let before = wb.clone();
+
+        apply(
+            &mut wb,
+            &Op::InsertRows {
+                sheet: SheetId(0),
+                at: 9998,
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(wb.defined_names, before.defined_names);
+
+        let inverse = apply(
+            &mut wb,
+            &Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.defined_names[0].formula,
+            "Sheet1!$A$2:INDEX(Sheet1!$A:$A,COUNTA(Sheet1!$A:$A))"
+        );
+        apply_ops(&mut wb, &inverse.0).unwrap();
+        assert_eq!(wb.defined_names, before.defined_names);
+    }
+
     #[test]
     fn refused_defined_name_rewrites_leave_the_workbook_unchanged() {
         let mut wb = wb_one_sheet();
@@ -1497,7 +1562,7 @@ mod tests {
         );
         wb.defined_names.push(DefinedName {
             name: "Dynamic".into(),
-            formula: "OFFSET($A$1,0,0,COUNTA($A:$A),1)".into(),
+            formula: "SUM(Table1[Amount])".into(),
             local_sheet: Some(SheetId(0)),
             hidden: false,
         });
@@ -1515,5 +1580,257 @@ mod tests {
 
         assert!(matches!(error, OpError::DefinedNameNotRewritable { .. }));
         assert_eq!(wb, before);
+    }
+
+    #[test]
+    fn setting_a_chart_anchor_inverts_to_the_previous_one() {
+        use xlsx_model::{AnchorCell, AnchorEditAs, ChartAnchor, SheetChart};
+
+        let anchor = |col, row| ChartAnchor::TwoCell {
+            from: AnchorCell {
+                col,
+                row,
+                ..AnchorCell::default()
+            },
+            to: AnchorCell {
+                col: col + 4,
+                row: row + 8,
+                ..AnchorCell::default()
+            },
+            edit_as: AnchorEditAs::TwoCell,
+        };
+        let mut wb = wb_one_sheet();
+        wb.sheets[0].charts.push(SheetChart {
+            part: "xl/charts/chart1.xml".into(),
+            drawing: "xl/drawings/drawing1.xml".into(),
+            anchor_index: 0,
+            anchor: anchor(0, 0),
+            refs: Vec::new(),
+        });
+
+        let op = Op::SetChartAnchor {
+            sheet: SheetId(0),
+            frame: "xl/drawings/drawing1.xml#0".into(),
+            part: "xl/charts/chart1.xml".into(),
+            from: anchor(0, 0),
+            to: anchor(3, 5),
+        };
+        let inverse = apply(&mut wb, &op).unwrap();
+        assert_eq!(wb.sheets[0].charts[0].anchor, anchor(3, 5));
+        for op in &inverse.0 {
+            apply(&mut wb, op).unwrap();
+        }
+        assert_eq!(wb.sheets[0].charts[0].anchor, anchor(0, 0));
+
+        let error = apply(
+            &mut wb,
+            &Op::SetChartAnchor {
+                sheet: SheetId(0),
+                frame: "xl/drawings/drawing9.xml#0".into(),
+                part: "xl/charts/chart1.xml".into(),
+                from: anchor(0, 0),
+                to: anchor(1, 1),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, OpError::ChartNotFound { .. }));
+
+        // the frame is there but holds neither the anchor nor the part the op
+        // recorded: the ordinal now names something else, so it is refused.
+        for (part, from) in [
+            ("xl/charts/chart1.xml", anchor(7, 7)),
+            ("xl/charts/chart9.xml", anchor(0, 0)),
+        ] {
+            let error = apply(
+                &mut wb,
+                &Op::SetChartAnchor {
+                    sheet: SheetId(0),
+                    frame: "xl/drawings/drawing1.xml#0".into(),
+                    part: part.into(),
+                    from,
+                    to: anchor(1, 1),
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(error, OpError::ChartFrameShifted { .. }));
+            assert_eq!(wb.sheets[0].charts[0].anchor, anchor(0, 0));
+        }
+    }
+
+    fn filled(at: &str, value: f64) -> (CellRef, Cell) {
+        (
+            r(at),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        )
+    }
+
+    /// two cells land on one target; today's clear-then-reinsert order made
+    /// the largest source address win.
+    #[test]
+    fn remap_cells_contested_target_keeps_the_largest_source() {
+        let mut sheet = Sheet::new("S");
+        let (a1, c1) = filled("A1", 1.0);
+        let (_, c2) = filled("A6", 2.0);
+        sheet.set_cell(a1, c1.clone());
+        sheet.set_cell(r("A6"), c2.clone());
+        let dropped = sheet.remap_cells(|at| match at.row {
+            0 => Some(CellRef::new(5, 0)),
+            5 => Some(CellRef::new(5, 0)),
+            _ => Some(at),
+        });
+        assert!(dropped.is_empty());
+        assert_eq!(sheet.cell(CellRef::new(5, 0)), Some(&c2));
+        assert_eq!(sheet.iter_cells().count(), 1);
+    }
+
+    /// the same contest when every touched cell moves, so the split-off
+    /// fast path runs instead of the full-rebuild fallback.
+    #[test]
+    fn remap_cells_contested_target_resolves_on_the_fast_path_too() {
+        let mut sheet = Sheet::new("S");
+        let (_, c5) = filled("A5", 5.0);
+        let (_, c7) = filled("A7", 7.0);
+        sheet.set_cell(r("A5"), c5);
+        sheet.set_cell(r("A7"), c7.clone());
+        let dropped = sheet.remap_cells(|at| {
+            if at.row >= 4 {
+                Some(CellRef::new(6, at.col))
+            } else {
+                Some(at)
+            }
+        });
+        assert!(dropped.is_empty());
+        assert_eq!(sheet.cell(CellRef::new(6, 0)), Some(&c7));
+        assert_eq!(sheet.iter_cells().count(), 1);
+    }
+
+    /// cells that keep their address stay put, refused ones come back in
+    /// address order, and survivors move down past the refused span.
+    #[test]
+    fn remap_cells_keeps_stays_and_reports_drops_in_address_order() {
+        let mut sheet = Sheet::new("S");
+        for (at, value) in [("A1", 1.0), ("A2", 2.0), ("A3", 3.0), ("B7", 7.0)] {
+            let (at, cell) = filled(at, value);
+            sheet.set_cell(at, cell);
+        }
+        let dropped = sheet.remap_cells(|at| {
+            if at.row == 1 {
+                None
+            } else if at.row == 0 {
+                Some(at)
+            } else {
+                Some(CellRef::new(at.row - 1, at.col))
+            }
+        });
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].0, r("A2"));
+        assert_eq!(dropped[0].1.value, CellValue::Number { value: 2.0 });
+        assert_eq!(
+            sheet.cell(r("A1")).unwrap().value,
+            CellValue::Number { value: 1.0 }
+        );
+        assert_eq!(
+            sheet.cell(r("A2")).unwrap().value,
+            CellValue::Number { value: 3.0 }
+        );
+        assert_eq!(
+            sheet.cell(r("B6")).unwrap().value,
+            CellValue::Number { value: 7.0 }
+        );
+        assert_eq!(sheet.iter_cells().count(), 3);
+    }
+
+    /// rows and columns shift through the new storage path and invert back to
+    /// exactly the workbook they started from.
+    #[test]
+    fn structural_shifts_round_trip_exactly_on_both_axes() {
+        let mut wb = wb_one_sheet();
+        wb.sheets.push(Sheet::new("Data"));
+        for row in 1..=12 {
+            for col in ["A", "C", "F"] {
+                let at = format!("{col}{row}");
+                let (cell_ref, cell) = filled(&at, f64::from(row));
+                wb.sheet_mut(SheetId(0)).unwrap().set_cell(cell_ref, cell);
+            }
+            wb.sheet_mut(SheetId(1)).unwrap().set_cell(
+                r(&format!("B{row}")),
+                Cell {
+                    formula: Some("Sheet1!A1+Sheet1!$E$9".into()),
+                    ..Cell::default()
+                },
+            );
+        }
+        let before = wb.clone();
+
+        let edits = [
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 4,
+                count: 3,
+            },
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 2,
+            },
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 2,
+            },
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 3,
+                count: 1,
+            },
+        ];
+        for op in &edits {
+            let inverse = apply(&mut wb, op).unwrap();
+            apply_ops(&mut wb, &inverse.0).unwrap();
+            assert_eq!(wb, before, "{op:?} must invert exactly");
+        }
+    }
+
+    /// a deletion whose span holds contents must report them for the inverse,
+    /// whatever sits above or below the span.
+    #[test]
+    fn deleting_rows_reports_every_dropped_cell_for_undo() {
+        let mut wb = wb_one_sheet();
+        for (at, value) in [("A1", 1.0), ("A3", 3.0), ("A4", 4.0), ("A6", 6.0)] {
+            let (at, cell) = filled(at, value);
+            wb.sheets[0].set_cell(at, cell);
+        }
+        let inverse = apply(
+            &mut wb,
+            &Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 2,
+                count: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.value(SheetId(0), r("A4")),
+            CellValue::Number { value: 6.0 }
+        );
+        assert!(wb.sheet(SheetId(0)).unwrap().cell(r("A3")).is_none());
+        let restores = inverse
+            .0
+            .iter()
+            .filter(|op| matches!(op, Op::SetCell { .. }))
+            .count();
+        assert_eq!(restores, 2, "rows 3 and 4 must come back");
+        apply_ops(&mut wb, &inverse.0).unwrap();
+        assert_eq!(
+            wb.value(SheetId(0), r("A3")),
+            CellValue::Number { value: 3.0 }
+        );
+        assert_eq!(
+            wb.value(SheetId(0), r("A4")),
+            CellValue::Number { value: 4.0 }
+        );
     }
 }

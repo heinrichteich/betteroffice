@@ -52,6 +52,48 @@ describe('PPTX wasm boundary', () => {
     right.dispose();
   });
 
+  // the wasm event arrives as `[origin, ...update]`, so a listener that reaches
+  // for `.buffer` must not find the origin tag riding along — and the shape must
+  // not depend on how many other listeners happen to be subscribed.
+  test('delivers exact update buffers regardless of subscriber count', () => {
+    const seed = openPresentation(fixture, { clientId: 9201 });
+    let update: Uint8Array;
+    try {
+      update = seed.encodeStateAsUpdate();
+    } finally {
+      seed.dispose();
+    }
+    for (const extraSubscriber of [false, true]) {
+      const source = openPresentation(Uint8Array.of(0xff), {
+        clientId: extraSubscriber ? 9202 : 9203,
+        initialUpdate: update,
+      });
+      const peer = openPresentation(Uint8Array.of(0xff), {
+        clientId: extraSubscriber ? 9204 : 9205,
+        initialUpdate: update,
+      });
+      const received: Uint8Array[] = [];
+      try {
+        source.onUpdate((bytes, origin) => {
+          if (origin === 'local') received.push(bytes);
+        });
+        if (extraSubscriber) source.onUpdate(() => {});
+
+        const story = firstStory(source.snapshot().slides.flatMap((slide) => slide.shapes));
+        source.insertText(story.id, story.length - 1, ' exact');
+        expect(received).toHaveLength(1);
+        expect(received[0].byteOffset).toBe(0);
+        expect(received[0].buffer.byteLength).toBe(received[0].byteLength);
+
+        peer.applyUpdate(new Uint8Array(received[0].buffer));
+        expect(peer.story(story.id)).toEqual(source.story(story.id));
+      } finally {
+        source.dispose();
+        peer.dispose();
+      }
+    }
+  });
+
   test('opens, edits, reflows, hit-tests, and observes a local update', () => {
     const snapshot = handle.snapshot();
     expect(snapshot.slides.length).toBe(3);
@@ -142,6 +184,50 @@ describe('PPTX wasm boundary', () => {
     );
     expect(cleared?.fill).toBeUndefined();
     expect(cleared?.stroke).toBeUndefined();
+  });
+
+  test('a session opened from an update saves when the source file is attached', () => {
+    const seeded = openPresentation(fixture, { clientId: 9007 });
+    const seed = seeded.encodeStateAsUpdate();
+
+    const attached = openPresentation(fixture, { clientId: 9008, initialUpdate: seed });
+    const slide = attached.snapshot().slides[0];
+    attached.moveShape(slide.id, slide.shapes[0].id, 777_000, 888_000);
+    const reopened = openPresentation(attached.save(), { clientId: 9009 });
+    const moved = reopened.snapshot().slides[0].shapes[0];
+    expect([moved.x, moved.y]).toEqual([777_000, 888_000]);
+
+    const bare = openPresentation(Uint8Array.of(0xff), { clientId: 9010, initialUpdate: seed });
+    expect(() => bare.save()).toThrow(/source file bytes/);
+
+    seeded.dispose();
+    attached.dispose();
+    reopened.dispose();
+    bare.dispose();
+  });
+
+  test('edits survive a save and reopen', () => {
+    const source = openPresentation(fixture, { clientId: 9005 });
+    const slide = source.snapshot().slides[0];
+    const shape = slide.shapes.find((candidate) => candidate.sourceId !== 0)!;
+    source.moveShape(slide.id, shape.id, 1_234_000, 2_345_000);
+    const story = firstStory(slide.shapes);
+    source.insertText(story.id, 0, 'Saved: ');
+
+    const reopened = openPresentation(source.save(), { clientId: 9006 });
+    const snapshot = reopened.snapshot();
+    const moved = snapshot.slides[0].shapes.find(
+      (candidate) => candidate.sourceId === shape.sourceId
+    );
+    expect([moved?.x, moved?.y]).toEqual([1_234_000, 2_345_000]);
+    const text = snapshot.slides
+      .flatMap((candidate) => candidate.shapes)
+      .flatMap((candidate) => candidate.textStories)
+      .find((candidate) => candidate.id === story.id);
+    expect(text?.paragraphs[0]?.runs[0]?.text.startsWith('Saved: ')).toBe(true);
+
+    source.dispose();
+    reopened.dispose();
   });
 });
 

@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
 use pptx_edit::{
-    DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft,
-    ShapeFillReceipt, ShapeReceipt, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, StorySnapshot,
-    TextReceipt, TextStyle, TextStylePatch, TransformReceipt,
+    CaretAnchor, DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeAdjustReceipt,
+    ShapeDraft, ShapeFillReceipt, ShapeReceipt, ShapeStroke, ShapeStrokeReceipt, SlideReceipt,
+    StorySnapshot, TextReceipt, TextStyle, TextStylePatch, TransformReceipt, UpdateEvent,
+    UpdateSubscription,
 };
 use pptx_parse::{
     MediaPart, ParseLimits, PptxPackage, Presentation as PresentationModel, Slide, SlideLayout,
@@ -47,7 +48,7 @@ impl Presentation {
         client_id: u64,
     ) -> Result<Self> {
         let package = pptx_parse::parse_pptx_with_limits(bytes, limits)?;
-        let session = DeckSession::from_package(package, client_id)?;
+        let session = DeckSession::from_package_with_source(package, bytes, client_id)?;
         Ok(Self {
             session,
             renderer: SlideRenderer::new(),
@@ -92,6 +93,14 @@ impl Presentation {
 
     pub fn story(&self, story_id: &str) -> Result<StorySnapshot> {
         Ok(self.session.story(story_id)?)
+    }
+
+    pub fn anchor_caret(&self, story_id: &str, index: u32) -> Result<CaretAnchor> {
+        Ok(self.session.anchor_caret(story_id, index)?)
+    }
+
+    pub fn resolve_caret_anchor(&self, anchor: &CaretAnchor) -> Option<u32> {
+        self.session.resolve_caret_anchor(anchor)
     }
 
     pub fn insert_slide(
@@ -252,6 +261,17 @@ impl Presentation {
             .insert_paragraph_break(context, story_id, index)?)
     }
 
+    pub fn delete_paragraph_break(
+        &self,
+        context: &EditCtx,
+        story_id: &str,
+        index: u32,
+    ) -> Result<TextReceipt> {
+        Ok(self
+            .session
+            .delete_paragraph_break(context, story_id, index)?)
+    }
+
     pub fn register_font(
         &mut self,
         family: &str,
@@ -269,10 +289,12 @@ impl Presentation {
             .layout_slide(self.session.package(), &snapshot, slide_index)?)
     }
 
-    /// Re-zips the retained parts. Part bytes survive unchanged; the container
-    /// is rebuilt, so the output is not byte-identical to the source.
+    /// Serializes the deck with all edits applied. Untouched slides keep their
+    /// exact source part bytes; edited slides are patched at the XML level.
+    /// The container is rebuilt, so the output is not byte-identical to the
+    /// source even without edits.
     pub fn save(&self) -> Result<Vec<u8>> {
-        Ok(pptx_parse::write_pptx(self.session.package())?)
+        Ok(self.session.save()?)
     }
 
     pub fn encode_state_vector_v1(&self) -> Vec<u8> {
@@ -289,6 +311,13 @@ impl Presentation {
 
     pub fn apply_update_v1(&self, update: &[u8]) -> Result<DeckSnapshot> {
         Ok(self.session.apply_update_v1(update)?)
+    }
+
+    pub fn observe_update_v1<F>(&self, callback: F) -> Result<UpdateSubscription>
+    where
+        F: Fn(UpdateEvent) + 'static,
+    {
+        Ok(self.session.observe_update_v1(callback)?)
     }
 
     pub fn undo(&self) -> bool {

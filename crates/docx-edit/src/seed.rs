@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -456,20 +456,24 @@ fn any_from_value(value: Value) -> Result<Any, String> {
             .collect::<Result<Vec<_>, _>>()
             .map(Arc::from)
             .map(Any::Array),
-        Value::Object(values) => values
-            .into_iter()
-            .map(|(key, value)| Ok((key, any_from_value(value)?)))
-            .collect::<Result<HashMap<_, _>, _>>()
-            .map(Arc::new)
-            .map(Any::Map),
+        Value::Object(values) => {
+            let mut entries = values
+                .into_iter()
+                .map(|(key, value)| Ok((key, any_from_value(value)?)))
+                .collect::<Result<Vec<_>, String>>()?;
+            entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            Ok(Any::Map(Arc::new(entries.into_iter().collect())))
+        }
     }
 }
 
 fn yrs_attrs(values: JsonObject) -> Result<Attrs, String> {
-    values
+    let mut entries = values
         .into_iter()
         .map(|(key, value)| Ok((Arc::<str>::from(key), any_from_value(value)?)))
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    Ok(entries.into_iter().collect())
 }
 
 fn payload(values: JsonObject) -> Result<Vec<(String, Any)>, String> {
@@ -1213,7 +1217,7 @@ fn note_ref_unit(
         }),
         &all_marks,
         comment_id,
-        utf16_len(&js_string(id)),
+        1,
     )
 }
 
@@ -1566,6 +1570,21 @@ fn paragraph_style_formatting(
     merge_text_formatting(style.as_ref(), extra)
 }
 
+/// Note number marks carry no story unit, so the run boundary cache is the only
+/// place a saved paragraph can learn they were there.
+fn note_ref_mark_types(run: &Value) -> Vec<Value> {
+    array(field(Some(run), "content"))
+        .iter()
+        .filter_map(
+            |content| match string(field(Some(content), "type")).unwrap_or_default() {
+                "footnoteRefMark" => Some(Value::String("footnote".to_owned())),
+                "endnoteRefMark" => Some(Value::String("endnote".to_owned())),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
 fn run_boundary(
     run: &Value,
     style_formatting: Option<&Value>,
@@ -1597,8 +1616,12 @@ fn run_boundary(
                 .unwrap_or_default(),
         })
         .collect::<String>();
+    let note_marks = note_ref_mark_types(run);
     let mut boundary = Map::new();
     boundary.insert("text".to_owned(), Value::String(text));
+    if !note_marks.is_empty() {
+        boundary.insert("noteMarks".to_owned(), Value::Array(note_marks));
+    }
     if let Some(key) = keys.first() {
         boundary.insert("marksKey".to_owned(), Value::String(key.clone()));
     }
@@ -1663,6 +1686,7 @@ fn paragraph_attrs(
             "pageBreakBefore",
             "keepNext",
             "keepLines",
+            "widowControl",
             "contextualSpacing",
             "outlineLevel",
             "bidi",
@@ -1744,6 +1768,7 @@ fn paragraph_attrs(
             "pageBreakBefore",
             "keepNext",
             "keepLines",
+            "widowControl",
             "outlineLevel",
             "bidi",
         ] {
@@ -1774,7 +1799,7 @@ fn paragraph_attrs(
     }
     if let Some(section) = field(Some(paragraph), "sectionProperties") {
         attrs.insert("_sectionProperties".to_owned(), section.clone());
-        if let Some(start @ ("nextPage" | "continuous" | "oddPage" | "evenPage")) =
+        if let Some(start @ ("nextPage" | "continuous" | "oddPage" | "evenPage" | "nextColumn")) =
             string(field(Some(section), "sectionStart"))
         {
             attrs.insert(
@@ -2183,6 +2208,22 @@ fn revision_attrs(info: &Value) -> Value {
     })
 }
 
+/// Maps each physical cell edge to the border side that feeds it: the matching
+/// outer side where the cell sits on the boundary, `insideH`/`insideV` within.
+pub(crate) fn border_side_sources(
+    first_row: bool,
+    last_row: bool,
+    first_column: bool,
+    last_column: bool,
+) -> [(&'static str, &'static str); 4] {
+    [
+        ("top", if first_row { "top" } else { "insideH" }),
+        ("bottom", if last_row { "bottom" } else { "insideH" }),
+        ("left", if first_column { "left" } else { "insideV" }),
+        ("right", if last_column { "right" } else { "insideV" }),
+    ]
+}
+
 fn cell_borders(
     formatting: Option<&Value>,
     table_borders: Option<&Value>,
@@ -2192,12 +2233,12 @@ fn cell_borders(
     last_column: bool,
 ) -> Option<Value> {
     let inherited = object(table_borders).map(|borders| {
-        json!({
-            "top": nullish(if first_row { borders.get("top") } else { borders.get("insideH") }),
-            "bottom": nullish(if last_row { borders.get("bottom") } else { borders.get("insideH") }),
-            "left": nullish(if first_column { borders.get("left") } else { borders.get("insideV") }),
-            "right": nullish(if last_column { borders.get("right") } else { borders.get("insideV") })
-        })
+        Value::Object(
+            border_side_sources(first_row, last_row, first_column, last_column)
+                .into_iter()
+                .map(|(edge, source)| (edge.to_owned(), nullish(borders.get(source))))
+                .collect(),
+        )
     });
     let direct = field(formatting, "borders");
     if inherited.is_none() && direct.is_none() {
@@ -3073,5 +3114,110 @@ mod tests {
             source_json(&value, &source),
             r#"{"type":"shape","z":1,"nested":{"b":2,"a":3}}"#
         );
+    }
+
+    fn widow_control_styles() -> Value {
+        // Style chains are already merged: Body carries Normal's authored off,
+        // while docDefaults sits under a style that leaves the toggle absent.
+        json!({
+            "docDefaults": { "pPr": { "widowControl": false } },
+            "styles": [
+                { "styleId": "Normal", "type": "paragraph", "default": true, "pPr": {} },
+                { "styleId": "Body", "type": "paragraph", "pPr": { "widowControl": false } },
+                { "styleId": "Quote", "type": "paragraph", "pPr": { "widowControl": true } }
+            ]
+        })
+    }
+
+    fn seeded_widow_control(styles: &StyleResolver, formatting: Value) -> Option<Value> {
+        paragraph_attrs(
+            &json!({ "formatting": formatting, "content": [] }),
+            styles,
+            &[],
+            &[],
+            None,
+        )
+        .get("widowControl")
+        .cloned()
+    }
+
+    #[test]
+    fn widow_control_is_seeded_from_doc_defaults_the_style_and_direct_formatting() {
+        let styles = StyleResolver::new(Some(&widow_control_styles()));
+
+        assert_eq!(
+            seeded_widow_control(&styles, json!({})),
+            Some(Value::Bool(false)),
+            "docDefaults reaches a paragraph whose style is silent"
+        );
+        assert_eq!(
+            seeded_widow_control(&styles, json!({ "styleId": "Body" })),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            seeded_widow_control(&styles, json!({ "styleId": "Quote" })),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            seeded_widow_control(&styles, json!({ "styleId": "Body", "widowControl": true })),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            seeded_widow_control(
+                &styles,
+                json!({ "styleId": "Quote", "widowControl": false })
+            ),
+            Some(Value::Bool(false)),
+            "a direct off overrides a style that turns the toggle back on"
+        );
+    }
+
+    #[test]
+    fn note_ref_marks_seed_no_story_unit_and_land_in_the_run_boundary() {
+        let styles = StyleResolver::new(None);
+        for (content_type, note_type) in [
+            ("footnoteRefMark", "footnote"),
+            ("endnoteRefMark", "endnote"),
+        ] {
+            let run = json!({
+                "type": "run",
+                "formatting": { "styleId": "FootnoteReference" },
+                "content": [{ "type": content_type }, { "type": content_type }],
+            });
+            assert!(run_to_units(&run, None, &styles, None, &[], &BTreeMap::new()).is_empty());
+            let boundary = run_boundary(&run, None, &styles, &BTreeMap::new()).unwrap();
+            assert_eq!(
+                boundary.get("noteMarks"),
+                Some(&json!([note_type, note_type]))
+            );
+            assert_eq!(boundary.get("text"), Some(&Value::String(String::new())));
+        }
+    }
+
+    #[test]
+    fn multi_digit_note_references_seed_one_position() {
+        let styles = StyleResolver::new(None);
+        let units = run_to_units(
+            &json!({
+                "type": "run",
+                "content": [{ "type": "footnoteRef", "id": 12 }],
+            }),
+            None,
+            &styles,
+            None,
+            &[],
+            &BTreeMap::new(),
+        );
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].pm_size, 1);
+    }
+
+    #[test]
+    fn widow_control_left_unauthored_anywhere_seeds_null() {
+        let styles = StyleResolver::new(Some(&json!({
+            "styles": [{ "styleId": "Normal", "type": "paragraph", "default": true, "pPr": {} }]
+        })));
+
+        assert_eq!(seeded_widow_control(&styles, json!({})), Some(Value::Null));
     }
 }

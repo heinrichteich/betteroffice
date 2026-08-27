@@ -508,8 +508,7 @@ function noteRefUnit(
     'noteRef',
     noteType === 'endnote' ? { endnoteRefId: id } : { footnoteRefId: id },
     allMarks,
-    commentId,
-    String(id).length
+    commentId
   );
 }
 
@@ -719,6 +718,19 @@ function paragraphStyleFormatting(
   return mergeTextFormatting(styleFormatting, extraRunFormatting);
 }
 
+/**
+ * Note number marks carry no story unit, so the run boundary cache is the only
+ * place a saved paragraph can learn they were there.
+ */
+function noteRefMarkTypes(run: Run): string[] {
+  const marks: string[] = [];
+  for (const content of run.content) {
+    if (content.type === 'footnoteRefMark') marks.push('footnote');
+    else if (content.type === 'endnoteRefMark') marks.push('endnote');
+  }
+  return marks;
+}
+
 function runBoundary(
   run: Run,
   styleFormatting: TextFormatting | undefined,
@@ -728,6 +740,7 @@ function runBoundary(
   if (units.some((unit) => unit.kind !== 'text' && unit.embedKind !== 'noteRef')) return null;
   const keys = units.map((unit) => marksKey(unit.marks));
   if (keys.some((key) => key !== keys[0])) return null;
+  const marks = noteRefMarkTypes(run);
   const text = units
     .map((unit) => {
       if (unit.kind === 'text') return unit.text;
@@ -738,6 +751,7 @@ function runBoundary(
   const key = keys[0];
   return {
     text,
+    ...(marks.length > 0 ? { noteMarks: marks } : {}),
     ...(key !== undefined ? { marksKey: key } : {}),
     ...(run.formatting ? { formatting: run.formatting } : {}),
     ...(run.propertyChanges ? { propertyChanges: run.propertyChanges } : {}),
@@ -793,6 +807,7 @@ function paragraphAttrs(
     attrs.pageBreakBefore = formatting?.pageBreakBefore ?? stylePpr?.pageBreakBefore ?? null;
     attrs.keepNext = formatting?.keepNext ?? stylePpr?.keepNext ?? null;
     attrs.keepLines = formatting?.keepLines ?? stylePpr?.keepLines ?? null;
+    attrs.widowControl = formatting?.widowControl ?? stylePpr?.widowControl ?? null;
     attrs.contextualSpacing = formatting?.contextualSpacing ?? stylePpr?.contextualSpacing ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? stylePpr?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? stylePpr?.bidi ?? null;
@@ -827,6 +842,7 @@ function paragraphAttrs(
     attrs.pageBreakBefore = formatting?.pageBreakBefore ?? null;
     attrs.keepNext = formatting?.keepNext ?? null;
     attrs.keepLines = formatting?.keepLines ?? null;
+    attrs.widowControl = formatting?.widowControl ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? null;
     attrs.defaultTextFormatting = formatting?.runProperties ?? null;
@@ -839,7 +855,8 @@ function paragraphAttrs(
       start === 'nextPage' ||
       start === 'continuous' ||
       start === 'oddPage' ||
-      start === 'evenPage'
+      start === 'evenPage' ||
+      start === 'nextColumn'
     ) {
       attrs.sectionBreakType = start;
     }
@@ -1459,10 +1476,9 @@ function unitsToRawOps(units: readonly InlineUnit[]): YrsRawOp[] {
 }
 
 function seedPlan(session: YrsSession, plan: StoryPlan): void {
-  session.applyRawOps(plan.storyId, unitsToRawOps(plan.units));
-  const comments: YrsRawOp[] = [];
+  const ops = unitsToRawOps(plan.units);
   for (const [id, ranges] of plan.commentCoverage) {
-    comments.push({
+    ops.push({
       op: 'setComment',
       id: String(id),
       ranges,
@@ -1471,7 +1487,7 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
       body: null,
     });
   }
-  if (comments.length > 0) session.applyRawOps(plan.storyId, comments);
+  session.applySeedRawOps(plan.storyId, ops);
 }
 
 /**

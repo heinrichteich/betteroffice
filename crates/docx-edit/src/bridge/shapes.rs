@@ -10,6 +10,7 @@ use super::RenderEnv;
 
 const EMU_PER_INCH: f64 = 914_400.0;
 const PIXELS_PER_INCH: f64 = 96.0;
+const MAX_SHAPE_BODY_DEPTH: usize = 8;
 
 pub(super) fn lower_shape_json(
     shape: &Value,
@@ -79,7 +80,7 @@ fn lower_shape(
         children,
         scene: field(shape, "scene").cloned(),
         effects: array(shape, "effects").cloned(),
-        text_body_properties: field(shape, "textBodyProperties").cloned(),
+        text_body_properties: field(shape, "textBodyProperties").map(text_body_in_pixels),
         position: None,
         wrap_type: None,
         wrap_text: None,
@@ -93,6 +94,20 @@ fn lower_shape(
         pm_start: doc_start,
         pm_end: doc_end,
     })
+}
+
+/// The text body with its insets in page pixels; the model keeps them in EMU
+/// like every other length, and layout reads them alongside pixel widths.
+fn text_body_in_pixels(properties: &Value) -> Value {
+    let mut properties = properties.clone();
+    if let Some(margins) = properties.get_mut("margins").and_then(Value::as_object_mut) {
+        for side in ["left", "right", "top", "bottom"] {
+            if let Some(emu) = margins.get(side).and_then(Value::as_f64) {
+                margins.insert(side.to_owned(), Value::from(emu_to_pixels(emu)));
+            }
+        }
+    }
+    properties
 }
 
 fn shape_fill(shape: &Value) -> Option<Value> {
@@ -223,13 +238,46 @@ fn shape_transform(shape: &Value) -> Option<Value> {
 fn shape_inner_text(shape: &Value, block_id: &str) -> Option<Vec<ParagraphBlock>> {
     let text_body = object(shape, "textBody")?;
     let content = text_body.get("content")?.as_array()?;
-    Some(
-        content
-            .iter()
-            .enumerate()
-            .map(|(index, paragraph)| shape_paragraph(paragraph, format!("{block_id}:p:{index}")))
-            .collect(),
-    )
+    let mut blocks = Vec::new();
+    for (index, block) in content.iter().enumerate() {
+        push_shape_body_block(block, format!("{block_id}:p:{index}"), 0, &mut blocks);
+    }
+    Some(blocks)
+}
+
+/// `ShapeBlock` renders paragraphs only, so nested tables and block SDTs
+/// contribute their paragraphs in reading order instead of a grid.
+fn push_shape_body_block(
+    block: &Value,
+    block_id: String,
+    depth: usize,
+    output: &mut Vec<ParagraphBlock>,
+) {
+    if depth > MAX_SHAPE_BODY_DEPTH {
+        return;
+    }
+    match string(block, "type").as_deref() {
+        Some("table") => {
+            for (row_index, row) in array(block, "rows").into_iter().flatten().enumerate() {
+                for (cell_index, cell) in array(row, "cells").into_iter().flatten().enumerate() {
+                    for (index, child) in array(cell, "content").into_iter().flatten().enumerate() {
+                        push_shape_body_block(
+                            child,
+                            format!("{block_id}:r{row_index}c{cell_index}:p:{index}"),
+                            depth + 1,
+                            output,
+                        );
+                    }
+                }
+            }
+        }
+        Some("blockSdt") => {
+            for (index, child) in array(block, "content").into_iter().flatten().enumerate() {
+                push_shape_body_block(child, format!("{block_id}:sdt:{index}"), depth + 1, output);
+            }
+        }
+        _ => output.push(shape_paragraph(block, block_id)),
+    }
 }
 
 fn shape_paragraph(paragraph: &Value, block_id: String) -> ParagraphBlock {
@@ -819,6 +867,65 @@ mod tests {
         assert_eq!(block.transform.as_ref().unwrap()["flipH"], true);
         assert_eq!(block.scene.as_ref().unwrap()["version"], 1);
         assert_eq!(block.pm_start, Some(7.0));
+    }
+
+    /// Word writes the insets in EMU on every text box; layout reads them next
+    /// to pixel widths, so a raw inset pushed the text a thousand inches off the
+    /// page.
+    #[test]
+    fn lowers_text_body_insets_from_emu_to_pixels() {
+        let shape = json!({
+            "type": "shape",
+            "shapeType": "textBox",
+            "size": {"width": 914400, "height": 457200},
+            "textBodyProperties": {
+                "anchor": "top",
+                "margins": {"left": 91440, "right": 91440, "top": 45720, "bottom": 45720}
+            },
+            "textBody": {"content": []}
+        });
+
+        let block = lower_shape_json(&shape, 3, &RenderEnv::default()).unwrap();
+        let margins = &block.text_body_properties.unwrap()["margins"];
+
+        assert_eq!(margins["left"], json!(emu_to_pixels(91440.0)));
+        assert_eq!(margins["top"], json!(emu_to_pixels(45720.0)));
+        assert!(margins["left"].as_f64().unwrap() < 10.0);
+    }
+
+    #[test]
+    fn lowers_a_table_in_the_text_body_to_its_cell_paragraphs() {
+        let shape = json!({
+            "type": "shape",
+            "shapeType": "textBox",
+            "size": {"width": 914400, "height": 457200},
+            "textBody": {"content": [{
+                "type": "table",
+                "rows": [{
+                    "type": "tableRow",
+                    "cells": [{
+                        "type": "tableCell",
+                        "content": [{
+                            "type": "paragraph",
+                            "content": [{
+                                "type": "run",
+                                "content": [{"type": "text", "text": "TABLE-CELL"}]
+                            }]
+                        }]
+                    }]
+                }]
+            }]}
+        });
+
+        let block = lower_shape_json(&shape, 3, &RenderEnv::default()).unwrap();
+        let inner = block.inner_text.as_ref().unwrap();
+
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0].runs.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&inner[0].runs[0]).unwrap()["text"],
+            "TABLE-CELL"
+        );
     }
 
     #[test]

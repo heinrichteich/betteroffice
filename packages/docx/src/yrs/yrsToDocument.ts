@@ -41,6 +41,8 @@ import type {
   InlineSdt,
   SdtProperties,
   Comment,
+  Footnote,
+  Endnote,
 } from '../types/document';
 import type { YrsSession } from './index';
 
@@ -129,6 +131,7 @@ const PARAGRAPH_ATTR_DEFAULTS: Attrs = {
   renderedPageBreakBefore: null,
   keepNext: null,
   keepLines: null,
+  widowControl: null,
   contextualSpacing: null,
   defaultTextFormatting: null,
   sectionBreakType: null,
@@ -200,6 +203,7 @@ interface BookmarkBoundary extends CommentBoundary {
 
 interface OriginalRunBoundary {
   text: string;
+  noteMarks?: string[];
   marksKey?: string;
   formatting?: TextFormatting;
   propertyChanges?: Run['propertyChanges'];
@@ -675,16 +679,32 @@ function imageRunFromPayload(payload: Attrs): Run {
   return { type: 'run', content: [{ type: 'drawing', image }] };
 }
 
+/** The seeded shape, carrying the text body and everything else no payload field describes. */
+function storedShape(value: unknown): Shape | undefined {
+  const json = asString(value);
+  if (!json || json.length > 2_000_000) return undefined;
+  try {
+    const parsed = JSON.parse(json) as Shape;
+    if (parsed?.type !== 'shape' || typeof parsed.shapeType !== 'string') return undefined;
+    if (!asObject(parsed.size)) parsed.size = { width: 0, height: 0 };
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
 function shapeRunFromPayload(payload: Attrs): Run {
-  const shape: Shape = {
+  const shape: Shape = storedShape(payload.shapeJson) ?? {
     type: 'shape',
-    shapeType: (asString(payload.shapeType) || 'rect') as Shape['shapeType'],
-    id: asString(payload.shapeId) || undefined,
-    size: {
-      width: payload.width ? pixelsToEmu(Number(payload.width)) : 0,
-      height: payload.height ? pixelsToEmu(Number(payload.height)) : 0,
-    },
+    shapeType: 'rect',
+    size: { width: 0, height: 0 },
   };
+  const shapeType = asString(payload.shapeType);
+  if (shapeType) shape.shapeType = shapeType as Shape['shapeType'];
+  const shapeId = asString(payload.shapeId);
+  if (shapeId) shape.id = shapeId;
+  if (payload.width) shape.size = { ...shape.size, width: pixelsToEmu(Number(payload.width)) };
+  if (payload.height) shape.size = { ...shape.size, height: pixelsToEmu(Number(payload.height)) };
   if (Array.isArray(payload.geometryPath) && payload.geometryPath.length > 0) {
     shape.geometryPath = payload.geometryPath as NonNullable<Shape['geometryPath']>;
   }
@@ -1022,6 +1042,14 @@ function marksKeyToYrsAttrs(marksKey: string | undefined): Attrs | null {
   return attrs;
 }
 
+/** Rebuilds the note number marks a run held; they occupy no story unit. */
+function noteMarkContent(boundary: OriginalRunBoundary): RunContent[] | null {
+  if (!boundary.noteMarks?.length) return null;
+  return boundary.noteMarks.map((mark) => ({
+    type: mark === 'endnote' ? 'endnoteRefMark' : 'footnoteRefMark',
+  }));
+}
+
 function restoreOriginalRuns(
   content: ParagraphContent[],
   items: InlineItem[],
@@ -1032,7 +1060,8 @@ function restoreOriginalRuns(
     !content.every(
       (child) => child.type === 'run' && child.content.every((entry) => entry.type === 'text')
     ) ||
-    items.some((item) => item.kind !== 'text' || item.attributes.hyperlink)
+    items.some((item) => item.kind !== 'text' || item.attributes.hyperlink) ||
+    boundaries.some((boundary) => boundary.noteMarks?.length && boundary.text.length > 0)
   ) {
     return content;
   }
@@ -1048,8 +1077,8 @@ function restoreOriginalRuns(
     restoredAttrs.push(expected);
     let remaining = boundary.text.length;
     while (remaining > 0) {
-      const item = items[itemIndex] as TextItem | undefined;
-      if (!item) return content;
+      const item = items[itemIndex];
+      if (item?.kind !== 'text') return content;
       if (stableStringify(formattingAttrs(item.attributes)) !== stableStringify(expected)) {
         return content;
       }
@@ -1064,6 +1093,8 @@ function restoreOriginalRuns(
     }
   }
 
+  if (itemIndex !== items.length || itemOffset !== 0) return content;
+
   return boundaries.map((boundary, index) => {
     // restoreOriginalRuns restores the original segmentation/property-change
     // cache, but non-empty runs keep formatting reconstructed from their live
@@ -1074,7 +1105,7 @@ function restoreOriginalRuns(
         : attrsToTextFormatting(restoredAttrs[index]);
     const run: Run = {
       type: 'run',
-      content: runContentForText(boundary.text, formatting ?? {}),
+      content: noteMarkContent(boundary) ?? runContentForText(boundary.text, formatting ?? {}),
     };
     if (formatting && Object.keys(formatting).length > 0) run.formatting = formatting;
     if (boundary.propertyChanges?.length) run.propertyChanges = boundary.propertyChanges;
@@ -1090,7 +1121,9 @@ function runTextLength(run: Run): number {
     if (
       content.type === 'tab' ||
       content.type === 'softHyphen' ||
-      content.type === 'noBreakHyphen'
+      content.type === 'noBreakHyphen' ||
+      content.type === 'footnoteRef' ||
+      content.type === 'endnoteRef'
     ) {
       return length + 1;
     }
@@ -1297,30 +1330,26 @@ function paragraphFromStory(
   return paragraph;
 }
 
+/**
+ * Lifts a `w:tblBorders` back out of the per-cell edges seeding pushed down:
+ * outer sides come from the cells owning the table's boundary, `insideH`/
+ * `insideV` from an interior edge. Sides no cell authors stay absent.
+ */
 function inferTableBorders(rows: TableRow[]): TableBorders | undefined {
-  for (const row of rows) {
-    for (const cell of row.cells) {
-      const borders = cell.formatting?.borders;
-      if (!borders) continue;
-      const base =
-        borders.top ||
-        borders.left ||
-        borders.right ||
-        borders.bottom ||
-        borders.insideH ||
-        borders.insideV;
-      if (!base) return undefined;
-      return {
-        top: borders.top ?? base,
-        bottom: borders.bottom ?? base,
-        left: borders.left ?? base,
-        right: borders.right ?? base,
-        insideH: borders.insideH ?? borders.bottom ?? base,
-        insideV: borders.insideV ?? borders.right ?? base,
-      };
-    }
-  }
-  return undefined;
+  const firstRow = rows[0]?.cells;
+  const lastRow = rows[rows.length - 1]?.cells;
+  const corner = firstRow?.[0]?.formatting?.borders;
+  if (!firstRow || !lastRow || !corner) return undefined;
+  const borders: TableBorders = {
+    top: corner.top,
+    left: corner.left,
+    bottom: lastRow[0]?.formatting?.borders?.bottom,
+    right: firstRow[firstRow.length - 1]?.formatting?.borders?.right,
+    insideH: rows.length > 1 ? corner.bottom : undefined,
+    insideV: firstRow.length > 1 ? corner.right : undefined,
+  };
+  const authored = Object.entries(borders).filter(([, value]) => value !== undefined);
+  return authored.length > 0 ? (Object.fromEntries(authored) as TableBorders) : undefined;
 }
 
 function normalizeVMergeRuns(rows: TableRow[]): void {
@@ -1539,6 +1568,51 @@ function pageBreakParagraph(): Paragraph {
   };
 }
 
+/** A note number mark run, or a tracked-change wrapper holding only those. */
+function isNoteMark(content: ParagraphContent): boolean {
+  if (
+    content.type === 'insertion' ||
+    content.type === 'deletion' ||
+    content.type === 'moveFrom' ||
+    content.type === 'moveTo'
+  ) {
+    return content.content.length > 0 && content.content.every(isNoteMark);
+  }
+  return (
+    content.type === 'run' &&
+    content.content.length > 0 &&
+    content.content.every(
+      (entry) => entry.type === 'footnoteRefMark' || entry.type === 'endnoteRefMark'
+    )
+  );
+}
+
+function hasNoteMark(blocks: readonly BlockContent[]): boolean {
+  return blocks.some((block) => block.type === 'paragraph' && block.content.some(isNoteMark));
+}
+
+/**
+ * Reinstates the `w:footnoteRef` / `w:endnoteRef` number mark on a projected
+ * note. The mark carries no story unit, so an edit that invalidates the run
+ * boundary cache would otherwise drop it; the source note is the only record.
+ */
+function restoreNoteMarks(
+  projected: BlockContent[],
+  base: readonly BlockContent[]
+): BlockContent[] {
+  if (hasNoteMark(projected)) return projected;
+  const opening = base.find((block) => block.type === 'paragraph')?.content ?? [];
+  const end = opening.findIndex((child) => !isNoteMark(child));
+  const marks = opening.slice(0, end < 0 ? opening.length : end);
+  if (marks.length === 0) return projected;
+  const index = projected.findIndex((block) => block.type === 'paragraph');
+  if (index < 0) return projected;
+  const target = projected[index] as Paragraph;
+  const restored = [...projected];
+  restored[index] = { ...target, content: [...marks, ...target.content] };
+  return restored;
+}
+
 function collectBaseParagraphs(document: Document): Map<string, Paragraph> {
   const paragraphs = new Map<string, Paragraph>();
   const visit = (blocks: readonly BlockContent[]): void => {
@@ -1580,6 +1654,7 @@ function collectBaseStories(document: Document): Map<string, readonly BlockConte
   for (const [rId, part] of document.package.headers ?? []) visit(`hf:${rId}`, part.content);
   for (const [rId, part] of document.package.footers ?? []) visit(`hf:${rId}`, part.content);
   for (const note of document.package.footnotes ?? []) visit(`fn:${note.id}`, note.content);
+  for (const note of document.package.endnotes ?? []) visit(`en:${note.id}`, note.content);
   return stories;
 }
 
@@ -1803,17 +1878,27 @@ export function yrsToDocument(
     );
   }
 
-  const shouldProjectFootnotes =
-    options.storyIds === undefined ||
-    base.package.footnotes?.some((note) => shouldProject(`fn:${note.id}`));
-  const footnotes = shouldProjectFootnotes
-    ? base.package.footnotes?.map((note) => {
-        const storyId = `fn:${note.id}`;
-        return context.storyIds.has(storyId) && shouldProject(storyId)
-          ? { ...note, content: context.storyToBlocks(storyId), verbatimXml: undefined }
-          : note;
-      })
-    : base.package.footnotes;
+  const projectNotes = <T extends Footnote | Endnote>(
+    notes: T[] | undefined,
+    prefix: string
+  ): T[] | undefined => {
+    const shouldProjectNotes =
+      options.storyIds === undefined ||
+      notes?.some((note) => shouldProject(`${prefix}${note.id}`));
+    if (!shouldProjectNotes) return notes;
+    return notes?.map((note) => {
+      const storyId = `${prefix}${note.id}`;
+      return context.storyIds.has(storyId) && shouldProject(storyId)
+        ? {
+            ...note,
+            content: restoreNoteMarks(context.storyToBlocks(storyId), note.content),
+            verbatimXml: undefined,
+          }
+        : note;
+    });
+  };
+  const footnotes = projectNotes(base.package.footnotes, 'fn:');
+  const endnotes = projectNotes(base.package.endnotes, 'en:');
 
   return {
     ...base,
@@ -1826,6 +1911,7 @@ export function yrsToDocument(
       ...(headers ? { headers } : {}),
       ...(footers ? { footers } : {}),
       ...(footnotes ? { footnotes } : {}),
+      ...(endnotes ? { endnotes } : {}),
     },
   };
 }

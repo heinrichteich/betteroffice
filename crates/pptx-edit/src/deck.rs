@@ -14,13 +14,15 @@ use yrs::{
 
 use crate::story::{seed_plain_story, seed_story, snapshot_story, validate_story};
 use crate::{
-    DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, META, PresetShapeDraft, SHAPES,
-    SLIDE_ORDER, SLIDES, STORIES, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt, ShapeKind,
-    ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, SlideReceipt,
-    SlideSnapshot, TransformReceipt,
+    DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, META, MIGRATE_ORIGIN,
+    PresetShapeDraft, SHAPES, SLIDE_ORDER, SLIDES, STORIES, ShapeAdjustReceipt, ShapeDraft,
+    ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
+    ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
 };
 
 const SCHEMA_VERSION: f64 = 2.0;
+/// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 2] = [1.0, SCHEMA_VERSION];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -245,6 +247,17 @@ impl DeckSession {
         index: u32,
         layout_part_path: Option<&str>,
     ) -> EditResult<SlideReceipt> {
+        if let Some(path) = layout_part_path
+            && !self
+                .package
+                .layouts
+                .iter()
+                .any(|layout| layout.part_path == path)
+        {
+            return Err(EditError::InvalidState(format!(
+                "unknown slide layout {path:?}"
+            )));
+        }
         let slide_id = self.next_id("slide");
         let mut txn = self.transact_for(context);
         let order = required_order(&txn)?;
@@ -322,6 +335,14 @@ impl DeckSession {
         draft: &ShapeDraft,
     ) -> EditResult<ShapeReceipt> {
         validate_rect(draft.rect)?;
+        crate::model::validate_xml_text(&draft.name)?;
+        crate::model::validate_xml_text(&draft.text)?;
+        crate::story::validate_style_values(
+            draft.style.font_family.as_deref(),
+            draft.style.underline.as_deref(),
+            draft.style.color.as_deref(),
+            draft.style.font_size_pt,
+        )?;
         let shape_id = self.next_id("shape");
         let story_id = format!("story:{shape_id}:0");
         let paragraph_id = self.next_id("para");
@@ -379,6 +400,7 @@ impl DeckSession {
         draft: &PresetShapeDraft,
     ) -> EditResult<ShapeReceipt> {
         validate_rect(draft.rect)?;
+        crate::model::validate_xml_text(&draft.name)?;
         let aspect_ratio = draft.rect.width as f64 / draft.rect.height as f64;
         if preset_geometry_to_path(&draft.geometry, &Default::default(), aspect_ratio).is_none() {
             return Err(EditError::InvalidGeometry(format!(
@@ -635,13 +657,45 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<PptxPackage> {
     package_from_meta(&meta, &txn)
 }
 
-fn validate_schema_version<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<()> {
-    if map_number(meta, txn, "schemaVersion") != Some(SCHEMA_VERSION) {
-        return Err(EditError::InvalidState(
-            "unsupported deck schema version".to_owned(),
-        ));
-    }
+pub(crate) fn fingerprint_from_doc(doc: &Doc) -> EditResult<String> {
+    let txn = doc.transact();
+    let meta = required_map(&txn, META)?;
+    map_string(&meta, &txn, "fingerprint")
+        .ok_or_else(|| EditError::InvalidState("missing fingerprint".to_owned()))
+}
+
+/// Rewrites a hydrated older document into the current schema and stamps it, so
+/// the next snapshot this session writes is a v2 one.
+pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
+    let package = {
+        let txn = doc.transact();
+        let meta = required_map(&txn, META)?;
+        if schema_version(&meta, &txn)? == SCHEMA_VERSION {
+            return Ok(());
+        }
+        package_from_meta(&meta, &txn)?
+    };
+    let package_json =
+        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    meta.insert(
+        &mut txn,
+        "packageJson",
+        Any::Buffer(Arc::from(package_json)),
+    );
+    meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
     Ok(())
+}
+
+fn schema_version<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<f64> {
+    map_number(meta, txn, "schemaVersion")
+        .filter(|version| MIGRATABLE_SCHEMA_VERSIONS.contains(version))
+        .ok_or_else(|| EditError::InvalidState("unsupported deck schema version".to_owned()))
+}
+
+fn validate_schema_version<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<()> {
+    schema_version(meta, txn).map(|_| ())
 }
 
 fn package_from_meta<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<PptxPackage> {
@@ -651,7 +705,7 @@ fn package_from_meta<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<PptxPacka
     serde_json::from_slice(&bytes).map_err(|error| EditError::InvalidState(error.to_string()))
 }
 
-fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
+pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
     let order = required_order(&txn)?;
@@ -1106,12 +1160,12 @@ mod tests {
     const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 
     #[test]
-    fn schema_version_is_validated_before_package_json() {
+    fn an_unmigratable_schema_version_is_reported_before_package_json() {
         let session = DeckSession::open(FIXTURE, 100).unwrap();
         {
             let mut txn = session.doc.transact_mut();
             let meta = required_map(&txn, META).unwrap();
-            meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION - 1.0);
+            meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION + 1.0);
             meta.insert(
                 &mut txn,
                 "packageJson",
@@ -1129,6 +1183,14 @@ mod tests {
             Err(EditError::InvalidState(message))
                 if message == "unsupported deck schema version"
         ));
+    }
+
+    #[test]
+    fn migration_leaves_a_current_document_untouched() {
+        let session = DeckSession::open(FIXTURE, 102).unwrap();
+        let before = session.encode_state_as_update_v1();
+        migrate_doc(&session.doc).unwrap();
+        assert_eq!(session.encode_state_as_update_v1(), before);
     }
 
     #[test]

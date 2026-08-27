@@ -12,9 +12,12 @@ export interface SlidePoint {
   y: number;
 }
 
-/** What the pointer is over, for cursor feedback only — the engine's
- *  `hitTest` remains the authority for what a click actually selects. */
 export type HoverTarget = 'text' | 'shape';
+
+type PrimitiveGeometry = Pick<SlidePrimitive, 'x' | 'y' | 'w' | 'h' | 'transform'>;
+
+/** `f32::to_radians` folds PI/180 to one f32 constant before multiplying. */
+const RADIANS_PER_DEGREE = Math.fround(Math.fround(Math.PI) / 180);
 
 export interface FrameBounds {
   x: number;
@@ -137,9 +140,12 @@ export function textPositionAtPoint(
       primitive.storyId === storyId
   );
   if (!textBox || textBox.lines.length === 0) return null;
+  // lines are laid out unrotated, so a drag has to resolve in the same frame the
+  // engine's hitTest used when the gesture started
+  const local = localPoint(textBox, point);
   const line = textBox.lines.reduce((nearest, candidate) =>
-    lineDistance(candidate.y, candidate.height, point.y) <
-    lineDistance(nearest.y, nearest.height, point.y)
+    lineDistance(candidate.y, candidate.height, local.y) <
+    lineDistance(nearest.y, nearest.height, local.y)
       ? candidate
       : nearest
   );
@@ -147,32 +153,79 @@ export function textPositionAtPoint(
   if (!firstCaret) return line.start;
   const caret = line.caretStops.reduce(
     (nearest, candidate) =>
-      Math.abs(candidate.x - point.x) < Math.abs(nearest.x - point.x) ? candidate : nearest,
+      Math.abs(candidate.x - local.x) < Math.abs(nearest.x - local.x) ? candidate : nearest,
     firstCaret
   );
   return caret.position;
 }
 
+/** Mirrors the engine's `hitTest`, which resolves text only where a caret can
+ *  land — an empty story reads as a plain shape in both. */
 export function hoverTargetAtPoint(
   frame: SlideDisplayList,
   point: SlidePoint
 ): HoverTarget | null {
+  // wasm-bindgen narrows hitTest's arguments to f32 before the engine sees them
+  const at = { x: Math.fround(point.x), y: Math.fround(point.y) };
   for (let index = frame.primitives.length - 1; index >= 0; index -= 1) {
     const primitive = frame.primitives[index];
-    if (!primitive.shapeId || !primitiveContains(primitive, point)) continue;
-    return primitive.kind === 'textBox' && primitive.storyId ? 'text' : 'shape';
+    if (!primitive.shapeId) continue;
+    const local = containedPoint(primitive, at);
+    if (!local) continue;
+    return primitive.kind === 'textBox' && primitive.storyId && hasCaretNear(primitive, local.y)
+      ? 'text'
+      : 'shape';
   }
   return null;
 }
 
-function primitiveContains(primitive: SlidePrimitive, point: SlidePoint): boolean {
-  if (primitive.w <= 0 || primitive.h <= 0) return false;
-  const angle = ((primitive.transform?.rotationDeg ?? 0) * Math.PI) / 180;
-  const dx = point.x - (primitive.x + primitive.w / 2);
-  const dy = point.y - (primitive.y + primitive.h / 2);
-  const localX = dx * Math.cos(angle) + dy * Math.sin(angle);
-  const localY = dy * Math.cos(angle) - dx * Math.sin(angle);
-  return Math.abs(localX) <= primitive.w / 2 && Math.abs(localY) <= primitive.h / 2;
+/** Undoes the rotate-then-flip the primitive paints with. Mirrors the engine's
+ *  `HitRegion::local_point`; the display list is f32, so the arithmetic is too —
+ *  an f64 sum puts the far edges up to 1e-5 off, which whole pixels fall into. */
+export function localPoint(primitive: PrimitiveGeometry, point: SlidePoint): SlidePoint {
+  const transform = primitive.transform;
+  if (!transform || (!transform.rotationDeg && !transform.flipH && !transform.flipV)) {
+    return point;
+  }
+  const f32 = Math.fround;
+  const centerX = f32(f32(primitive.x) + f32(f32(primitive.w) / 2));
+  const centerY = f32(f32(primitive.y) + f32(f32(primitive.h) / 2));
+  const angle = f32(f32(transform.rotationDeg ?? 0) * RADIANS_PER_DEGREE);
+  const cos = f32(Math.cos(angle));
+  const sin = f32(Math.sin(angle));
+  const dx = f32(point.x - centerX);
+  const dy = f32(point.y - centerY);
+  let localX = f32(f32(dx * cos) + f32(dy * sin));
+  let localY = f32(f32(dy * cos) - f32(dx * sin));
+  if (transform.flipH) localX = -localX;
+  if (transform.flipV) localY = -localY;
+  return { x: f32(centerX + localX), y: f32(centerY + localY) };
+}
+
+/** The far edge of a primitive, as the engine's f32 arithmetic computes it. */
+export function farEdge(origin: number, extent: number): number {
+  return Math.fround(Math.fround(origin) + Math.fround(extent));
+}
+
+/** The local point when it lands inside the primitive, else null. */
+function containedPoint(primitive: SlidePrimitive, point: SlidePoint): SlidePoint | null {
+  const local = localPoint(primitive, point);
+  return local.x >= Math.fround(primitive.x) &&
+    local.x <= farEdge(primitive.x, primitive.w) &&
+    local.y >= Math.fround(primitive.y) &&
+    local.y <= farEdge(primitive.y, primitive.h)
+    ? local
+    : null;
+}
+
+function hasCaretNear(textBox: TextBoxPrimitive, y: number): boolean {
+  if (textBox.lines.length === 0) return false;
+  const nearest = textBox.lines.reduce((best, candidate) =>
+    lineDistance(candidate.y, candidate.height, y) < lineDistance(best.y, best.height, y)
+      ? candidate
+      : best
+  );
+  return nearest.caretStops.length > 0;
 }
 
 export function movedShapePosition(
