@@ -5,10 +5,12 @@ mod colour;
 #[path = "tests.rs"]
 mod corpus;
 mod eval;
+mod policy;
 mod tokenizer;
 mod units;
 
 pub use ast::{Expr, Op};
+pub use policy::{MutationContext, MutationOutcome, decide as decide_mutation};
 pub use units::Unit;
 use units::unit;
 
@@ -2156,6 +2158,113 @@ mod tests {
         assert_eq!(measurement.error, 1);
         assert_eq!(measurement.unsupported_known, 0);
         assert_eq!(measurement.unsupported_other, 0);
+    }
+
+    #[test]
+    fn corpus_policy_scanner_reports_local_formula_counts() {
+        let Some(directory) = std::env::var_os("VSDX_CORPUS_DIR") else {
+            eprintln!("SKIPPED CORPUS POLICY SCANNER: VSDX_CORPUS_DIR is unset");
+            return;
+        };
+        let mut counts = CorpusPolicyCounts::default();
+        for file in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
+            let package =
+                parse_vsdx(&fs::read(std::path::Path::new(&directory).join(file)).unwrap())
+                    .unwrap();
+            let mut sheets = package
+                .document_sheet
+                .iter()
+                .chain(package.style_sheets.iter())
+                .chain(package.page_sheets.values())
+                .chain(package.master_sheets.values())
+                .chain(package.page_contents.values())
+                .chain(package.master_contents.values())
+                .collect::<Vec<_>>();
+            for sheet in sheets.drain(..) {
+                scan_policy_formulas(sheet_formulas(sheet), &mut counts);
+                for shape in shapes(sheet) {
+                    scan_policy_formulas(shape_formulas(shape), &mut counts);
+                }
+            }
+        }
+        eprintln!(
+            "VSDX corpus policy (local formulas only; inherited formulas excluded): guarded={} redirected_root={} redirected_nested_or_multiple={} lock_protected={}",
+            counts.guarded,
+            counts.redirected_root,
+            counts.redirected_nested_or_multiple,
+            counts.lock_protected
+        );
+    }
+
+    #[derive(Default)]
+    struct CorpusPolicyCounts {
+        guarded: usize,
+        redirected_root: usize,
+        redirected_nested_or_multiple: usize,
+        lock_protected: usize,
+    }
+
+    fn scan_policy_formulas(formulas: Vec<(String, &str)>, counts: &mut CorpusPolicyCounts) {
+        let references = formulas
+            .iter()
+            .filter(|(_, formula)| !formula.eq_ignore_ascii_case("Inh"))
+            .map(|(name, formula)| (name.clone(), (*formula).to_owned()))
+            .collect::<BTreeMap<_, _>>();
+        for (name, formula) in formulas {
+            if formula.eq_ignore_ascii_case("Inh") {
+                continue;
+            }
+            let Ok(expression) = parse(formula, &limits()) else {
+                continue;
+            };
+            if contains_named_call(&expression, "GUARD") {
+                counts.guarded += 1;
+            }
+            let redirects = named_call_count(&expression, "SETATREF");
+            if redirects > 0 {
+                if redirects == 1 && is_root_call(&expression, "SETATREF") {
+                    counts.redirected_root += 1;
+                } else {
+                    counts.redirected_nested_or_multiple += 1;
+                }
+            }
+            if name.starts_with("Lock")
+                && matches!(
+                    evaluate(formula, &references, &limits()),
+                    Evaluation::Evaluated(Evaluated {
+                        value: Value::Number(Number { number: 1.0, .. }),
+                        ..
+                    })
+                )
+            {
+                counts.lock_protected += 1;
+            }
+        }
+    }
+
+    fn contains_named_call(expression: &Expr, name: &str) -> bool {
+        named_call_count(expression, name) > 0
+    }
+
+    fn named_call_count(expression: &Expr, name: &str) -> usize {
+        match expression {
+            Expr::Call(current, arguments) => {
+                usize::from(current.eq_ignore_ascii_case(name))
+                    + arguments
+                        .iter()
+                        .map(|argument| named_call_count(argument, name))
+                        .sum::<usize>()
+            }
+            Expr::Unary(value) => named_call_count(value, name),
+            Expr::Binary(left, _, right) => {
+                named_call_count(left, name) + named_call_count(right, name)
+            }
+            Expr::Number(_, _) | Expr::String(_) | Expr::Reference(_) => 0,
+        }
+    }
+
+    fn is_root_call(expression: &Expr, name: &str) -> bool {
+        matches!(expression, Expr::Call(current, _) if current.eq_ignore_ascii_case(name))
     }
 
     fn classify_error(
