@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use vsdx_eval::{MutationContext, MutationOutcome, decide_mutation, evaluate};
-use vsdx_parse::{CellLocator, CellRow, CellSheet, MutationGesture, ParseLimits};
+use vsdx_parse::{
+    Cell, CellLocator, CellRow, CellSheet, MutationGesture, ParseLimits, RowChild, SectionChild,
+    Shape, ShapeChild, ShapesChild, SheetChild,
+};
 use vsdx_resolve::{Lookup, Resolver};
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, Doc, Map, MapPrelim, MapRef, Out, ReadTxn, Transact,
@@ -23,6 +26,8 @@ pub(crate) fn seed_doc(
 ) -> EditResult<()> {
     let package_json =
         serde_json::to_vec(package).map_err(|error| EditError::Json(error.to_string()))?;
+    let package_bytes =
+        vsdx_parse::write_vsdx(package).map_err(|error| EditError::Parse(error.to_string()))?;
     let mut txn = doc.transact_mut_with("vsdx:bootstrap");
     let meta = txn.get_or_insert_map(META);
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
@@ -31,6 +36,11 @@ pub(crate) fn seed_doc(
         &mut txn,
         "packageJson",
         Any::Buffer(Arc::from(package_json)),
+    );
+    meta.insert(
+        &mut txn,
+        "packageBytes",
+        Any::Buffer(Arc::from(package_bytes)),
     );
     meta.insert(&mut txn, "pageWidth", 0.0);
     meta.insert(&mut txn, "pageHeight", 0.0);
@@ -64,6 +74,234 @@ pub(crate) fn seed_doc(
         }
     }
     Ok(())
+}
+
+pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage> {
+    let txn = doc.transact();
+    let meta = required_map(&txn, META)?;
+    if map_number(&meta, &txn, "schemaVersion") != Some(SCHEMA_VERSION) {
+        return Err(EditError::InvalidState(
+            "unsupported diagram schema version".to_owned(),
+        ));
+    }
+    let mut package = match meta.get(&txn, "packageBytes") {
+        Some(Out::Any(Any::Buffer(bytes))) => vsdx_parse::parse_vsdx(&bytes)
+            .map_err(|error| EditError::InvalidState(error.to_string()))?,
+        _ => {
+            let Some(Out::Any(Any::Buffer(bytes))) = meta.get(&txn, "packageJson") else {
+                return Err(EditError::InvalidState("missing package data".to_owned()));
+            };
+            serde_json::from_slice(&bytes)
+                .map_err(|error| EditError::InvalidState(error.to_string()))?
+        }
+    };
+    materialize_snapshot(&mut package, &snapshot_doc(doc)?);
+    Ok(package)
+}
+
+fn materialize_snapshot(package: &mut vsdx_parse::VsdxPackage, snapshot: &DiagramSnapshot) {
+    for page in &snapshot.pages {
+        let Some(sheet) = package.page_contents.get_mut(&page.source_part_path) else {
+            continue;
+        };
+        materialize_page_shapes(sheet, page);
+    }
+}
+
+fn materialize_page_shapes(sheet: &mut vsdx_parse::Sheet, page: &PageSnapshot) {
+    let originals = sheet
+        .shapes()
+        .cloned()
+        .map(|shape| (shape.id, shape))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut next_id = largest_shape_id(sheet);
+    let mut shapes = Vec::with_capacity(page.shapes.len());
+    for snapshot in &page.shapes {
+        let canonical_id = format!("{}:shape:{}", page.id, snapshot.source_id);
+        let mut shape = if snapshot.id == canonical_id {
+            originals
+                .get(&snapshot.source_id)
+                .cloned()
+                .unwrap_or_else(|| shape_from_snapshot(snapshot, &mut next_id))
+        } else {
+            shape_from_snapshot(snapshot, &mut next_id)
+        };
+        materialize_shape(&mut shape, snapshot);
+        shapes.push(ShapesChild::Shape(shape));
+    }
+    if let Some(SheetChild::Shapes(existing)) = sheet
+        .children
+        .iter_mut()
+        .find(|child| matches!(child, SheetChild::Shapes(_)))
+    {
+        *existing = shapes;
+    } else {
+        sheet.children.push(SheetChild::Shapes(shapes));
+    }
+}
+
+fn largest_shape_id(sheet: &vsdx_parse::Sheet) -> u32 {
+    sheet
+        .shapes()
+        .map(largest_shape_id_including_children)
+        .max()
+        .unwrap_or_default()
+}
+
+fn largest_shape_id_including_children(shape: &Shape) -> u32 {
+    shape
+        .shapes()
+        .map(largest_shape_id_including_children)
+        .max()
+        .unwrap_or_default()
+        .max(shape.id)
+}
+
+fn shape_from_snapshot(snapshot: &ShapeSnapshot, next_id: &mut u32) -> Shape {
+    *next_id = next_id.saturating_add(1);
+    Shape {
+        id: *next_id,
+        name: snapshot.name.clone(),
+        name_u: None,
+        shape_type: Some("Shape".to_owned()),
+        master: None,
+        master_shape: None,
+        line_style: None,
+        fill_style: None,
+        text_style: None,
+        children: Vec::new(),
+        del: false,
+        other_attrs: Vec::new(),
+    }
+}
+
+fn materialize_shape(shape: &mut Shape, snapshot: &ShapeSnapshot) {
+    if shape.id == snapshot.source_id {
+        for cell in &snapshot.cells {
+            materialize_cell(shape, cell);
+        }
+    }
+    for child in &snapshot.children {
+        for value in &mut shape.children {
+            if let ShapeChild::Shapes(shapes) = value {
+                for value in shapes {
+                    if let ShapesChild::Shape(shape) = value {
+                        materialize_shape(shape, child);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn materialize_cell(shape: &mut Shape, snapshot: &CellSnapshot) {
+    let locator = &snapshot.locator;
+    let target = match &locator.section {
+        None => shape.children.iter_mut().find_map(|child| match child {
+            ShapeChild::Cell(cell) if cell.name == locator.cell_name => Some(cell),
+            _ => None,
+        }),
+        Some(section_name) => shape.children.iter_mut().find_map(|child| {
+            let ShapeChild::Section(section) = child else {
+                return None;
+            };
+            if section.name != *section_name {
+                return None;
+            }
+            section.children.iter_mut().find_map(|child| {
+                let SectionChild::Row(row) = child else {
+                    return None;
+                };
+                let row_matches = match &locator.row {
+                    Some(CellRow::Index(index)) => row.index == Some(*index),
+                    Some(CellRow::Name(name)) => row.name.as_deref() == Some(name),
+                    None => false,
+                };
+                row_matches.then(|| {
+                    row.children.iter_mut().find_map(|child| match child {
+                        RowChild::Cell(cell) if cell.name == locator.cell_name => Some(cell),
+                        _ => None,
+                    })
+                })?
+            })
+        }),
+    };
+    if let Some(cell) = target {
+        cell.formula = snapshot.formula.clone();
+    } else if locator.section.is_none() {
+        shape.children.push(ShapeChild::Cell(Cell {
+            name: locator.cell_name.clone(),
+            formula: snapshot.formula.clone(),
+            value: snapshot.value.clone(),
+            unit: None,
+            del: false,
+            other_attrs: Vec::new(),
+        }));
+    } else if let (Some(section_name), Some(row)) = (&locator.section, &locator.row) {
+        let cell = Cell {
+            name: locator.cell_name.clone(),
+            formula: snapshot.formula.clone(),
+            value: snapshot.value.clone(),
+            unit: None,
+            del: false,
+            other_attrs: Vec::new(),
+        };
+        let row_matches = |candidate: &vsdx_parse::Row| match row {
+            CellRow::Index(index) => candidate.index == Some(*index),
+            CellRow::Name(name) => candidate.name.as_deref() == Some(name),
+        };
+        if let Some(section) = shape.children.iter_mut().find_map(|child| match child {
+            ShapeChild::Section(section) if section.name == *section_name => Some(section),
+            _ => None,
+        }) {
+            if let Some(existing_row) = section.children.iter_mut().find_map(|child| match child {
+                SectionChild::Row(candidate) if row_matches(candidate) => Some(candidate),
+                _ => None,
+            }) {
+                existing_row.children.push(RowChild::Cell(cell));
+            } else {
+                section.children.push(SectionChild::Row(vsdx_parse::Row {
+                    index: match row {
+                        CellRow::Index(index) => Some(*index),
+                        CellRow::Name(_) => None,
+                    },
+                    name: match row {
+                        CellRow::Index(_) => None,
+                        CellRow::Name(name) => Some(name.clone()),
+                    },
+                    local_name: None,
+                    row_type: None,
+                    del: false,
+                    children: vec![RowChild::Cell(cell)],
+                    other_attrs: Vec::new(),
+                }));
+            }
+        } else {
+            shape
+                .children
+                .push(ShapeChild::Section(vsdx_parse::Section {
+                    name: section_name.clone(),
+                    index: None,
+                    del: false,
+                    children: vec![SectionChild::Row(vsdx_parse::Row {
+                        index: match row {
+                            CellRow::Index(index) => Some(*index),
+                            CellRow::Name(_) => None,
+                        },
+                        name: match row {
+                            CellRow::Index(_) => None,
+                            CellRow::Name(name) => Some(name.clone()),
+                        },
+                        local_name: None,
+                        row_type: None,
+                        del: false,
+                        children: vec![RowChild::Cell(cell)],
+                        other_attrs: Vec::new(),
+                    })],
+                    other_attrs: Vec::new(),
+                }));
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -343,6 +581,7 @@ impl DiagramSession {
             .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
         let shape = sheets.insert(&mut txn, id.as_str(), MapPrelim::default());
         shape.insert(&mut txn, "id", id.as_str());
+        shape.insert(&mut txn, "pageId", page_id);
         shape.insert(&mut txn, "sourceId", draft.source_id as f64);
         if let Some(name) = &draft.name {
             shape.insert(&mut txn, "name", name.as_str());
@@ -485,15 +724,8 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
 
 pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<()> {
     validate_doc(staged)?;
-    let before = protected_formulas(before)?;
-    let after = protected_formulas(staged)?;
-    for (key, formula) in before {
-        if after.get(&key) != Some(&formula) {
-            return Err(EditError::InvalidState(format!(
-                "remote update changes protected cell {key}"
-            )));
-        }
-    }
+    validate_immutable_metadata(before, staged)?;
+    validate_formula_mutations(before, staged)?;
     Ok(())
 }
 
@@ -521,111 +753,80 @@ pub(crate) fn next_id_counter(doc: &Doc, client_id: u64) -> u64 {
         .unwrap_or(0)
 }
 
-fn protected_formulas(doc: &Doc) -> EditResult<std::collections::BTreeMap<String, String>> {
-    let txn = doc.transact();
-    let pages = required_map(&txn, PAGES)?;
-    let sheets = required_map(&txn, SHEETS)?;
-    let mut protected = std::collections::BTreeMap::new();
-    for (page_id, page) in pages.iter(&txn) {
+fn validate_immutable_metadata(before: &Doc, staged: &Doc) -> EditResult<()> {
+    let before_txn = before.transact();
+    let staged_txn = staged.transact();
+    let before_meta = required_map(&before_txn, META)?;
+    let staged_meta = required_map(&staged_txn, META)?;
+    for key in ["fingerprint", "packageJson", "packageBytes"] {
+        if before_meta.get(&before_txn, key) != staged_meta.get(&staged_txn, key) {
+            return Err(EditError::InvalidState(format!(
+                "remote update changes immutable diagram metadata {key}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_formula_mutations(before: &Doc, staged: &Doc) -> EditResult<()> {
+    let before_txn = before.transact();
+    let staged_txn = staged.transact();
+    let pages = required_map(&before_txn, PAGES)?;
+    let sheets = required_map(&before_txn, SHEETS)?;
+    for (page_id, page) in pages.iter(&before_txn) {
         let Out::YMap(page) = page else { continue };
-        let order = map_array(&page, &txn, "shapes")?;
-        for index in 0..order.len(&txn) {
-            let Some(shape_id) = array_string(&order, &txn, index) else {
-                continue;
-            };
-            let shape = map_ref(&sheets, &txn, &shape_id)?;
-            let cells = map_map(&shape, &txn, "cells")?;
-            let values = cells
-                .iter(&txn)
-                .filter_map(|(name, cell)| match cell {
-                    Out::YMap(cell) => Some((
-                        name.to_string(),
-                        map_string(&cell, &txn, "formula")
-                            .or_else(|| map_string(&cell, &txn, "value")),
-                    )),
-                    _ => None,
-                })
-                .collect::<std::collections::BTreeMap<_, _>>();
-            for (name, cell) in cells.iter(&txn) {
+        let order = map_array(&page, &before_txn, "shapes")?;
+        for index in 0..order.len(&before_txn) {
+            let shape_id = array_string(&order, &before_txn, index).ok_or_else(|| {
+                EditError::InvalidState("shape order contains non-string".to_owned())
+            })?;
+            let shape = map_ref(&sheets, &before_txn, &shape_id)?;
+            let cells = map_map(&shape, &before_txn, "cells")?;
+            let context = CrdtMutationContext::new(&before_txn, page_id, &shape_id)?;
+            let staged_shape = required_map(&staged_txn, SHEETS)
+                .and_then(|sheets| map_ref(&sheets, &staged_txn, &shape_id))?;
+            let staged_cells = map_map(&staged_shape, &staged_txn, "cells")?;
+            for (key, cell) in cells.iter(&before_txn) {
                 let Out::YMap(cell) = cell else { continue };
-                let formula = map_string(&cell, &txn, "formula");
-                let locked = lock_target(name).is_some_and(|_| {
-                    values
-                        .get(name)
-                        .and_then(|value| value.as_deref())
-                        .is_some_and(|value| lock_is_enabled(value, &values))
-                });
-                let protected_target = lock_target(name).is_none()
-                    && [
-                        "LockMoveX",
-                        "LockMoveY",
-                        "LockWidth",
-                        "LockHeight",
-                        "LockAspect",
-                        "LockTextEdit",
-                        "LockFormat",
-                        "LockDelete",
-                    ]
-                    .iter()
-                    .any(|lock| {
-                        lock_target(lock) == Some(name)
-                            && values
-                                .get(*lock)
-                                .and_then(|value| value.as_deref())
-                                .is_some_and(|value| lock_is_enabled(value, &values))
-                    });
-                if locked || protected_target || formula.as_deref().is_some_and(is_guarded) {
-                    protected.insert(
-                        format!("{page_id}/{shape_id}/{name}"),
-                        formula.unwrap_or_default(),
-                    );
+                let before_formula = map_string(&cell, &before_txn, "formula");
+                let after_formula =
+                    staged_cells
+                        .get(&staged_txn, key)
+                        .and_then(|cell| match cell {
+                            Out::YMap(cell) => map_string(&cell, &staged_txn, "formula"),
+                            _ => None,
+                        });
+                if before_formula == after_formula {
+                    continue;
+                }
+                let formula = after_formula.ok_or_else(|| {
+                    EditError::InvalidState(format!(
+                        "remote update removes formula from {page_id}/{shape_id}/{key}"
+                    ))
+                })?;
+                let locator = context.locator(cell_locator(&cell, &before_txn, 0, 0)?);
+                match decide_mutation(
+                    &context,
+                    locator.clone(),
+                    gesture_for_cell(&locator.cell_name),
+                    formula,
+                    &ParseLimits::default(),
+                ) {
+                    MutationOutcome::Allowed { target, .. } if target == locator => {}
+                    MutationOutcome::Allowed { .. } => {
+                        return Err(EditError::InvalidState(format!(
+                            "remote update bypasses formula redirect at {page_id}/{shape_id}/{key}"
+                        )));
+                    }
+                    MutationOutcome::Refused { reason }
+                    | MutationOutcome::Unsupported { reason } => {
+                        return Err(EditError::InvalidState(reason));
+                    }
                 }
             }
         }
     }
-    Ok(protected)
-}
-
-fn lock_is_enabled(
-    value: &str,
-    formulas: &std::collections::BTreeMap<String, Option<String>>,
-) -> bool {
-    let formulas = formulas
-        .iter()
-        .filter_map(|(name, formula)| {
-            formula
-                .as_ref()
-                .map(|formula| (name.clone(), formula.clone()))
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    matches!(
-        evaluate(value.trim_start_matches('='), &formulas, &ParseLimits::default()),
-        vsdx_eval::Evaluation::Evaluated(result)
-            if matches!(result.value, vsdx_eval::Value::Number(number) if number.number == 1.0)
-    )
-}
-
-fn lock_target(lock: &str) -> Option<&str> {
-    match lock {
-        "LockMoveX" => Some("PinX"),
-        "LockMoveY" => Some("PinY"),
-        "LockWidth" => Some("Width"),
-        "LockHeight" => Some("Height"),
-        "LockAspect" => Some("Width"),
-        "LockTextEdit" => Some("Text"),
-        "LockFormat" | "LockDelete" => None,
-        _ => None,
-    }
-}
-
-fn is_guarded(formula: &str) -> bool {
-    vsdx_eval::parse(formula.trim_start_matches('='), &ParseLimits::default())
-        .map(|expression| {
-            format!("{expression:?}")
-                .to_ascii_uppercase()
-                .contains("GUARD")
-        })
-        .unwrap_or(false)
+    Ok(())
 }
 
 fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
@@ -840,7 +1041,7 @@ struct CrdtMutationContext {
 }
 
 impl CrdtMutationContext {
-    fn new(txn: &TransactionMut<'_>, page_id: &str, shape_id: &str) -> EditResult<Self> {
+    fn new<T: ReadTxn>(txn: &T, page_id: &str, shape_id: &str) -> EditResult<Self> {
         let pages = required_map(txn, PAGES)?;
         map_ref(&pages, txn, page_id)?;
         let sheets = required_map(txn, SHEETS)?;

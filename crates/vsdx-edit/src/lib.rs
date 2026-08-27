@@ -16,6 +16,9 @@ mod diagram;
 mod model;
 mod undo;
 
+#[cfg(feature = "wasm")]
+pub mod wasm;
+
 pub use model::*;
 pub use undo::DiagramUndoManager;
 
@@ -106,6 +109,9 @@ impl DiagramSession {
 
     pub fn client_id(&self) -> u64 {
         self.client_id
+    }
+    pub fn package(&self) -> EditResult<vsdx_parse::VsdxPackage> {
+        diagram::package_from_doc(&self.doc)
     }
     pub fn yrs_doc(&self) -> &Doc {
         &self.doc
@@ -787,6 +793,37 @@ mod tests {
             .transact()
             .encode_diff_v1(&session.doc.transact().state_vector());
         assert!(session.apply_update_v1(&update).is_ok());
+    }
+
+    #[test]
+    fn remote_setatref_formula_rewrite_is_rejected_without_changing_the_document() {
+        let session = session();
+        add_cell(&session, "Width", Some("SETATREF(Target)"), None);
+        add_cell(&session, "Target", Some("1"), None);
+        let before = session.encode_state_as_update_v1();
+        let attacker = doc_with_client_id(9);
+        hydrate_doc(&attacker, &before).unwrap();
+        let mut txn = attacker.transact_mut_with(9_u64);
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = match sheets.get(&txn, "page:1:shape:1") {
+            Some(yrs::Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        let cells = match shape.get(&txn, "cells") {
+            Some(yrs::Out::YMap(cells)) => cells,
+            _ => unreachable!(),
+        };
+        let width = match cells.get(&txn, "Width") {
+            Some(yrs::Out::YMap(cell)) => cell,
+            _ => unreachable!(),
+        };
+        width.insert(&mut txn, "formula", "2");
+        drop(txn);
+        let update = attacker
+            .transact()
+            .encode_diff_v1(&session.doc.transact().state_vector());
+        assert!(session.apply_update_v1(&update).is_err());
+        assert_eq!(before, session.encode_state_as_update_v1());
     }
 
     #[test]
