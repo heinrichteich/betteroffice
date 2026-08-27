@@ -242,6 +242,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-vsdx-parse"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-opc",
+ "quick-xml",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "betteroffice-xlsx"
 version = "0.1.0"
 dependencies = [
