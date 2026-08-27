@@ -117,27 +117,38 @@ impl<'a> Resolver<'a> {
         page: &Sheet,
     ) -> Result<Vec<ResolvedTextToken>, ResolveError> {
         let resolved = self.resolve_shape_ref(shape, page)?;
-        Ok(shape
+        self.resolve_text_in_context(shape, page, &resolved)
+    }
+    pub fn resolve_text_in_context(
+        &self,
+        shape: &Shape,
+        page: &Sheet,
+        resolved: &ResolvedShape,
+    ) -> Result<Vec<ResolvedTextToken>, ResolveError> {
+        let masters = self.master_chain(shape, page)?;
+        let tokens = shape
             .text()
+            .or_else(|| masters.iter().find_map(|(_, master)| master.text()));
+        Ok(tokens
             .unwrap_or_default()
             .iter()
             .map(|token| match token {
                 TextToken::Literal(value) => ResolvedTextToken::Literal(value.clone()),
                 TextToken::CharacterRun(index) => ResolvedTextToken::CharacterRun {
                     index: *index,
-                    properties: row_cells(&resolved, "Character", *index),
+                    properties: row_cells(resolved, "Character", *index),
                 },
                 TextToken::ParagraphRun(index) => ResolvedTextToken::ParagraphRun {
                     index: *index,
-                    properties: row_cells(&resolved, "Paragraph", *index),
+                    properties: row_cells(resolved, "Paragraph", *index),
                 },
                 TextToken::Tab(index) => ResolvedTextToken::Tab {
                     index: *index,
-                    properties: row_cells(&resolved, "Tabs", *index),
+                    properties: row_cells(resolved, "Tabs", *index),
                 },
                 TextToken::Field(index) => ResolvedTextToken::Field {
                     index: *index,
-                    properties: row_cells(&resolved, "Field", *index),
+                    properties: row_cells(resolved, "Field", *index),
                 },
             })
             .collect())
@@ -404,10 +415,13 @@ impl<'a> Resolver<'a> {
             }
             sources.truncate(position);
         }
-        let mut keys = HashSet::new();
+        let mut keys = Vec::new();
         for (_, section) in &sources {
-            if let Some(section) = section {
-                keys.extend(section.rows().map(row_key));
+            let Some(section) = section else { continue };
+            for key in row_keys(section) {
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
             }
         }
         let mut out = ResolvedSection {
@@ -420,21 +434,29 @@ impl<'a> Resolver<'a> {
                 .map(|(p, section)| {
                     (
                         *p,
-                        section.and_then(|s| s.rows().find(|r| row_key(r) == key)),
+                        section.and_then(|s| {
+                            row_keys(s)
+                                .into_iter()
+                                .zip(s.rows())
+                                .find(|(row_key, _)| row_key == &key)
+                                .map(|(_, row)| row)
+                        }),
                     )
                 })
                 .collect();
             let row = rows.iter().find_map(|(_, row)| *row);
             let Some(row) = row else { continue };
+            let resolved_key = resolved_row_key(&key, &out.rows);
             if row.del {
                 out.rows.insert(
-                    key.clone(),
+                    resolved_key.clone(),
                     ResolvedRow {
-                        key,
+                        key: resolved_key.clone(),
                         deleted: true,
                         ..Default::default()
                     },
                 );
+                out.row_order.push(resolved_key);
                 continue;
             }
             let mut names = HashSet::new();
@@ -474,14 +496,15 @@ impl<'a> Resolver<'a> {
                 cells.insert(cell_name, lookup.unwrap_or(Lookup::Absent));
             }
             out.rows.insert(
-                key.clone(),
+                resolved_key.clone(),
                 ResolvedRow {
-                    key,
+                    key: resolved_key.clone(),
                     deleted: false,
                     row_type: row.row_type.clone(),
                     cells,
                 },
             );
+            out.row_order.push(resolved_key);
         }
         out
     }
@@ -675,10 +698,32 @@ impl HasSections for Sheet {
         Box::new(self.sections())
     }
 }
-fn row_key(row: &Row) -> String {
+fn row_base_key(row: &Row) -> String {
     row.name
         .clone()
         .map(|name| format!("N:{name}"))
         .or_else(|| row.index.map(|index| format!("IX:{index}")))
-        .unwrap_or_default()
+        .unwrap_or_else(|| "row".into())
+}
+
+fn row_keys(section: &Section) -> Vec<String> {
+    let mut occurrences = BTreeMap::new();
+    section
+        .rows()
+        .map(|row| {
+            let key = row_base_key(row);
+            let occurrence = occurrences.entry(key.clone()).or_insert(0usize);
+            let identity = format!("{key}\u{1f}{occurrence}");
+            *occurrence += 1;
+            identity
+        })
+        .collect()
+}
+fn resolved_row_key(identity: &str, rows: &BTreeMap<String, ResolvedRow>) -> String {
+    let (key, occurrence) = identity.rsplit_once('\u{1f}').unwrap_or((identity, "0"));
+    if !rows.contains_key(key) {
+        key.into()
+    } else {
+        format!("{key}\u{1f}{occurrence}")
+    }
 }
