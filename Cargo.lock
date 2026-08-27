@@ -246,9 +246,26 @@ name = "betteroffice-vsdx"
 version = "0.1.0"
 dependencies = [
  "betteroffice-opc",
+ "betteroffice-vsdx-edit",
  "betteroffice-vsdx-eval",
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-resolve",
+]
+
+[[package]]
+name = "betteroffice-vsdx-edit"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-vsdx-eval",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "wasm-bindgen",
+ "yrs",
 ]
 
 [[package]]
