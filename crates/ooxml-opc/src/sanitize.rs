@@ -142,7 +142,9 @@ pub fn detect_package_kind(parts: &[(String, Vec<u8>)]) -> Result<DocumentKind, 
                         )
                     {
                         let part_name = normalize_part_name(part_name);
-                        if let Some(kind) = declared_main_kind(&part_name, content_type) {
+                        if has_part(parts, &part_name)
+                            && let Some(kind) = declared_main_kind(&part_name, content_type)
+                        {
                             kinds.insert(kind);
                         }
                         overrides.insert(part_name, content_type.to_owned());
@@ -175,7 +177,9 @@ pub fn detect_package_kind(parts: &[(String, Vec<u8>)]) -> Result<DocumentKind, 
                         )
                     {
                         let part_name = normalize_part_name(part_name);
-                        if let Some(kind) = declared_main_kind(&part_name, content_type) {
+                        if has_part(parts, &part_name)
+                            && let Some(kind) = declared_main_kind(&part_name, content_type)
+                        {
                             kinds.insert(kind);
                         }
                         overrides.insert(part_name, content_type.to_owned());
@@ -975,29 +979,42 @@ mod tests {
 
     #[test]
     fn validates_content_types_and_resolves_conflicts() {
-        let macro_enabled = vec![(
-            "[Content_Types].xml".to_owned(),
-            br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.macro&#69;nabled.main+xml'/></Types>"#.to_vec(),
-        )];
+        let macro_enabled = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.macro&#69;nabled.main+xml'/></Types>"#.to_vec(),
+            ),
+            ("visio/document.xml".to_owned(), Vec::new()),
+        ];
         assert_eq!(detect_package_kind(&macro_enabled), Ok(DocumentKind::Vsdm));
 
-        let comment = vec![(
-            "[Content_Types].xml".to_owned(),
-            br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><!-- application/vnd.ms-visio.drawing.main+xml --><Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/></Types>"#.to_vec(),
-        )];
+        let comment = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><!-- application/vnd.ms-visio.drawing.main+xml --><Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/></Types>"#.to_vec(),
+            ),
+            ("word/document.xml".to_owned(), Vec::new()),
+        ];
         assert_eq!(detect_package_kind(&comment), Ok(DocumentKind::Docx));
 
-        let conflicting = vec![(
-            "[Content_Types].xml".to_owned(),
-            br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/><Override PartName='/ppt/presentation.xml' ContentType='application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml'/></Types>"#.to_vec(),
-        )];
+        let conflicting = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/><Override PartName='/ppt/presentation.xml' ContentType='application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml'/></Types>"#.to_vec(),
+            ),
+            ("word/document.xml".to_owned(), Vec::new()),
+            ("ppt/presentation.xml".to_owned(), Vec::new()),
+        ];
         assert_eq!(detect_package_kind(&conflicting), Ok(DocumentKind::Docx));
         assert_eq!(detect_format(&conflicting).unwrap(), DocumentKind::Docx);
 
-        let visio_conflict = vec![(
-            "[Content_Types].xml".to_owned(),
-            br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.macroEnabled.main+xml'/></Types>"#.to_vec(),
-        )];
+        let visio_conflict = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.macroEnabled.main+xml'/></Types>"#.to_vec(),
+            ),
+            ("visio/document.xml".to_owned(), Vec::new()),
+        ];
         assert!(matches!(
             detect_package_kind(&visio_conflict),
             Err(DocumentKindError::ConflictingDocumentKinds(_))
@@ -1006,19 +1023,25 @@ mod tests {
 
     #[test]
     fn ignores_nested_and_foreign_content_type_entries() {
-        let nested = vec![(
-            "[Content_Types].xml".to_owned(),
-            br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Group><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Group></Types>"#.to_vec(),
-        )];
+        let nested = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Group><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Group></Types>"#.to_vec(),
+            ),
+            ("visio/document.xml".to_owned(), Vec::new()),
+        ];
         assert_eq!(
             detect_package_kind(&nested),
             Err(DocumentKindError::MissingMainDocumentKind)
         );
 
-        let foreign = vec![(
-            "[Content_Types].xml".to_owned(),
-            br#"<Types xmlns='urn:foreign'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec(),
-        )];
+        let foreign = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns='urn:foreign'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec(),
+            ),
+            ("visio/document.xml".to_owned(), Vec::new()),
+        ];
         assert_eq!(
             detect_package_kind(&foreign),
             Err(DocumentKindError::MissingMainDocumentKind)
@@ -1027,10 +1050,13 @@ mod tests {
 
     #[test]
     fn ignores_foreign_namespaced_direct_content_type_entries() {
-        let parts = vec![(
-            "[Content_Types].xml".to_owned(),
-            br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types' xmlns:evil='urn:evil'><evil:Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec(),
-        )];
+        let parts = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types' xmlns:evil='urn:evil'><evil:Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec(),
+            ),
+            ("visio/document.xml".to_owned(), Vec::new()),
+        ];
         assert_eq!(
             detect_package_kind(&parts),
             Err(DocumentKindError::MissingMainDocumentKind)
@@ -1039,20 +1065,41 @@ mod tests {
 
     #[test]
     fn accepts_prefixed_content_type_declarations() {
-        let parts = vec![(
-            "[Content_Types].xml".to_owned(),
-            br#"<ct:Types xmlns:ct='http://schemas.openxmlformats.org/package/2006/content-types'><ct:Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></ct:Types>"#.to_vec(),
-        )];
+        let parts = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<ct:Types xmlns:ct='http://schemas.openxmlformats.org/package/2006/content-types'><ct:Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></ct:Types>"#.to_vec(),
+            ),
+            ("visio/document.xml".to_owned(), Vec::new()),
+        ];
         assert_eq!(detect_package_kind(&parts), Ok(DocumentKind::Vsdx));
     }
 
     #[test]
     fn accepts_default_namespaced_content_type_declarations() {
+        let parts = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec(),
+            ),
+            ("visio/document.xml".to_owned(), Vec::new()),
+        ];
+        assert_eq!(detect_package_kind(&parts), Ok(DocumentKind::Vsdx));
+    }
+
+    #[test]
+    fn rejects_declared_main_part_that_is_absent() {
         let parts = vec![(
             "[Content_Types].xml".to_owned(),
             br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec(),
         )];
-        assert_eq!(detect_package_kind(&parts), Ok(DocumentKind::Vsdx));
+        assert_eq!(
+            detect_package_kind(&parts),
+            Err(DocumentKindError::MissingMainDocumentKind)
+        );
+
+        let package = rezip_parts(&parts).unwrap();
+        assert!(sanitize_package_for_format(&package, "vsdx").is_err());
     }
 
     #[test]
