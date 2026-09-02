@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::model::{PackagePart, VsdxPackage};
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
 use crate::sheet::{parse_records, parse_sheet};
-use crate::xml::{ParseBudget, XmlElement, parse_xml};
+use crate::xml::{ParseBudget, XmlElement, XmlNode, parse_xml};
 use crate::{ParseLimits, Sheet, VsdxError};
+use ooxml_drawingml::Theme;
 
 pub fn parse_vsdx(data: &[u8]) -> Result<VsdxPackage, VsdxError> {
     parse_vsdx_with_limits(data, &ParseLimits::default())
@@ -112,6 +113,16 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
     );
     let page_contents = parse_part_sheets(&page_part_paths, &mut xml_parts, &mut budget)?;
     let master_contents = parse_part_sheets(&master_part_paths, &mut xml_parts, &mut budget)?;
+    let themes = theme_part_paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let root = xml_parts
+                .get(path)
+                .ok_or_else(|| VsdxError::MissingPart(path.clone()))?;
+            Ok(((index + 1) as u32, parse_theme(root, path)?))
+        })
+        .collect::<Result<_, VsdxError>>()?;
     Ok(VsdxPackage {
         document_part_path: document_path,
         pages_part_path,
@@ -119,6 +130,7 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         page_part_paths,
         master_part_paths,
         theme_part_paths,
+        themes,
         windows_part_path,
         relationships,
         document_sheet,
@@ -138,6 +150,41 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
     })
 }
 
+fn parse_theme(root: &XmlElement, part: &str) -> Result<Theme, VsdxError> {
+    let mut theme = Theme {
+        name: root.attribute("name").unwrap_or("Office Theme").to_owned(),
+        ..Theme::default()
+    };
+    let Some(theme_elements) = root.children_named("themeElements").next() else {
+        return Ok(theme);
+    };
+    let scheme = theme_elements
+        .children_named("clrScheme")
+        .next()
+        .ok_or_else(|| VsdxError::MalformedXml {
+            part: part.to_owned(),
+            offset: 0,
+            message: "theme is missing themeElements/clrScheme".to_owned(),
+        })?;
+    for slot in [
+        "dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5",
+        "accent6", "hlink", "folHlink",
+    ] {
+        let Some(value) = scheme.children_named(slot).next().and_then(|slot| {
+            slot.children.iter().find_map(|child| match child {
+                XmlNode::Element(value) => value
+                    .attribute("lastClr")
+                    .or_else(|| value.attribute("val")),
+                XmlNode::Text(_) => None,
+            })
+        }) else {
+            continue;
+        };
+        theme.color_scheme.set(slot, value.to_owned());
+    }
+    Ok(theme)
+}
+
 fn catalog_part_ids(
     root: Option<&XmlElement>,
     item: &str,
@@ -148,11 +195,13 @@ fn catalog_part_ids(
         .filter_map(|element| {
             let id = element.attribute("ID")?.parse().ok()?;
             let relationship_id = element
-                .attributes
-                .iter()
-                .find(|(name, _)| name == "r:id" || name == "id")?
-                .1
-                .as_str();
+                .children_named("Rel")
+                .find_map(|rel| rel.attribute("r:id").or_else(|| rel.attribute("id")))
+                .or_else(|| {
+                    element
+                        .attribute("r:id")
+                        .or_else(|| element.attribute("id"))
+                })?;
             let path = relationships?
                 .iter()
                 .find(|relationship| relationship.id == relationship_id)?
@@ -319,6 +368,47 @@ mod tests {
     use crate::sheet::serialize_sheet;
     use crate::xml::{XmlNode, parse_xml};
     use ooxml_opc::{rezip_parts, unzip_parts};
+
+    #[test]
+    fn rejects_incomplete_theme_parts() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let part = "visio/theme/theme1.xml";
+        let root = parse_xml(
+            br#"<a:theme xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main'><a:themeElements/></a:theme>"#,
+            part,
+            &mut budget,
+        )
+        .unwrap();
+        assert!(matches!(
+            parse_theme(&root, part),
+            Err(VsdxError::MalformedXml { message, .. }) if message == "theme is missing themeElements/clrScheme"
+        ));
+    }
+
+    #[test]
+    fn maps_catalog_ids_through_child_relationships() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<Masters><Master ID='15'><Rel r:id='rId2'/></Master></Masters>"#,
+            "visio/masters/masters.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let relationships = [Relationship {
+            id: "rId2".into(),
+            relationship_type: relationship_types::MASTER.into(),
+            target: "master2.xml".into(),
+            target_mode: crate::TargetMode::Internal,
+            resolved_target: Some("visio/masters/master2.xml".into()),
+        }];
+
+        assert_eq!(
+            catalog_part_ids(Some(&root), "Master", Some(&relationships)),
+            [("visio/masters/master2.xml".into(), 15)].into()
+        );
+    }
     use std::path::PathBuf;
 
     #[test]
