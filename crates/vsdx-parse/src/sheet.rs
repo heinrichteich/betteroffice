@@ -54,8 +54,17 @@ pub enum ShapeChild {
     Cell(Cell),
     Section(Section),
     Text(Vec<TextToken>),
+    ForeignData(ForeignData),
     Shapes(Vec<ShapesChild>),
     Unknown(OpaqueXml),
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignData {
+    pub foreign_type: Option<String>,
+    pub compression_type: Option<String>,
+    pub relationship_id: Option<String>,
+    pub other_attrs: Vec<(String, String)>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -120,6 +129,12 @@ impl Shape {
             } else {
                 None
             }
+        })
+    }
+    pub fn foreign_data(&self) -> Option<&ForeignData> {
+        self.children.iter().find_map(|child| match child {
+            ShapeChild::ForeignData(value) => Some(value),
+            _ => None,
         })
     }
     pub fn shapes(&self) -> impl Iterator<Item = &Shape> {
@@ -331,11 +346,29 @@ fn parse_shape(
             "Cell" => ShapeChild::Cell(parse_cell(child, part, budget)?),
             "Section" => ShapeChild::Section(parse_section(child, part, budget)?),
             "Text" => ShapeChild::Text(parse_text(child, part)?),
+            "ForeignData" => ShapeChild::ForeignData(parse_foreign_data(child)),
             "Shapes" => ShapeChild::Shapes(parse_shapes(child, part, budget)?),
             _ => ShapeChild::Unknown(opaque(child)),
         });
     }
     Ok(shape)
+}
+fn parse_foreign_data(element: &XmlElement) -> ForeignData {
+    let relationship_id = elements(element)
+        .find(|child| child.local_name() == "Rel")
+        .and_then(|child| {
+            child
+                .attributes
+                .iter()
+                .find(|(name, _)| name == "id" || name.ends_with(":id"))
+                .map(|(_, value)| value.clone())
+        });
+    ForeignData {
+        foreign_type: attr(element, "ForeignType"),
+        compression_type: attr(element, "CompressionType"),
+        relationship_id,
+        other_attrs: other(element, &["ForeignType", "CompressionType"]),
+    }
 }
 fn parse_cell(
     element: &XmlElement,
@@ -639,11 +672,24 @@ fn serialize_shape(output: &mut String, shape: &Shape) {
             ShapeChild::Cell(value) => serialize_cell(output, value),
             ShapeChild::Section(value) => serialize_section(output, value),
             ShapeChild::Text(value) => serialize_text(output, value),
+            ShapeChild::ForeignData(value) => serialize_foreign_data(output, value),
             ShapeChild::Shapes(values) => serialize_shapes(output, values),
             ShapeChild::Unknown(value) => serialize_opaque(output, value),
         }
     }
     output.push_str("</Shape>");
+}
+#[cfg(test)]
+fn serialize_foreign_data(output: &mut String, value: &ForeignData) {
+    let mut attributes = value.other_attrs.clone();
+    option(&mut attributes, "ForeignType", &value.foreign_type);
+    option(&mut attributes, "CompressionType", &value.compression_type);
+    element_open(output, "ForeignData", &attributes);
+    if let Some(id) = &value.relationship_id {
+        element_open(output, "Rel", &[("r:id".to_owned(), id.clone())]);
+        output.push_str("</Rel>");
+    }
+    output.push_str("</ForeignData>");
 }
 #[cfg(test)]
 fn serialize_text(output: &mut String, tokens: &[TextToken]) {
