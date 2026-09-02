@@ -1,10 +1,10 @@
 use ooxml_drawingml::GeometryPathCommand;
 use serde::{Deserialize, Serialize};
 
-pub const CONTRACT_VERSION: u32 = 1;
+pub const CONTRACT_VERSION: u32 = 3;
 
 /// Replay primitives in ascending `z_order` (back-to-front); hit test in descending order.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VsdxDisplayList {
     pub contract_version: u32,
@@ -13,6 +13,38 @@ pub struct VsdxDisplayList {
     /// The only transform from Visio inches/Y-up into canvas pixels/Y-down.
     pub paint_transform: PaintTransform,
     pub primitives: Vec<Primitive>,
+}
+
+impl<'de> Deserialize<'de> for VsdxDisplayList {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WireDisplayList {
+            contract_version: u32,
+            width: f32,
+            height: f32,
+            paint_transform: PaintTransform,
+            primitives: Vec<Primitive>,
+        }
+
+        let wire = WireDisplayList::deserialize(deserializer)?;
+        if wire.contract_version != CONTRACT_VERSION {
+            return Err(serde::de::Error::custom(format!(
+                "unsupported VSDX display-list contract version {}",
+                wire.contract_version
+            )));
+        }
+        Ok(Self {
+            contract_version: wire.contract_version,
+            width: wire.width,
+            height: wire.height,
+            paint_transform: wire.paint_transform,
+            primitives: wire.primitives,
+        })
+    }
 }
 
 impl VsdxDisplayList {
@@ -191,10 +223,108 @@ pub struct TextParagraph {
 pub struct TextRun {
     pub text: String,
     pub family: String,
-    pub size_px: f32,
+    /// Font size in Visio inches; apply `paint_transform` to obtain pixels.
+    pub size_in: f32,
     pub bold: bool,
     pub italic: bool,
+    #[serde(default)]
+    pub underline: bool,
+    #[serde(default)]
+    pub small_caps: bool,
+    #[serde(default)]
+    pub superscript: bool,
+    #[serde(default)]
+    pub subscript: bool,
+    #[serde(default)]
+    pub letter_spacing: f32,
+    #[serde(skip)]
+    pub(crate) case: i32,
     pub color: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<Diagnostic>,
+    #[serde(skip)]
+    pub(crate) tab: Option<super::TabStop>,
+    #[serde(skip)]
+    pub(crate) diagnosed_face: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DiagnosticCategory {
+    Integrity,
+    Fidelity,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Diagnostic {
+    pub category: DiagnosticCategory,
+    pub code: String,
+    pub detail: String,
+    #[serde(skip)]
+    pub category_defaulted: bool,
+}
+
+impl Diagnostic {
+    pub fn new(
+        category: DiagnosticCategory,
+        code: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            category,
+            code: code.into(),
+            detail: detail.into(),
+            category_defaulted: false,
+        }
+    }
+
+    pub fn for_code(code: impl Into<String>, detail: impl Into<String>) -> Self {
+        let code = code.into();
+        Self::new(DiagnosticCategory::for_code(&code), code, detail)
+    }
+}
+
+impl DiagnosticCategory {
+    pub fn for_code(code: &str) -> Self {
+        match code {
+            "font-substituted"
+            | "unregistered-font"
+            | "missing-tab-position"
+            | "justify-fallback"
+            | "unresolvable-character-pos"
+            | "unresolvable-character-case" => Self::Fidelity,
+            _ => Self::Integrity,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Diagnostic {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WireDiagnostic {
+            category: Option<String>,
+            code: String,
+            detail: String,
+        }
+
+        let wire = WireDiagnostic::deserialize(deserializer)?;
+        let category = match wire.category.as_deref() {
+            Some("integrity") => DiagnosticCategory::Integrity,
+            Some("fidelity") => DiagnosticCategory::Fidelity,
+            _ => DiagnosticCategory::Integrity,
+        };
+        Ok(Self {
+            category,
+            code: wire.code,
+            detail: wire.detail,
+            category_defaulted: !matches!(wire.category.as_deref(), Some("integrity" | "fidelity")),
+        })
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

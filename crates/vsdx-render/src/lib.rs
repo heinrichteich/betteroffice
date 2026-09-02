@@ -5,7 +5,7 @@ mod layout;
 mod paint;
 
 pub use display_list::*;
-pub use layout::{PIXELS_PER_INCH, final_paint_transform, to_canvas};
+pub use layout::{PIXELS_PER_INCH, final_paint_transform, to_canvas, to_canvas_length};
 
 use std::collections::BTreeMap;
 
@@ -15,6 +15,400 @@ use vsdx_parse::{ParseLimits, Shape, VsdxPackage};
 use vsdx_resolve::{Lookup, ResolvedShape, Resolver, realize_geometry};
 
 const MAX_RECURSION_DEPTH: usize = 64;
+
+struct RichParagraph {
+    runs: Vec<TextRun>,
+    align: i32,
+    before: f32,
+    after: f32,
+    left: f32,
+    right: f32,
+    first: f32,
+    line_spacing: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TabStop {
+    position: f32,
+    alignment: i32,
+    default_interval: Option<f32>,
+}
+
+fn rich_paragraphs(
+    renderer: &Renderer,
+    package: &VsdxPackage,
+    references: Option<&PageShapeReferences>,
+    resolved: &ResolvedShape,
+    shape_id: u32,
+    tokens: &[vsdx_resolve::ResolvedTextToken],
+) -> Vec<RichParagraph> {
+    let mut character = TextRun {
+        text: String::new(),
+        family: "sans-serif".into(),
+        size_in: 1.0 / 6.0,
+        bold: false,
+        italic: false,
+        color: "currentColor".into(),
+        underline: false,
+        small_caps: false,
+        superscript: false,
+        subscript: false,
+        letter_spacing: 0.0,
+        case: 0,
+        diagnostics: Vec::new(),
+        tab: None,
+        diagnosed_face: None,
+    };
+    let mut paragraphs = vec![RichParagraph {
+        runs: Vec::new(),
+        align: 0,
+        before: 0.0,
+        after: 0.0,
+        left: 0.0,
+        right: 0.0,
+        first: 0.0,
+        line_spacing: None,
+    }];
+    character = character_run(
+        renderer,
+        package,
+        references,
+        resolved,
+        shape_id,
+        &row_properties(resolved, "Character", 0),
+        &character,
+    );
+    for token in tokens {
+        match token {
+            vsdx_resolve::ResolvedTextToken::Literal(value) => {
+                append_run(&mut paragraphs, &character, value.clone())
+            }
+            vsdx_resolve::ResolvedTextToken::CharacterRun { index, properties } => {
+                if properties.is_empty() {
+                    append_diagnostic(
+                        &mut character,
+                        "unresolved-character-row",
+                        format!("unresolved Character row {index}"),
+                    );
+                } else {
+                    character = character_run(
+                        renderer, package, references, resolved, shape_id, properties, &character,
+                    );
+                }
+            }
+            vsdx_resolve::ResolvedTextToken::ParagraphRun { properties, .. } => {
+                let paragraph = RichParagraph {
+                    runs: Vec::new(),
+                    align: property_number(properties, "HorzAlign").unwrap_or(0.0) as i32,
+                    before: property_number(properties, "SpBefore").unwrap_or(0.0) as f32,
+                    after: property_number(properties, "SpAfter").unwrap_or(0.0) as f32,
+                    left: property_number(properties, "IndLeft").unwrap_or(0.0) as f32,
+                    right: property_number(properties, "IndRight").unwrap_or(0.0) as f32,
+                    first: property_number(properties, "IndFirst").unwrap_or(0.0) as f32,
+                    line_spacing: property_number(properties, "SpLine").map(|value| value as f32),
+                };
+                paragraphs.push(paragraph);
+            }
+            vsdx_resolve::ResolvedTextToken::Tab { properties, .. } => {
+                append_run(&mut paragraphs, &character, "\t".into());
+                if let Some(run) = paragraphs
+                    .last_mut()
+                    .and_then(|paragraph| paragraph.runs.last_mut())
+                {
+                    let position = property_number(properties, "Position");
+                    let alignment = property_number(properties, "Alignment").unwrap_or(0.0) as i32;
+                    let default_interval =
+                        property_number(&resolved.cells, "DefaultTabStop").unwrap_or(0.5) as f32;
+                    if position.is_none() {
+                        append_diagnostic(
+                            run,
+                            "missing-tab-position",
+                            format!(
+                                "tab stop missing Position; used renderer policy DefaultTabStop {default_interval} in"
+                            ),
+                        );
+                    }
+                    run.tab = Some(TabStop {
+                        position: position.unwrap_or(0.0) as f32,
+                        alignment,
+                        default_interval: position.is_none().then_some(default_interval),
+                    });
+                }
+            }
+            vsdx_resolve::ResolvedTextToken::Field { properties, .. } => {
+                let mut run = character.clone();
+                match field_value(package, resolved, properties) {
+                    Ok(value) => run.text = value,
+                    Err(reason) => {
+                        run.text = "[unresolved field]".into();
+                        append_diagnostic(&mut run, "unresolvable-field", reason);
+                    }
+                }
+                paragraphs
+                    .last_mut()
+                    .expect("paragraph exists")
+                    .runs
+                    .push(run);
+            }
+        }
+    }
+    paragraphs
+}
+
+fn field_value(
+    package: &VsdxPackage,
+    resolved: &ResolvedShape,
+    properties: &std::collections::BTreeMap<String, Lookup>,
+) -> Result<String, String> {
+    let Some(Lookup::Found(value)) = properties.get("Value") else {
+        return Err("unresolvable field: no Value cell".into());
+    };
+    if let Some(display) = value
+        .cell
+        .value
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(display.into());
+    }
+    let Some(formula) = value.cell.formula.as_deref() else {
+        return Err("unresolvable field: no cached Value".into());
+    };
+    match evaluate_cell_with_shape_package_theme(
+        "Field.Value",
+        formula,
+        resolved,
+        &ParseLimits::default(),
+        resolved,
+        package,
+    ) {
+        Evaluation::Evaluated(result) => match result.value {
+            Value::Number(value) if value.number.is_finite() => Ok(value.number.to_string()),
+            Value::Number(_) => Err("unresolvable field: non-finite Value".into()),
+            Value::Color(_) => Err("unresolvable field: Value is a colour".into()),
+        },
+        Evaluation::Unsupported(reason) => Err(format!("unresolvable field: {reason}")),
+        Evaluation::Error(error) => Err(format!("unresolvable field: {}", error.message)),
+    }
+}
+
+fn append_run(paragraphs: &mut [RichParagraph], character: &TextRun, text: String) {
+    let mut run = character.clone();
+    run.text = match character_case(character, &text) {
+        Ok(text) => text,
+        Err(diagnostic) => {
+            append_diagnostic(&mut run, "unresolvable-character-case", diagnostic);
+            text
+        }
+    };
+    run.tab = None;
+    paragraphs
+        .last_mut()
+        .expect("paragraph exists")
+        .runs
+        .push(run);
+}
+
+fn character_run(
+    renderer: &Renderer,
+    package: &VsdxPackage,
+    references: Option<&PageShapeReferences>,
+    resolved: &ResolvedShape,
+    shape_id: u32,
+    properties: &std::collections::BTreeMap<String, Lookup>,
+    current: &TextRun,
+) -> TextRun {
+    let mut run = current.clone();
+    if let Some(font) = property_value(properties, "Font") {
+        run.family = package
+            .face_names
+            .iter()
+            .find(|face| {
+                face.attributes
+                    .iter()
+                    .any(|(key, value)| key == "ID" && value == font)
+            })
+            .and_then(|face| {
+                face.attributes
+                    .iter()
+                    .find(|(key, _)| key == "Name")
+                    .map(|(_, value)| value.clone())
+            })
+            .unwrap_or_else(|| font.into());
+    }
+    if let Some(size) = property_number(properties, "Size") {
+        run.size_in = size as f32;
+    }
+    if properties.contains_key("Color") {
+        match text_colour(package, references, resolved, shape_id, properties) {
+            Ok(color) => run.color = color,
+            Err(reason) => append_diagnostic(
+                &mut run,
+                "unresolvable-text-colour",
+                format!("unresolvable text colour: {reason}"),
+            ),
+        }
+    }
+    if let Some(style) = property_number(properties, "Style") {
+        let style = style as i32;
+        run.bold = style & 1 != 0;
+        run.italic = style & 2 != 0;
+        run.underline = style & 4 != 0;
+        run.small_caps = style & 8 != 0;
+    }
+    if let Some(pos) = property_number(properties, "Pos") {
+        match pos as i32 {
+            0 => (run.superscript, run.subscript) = (false, false),
+            1 => (run.superscript, run.subscript) = (true, false),
+            2 => (run.superscript, run.subscript) = (false, true),
+            _ => append_diagnostic(
+                &mut run,
+                "unresolvable-character-pos",
+                format!("unresolvable Character.Pos value {pos}"),
+            ),
+        }
+    }
+    if let Some(case) = property_number(properties, "Case") {
+        run.case = case as i32;
+    }
+    if let Some(letter_spacing) = property_number(properties, "Letterspace") {
+        run.letter_spacing = letter_spacing as f32 / 1440.0;
+    }
+    let exact_font =
+        renderer
+            .registered_fonts
+            .contains_key(&(run.family.clone(), run.bold, run.italic));
+    if !exact_font && run.diagnosed_face.as_deref() != Some(run.family.as_str()) {
+        let family = run.family.clone();
+        let (code, detail) = if renderer.font_for(&family, run.bold, run.italic).is_some() {
+            (
+                "font-substituted",
+                format!("font substituted for '{family}'"),
+            )
+        } else {
+            ("unregistered-font", format!("unregistered font '{family}'"))
+        };
+        append_diagnostic(&mut run, code, detail);
+        run.diagnosed_face = Some(family);
+    }
+    run
+}
+
+fn row_properties(
+    resolved: &ResolvedShape,
+    section: &str,
+    index: u32,
+) -> std::collections::BTreeMap<String, Lookup> {
+    resolved
+        .sections
+        .get(section)
+        .and_then(|section| section.rows.get(&format!("IX:{index}")))
+        .map(|row| row.cells.clone())
+        .unwrap_or_default()
+}
+
+fn append_diagnostic(run: &mut TextRun, code: &'static str, detail: impl Into<String>) {
+    run.diagnostics.push(Diagnostic::for_code(code, detail));
+}
+
+fn text_colour(
+    package: &VsdxPackage,
+    references: Option<&PageShapeReferences>,
+    resolved: &ResolvedShape,
+    shape_id: u32,
+    properties: &std::collections::BTreeMap<String, Lookup>,
+) -> Result<String, String> {
+    let Some(Lookup::Found(cell)) = properties.get("Color") else {
+        return Err("missing Color cell".into());
+    };
+    let formula = cell
+        .cell
+        .formula
+        .as_deref()
+        .or(cell.cell.value.as_deref())
+        .ok_or_else(|| "missing Color value".to_string())?;
+    let references = references.ok_or_else(|| "unavailable colour references".to_string())?;
+    match evaluate_cell_with_shape_package_theme(
+        "Char.Color",
+        formula,
+        &references.for_shape(shape_id),
+        &ParseLimits::default(),
+        resolved,
+        package,
+    ) {
+        Evaluation::Evaluated(result) => match result.value {
+            Value::Color(color) => Ok(format!(
+                "#{:02X}{:02X}{:02X}",
+                color.red, color.green, color.blue
+            )),
+            Value::Number(value) => palette_colour(package, value.number)
+                .ok_or_else(|| "Color evaluated to an unresolvable palette index".into()),
+        },
+        Evaluation::Unsupported(reason) => Err(reason),
+        Evaluation::Error(error) => Err(error.message),
+    }
+}
+
+fn palette_colour(package: &VsdxPackage, index: f64) -> Option<String> {
+    let index = (index.fract() == 0.0).then_some(index as i64)?;
+    let record = package.colors.iter().find(|record| {
+        record.attributes.iter().any(|(name, value)| {
+            matches!(name.as_str(), "IX" | "Index") && value.parse::<i64>().ok() == Some(index)
+        })
+    })?;
+    let value = record
+        .attributes
+        .iter()
+        .find(|(name, _)| matches!(name.as_str(), "RGB" | "Color" | "Value"))?
+        .1
+        .trim_start_matches('#');
+    (value.len() == 6 && value.chars().all(|ch| ch.is_ascii_hexdigit()))
+        .then(|| format!("#{value}"))
+}
+
+fn character_case(run: &TextRun, text: &str) -> Result<String, String> {
+    match run.case {
+        0 => Ok(text.into()),
+        1 => Ok(text.to_uppercase()),
+        2 => Ok(title_case(text)),
+        value => Err(format!("unresolvable Character.Case value {value}")),
+    }
+}
+
+fn title_case(text: &str) -> String {
+    let mut start = true;
+    text.chars()
+        .flat_map(|ch| {
+            let output = if start {
+                ch.to_uppercase().collect::<String>()
+            } else {
+                ch.to_lowercase().collect()
+            };
+            start = !ch.is_alphanumeric();
+            output.chars().collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn property_value<'a>(
+    properties: &'a std::collections::BTreeMap<String, Lookup>,
+    name: &str,
+) -> Option<&'a str> {
+    match properties.get(name)? {
+        Lookup::Found(cell) => cell.cell.value.as_deref(),
+        Lookup::Deleted | Lookup::Absent => None,
+    }
+}
+
+fn property_number(
+    properties: &std::collections::BTreeMap<String, Lookup>,
+    name: &str,
+) -> Option<f64> {
+    property_value(properties, name)?
+        .parse()
+        .ok()
+        .filter(|value: &f64| value.is_finite())
+}
 
 #[derive(Clone, Debug)]
 pub struct RenderLimits {
@@ -333,33 +727,54 @@ impl Renderer {
             stroke,
             transform: Affine::identity(),
         });
-        self.text(shape, &resolved, id, bounds, state)?;
+        self.text(
+            package, resolver, references, page_part, shape, &resolved, id, bounds, state,
+        )?;
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)]
     fn text(
         &self,
+        package: &VsdxPackage,
+        resolver: &Resolver<'_>,
+        references: Option<&PageShapeReferences>,
+        page_part: &str,
         shape: &Shape,
         resolved: &ResolvedShape,
         id: String,
         bounds: Bounds,
         state: &mut State,
     ) -> Result<(), RenderError> {
-        let Some(tokens) = shape.text() else {
-            return Ok(());
-        };
-        let text = tokens
-            .iter()
-            .filter_map(|token| {
-                if let vsdx_parse::TextToken::Literal(value) = token {
-                    Some(value.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect::<String>();
-        if text.is_empty() {
+        if matches!(resolved.cell("Char.Size"), Some(Lookup::Found(cell)) if cell.cell.value.as_deref().and_then(|value| value.parse::<f32>().ok()).is_some_and(|value| !value.is_finite()))
+        {
+            return Err(RenderError::PageDimensions(
+                "non-finite text metrics".into(),
+            ));
+        }
+        let page = package
+            .page_part_ids
+            .get(page_part)
+            .and_then(|id| package.page_sheets.get(id))
+            .or_else(|| package.page_contents.get(page_part))
+            .ok_or_else(|| RenderError::MissingPage(page_part.into()))?;
+        let tokens = resolver.resolve_text_in_context(shape, page, resolved)?;
+        let mut paragraphs =
+            rich_paragraphs(self, package, references, resolved, shape.id, &tokens);
+        if paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()) {
             return Ok(());
         }
+        for paragraph in &mut paragraphs {
+            if paragraph.align == 3
+                && let Some(run) = paragraph.runs.first_mut()
+            {
+                append_diagnostic(run, "justify-fallback", "justify falls back to left");
+            }
+        }
+        let text = paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.runs.iter())
+            .map(|run| run.text.as_str())
+            .collect::<String>();
         let text_bytes = state
             .text_bytes
             .checked_add(text.len())
@@ -367,7 +782,12 @@ impl Renderer {
         if text_bytes > self.limits.max_text_bytes {
             return Err(RenderError::Budget("text bytes"));
         }
-        if state.text_paragraphs >= self.limits.max_text_paragraphs {
+        if state
+            .text_paragraphs
+            .checked_add(paragraphs.len())
+            .ok_or(RenderError::Budget("text paragraphs"))?
+            > self.limits.max_text_paragraphs
+        {
             return Err(RenderError::Budget("text paragraphs"));
         }
         if state.text_lines >= self.limits.max_text_lines {
@@ -377,60 +797,360 @@ impl Renderer {
             return Err(RenderError::Budget("text runs"));
         }
         state.text_bytes = text_bytes;
-        state.text_paragraphs += 1;
-        state.text_lines += 1;
-        state.text_runs += 1;
-        let size = paint::number(resolved, "Char.Size").unwrap_or(0.166_666_67) as f32;
-        let family = "Arial".to_owned();
-        let width = self
-            .registered_fonts
-            .get(&(family.clone(), false, false))
-            .and_then(|font| ooxml_text::shape(&self.fonts, *font, &text, size, &[]).ok())
-            .map(|glyphs| glyphs.iter().map(|glyph| glyph.x_advance).sum())
-            .unwrap_or_else(|| text.chars().count() as f32 * size * 0.5);
-        let _breaks = ooxml_text::break_opportunities(&text);
-        let stops = text
-            .char_indices()
-            .map(|(position, _)| CaretStop {
-                position: position as u32,
-                x: bounds.x as f32 + position as f32 * size * 0.5,
-                y: bounds.y as f32,
-            })
-            .chain(std::iter::once(CaretStop {
-                position: text.len() as u32,
-                x: bounds.x as f32 + width,
-                y: bounds.y as f32,
-            }))
-            .collect();
+        state.text_paragraphs += paragraphs.len();
+        state.text_runs += paragraphs
+            .iter()
+            .map(|paragraph| paragraph.runs.len())
+            .sum::<usize>();
+        if state.text_runs > self.limits.max_text_runs {
+            return Err(RenderError::Budget("text runs"));
+        }
+        let left = paint::number(resolved, "LeftMargin").unwrap_or(0.0) as f32;
+        let right = paint::number(resolved, "RightMargin").unwrap_or(0.0) as f32;
+        let top = paint::number(resolved, "TopMargin").unwrap_or(0.0) as f32;
+        let bottom = paint::number(resolved, "BottomMargin").unwrap_or(0.0) as f32;
+        let block_width = paint::number(resolved, "TxtWidth").unwrap_or(bounds.width) as f32;
+        let block_height = paint::number(resolved, "TxtHeight").unwrap_or(bounds.height) as f32;
+        let x = bounds.x as f32 + left;
+        let y = bounds.y as f32 + top;
+        let available_width = (block_width - left - right).max(0.0);
+        let mut lines = Vec::new();
+        let mut cursor_y = y;
+        let mut offset = 0u32;
+        for paragraph in &paragraphs {
+            if paragraph.runs.is_empty() {
+                continue;
+            }
+            cursor_y += paragraph.before;
+            let width = (available_width - paragraph.left - paragraph.right).max(0.0);
+            let mut laid_out =
+                self.wrap_paragraph(paragraph, width, x + paragraph.left, cursor_y, offset);
+            if let Some(first) = laid_out.first_mut() {
+                first.x += paragraph.first;
+                for stop in &mut first.caret_stops {
+                    stop.x += paragraph.first;
+                }
+            }
+            if let Some(spacing) = paragraph.line_spacing {
+                let solid = laid_out.first().map_or(0.2, |line| line.height / 1.2);
+                let line_height = if spacing > 0.0 {
+                    spacing
+                } else if spacing < 0.0 {
+                    solid * -spacing / 100.0
+                } else {
+                    solid
+                };
+                for (index, line) in laid_out.iter_mut().enumerate() {
+                    let y = cursor_y + index as f32 * line_height;
+                    line.y = y;
+                    line.height = line_height;
+                    for stop in &mut line.caret_stops {
+                        stop.y = y;
+                    }
+                }
+            }
+            offset += paragraph
+                .runs
+                .iter()
+                .map(|run| run.text.len() as u32)
+                .sum::<u32>();
+            cursor_y += laid_out.iter().map(|line| line.height).sum::<f32>() + paragraph.after;
+            lines.extend(laid_out);
+        }
+        if state
+            .text_lines
+            .checked_add(lines.len())
+            .ok_or(RenderError::Budget("text lines"))?
+            > self.limits.max_text_lines
+        {
+            return Err(RenderError::Budget("text lines"));
+        }
+        state.text_lines += lines.len();
+        let used_height = cursor_y - y;
+        let vertical = paint::number(resolved, "VerticalAlign").unwrap_or(0.0) as i32;
+        let dy = match vertical {
+            1 => (block_height - top - bottom - used_height) * 0.5,
+            2 => block_height - top - bottom - used_height,
+            _ => 0.0,
+        }
+        .max(0.0);
+        for line in &mut lines {
+            line.y += dy;
+            for stop in &mut line.caret_stops {
+                stop.y += dy;
+            }
+        }
         let z_order = state.next_z();
         state.primitives.push(Primitive::TextBox {
             id,
             z_order,
-            x: bounds.x as f32,
-            y: bounds.y as f32,
-            width: bounds.width as f32,
-            height: bounds.height as f32,
-            paragraphs: vec![TextParagraph {
-                runs: vec![TextRun {
-                    text: text.clone(),
-                    family,
-                    size_px: size,
-                    bold: false,
-                    italic: false,
-                    color: "#000000".into(),
-                }],
-            }],
-            lines: vec![PositionedLine {
-                x: bounds.x as f32,
-                y: bounds.y as f32,
-                width,
-                height: size * 1.2,
-                start: 0,
-                end: text.len() as u32,
-                caret_stops: stops,
-            }],
+            x,
+            y,
+            width: available_width,
+            height: (block_height - top - bottom).max(0.0),
+            paragraphs: paragraphs
+                .into_iter()
+                .map(|paragraph| TextParagraph {
+                    runs: paragraph.runs,
+                })
+                .collect(),
+            lines,
         });
         Ok(())
+    }
+    fn wrap_paragraph(
+        &self,
+        paragraph: &RichParagraph,
+        available_width: f32,
+        x: f32,
+        y: f32,
+        offset: u32,
+    ) -> Vec<PositionedLine> {
+        let text = paragraph
+            .runs
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect::<String>();
+        let breaks = ooxml_text::break_opportunities(&text);
+        let mut widths = Vec::new();
+        let mut height = 0.0f32;
+        for (index, ch) in text.char_indices() {
+            let run = paragraph
+                .runs
+                .iter()
+                .scan(0usize, |end, run| {
+                    *end += run.text.len();
+                    Some((*end > index).then_some(run))
+                })
+                .find_map(|run| run);
+            let run_end = paragraph
+                .runs
+                .iter()
+                .scan(0usize, |end, run| {
+                    *end += run.text.len();
+                    Some((*end > index).then_some(*end))
+                })
+                .find_map(|end| end);
+            let (mut width, line_height) = run
+                .map(|run| {
+                    (
+                        self.measure(run, &ch.to_string())
+                            + if run_end > Some(index + ch.len_utf8()) {
+                                run.letter_spacing
+                            } else {
+                                0.0
+                            },
+                        run.size_in * 1.2,
+                    )
+                })
+                .unwrap_or((0.0, 0.2));
+            if ch == '\t'
+                && let Some(tab) = run.and_then(|run| run.tab)
+            {
+                let cursor = widths.iter().map(|(_, _, width)| *width).sum::<f32>();
+                let position = tab.default_interval.map_or(tab.position, |interval| {
+                    ((cursor / interval).floor() + 1.0) * interval
+                });
+                let following = text[index + ch.len_utf8()..]
+                    .split('\t')
+                    .next()
+                    .unwrap_or_default();
+                let following_width =
+                    self.measure_text(paragraph, index + ch.len_utf8(), following);
+                let before_decimal = following
+                    .split_once('.')
+                    .map_or(following, |(before, _)| before);
+                let decimal_width =
+                    self.measure_text(paragraph, index + ch.len_utf8(), before_decimal);
+                let aligned = match tab.alignment {
+                    1 => position - following_width * 0.5,
+                    2 => position - following_width,
+                    3 => position - decimal_width,
+                    _ => position,
+                };
+                width = (aligned - cursor).max(0.0);
+            }
+            widths.push((index, ch.len_utf8(), width));
+            height = height.max(line_height);
+        }
+        let height = height.max(0.2);
+        let mut result = Vec::new();
+        let mut start = 0usize;
+        let mut cursor = 0.0;
+        let mut last_break = None;
+        let mut mandatory_break = None;
+        for (position, length, width) in widths.iter().copied() {
+            if mandatory_break == Some(position) {
+                result.push(self.line(
+                    &text,
+                    &widths,
+                    start,
+                    position,
+                    x,
+                    y + result.len() as f32 * height,
+                    height,
+                    offset,
+                    paragraph.align,
+                    available_width,
+                ));
+                start = position;
+                cursor = 0.0;
+                last_break = None;
+                mandatory_break = None;
+            }
+            if position > start && cursor + width > available_width && available_width > 0.0 {
+                let end = last_break.unwrap_or(position).max(start + 1);
+                result.push(self.line(
+                    &text,
+                    &widths,
+                    start,
+                    end,
+                    x,
+                    y + result.len() as f32 * height,
+                    height,
+                    offset,
+                    paragraph.align,
+                    available_width,
+                ));
+                start = end;
+                cursor = widths
+                    .iter()
+                    .filter(|(p, _, _)| *p >= start && *p < position)
+                    .map(|(_, _, w)| *w)
+                    .sum();
+                last_break = None;
+            }
+            cursor += width;
+            let next = position + length;
+            if let Some(opportunity) = breaks.iter().find(|item| item.byte_index == next) {
+                if opportunity.mandatory && next < text.len() {
+                    mandatory_break = Some(next);
+                } else {
+                    last_break = Some(next);
+                }
+            }
+        }
+        if start < text.len() || result.is_empty() {
+            result.push(self.line(
+                &text,
+                &widths,
+                start,
+                text.len(),
+                x,
+                y + result.len() as f32 * height,
+                height,
+                offset,
+                paragraph.align,
+                available_width,
+            ));
+        }
+        result
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn line(
+        &self,
+        _text: &str,
+        widths: &[(usize, usize, f32)],
+        start: usize,
+        end: usize,
+        x: f32,
+        y: f32,
+        height: f32,
+        offset: u32,
+        align: i32,
+        available: f32,
+    ) -> PositionedLine {
+        let width = widths
+            .iter()
+            .filter(|(position, _, _)| *position >= start && *position < end)
+            .map(|(_, _, width)| *width)
+            .sum::<f32>();
+        let line_x = x + match align {
+            1 => (available - width) * 0.5,
+            2 => available - width,
+            _ => 0.0,
+        };
+        let mut advance = 0.0;
+        let mut stops = Vec::new();
+        for (position, length, char_width) in widths
+            .iter()
+            .copied()
+            .filter(|(position, _, _)| *position >= start && *position < end)
+        {
+            stops.push(CaretStop {
+                position: offset + position as u32,
+                x: line_x + advance,
+                y,
+            });
+            advance += char_width;
+            if position + length == end {
+                stops.push(CaretStop {
+                    position: offset + end as u32,
+                    x: line_x + advance,
+                    y,
+                });
+            }
+        }
+        PositionedLine {
+            x: line_x,
+            y,
+            width,
+            height,
+            start: offset + start as u32,
+            end: offset + end as u32,
+            caret_stops: stops,
+        }
+    }
+    /// Uses the effective face, then its style variants, then Arial and sans-serif.
+    fn font_for(&self, family: &str, bold: bool, italic: bool) -> Option<ooxml_text::FontId> {
+        std::iter::once(family)
+            .chain(["Arial", "sans-serif"])
+            .flat_map(|family| {
+                [
+                    (bold, italic),
+                    (bold, false),
+                    (false, italic),
+                    (false, false),
+                ]
+                .into_iter()
+                .map(move |(bold, italic)| (family.into(), bold, italic))
+            })
+            .find_map(|key| self.registered_fonts.get(&key))
+            .copied()
+    }
+    fn measure(&self, run: &TextRun, text: &str) -> f32 {
+        self.font_for(&run.family, run.bold, run.italic)
+            .and_then(|font| ooxml_text::shape(&self.fonts, font, text, run.size_in, &[]).ok())
+            .map(|glyphs| glyphs.iter().map(|glyph| glyph.x_advance).sum())
+            .unwrap_or(text.chars().count() as f32 * run.size_in * 0.5)
+    }
+    fn measure_text(&self, paragraph: &RichParagraph, start: usize, text: &str) -> f32 {
+        text.char_indices()
+            .map(|(relative, ch)| {
+                let index = start + relative;
+                paragraph
+                    .runs
+                    .iter()
+                    .scan(0usize, |end, run| {
+                        *end += run.text.len();
+                        Some((*end > index).then_some(run))
+                    })
+                    .find_map(|run| run)
+                    .map_or(0.0, |run| {
+                        let end = paragraph
+                            .runs
+                            .iter()
+                            .scan(0usize, |end, run| {
+                                *end += run.text.len();
+                                Some((*end > index).then_some(*end))
+                            })
+                            .find_map(|end| end)
+                            .unwrap_or(index + ch.len_utf8());
+                        self.measure(run, &ch.to_string())
+                            + (end > index + ch.len_utf8()) as u8 as f32 * run.letter_spacing
+                    })
+            })
+            .sum()
     }
     fn placeholder(
         &self,
@@ -826,7 +1546,7 @@ fn primitives_finite(primitives: &[Primitive]) -> bool {
                 })
                 && paragraphs
                     .iter()
-                    .all(|paragraph| paragraph.runs.iter().all(|run| run.size_px.is_finite()))
+                    .all(|paragraph| paragraph.runs.iter().all(|run| run.size_in.is_finite()))
         }
         Primitive::Placeholder {
             x,
@@ -1231,6 +1951,29 @@ mod tests {
         Renderer::default().layout_page(&package, "page").unwrap()
     }
 
+    fn text_shape(tokens: Vec<TextToken>) -> Shape {
+        let mut shape = shape(1, 1.0, 1.0);
+        shape.children.push(ShapeChild::Text(tokens));
+        shape
+    }
+
+    fn text_box(list: &VsdxDisplayList) -> &Primitive {
+        list.primitives
+            .iter()
+            .find(|primitive| matches!(primitive, Primitive::TextBox { .. }))
+            .unwrap()
+    }
+
+    fn text_section(name: &str, rows: Vec<Row>) -> ShapeChild {
+        ShapeChild::Section(Section {
+            name: name.into(),
+            index: None,
+            del: false,
+            children: rows.into_iter().map(SectionChild::Row).collect(),
+            other_attrs: vec![],
+        })
+    }
+
     fn shape_primitive(list: &VsdxDisplayList, id: u32) -> &Primitive {
         list.primitives.iter().find(|primitive| matches!(primitive, Primitive::Shape { id: actual, .. } if actual == &format!("page:{id}"))).unwrap()
     }
@@ -1282,6 +2025,421 @@ mod tests {
             path[0],
             GeometryPathCommand::Move { x: 2.0, y: 3.0 }
         ));
+    }
+
+    #[test]
+    fn font_size_round_trips_in_inches_and_paints_in_pixels() {
+        let mut shape = text_shape(vec![TextToken::Literal("a".into())]);
+        shape.children.push(text_section(
+            "Character",
+            vec![row(0, "", vec![cell("Size", "0.25")])],
+        ));
+        let list = render(vec![shape]);
+        let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        assert_eq!(paragraphs[0].runs[0].size_in, 0.25);
+        assert_eq!(
+            to_canvas_length(list.paint_transform, paragraphs[0].runs[0].size_in),
+            24.0
+        );
+    }
+
+    #[test]
+    fn tabs_advance_to_effective_stops_and_align_following_text() {
+        for (alignment, expected_start) in [(0, 4.0), (1, 3.0), (2, 2.0)] {
+            let mut shape = text_shape(vec![
+                TextToken::CharacterRun(0),
+                TextToken::Literal("a".into()),
+                TextToken::Tab(0),
+                TextToken::Literal("bc".into()),
+            ]);
+            shape.children.push(text_section(
+                "Character",
+                vec![row(0, "", vec![cell("Size", "2")])],
+            ));
+            shape.children.push(text_section(
+                "Tabs",
+                vec![row(
+                    0,
+                    "",
+                    vec![
+                        cell("Position", "4"),
+                        cell("Alignment", &alignment.to_string()),
+                    ],
+                )],
+            ));
+            with_cell(&mut shape, "Width", "10");
+            let list = render(vec![shape]);
+            let Primitive::TextBox { lines, .. } = text_box(&list) else {
+                unreachable!()
+            };
+            let start = lines[0]
+                .caret_stops
+                .iter()
+                .find(|stop| stop.position == 2)
+                .unwrap();
+            assert!((start.x - (1.0 + expected_start)).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn undefined_tab_uses_actual_default_interval_with_renderer_policy_diagnostic() {
+        let mut shape = text_shape(vec![
+            TextToken::CharacterRun(0),
+            TextToken::Literal("a".into()),
+            TextToken::Tab(3),
+            TextToken::Literal("b".into()),
+        ]);
+        shape.children.push(text_section(
+            "Tabs",
+            vec![row(0, "", vec![cell("Position", "0.25")])],
+        ));
+        with_cell(&mut shape, "DefaultTabStop", "0.75");
+        let list = render(vec![shape]);
+        let Primitive::TextBox {
+            paragraphs, lines, ..
+        } = text_box(&list)
+        else {
+            unreachable!()
+        };
+        assert!(paragraphs[0].runs[1].diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing-tab-position"
+                && diagnostic
+                    .detail
+                    .contains("renderer policy DefaultTabStop 0.75 in")
+        }));
+        assert!((lines[0].caret_stops[2].x - 1.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn fields_render_cached_values_or_diagnostic_runs_in_order() {
+        let mut shape = text_shape(vec![
+            TextToken::Literal(" before ".into()),
+            TextToken::Field(0),
+            TextToken::Literal(" middle ".into()),
+            TextToken::Field(1),
+            TextToken::Literal(" after ".into()),
+        ]);
+        shape.children.push(text_section(
+            "Field",
+            vec![
+                row(0, "", vec![cell("Value", "resolved")]),
+                row(1, "", vec![cell("Format", "not a value")]),
+            ],
+        ));
+        let list = render(vec![shape]);
+        let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        let runs = &paragraphs[0].runs;
+        assert_eq!(
+            runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+            " before resolved middle [unresolved field] after "
+        );
+        assert!(runs[1].diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unregistered-font"
+                && diagnostic.detail == "unregistered font 'sans-serif'"
+                && diagnostic.category == DiagnosticCategory::Fidelity
+        }));
+        assert!(
+            runs[3]
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "unresolvable-field"
+                    && diagnostic.detail.contains("no Value cell")
+                    && diagnostic.category == DiagnosticCategory::Integrity)
+        );
+    }
+
+    #[test]
+    fn word_wraps_at_uax14_opportunities_in_scene_inches() {
+        let mut shape = text_shape(vec![TextToken::Literal("a b".into())]);
+        with_cell(&mut shape, "TxtWidth", "0.18");
+        let list = render(vec![shape]);
+        let Primitive::TextBox { lines, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        assert_eq!(lines.len(), 2);
+        assert_eq!((lines[0].start, lines[0].end), (0, 2));
+        assert_eq!((lines[1].start, lines[1].end), (2, 3));
+    }
+
+    #[test]
+    fn paragraph_alignment_positions_lines_in_scene_inches() {
+        for (align, expected_x) in [(0, 1.0), (1, 1.458_333_4), (2, 1.916_666_6)] {
+            let mut shape = text_shape(vec![
+                TextToken::ParagraphRun(0),
+                TextToken::Literal("a".into()),
+            ]);
+            with_cell(&mut shape, "TxtWidth", "1");
+            shape.children.push(ShapeChild::Section(Section {
+                name: "Paragraph".into(),
+                index: None,
+                del: false,
+                children: vec![SectionChild::Row(row(
+                    0,
+                    "",
+                    vec![cell("HorzAlign", &align.to_string())],
+                ))],
+                other_attrs: vec![],
+            }));
+            let list = render(vec![shape]);
+            let Primitive::TextBox { lines, .. } = text_box(&list) else {
+                unreachable!()
+            };
+            assert!((lines[0].x - expected_x).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn paragraph_indents_and_line_spacing_change_line_geometry() {
+        let mut shape = text_shape(vec![
+            TextToken::ParagraphRun(0),
+            TextToken::Literal("a\nb".into()),
+        ]);
+        with_cell(&mut shape, "TxtWidth", "1");
+        shape.children.push(ShapeChild::Section(Section {
+            name: "Paragraph".into(),
+            index: None,
+            del: false,
+            children: vec![SectionChild::Row(row(
+                0,
+                "",
+                vec![
+                    cell("IndLeft", "0.2"),
+                    cell("IndRight", "0.3"),
+                    cell("IndFirst", "0.1"),
+                    cell("SpLine", "-200"),
+                ],
+            ))],
+            other_attrs: vec![],
+        }));
+        let list = render(vec![shape]);
+        let Primitive::TextBox { lines, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        assert_eq!(lines.len(), 2);
+        assert!((lines[0].x - 1.3).abs() < 1e-5);
+        assert!((lines[1].x - 1.2).abs() < 1e-5);
+        assert!((lines[1].y - lines[0].y - 1.0 / 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn character_defaults_case_position_and_tracking_apply_before_text() {
+        let mut shape = text_shape(vec![TextToken::Literal("hello".into())]);
+        shape.children.push(text_section(
+            "Character",
+            vec![row(
+                0,
+                "",
+                vec![
+                    cell("Case", "1"),
+                    cell("Pos", "1"),
+                    cell("Letterspace", "20"),
+                    cell("Style", "12"),
+                ],
+            )],
+        ));
+        let list = render(vec![shape]);
+        let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        let run = &paragraphs[0].runs[0];
+        assert_eq!(run.text, "HELLO");
+        assert!(run.superscript && run.underline && run.small_caps);
+        assert!((run.letter_spacing - 1.0 / 72.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn vertical_alignment_and_margins_inset_text_in_scene_inches() {
+        for (align, expected_y) in [(0, 1.1), (1, 1.4), (2, 1.7)] {
+            let mut shape = text_shape(vec![TextToken::Literal("a".into())]);
+            let vertical = align.to_string();
+            for (name, value) in [
+                ("TxtWidth", "1"),
+                ("TxtHeight", "1"),
+                ("LeftMargin", "0.1"),
+                ("RightMargin", "0.2"),
+                ("TopMargin", "0.1"),
+                ("BottomMargin", "0.1"),
+                ("VerticalAlign", vertical.as_str()),
+            ] {
+                with_cell(&mut shape, name, value);
+            }
+            let list = render(vec![shape]);
+            let Primitive::TextBox {
+                x,
+                y,
+                width,
+                height,
+                lines,
+                ..
+            } = text_box(&list)
+            else {
+                unreachable!()
+            };
+            assert_point_close((*x, *y), (1.1, 1.1));
+            assert_point_close((*width, *height), (0.7, 0.8));
+            assert!((lines[0].y - expected_y).abs() < 1e-5);
+            assert!((lines[0].height - 0.2).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn unregistered_font_records_a_diagnostic() {
+        let mut shape = text_shape(vec![
+            TextToken::CharacterRun(0),
+            TextToken::Literal("a".into()),
+        ]);
+        shape.children.push(ShapeChild::Section(Section {
+            name: "Character".into(),
+            index: None,
+            del: false,
+            children: vec![SectionChild::Row(row(0, "", vec![cell("Font", "99")]))],
+            other_attrs: vec![],
+        }));
+        let list = render(vec![shape]);
+        let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        assert!(paragraphs[0].runs[0].diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unregistered-font" && diagnostic.detail == "unregistered font '99'"
+        }));
+    }
+
+    #[test]
+    fn unregistered_default_font_records_a_diagnostic() {
+        let list = render(vec![text_shape(vec![TextToken::Literal("a".into())])]);
+        let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        assert!(paragraphs[0].runs[0].diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unregistered-font"
+                && diagnostic.detail == "unregistered font 'sans-serif'"
+        }));
+    }
+
+    #[test]
+    fn text_runs_append_structured_diagnostics_without_losing_integrity() {
+        let mut run = TextRun {
+            text: String::new(),
+            family: "sans-serif".into(),
+            size_in: 1.0 / 6.0,
+            bold: false,
+            italic: false,
+            underline: false,
+            small_caps: false,
+            superscript: false,
+            subscript: false,
+            letter_spacing: 0.0,
+            case: 0,
+            color: "currentColor".into(),
+            diagnostics: Vec::new(),
+            tab: None,
+            diagnosed_face: None,
+        };
+        append_diagnostic(&mut run, "missing-tab-position", "missing tab position");
+        append_diagnostic(&mut run, "unresolvable-text-colour", "unresolvable colour");
+        assert_eq!(
+            run.diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.category)
+                .collect::<Vec<_>>(),
+            [DiagnosticCategory::Fidelity, DiagnosticCategory::Integrity]
+        );
+    }
+
+    #[test]
+    fn text_diagnostics_preserve_categories_when_a_tab_and_case_fail() {
+        let mut shape = text_shape(vec![TextToken::Literal("a".into()), TextToken::Tab(3)]);
+        shape.children.push(text_section(
+            "Character",
+            vec![row(
+                0,
+                "",
+                vec![cell("Color", "not-a-colour"), cell("Case", "9")],
+            )],
+        ));
+        let list = render(vec![shape]);
+        let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        let literal = &paragraphs[0].runs[0].diagnostics;
+        assert!(
+            literal
+                .iter()
+                .any(|item| item.category == DiagnosticCategory::Integrity)
+        );
+        assert!(
+            literal
+                .iter()
+                .any(|item| item.category == DiagnosticCategory::Fidelity)
+        );
+        let tab = &paragraphs[0].runs[1].diagnostics;
+        assert!(
+            tab.iter()
+                .any(|item| item.code == "unresolvable-text-colour")
+        );
+        assert!(tab.iter().any(|item| item.code == "missing-tab-position"));
+    }
+
+    #[test]
+    fn sequential_unavailable_faces_each_record_a_diagnostic() {
+        let mut shape = text_shape(vec![
+            TextToken::CharacterRun(0),
+            TextToken::Literal("a".into()),
+            TextToken::CharacterRun(1),
+            TextToken::Literal("b".into()),
+        ]);
+        shape.children.push(text_section(
+            "Character",
+            vec![
+                row(0, "", vec![cell("Font", "99")]),
+                row(1, "", vec![cell("Font", "98")]),
+            ],
+        ));
+        let mut renderer = Renderer::default();
+        renderer
+            .register_font(
+                "sans-serif",
+                false,
+                false,
+                include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf").to_vec(),
+            )
+            .unwrap();
+        let list = renderer.layout_page(&package(vec![shape]), "page").unwrap();
+        let Primitive::TextBox { paragraphs, .. } = text_box(&list) else {
+            unreachable!()
+        };
+        let details = paragraphs[0]
+            .runs
+            .iter()
+            .flat_map(|run| &run.diagnostics)
+            .map(|diagnostic| diagnostic.detail.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            details.contains(&"font substituted for '99'"),
+            "{details:?}"
+        );
+        assert!(
+            details.contains(&"font substituted for '98'"),
+            "{details:?}"
+        );
+    }
+
+    #[test]
+    fn palette_colours_and_unknown_codes_fail_safe() {
+        let mut package = package(Vec::new());
+        package.colors = serde_json::from_value(serde_json::json!([
+            {"name":"ColorEntry","attributes":[["IX","3"],["RGB","010203"]],"children":[]}
+        ]))
+        .unwrap();
+        assert_eq!(palette_colour(&package, 3.0), Some("#010203".into()));
+        assert_eq!(
+            Diagnostic::for_code("future-diagnostic", "detail").category,
+            DiagnosticCategory::Integrity
+        );
     }
 
     #[test]
@@ -2048,13 +3206,50 @@ mod tests {
     #[test]
     fn rejects_unknown_contract() {
         let list = VsdxDisplayList {
-            contract_version: 2,
+            contract_version: 4,
             width: 0.0,
             height: 0.0,
             paint_transform: final_paint_transform(0.0),
             primitives: vec![],
         };
         assert!(list.validate().is_err());
+    }
+
+    #[test]
+    fn display_list_decode_rejects_unsupported_contract() {
+        let payload = r#"{"contractVersion":2,"width":0.0,"height":0.0,"paintTransform":{"a":1.0,"b":0.0,"c":0.0,"d":1.0,"e":0.0,"f":0.0},"primitives":[]}"#;
+        assert!(serde_json::from_str::<VsdxDisplayList>(payload).is_err());
+    }
+
+    #[test]
+    fn decoded_diagnostics_own_codes_and_honour_wire_categories() {
+        let diagnostics = (0..10_000)
+            .map(|index| {
+                serde_json::from_value::<Diagnostic>(serde_json::json!({
+                    "category": "fidelity",
+                    "code": format!("unknown-{index}"),
+                    "detail": "fixture",
+                }))
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let _: String = diagnostics[0].code.clone();
+        assert_eq!(diagnostics[9_999].code, "unknown-9999");
+        assert!(diagnostics.iter().all(|diagnostic| {
+            diagnostic.category == DiagnosticCategory::Fidelity && !diagnostic.category_defaulted
+        }));
+    }
+
+    #[test]
+    fn decoded_diagnostic_missing_or_invalid_category_defaults_to_integrity() {
+        for payload in [
+            serde_json::json!({"code":"unknown","detail":"fixture"}),
+            serde_json::json!({"category":"future","code":"unknown","detail":"fixture"}),
+        ] {
+            let diagnostic = serde_json::from_value::<Diagnostic>(payload).unwrap();
+            assert_eq!(diagnostic.category, DiagnosticCategory::Integrity);
+            assert!(diagnostic.category_defaulted);
+        }
     }
 
     #[test]
@@ -2106,7 +3301,7 @@ mod tests {
         };
         assert!(matches!(&inner[0], Primitive::Shape { id, .. } if id.ends_with(":3")));
         assert!(
-            matches!(&inner[1], Primitive::TextBox { id, lines, .. } if id.ends_with(":3") && lines.len() == 1)
+            matches!(&inner[1], Primitive::TextBox { id, lines, .. } if id.ends_with(":3") && lines.len() == 2)
         );
         assert!(
             matches!(&inner[2], Primitive::Image { id, asset_id, .. } if id.ends_with(":4") && asset_id == "visio/media/image1.png")
@@ -2125,9 +3320,19 @@ mod tests {
         // Each expected AABB is min/max(M(corner)) for the original source rectangle;
         // the image corners and text caret are direct substitutions into that same affine.
         assert_point_close((x as f32, y as f32), (10.021151, 11.018823));
-        let Primitive::TextBox { lines, .. } = &inner[1] else {
+        let Primitive::TextBox {
+            x,
+            y,
+            width,
+            height,
+            lines,
+            ..
+        } = &inner[1]
+        else {
             unreachable!()
         };
+        assert_point_close((*x, *y), (9.079249, 9.821818));
+        assert_point_close((*width, *height), (2.8263865, 1.4685154));
         assert_point_close((lines[0].x, lines[0].y), (10.021151, 11.018823));
         assert_point_close(
             (lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
@@ -2189,11 +3394,21 @@ mod tests {
         let mut placeholders = 0usize;
         let mut groups = 0usize;
         let mut reasons = BTreeMap::new();
+        let mut text = TextCorpusStats::default();
+        let mut renderer = Renderer::default();
+        renderer
+            .register_font(
+                "sans-serif",
+                false,
+                false,
+                include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf").to_vec(),
+            )
+            .unwrap();
         for file in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
             let path = std::path::Path::new(&directory).join(file);
             let package = vsdx_parse::parse_vsdx(&std::fs::read(path).unwrap()).unwrap();
             for page in &package.page_part_paths {
-                let list = Renderer::default().layout_page(&package, page).unwrap();
+                let list = renderer.layout_page(&package, page).unwrap();
                 let json = serde_json::to_string(&list).unwrap();
                 assert!(!json.contains("NaN") && !json.contains("Infinity"));
                 let expected = package.page_contents[page]
@@ -2205,12 +3420,10 @@ mod tests {
                 let mut page_images = std::collections::BTreeSet::new();
                 let mut page_placeholders = std::collections::BTreeSet::new();
                 let mut page_groups = std::collections::BTreeSet::new();
-                let mut text_shapes = std::collections::BTreeSet::new();
                 let mut image_shapes = std::collections::BTreeSet::new();
                 expected_subcontent(
                     package.page_contents[page].shapes(),
                     page,
-                    &mut text_shapes,
                     &mut image_shapes,
                 );
                 count_primitives(
@@ -2242,8 +3455,17 @@ mod tests {
                     .cloned()
                     .collect::<std::collections::BTreeSet<_>>();
                 assert_eq!(actual, expected);
-                assert_eq!(page_text, text_shapes);
                 assert_eq!(page_images, image_shapes);
+                let mut resolved_text = std::collections::BTreeSet::new();
+                assert_resolved_text(
+                    &renderer,
+                    &package,
+                    page,
+                    &list.primitives,
+                    &mut resolved_text,
+                    &mut text,
+                );
+                assert_eq!(page_text, resolved_text);
                 painted += page_shapes.len() + page_text.len() + page_images.len();
                 placeholders += page_placeholders.len();
                 groups += page_groups.len();
@@ -2251,6 +3473,176 @@ mod tests {
         }
         eprintln!(
             "VSDX corpus render: painted={painted} placeholdered={placeholders} group={groups} placeholder reasons={reasons:?}",
+        );
+        eprintln!(
+            "VSDX corpus text: shapes={} zero-integrity-diagnostics={} integrity diagnostics={} integrity reasons={:?} fidelity diagnostics={} fidelity reasons={:?} paragraphs={} runs={} marker-only={} field-only={} style-inherited={} master-inherited={}",
+            text.shapes,
+            text.zero_integrity_diagnostics,
+            text.integrity_diagnostics,
+            text.integrity_reasons,
+            text.fidelity_diagnostics,
+            text.fidelity_reasons,
+            text.paragraphs,
+            text.runs,
+            text.marker_only,
+            text.field_only,
+            text.style_inherited,
+            text.master_inherited,
+        );
+        assert_eq!(text.integrity_diagnostics, 0, "text-integrity diagnostics");
+    }
+
+    #[test]
+    fn text_accounting_fixture_covers_resolved_text_sources() {
+        let package = vsdx_parse::parse_vsdx(include_bytes!(
+            "../../vsdx-parse/tests/fixtures/text-accounting.vsdx"
+        ))
+        .unwrap();
+        let page = &package.page_part_paths[0];
+        let list = Renderer::default().layout_page(&package, page).unwrap();
+        let mut rendered = std::collections::BTreeSet::new();
+        let mut stats = TextCorpusStats::default();
+        assert_resolved_text(
+            &Renderer::default(),
+            &package,
+            page,
+            &list.primitives,
+            &mut rendered,
+            &mut stats,
+        );
+        assert_eq!(stats.marker_only, 1);
+        assert_eq!(stats.field_only, 1);
+        assert_eq!(stats.style_inherited, 1);
+        assert_eq!(stats.master_inherited, 1);
+        let mut text_by_id = BTreeMap::new();
+        text_boxes_by_id(&list.primitives, &mut text_by_id);
+        let text = |id: &str| match text_by_id[&format!("{page}:{id}")] {
+            Primitive::TextBox { paragraphs, .. } => paragraphs,
+            _ => unreachable!(),
+        };
+        assert_eq!(text("4")[0].runs[0].text, "master text");
+        assert_eq!(text("2")[0].runs[0].text, "field value");
+        let inherited = &text("3")[0].runs[0];
+        assert_eq!(inherited.family, "Calibri");
+        assert_eq!(inherited.size_in, 0.25);
+        assert_eq!(inherited.color, "#010203");
+    }
+
+    fn accounting_oracle_fixture() -> (VsdxDisplayList, Vec<Vec<ExpectedTextRun>>) {
+        let run = |text: &str, category| TextRun {
+            text: text.into(),
+            family: "sans-serif".into(),
+            size_in: 1.0 / 6.0,
+            bold: false,
+            italic: false,
+            underline: false,
+            small_caps: false,
+            superscript: false,
+            subscript: false,
+            letter_spacing: 0.0,
+            case: 0,
+            color: "currentColor".into(),
+            diagnostics: vec![Diagnostic::new(category, "fixture", "fixture")],
+            tab: None,
+            diagnosed_face: None,
+        };
+        let paragraphs = vec![
+            TextParagraph {
+                runs: vec![
+                    run("first", DiagnosticCategory::Integrity),
+                    run("second", DiagnosticCategory::Fidelity),
+                ],
+            },
+            TextParagraph {
+                runs: vec![run("third", DiagnosticCategory::Integrity)],
+            },
+        ];
+        let expected = paragraphs
+            .iter()
+            .map(|paragraph| {
+                paragraph
+                    .runs
+                    .iter()
+                    .map(|run| ExpectedTextRun {
+                        text: run.text.clone(),
+                        diagnostic_categories: run
+                            .diagnostics
+                            .iter()
+                            .map(|item| item.category)
+                            .collect(),
+                    })
+                    .collect()
+            })
+            .collect();
+        (
+            VsdxDisplayList {
+                contract_version: CONTRACT_VERSION,
+                width: 0.0,
+                height: 0.0,
+                paint_transform: final_paint_transform(0.0),
+                primitives: vec![Primitive::TextBox {
+                    id: "fixture".into(),
+                    z_order: 0,
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                    paragraphs,
+                    lines: Vec::new(),
+                }],
+            },
+            expected,
+        )
+    }
+
+    fn fixture_paragraphs(list: &VsdxDisplayList) -> &[TextParagraph] {
+        let Primitive::TextBox { paragraphs, .. } = &list.primitives[0] else {
+            unreachable!()
+        };
+        paragraphs
+    }
+
+    fn fixture_paragraphs_mut(list: &mut VsdxDisplayList) -> &mut Vec<TextParagraph> {
+        let Primitive::TextBox { paragraphs, .. } = &mut list.primitives[0] else {
+            unreachable!()
+        };
+        paragraphs
+    }
+
+    #[test]
+    fn accounting_oracle_rejects_a_dropped_run() {
+        let (mut list, expected) = accounting_oracle_fixture();
+        fixture_paragraphs_mut(&mut list)[0].runs.pop();
+        assert!(
+            assert_display_text_matches("fixture", fixture_paragraphs(&list), &expected).is_err()
+        );
+    }
+
+    #[test]
+    fn accounting_oracle_rejects_a_dropped_paragraph() {
+        let (mut list, expected) = accounting_oracle_fixture();
+        fixture_paragraphs_mut(&mut list).pop();
+        assert!(
+            assert_display_text_matches("fixture", fixture_paragraphs(&list), &expected).is_err()
+        );
+    }
+
+    #[test]
+    fn accounting_oracle_rejects_reordered_runs() {
+        let (mut list, expected) = accounting_oracle_fixture();
+        fixture_paragraphs_mut(&mut list)[0].runs.swap(0, 1);
+        assert!(
+            assert_display_text_matches("fixture", fixture_paragraphs(&list), &expected).is_err()
+        );
+    }
+
+    #[test]
+    fn accounting_oracle_rejects_a_swapped_diagnostic_category() {
+        let (mut list, expected) = accounting_oracle_fixture();
+        fixture_paragraphs_mut(&mut list)[0].runs[0].diagnostics[0].category =
+            DiagnosticCategory::Fidelity;
+        assert!(
+            assert_display_text_matches("fixture", fixture_paragraphs(&list), &expected).is_err()
         );
     }
 
@@ -2303,22 +3695,436 @@ mod tests {
     fn expected_subcontent<'a>(
         shapes: impl Iterator<Item = &'a Shape>,
         page: &str,
-        text: &mut std::collections::BTreeSet<String>,
         images: &mut std::collections::BTreeSet<String>,
     ) {
         for shape in shapes {
             let id = format!("{page}:{}", shape.id);
-            if shape.text().is_some_and(|tokens| {
-                tokens
-                    .iter()
-                    .any(|token| matches!(token, TextToken::Literal(value) if !value.is_empty()))
-            }) {
-                text.insert(id.clone());
-            }
             if shape.foreign_data().is_some() {
                 images.insert(id);
             }
-            expected_subcontent(shape.shapes(), page, text, images);
+            expected_subcontent(shape.shapes(), page, images);
+        }
+    }
+
+    fn assert_resolved_text(
+        renderer: &Renderer,
+        package: &VsdxPackage,
+        page_part: &str,
+        primitives: &[Primitive],
+        rendered: &mut std::collections::BTreeSet<String>,
+        stats: &mut TextCorpusStats,
+    ) {
+        let contents = &package.page_contents[page_part];
+        let page = package
+            .page_part_ids
+            .get(page_part)
+            .and_then(|id| package.page_sheets.get(id))
+            .unwrap_or(contents);
+        let resolver = Resolver::new(package);
+        let references = PageShapeReferences::new(&resolver, page_part).ok();
+        let mut text_boxes = BTreeMap::new();
+        text_boxes_by_id(primitives, &mut text_boxes);
+        for shape in contents.shapes() {
+            assert_shape_text(
+                renderer,
+                package,
+                &resolver,
+                references.as_ref(),
+                page,
+                page_part,
+                shape,
+                &text_boxes,
+                rendered,
+                stats,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assert_shape_text(
+        renderer: &Renderer,
+        package: &VsdxPackage,
+        resolver: &Resolver<'_>,
+        references: Option<&PageShapeReferences>,
+        page: &Sheet,
+        page_part: &str,
+        shape: &Shape,
+        text_boxes: &BTreeMap<String, &Primitive>,
+        rendered: &mut std::collections::BTreeSet<String>,
+        stats: &mut TextCorpusStats,
+    ) {
+        let id = format!("{page_part}:{}", shape.id);
+        let resolved = resolver.resolve_shape(page_part, shape.id).unwrap();
+        if resolved.deleted || paint::number(&resolved, "NoShow").is_some_and(|value| value != 0.0)
+        {
+            return;
+        }
+        let tokens = resolver
+            .resolve_text_in_context(shape, page, &resolved)
+            .unwrap();
+        if tokens.iter().all(|token| {
+            matches!(
+                token,
+                vsdx_resolve::ResolvedTextToken::CharacterRun { .. }
+                    | vsdx_resolve::ResolvedTextToken::ParagraphRun { .. }
+            )
+        }) && !tokens.is_empty()
+        {
+            stats.marker_only += 1;
+        }
+        if tokens.iter().all(|token| {
+            matches!(
+                token,
+                vsdx_resolve::ResolvedTextToken::CharacterRun { .. }
+                    | vsdx_resolve::ResolvedTextToken::ParagraphRun { .. }
+                    | vsdx_resolve::ResolvedTextToken::Field { .. }
+            )
+        }) && tokens
+            .iter()
+            .any(|token| matches!(token, vsdx_resolve::ResolvedTextToken::Field { .. }))
+        {
+            stats.field_only += 1;
+        }
+        if !tokens.is_empty() && shape.text().is_none() {
+            stats.master_inherited += 1;
+        }
+        if tokens.iter().any(|token| match token {
+            vsdx_resolve::ResolvedTextToken::CharacterRun { properties, .. }
+            | vsdx_resolve::ResolvedTextToken::ParagraphRun { properties, .. }
+            | vsdx_resolve::ResolvedTextToken::Tab { properties, .. }
+            | vsdx_resolve::ResolvedTextToken::Field { properties, .. } => properties.values().any(
+                |value| matches!(value, Lookup::Found(value) if value.provenance == vsdx_resolve::Provenance::StyleText),
+            ),
+            vsdx_resolve::ResolvedTextToken::Literal(_) => false,
+        }) {
+            stats.style_inherited += 1;
+        }
+        let expected =
+            expected_text_runs(renderer, package, references, &resolved, shape.id, &tokens);
+        let expected_runs = expected.iter().map(Vec::len).sum::<usize>();
+        if expected_runs > 0 {
+            stats.paragraphs += expected.len();
+            stats.runs += expected_runs;
+        }
+        match text_boxes.get(&id) {
+            Some(Primitive::TextBox { paragraphs, .. }) => {
+                rendered.insert(id.clone());
+                assert_display_text_matches(&id, paragraphs, &expected).unwrap();
+                stats.shapes += 1;
+                let integrity_diagnostics = paragraphs
+                    .iter()
+                    .flat_map(|paragraph| &paragraph.runs)
+                    .flat_map(|run| &run.diagnostics)
+                    .filter(|diagnostic| diagnostic.category == DiagnosticCategory::Integrity)
+                    .count();
+                if integrity_diagnostics == 0 {
+                    stats.zero_integrity_diagnostics += 1;
+                }
+                for diagnostic in paragraphs
+                    .iter()
+                    .flat_map(|paragraph| &paragraph.runs)
+                    .flat_map(|run| &run.diagnostics)
+                {
+                    match diagnostic.category {
+                        DiagnosticCategory::Integrity => {
+                            stats.integrity_diagnostics += 1;
+                            *stats
+                                .integrity_reasons
+                                .entry(format!("{}: {}", diagnostic.code, diagnostic.detail))
+                                .or_default() += 1;
+                        }
+                        DiagnosticCategory::Fidelity => {
+                            stats.fidelity_diagnostics += 1;
+                            *stats
+                                .fidelity_reasons
+                                .entry(format!("{}: {}", diagnostic.code, diagnostic.detail))
+                                .or_default() += 1;
+                        }
+                    }
+                }
+            }
+            None => assert_eq!(expected_runs, 0, "{id}: resolved text was not rendered"),
+            Some(_) => unreachable!(),
+        }
+        for child in shape.shapes() {
+            assert_shape_text(
+                renderer, package, resolver, references, page, page_part, child, text_boxes,
+                rendered, stats,
+            );
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ExpectedTextRun {
+        text: String,
+        diagnostic_categories: Vec<DiagnosticCategory>,
+    }
+
+    #[derive(Default)]
+    struct OracleCharacter {
+        family: String,
+        bold: bool,
+        italic: bool,
+        case: i32,
+        diagnostics: Vec<DiagnosticCategory>,
+        diagnosed_face: Option<String>,
+    }
+
+    fn oracle_value<'a>(
+        properties: &'a std::collections::BTreeMap<String, Lookup>,
+        name: &str,
+    ) -> Option<&'a str> {
+        match properties.get(name)? {
+            Lookup::Found(cell) => cell.cell.value.as_deref(),
+            Lookup::Deleted | Lookup::Absent => None,
+        }
+    }
+
+    fn oracle_number(
+        properties: &std::collections::BTreeMap<String, Lookup>,
+        name: &str,
+    ) -> Option<f64> {
+        oracle_value(properties, name)?
+            .parse()
+            .ok()
+            .filter(|value: &f64| value.is_finite())
+    }
+
+    fn oracle_row(
+        resolved: &ResolvedShape,
+        section: &str,
+        index: u32,
+    ) -> std::collections::BTreeMap<String, Lookup> {
+        resolved
+            .sections
+            .get(section)
+            .and_then(|section| section.rows.get(&format!("IX:{index}")))
+            .map(|row| row.cells.clone())
+            .unwrap_or_default()
+    }
+
+    fn oracle_case(case: i32, text: &str) -> Result<String, ()> {
+        match case {
+            0 => Ok(text.into()),
+            1 => Ok(text.to_uppercase()),
+            2 => {
+                let mut start = true;
+                Ok(text
+                    .chars()
+                    .flat_map(|ch| {
+                        let output = if start {
+                            ch.to_uppercase().collect::<String>()
+                        } else {
+                            ch.to_lowercase().collect()
+                        };
+                        start = !ch.is_alphanumeric();
+                        output.chars().collect::<Vec<_>>()
+                    })
+                    .collect())
+            }
+            _ => Err(()),
+        }
+    }
+
+    fn oracle_character(
+        renderer: &Renderer,
+        package: &VsdxPackage,
+        properties: &std::collections::BTreeMap<String, Lookup>,
+        mut character: OracleCharacter,
+    ) -> OracleCharacter {
+        if character.family.is_empty() {
+            character.family = "sans-serif".into();
+        }
+        if let Some(font) = oracle_value(properties, "Font") {
+            character.family = package
+                .face_names
+                .iter()
+                .find(|face| {
+                    face.attributes
+                        .iter()
+                        .any(|(key, value)| key == "ID" && value == font)
+                })
+                .and_then(|face| {
+                    face.attributes
+                        .iter()
+                        .find(|(key, _)| key == "Name")
+                        .map(|(_, value)| value.clone())
+                })
+                .unwrap_or_else(|| font.into());
+        }
+        if let Some(style) = oracle_number(properties, "Style") {
+            let style = style as i32;
+            character.bold = style & 1 != 0;
+            character.italic = style & 2 != 0;
+        }
+        if let Some(case) = oracle_number(properties, "Case") {
+            character.case = case as i32;
+        }
+        if let Some(pos) = oracle_number(properties, "Pos")
+            && !matches!(pos as i32, 0..=2)
+        {
+            character.diagnostics.push(DiagnosticCategory::Fidelity);
+        }
+        if properties.contains_key("Color") && oracle_value(properties, "Color").is_none() {
+            character.diagnostics.push(DiagnosticCategory::Integrity);
+        }
+        let exact = renderer.registered_fonts.contains_key(&(
+            character.family.clone(),
+            character.bold,
+            character.italic,
+        ));
+        if !exact && character.diagnosed_face.as_deref() != Some(character.family.as_str()) {
+            character.diagnostics.push(DiagnosticCategory::Fidelity);
+            character.diagnosed_face = Some(character.family.clone());
+        }
+        character
+    }
+
+    fn oracle_field(properties: &std::collections::BTreeMap<String, Lookup>) -> Result<String, ()> {
+        oracle_value(properties, "Value")
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or(())
+    }
+
+    fn expected_text_runs(
+        renderer: &Renderer,
+        package: &VsdxPackage,
+        _references: Option<&PageShapeReferences>,
+        resolved: &ResolvedShape,
+        _shape_id: u32,
+        tokens: &[vsdx_resolve::ResolvedTextToken],
+    ) -> Vec<Vec<ExpectedTextRun>> {
+        let mut character = oracle_character(
+            renderer,
+            package,
+            &oracle_row(resolved, "Character", 0),
+            OracleCharacter::default(),
+        );
+        let mut paragraphs = vec![Vec::new()];
+        let mut justified = vec![false];
+        for token in tokens {
+            match token {
+                vsdx_resolve::ResolvedTextToken::Literal(value) => {
+                    let mut categories = character.diagnostics.clone();
+                    let text = match oracle_case(character.case, value) {
+                        Ok(text) => text,
+                        Err(_) => {
+                            categories.push(DiagnosticCategory::Fidelity);
+                            value.clone()
+                        }
+                    };
+                    paragraphs.last_mut().unwrap().push(ExpectedTextRun {
+                        text,
+                        diagnostic_categories: categories,
+                    });
+                }
+                vsdx_resolve::ResolvedTextToken::CharacterRun {
+                    index: _,
+                    properties,
+                } => {
+                    if properties.is_empty() {
+                        character.diagnostics.push(DiagnosticCategory::Integrity);
+                    } else {
+                        character = oracle_character(renderer, package, properties, character);
+                    }
+                }
+                vsdx_resolve::ResolvedTextToken::ParagraphRun { properties, .. } => {
+                    paragraphs.push(Vec::new());
+                    justified.push(oracle_number(properties, "HorzAlign") == Some(3.0));
+                }
+                vsdx_resolve::ResolvedTextToken::Tab { properties, .. } => {
+                    let mut categories = character.diagnostics.clone();
+                    if oracle_number(properties, "Position").is_none() {
+                        categories.push(DiagnosticCategory::Fidelity);
+                    }
+                    paragraphs.last_mut().unwrap().push(ExpectedTextRun {
+                        text: "\t".into(),
+                        diagnostic_categories: categories,
+                    });
+                }
+                vsdx_resolve::ResolvedTextToken::Field { properties, .. } => {
+                    let result = oracle_field(properties);
+                    let mut categories = character.diagnostics.clone();
+                    if result.is_err() {
+                        categories.push(DiagnosticCategory::Integrity);
+                    }
+                    paragraphs.last_mut().unwrap().push(ExpectedTextRun {
+                        text: result.unwrap_or_else(|_| "[unresolved field]".into()),
+                        diagnostic_categories: categories,
+                    });
+                }
+            }
+        }
+        for (runs, justified) in paragraphs.iter_mut().zip(justified) {
+            if justified && let Some(run) = runs.first_mut() {
+                run.diagnostic_categories.push(DiagnosticCategory::Fidelity);
+            }
+        }
+        paragraphs
+    }
+
+    fn assert_display_text_matches(
+        id: &str,
+        paragraphs: &[TextParagraph],
+        expected: &[Vec<ExpectedTextRun>],
+    ) -> Result<(), String> {
+        if paragraphs.len() != expected.len() {
+            return Err(format!("{id}: paragraph count"));
+        }
+        for (paragraph_index, (actual, expected)) in paragraphs.iter().zip(expected).enumerate() {
+            if actual.runs.len() != expected.len() {
+                return Err(format!("{id}: paragraph {paragraph_index} run count"));
+            }
+            for (run_index, (actual, expected)) in actual.runs.iter().zip(expected).enumerate() {
+                if actual.text != expected.text {
+                    return Err(format!(
+                        "{id}: paragraph {paragraph_index} run {run_index} text"
+                    ));
+                }
+                let categories = actual
+                    .diagnostics
+                    .iter()
+                    .map(|item| item.category)
+                    .collect::<Vec<_>>();
+                if categories != expected.diagnostic_categories {
+                    return Err(format!(
+                        "{id}: paragraph {paragraph_index} run {run_index} diagnostics"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[derive(Default)]
+    struct TextCorpusStats {
+        shapes: usize,
+        zero_integrity_diagnostics: usize,
+        integrity_diagnostics: usize,
+        fidelity_diagnostics: usize,
+        paragraphs: usize,
+        runs: usize,
+        marker_only: usize,
+        field_only: usize,
+        style_inherited: usize,
+        master_inherited: usize,
+        integrity_reasons: BTreeMap<String, usize>,
+        fidelity_reasons: BTreeMap<String, usize>,
+    }
+
+    fn text_boxes_by_id<'a>(
+        primitives: &'a [Primitive],
+        text_boxes: &mut BTreeMap<String, &'a Primitive>,
+    ) {
+        for primitive in primitives {
+            match primitive {
+                Primitive::TextBox { id, .. } => {
+                    assert!(text_boxes.insert(id.clone(), primitive).is_none());
+                }
+                Primitive::Group { primitives, .. } => text_boxes_by_id(primitives, text_boxes),
+                _ => {}
+            }
         }
     }
 }
