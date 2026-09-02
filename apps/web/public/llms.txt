@@ -49,6 +49,10 @@ The per-layer crates are published for direct use when you need one stage of the
 - [betteroffice-ooxml-text](https://crates.io/crates/betteroffice-ooxml-text): shared text shaping, measurement, and line breaking.
 - [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): the DrawingML colors, themes, and geometry shared by all three formats.
 
+The VSDX pipeline is in progress; its crates are published as they land:
+
+- [betteroffice-vsdx-parse](https://crates.io/crates/betteroffice-vsdx-parse): Visio XML parsing and part-preserving VSDX package writes.
+
 ## Python packages
 
 Published to PyPI, Apache-2.0. The Rust engine is compiled into each wheel — no Word, no Excel, no PowerPoint, no LibreOffice subprocess, no COM. Wheels cover Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows (x86_64) against the stable ABI for CPython 3.9 and up. The [Python guide](https://docs.betteroffice.dev/docs/python) carries the install line and a first example.
