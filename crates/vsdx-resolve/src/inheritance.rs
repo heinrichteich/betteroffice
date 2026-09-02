@@ -424,6 +424,26 @@ impl<'a> Resolver<'a> {
                 }
             }
         }
+        // Sources are visited most-local first, so a row only the master defines
+        // lands after the local overrides. Indexed rows are drawn in index order,
+        // so restore it; sections with unindexed rows keep their source order.
+        if let Some(mut indexed) = keys
+            .iter()
+            .map(|key| row_key_index(key))
+            .collect::<Option<Vec<_>>>()
+        {
+            indexed.sort_unstable();
+            let mut ordered: Vec<String> = Vec::with_capacity(keys.len());
+            for wanted in indexed {
+                if let Some(position) = keys
+                    .iter()
+                    .position(|key| row_key_index(key) == Some(wanted) && !ordered.contains(key))
+                {
+                    ordered.push(keys[position].clone());
+                }
+            }
+            keys = ordered;
+        }
         let mut out = ResolvedSection {
             name: name.into(),
             ..Default::default()
@@ -698,6 +718,13 @@ impl HasSections for Sheet {
         Box::new(self.sections())
     }
 }
+/// `(index, occurrence)` for an `IX:`-keyed row identity, or `None` for any other key.
+fn row_key_index(identity: &str) -> Option<(u32, usize)> {
+    let (key, occurrence) = identity.rsplit_once('\u{1f}')?;
+    let index = key.strip_prefix("IX:")?.parse().ok()?;
+    Some((index, occurrence.parse().ok()?))
+}
+
 fn row_base_key(row: &Row) -> String {
     row.name
         .clone()

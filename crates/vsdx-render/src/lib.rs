@@ -604,7 +604,10 @@ impl Renderer {
                 "overflowing transform",
             );
         }
-        let geometry = resolved.sections.get("Geometry").map(realize_geometry);
+        let geometry = resolved
+            .sections
+            .get("Geometry")
+            .map(|section| realize_geometry(section, (bounds.width, bounds.height)));
         let child_shapes = shape.shapes().collect::<Vec<_>>();
         if !child_shapes.is_empty() {
             let group_transform = bounds_affine(

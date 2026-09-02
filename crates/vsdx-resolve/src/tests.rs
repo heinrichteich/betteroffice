@@ -619,7 +619,7 @@ fn geometry_rows_without_ix_all_realize_in_source_order() {
     let resolved = Resolver::new(&package).resolve_shape(page, 1).unwrap();
     let section = &resolved.sections["Geometry"];
     assert_eq!(section.row_order.len(), 2);
-    let geometry = crate::realize_geometry(section);
+    let geometry = crate::realize_geometry(section, (1.0, 1.0));
     assert_eq!(
         geometry.commands,
         vec![
@@ -639,7 +639,7 @@ fn geometry_rows_with_duplicate_ix_all_realize_in_source_order() {
     let resolved = Resolver::new(&package).resolve_shape(page, 1).unwrap();
     let section = &resolved.sections["Geometry"];
     assert_eq!(section.row_order.len(), 2);
-    let geometry = crate::realize_geometry(section);
+    let geometry = crate::realize_geometry(section, (1.0, 1.0));
     assert_eq!(
         geometry.commands,
         vec![
@@ -677,7 +677,9 @@ fn section_rows_inherit_by_name_or_ix_and_preserve_duplicate_occurrences() {
     );
     let resolved = Resolver::new(&package).resolve_shape("page", 1).unwrap();
     let geometry = &resolved.sections["Geometry"];
-    assert_eq!(geometry.row_order, vec!["IX:1", "IX:0"]);
+    // Indexed rows resolve in index order, not in the order the sources were
+    // consulted: a master-only row is still drawn at its own index.
+    assert_eq!(geometry.row_order, vec!["IX:0", "IX:1"]);
     assert_eq!(
         found_row(geometry, "IX:1", "X"),
         ("local-one", Provenance::Local)
