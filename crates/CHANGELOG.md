@@ -1,5 +1,26 @@
 # @betteroffice/rust-crates
 
+## 0.2.0
+
+### Minor Changes
+
+- bf84789: Set paragraph alignment from the presentation toolbar.
+- 187cebc: Intern styles through hash indexes instead of linear scans. `Stylesheet` gains private interning caches, which prevent exhaustive struct-literal construction downstream; the caches are internal state only and excluded from serialization and equality.
+
+### Patch Changes
+
+- 45798dd: Compare layout blocks structurally instead of fingerprinting serialized JSON.
+- cf9a2f5: Share glyph caches across pages and stop re-parsing fonts per run.
+- 8ea2659: Preserve paragraph measurement values across the typed layout path.
+- 1fca3b6: Measure paragraphs through a typed path instead of serializing to JSON per call.
+- 7202c79: Scrub unrecognized binary parts during redaction. A part is kept only when it is recognized media or XML; every other part is emptied, and it is removed outright — together with its owned relationship part, that part's exclusive targets and its content-type declaration — when no surviving relationship points at it. The XML rewriter and the scrubber now share one reading of relationship markup, so they cannot disagree about which targets leave the package, and a part is only removed when every surviving relationship resolves to a stored entry.
+- 188540f: Redact relationship targets that carry a URI scheme, are protocol-relative or name a UNC share even when TargetMode is missing or oddly spelled, and declare the mode on the rewritten relationship.
+- 2d1b9d0: Media placeholders are now a fixed 64x64 blank image instead of matching the source dimensions, and WMF/EMF parts become blank metafile stubs instead of failing the whole redaction.
+- b59ba43: Resolve each font slot's fallback chain once per run during measurement.
+- aacdacc: Cache tokenized number formats across renders.
+- 79db755: Reuse formula parses and shift cell maps in place during structural edits.
+- b07afd7: Write sheetData in one pass instead of rescanning cells per row.
+
 ## 0.1.0
 
 ### Minor Changes

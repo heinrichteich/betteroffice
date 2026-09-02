@@ -1,5 +1,15 @@
 # @betteroffice/pptx
 
+## 0.1.0
+
+### Minor Changes
+
+- bf84789: Set paragraph alignment from the presentation toolbar.
+
+### Patch Changes
+
+- cae162d: Drop redundant buffer copies around the wasm boundary and per collaboration update.
+
 ## 0.0.4
 
 ### Patch Changes

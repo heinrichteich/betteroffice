@@ -1,5 +1,11 @@
 # @betteroffice/python-pptx
 
+## 0.0.3
+
+### Patch Changes
+
+- 4bcc61f: Release the GIL during python-pptx open, render, save, font registration and update application, without copying the input bytes to do it.
+
 ## 0.0.2
 
 ### Patch Changes

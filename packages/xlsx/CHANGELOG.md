@@ -1,5 +1,11 @@
 # @betteroffice/xlsx
 
+## 0.1.1
+
+### Patch Changes
+
+- cae162d: Drop redundant buffer copies around the wasm boundary and per collaboration update.
+
 ## 0.1.0
 
 ### Minor Changes
