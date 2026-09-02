@@ -1,7 +1,9 @@
 use crate::{GeometryIssue, Lookup, RealizedGeometry, ResolvedSection};
 use ooxml_drawingml::GeometryPathCommand;
 
-pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
+/// `size` is the shape's Width and Height, which the `Rel*` rows are expressed
+/// as fractions of.
+pub fn realize_geometry(section: &ResolvedSection, size: (f64, f64)) -> RealizedGeometry {
     let mut out = RealizedGeometry::default();
     let mut current = (0.0, 0.0);
     let rows: Vec<_> = if section.row_order.is_empty() {
@@ -14,6 +16,11 @@ pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
             .collect()
     };
     for row in rows {
+        // A `Del` row suppresses the inherited row at this index; it carries no
+        // geometry of its own and must not read as an unsupported row type.
+        if row.deleted {
+            continue;
+        }
         let ty = row.row_type.as_deref().unwrap_or("");
         if matches!(
             ty,
@@ -78,7 +85,7 @@ pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
                 }
             }
             "RelMoveTo" => {
-                let end = (current.0 + xy.0, current.1 + xy.1);
+                let end = (xy.0 * size.0, xy.1 * size.1);
                 if push_checked(
                     &mut out,
                     GeometryPathCommand::Move { x: end.0, y: end.1 },
@@ -88,7 +95,7 @@ pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
                 }
             }
             "RelLineTo" => {
-                let end = (current.0 + xy.0, current.1 + xy.1);
+                let end = (xy.0 * size.0, xy.1 * size.1);
                 if push_checked(
                     &mut out,
                     GeometryPathCommand::Line { x: end.0, y: end.1 },
@@ -540,7 +547,7 @@ mod tests {
                 ("IX:1".into(), resolved_row("NURBSTo", vec![])),
             ]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, (1.0, 1.0));
         assert!(matches!(
             geometry.commands[0],
             GeometryPathCommand::Move { x: 1.0, y: 2.0 }
@@ -563,7 +570,7 @@ mod tests {
                     resolved_row("MoveTo", vec![cell("X", value), cell("Y", "2")]),
                 )]),
             };
-            let geometry = realize_geometry(&section);
+            let geometry = realize_geometry(&section, (1.0, 1.0));
             assert!(geometry.commands.is_empty(), "{value}");
             assert_eq!(
                 geometry.issues,
@@ -589,11 +596,12 @@ mod tests {
                 ),
                 (
                     "IX:1".into(),
-                    resolved_row("RelLineTo", vec![cell("X", "1e308"), cell("Y", "0")]),
+                    resolved_row("RelLineTo", vec![cell("X", "10"), cell("Y", "0")]),
                 ),
             ]),
         };
-        let geometry = realize_geometry(&section);
+        // The fraction is finite; the width it scales by is what overflows.
+        let geometry = realize_geometry(&section, (1e308, 1.0));
         assert_eq!(
             geometry.commands,
             vec![GeometryPathCommand::Move { x: 1e308, y: 0.0 }]
@@ -621,7 +629,7 @@ mod tests {
                 ),
             )]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, (1.0, 1.0));
         assert!(geometry.commands.is_empty());
         assert_eq!(
             geometry.issues,
@@ -653,7 +661,7 @@ mod tests {
                 ),
             )]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, (1.0, 1.0));
         assert!(geometry.commands.is_empty());
         assert_eq!(
             geometry.issues,
@@ -662,6 +670,45 @@ mod tests {
                 cell: "geometry".into(),
             }]
         );
+    }
+
+    #[test]
+    fn relative_rows_scale_to_the_shape_box() {
+        // The rectangle every Visio master draws: corners as fractions of Width/Height.
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                (
+                    "IX:1".into(),
+                    resolved_row("RelMoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:2".into(),
+                    resolved_row("RelLineTo", vec![cell("X", "1"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:3".into(),
+                    resolved_row("RelLineTo", vec![cell("X", "1"), cell("Y", "1")]),
+                ),
+                (
+                    "IX:4".into(),
+                    resolved_row("RelLineTo", vec![cell("X", "0"), cell("Y", "1")]),
+                ),
+            ]),
+        };
+        let geometry = realize_geometry(&section, (4.0, 3.0));
+        assert_eq!(
+            geometry.commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 4.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 4.0, y: 3.0 },
+                GeometryPathCommand::Line { x: 0.0, y: 3.0 },
+            ]
+        );
+        assert!(geometry.issues.is_empty());
     }
 
     #[test]
@@ -681,12 +728,13 @@ mod tests {
                 ),
             ]),
         };
-        let geometry = realize_geometry(&section);
+        // `RelLineTo` is a fraction of the shape box, not an offset from the pen.
+        let geometry = realize_geometry(&section, (1.0, 1.0));
         assert_eq!(
             geometry.commands,
             vec![
                 GeometryPathCommand::Move { x: 1.0, y: 2.0 },
-                GeometryPathCommand::Line { x: 4.0, y: 6.0 },
+                GeometryPathCommand::Line { x: 3.0, y: 4.0 },
             ]
         );
         assert!(geometry.issues.is_empty());
@@ -712,7 +760,7 @@ mod tests {
                 ),
             ]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, (1.0, 1.0));
         assert!(geometry.commands.iter().any(|command| matches!(
             command,
             GeometryPathCommand::Cubic { x, y, .. }
@@ -741,7 +789,7 @@ mod tests {
                 ),
             )]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, (1.0, 1.0));
         assert!(matches!(
             geometry.commands[0],
             GeometryPathCommand::Move { x: 5.0, y: 5.0 }
@@ -787,7 +835,7 @@ mod tests {
                 ),
             )]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, (1.0, 1.0));
         assert!(geometry.commands.is_empty());
         assert_eq!(
             geometry.issues,
@@ -825,7 +873,7 @@ mod tests {
                 ),
             ]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, (1.0, 1.0));
         assert!(geometry.commands.iter().any(|command| matches!(
             command,
             GeometryPathCommand::Cubic { x, y, .. }
