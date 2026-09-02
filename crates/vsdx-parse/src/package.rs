@@ -96,6 +96,20 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         &document_path,
         &mut budget,
     )?;
+    let page_part_ids = catalog_part_ids(
+        xml_parts.get(pages_part_path.as_deref().unwrap_or("")),
+        "Page",
+        relationships
+            .get(pages_part_path.as_deref().unwrap_or(""))
+            .map(Vec::as_slice),
+    );
+    let master_part_ids = catalog_part_ids(
+        xml_parts.get(masters_part_path.as_deref().unwrap_or("")),
+        "Master",
+        relationships
+            .get(masters_part_path.as_deref().unwrap_or(""))
+            .map(Vec::as_slice),
+    );
     let page_contents = parse_part_sheets(&page_part_paths, &mut xml_parts, &mut budget)?;
     let master_contents = parse_part_sheets(&master_part_paths, &mut xml_parts, &mut budget)?;
     Ok(VsdxPackage {
@@ -113,6 +127,8 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         face_names,
         page_sheets,
         master_sheets,
+        page_part_ids,
+        master_part_ids,
         page_contents,
         master_contents,
         parts: source_parts
@@ -120,6 +136,31 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
             .map(|(path, bytes)| PackagePart { path, bytes })
             .collect(),
     })
+}
+
+fn catalog_part_ids(
+    root: Option<&XmlElement>,
+    item: &str,
+    relationships: Option<&[Relationship]>,
+) -> BTreeMap<String, u32> {
+    root.into_iter()
+        .flat_map(|root| root.children_named(item))
+        .filter_map(|element| {
+            let id = element.attribute("ID")?.parse().ok()?;
+            let relationship_id = element
+                .attributes
+                .iter()
+                .find(|(name, _)| name == "r:id" || name == "id")?
+                .1
+                .as_str();
+            let path = relationships?
+                .iter()
+                .find(|relationship| relationship.id == relationship_id)?
+                .resolved_target
+                .clone()?;
+            Some((path, id))
+        })
+        .collect()
 }
 
 fn parse_part_sheets(
@@ -601,6 +642,46 @@ mod tests {
             assert!(matches!(
                 parse_vsdx_with_limits(source, &limits),
                 Err(VsdxError::ResourceLimit { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn enforces_exact_package_wide_sheet_budgets() {
+        let source = rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec()),
+            ("visio/document.xml".to_owned(), br#"<VisioDocument><DocumentSheet><Cell N='DocumentCell'/><Section N='DocumentSection'><Row IX='0'><Cell N='DocumentRowCell'/></Row></Section></DocumentSheet><StyleSheets><StyleSheet ID='1'><Cell N='StyleCell'/><Section N='StyleSection'><Row IX='0'><Cell N='StyleRowCell'/></Row></Section></StyleSheet></StyleSheets></VisioDocument>"#.to_vec()),
+            ("visio/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/pages' Target='pages/pages.xml'/></Relationships>"#.to_vec()),
+            ("visio/pages/pages.xml".to_owned(), br#"<Pages><Page ID='1'/></Pages>"#.to_vec()),
+            ("visio/pages/_rels/pages.xml.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page1.xml'/></Relationships>"#.to_vec()),
+            ("visio/pages/page1.xml".to_owned(), br#"<PageContents><Cell N='PageCell'/><Section N='PageSection'><Row IX='0'><Cell N='PageRowCell'/></Row></Section><Shapes><Shape ID='1'><Cell N='ShapeCell'/><Section N='ShapeSection'><Row IX='0'><Cell N='ShapeRowCell0'/></Row><Row IX='1'><Cell N='ShapeRowCell1'/></Row></Section><Shapes><Shape ID='2'><Cell N='NestedShapeCell'/></Shape></Shapes></Shape></Shapes></PageContents>"#.to_vec()),
+        ]).unwrap();
+        // Fixture totals: 10 cells, 4 sections, 5 rows, 2 shapes.
+        let limits_for = |kind: &str, value: usize| match kind {
+            "cells" => ParseLimits {
+                max_cells: value,
+                ..ParseLimits::default()
+            },
+            "sections" => ParseLimits {
+                max_sections: value,
+                ..ParseLimits::default()
+            },
+            "rows" => ParseLimits {
+                max_rows: value,
+                ..ParseLimits::default()
+            },
+            "shapes" => ParseLimits {
+                max_shapes: value,
+                ..ParseLimits::default()
+            },
+            _ => unreachable!(),
+        };
+        for (kind, minimum) in [("cells", 10), ("sections", 4), ("rows", 5), ("shapes", 2)] {
+            assert!(parse_vsdx_with_limits(&source, &limits_for(kind, minimum)).is_ok());
+            assert!(matches!(
+                parse_vsdx_with_limits(&source, &limits_for(kind, minimum - 1)),
+                Err(VsdxError::ResourceLimit { kind: actual, .. }) if actual == kind
             ));
         }
     }
