@@ -245,6 +245,8 @@ dependencies = [
 name = "betteroffice-vsdx"
 version = "0.1.0"
 dependencies = [
+ "betteroffice-opc",
+ "betteroffice-vsdx-eval",
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-resolve",
 ]
