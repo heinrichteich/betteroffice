@@ -1,5 +1,35 @@
 # @betteroffice/docx-react
 
+## 0.2.0
+
+### Patch Changes
+
+- 5069ad2: Keep accepted spreadsheet proposals undoable in collaborative sessions, preserve pending proposals through remote edits, and require a refreshed review when calculated previews change. Reject document suggestions that overlap partially tracked text. Existing public signatures and wire fields remain unchanged.
+- 93971b5: Remove outdated early-release warnings from package READMEs and link the JavaScript guide and changelogs.
+- 43fad65: Reduce large-document interaction cost with per-line selection bands, lazy Unicode caret stops, compact retained-page shift replay, revision-bound lazy measured inputs, and stable page rendering identities.
+- 1d830df: Add a CDN-only font provider, settle Japanese font preflight without retry loops, and preserve floating header shapes without inflating body margins. Load and save alternate main-document filenames through their package relationships, and forward layout failures through the editor error callback.
+- 295f42f: Keep one local undo history across document stories, group rapid keystrokes in WebAssembly, and preserve native undo in other inputs. Replace story-scoped history helpers with session-wide tracking and changed-story reporting.
+- 0019657: Recover from resident worker crashes, WebAssembly traps, and unanswered requests so the editor can fall back to the main-thread engine. Reset retained worker frames and queries when switching engines so fresh main-thread frames render immediately.
+- Updated dependencies [93971b5]
+- Updated dependencies [b351bbe]
+- Updated dependencies [4bf205b]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [2c658b6]
+- Updated dependencies [43fad65]
+- Updated dependencies [1d830df]
+- Updated dependencies [295f42f]
+- Updated dependencies [6f0e36d]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [2ee434c]
+- Updated dependencies [1d0f41d]
+- Updated dependencies [0019657]
+- Updated dependencies [d926fb0]
+- Updated dependencies [c9b72bf]
+  - @betteroffice/docx@0.2.0
+  - @betteroffice/docx-i18n@0.2.0
+
 ## 0.1.0
 
 ### Minor Changes

@@ -1,5 +1,30 @@
 # @betteroffice/docx
 
+## 0.2.0
+
+### Minor Changes
+
+- 1d0f41d: Round-trip DOCX packages as a byte-stable fixed point that keeps the authored section properties, simple fields, drawing names, foreign markup, unknown attributes and custom root bindings (new public model fields and enum variants).
+
+### Patch Changes
+
+- 93971b5: Remove outdated early-release warnings from package READMEs and link the JavaScript guide and changelogs.
+- b351bbe: Keep vertically aligned table-cell text intact at page breaks by using its painted position when selecting row split points. Apply the same default vertical cell padding during measurement and rendering.
+- 4bf205b: Charts now survive a save. The drawing that places a chart, and any drawing the parser does not model, is kept as its original markup and written back verbatim, so the chart part and its relationship stay referenced; the editor save path projects chart runs back from the session instead of dropping them.
+- d4f4b85: Round page canvas dimensions up so fractional pixel edges remain visible at different zoom and display scales.
+- d4f4b85: Center and right-align the first line within its indented width, including hanging indents.
+- 2c658b6: Improve DOCX pagination, list formatting, justified text, header and footer spacing, anchored shapes, content-control text, and table geometry to better match Word. Use Carlito as the related fallback for Calibri Light.
+- 43fad65: Reduce large-document interaction cost with per-line selection bands, lazy Unicode caret stops, compact retained-page shift replay, revision-bound lazy measured inputs, and stable page rendering identities.
+- 1d830df: Add a CDN-only font provider, settle Japanese font preflight without retry loops, and preserve floating header shapes without inflating body margins. Load and save alternate main-document filenames through their package relationships, and forward layout failures through the editor error callback.
+- 295f42f: Keep one local undo history across document stories, group rapid keystrokes in WebAssembly, and preserve native undo in other inputs. Replace story-scoped history helpers with session-wide tracking and changed-story reporting.
+- 6f0e36d: Hide suppressed list-number placeholders while preserving literal labels.
+- d4f4b85: Keep table heading rows with their following rows when the group fits on a page, and prevent shorter fonts from adding extra leading below taller fonts on the same line.
+- d4f4b85: Respect narrow text boundaries and preserve empty paragraphs after header and footer tables so wrapping and footer placement match Word.
+- 2ee434c: Parse runs, paragraphs, tables, rows and cells that Word wraps in `w:customXml`, `w:smartTag` or a row/cell `w:sdt`; their text was dropped on open and therefore on save.
+- 0019657: Recover from resident worker crashes, WebAssembly traps, and unanswered requests so the editor can fall back to the main-thread engine. Reset retained worker frames and queries when switching engines so fresh main-thread frames render immediately.
+- d926fb0: Correct tint proportions in shared OOXML color resolution so lighter theme colors blend toward white as authored.
+- c9b72bf: Draw chart titles, axis labels, legends and data labels in the family, slant and character spacing their `c:txPr` declares, instead of the theme minor font upright and untracked. A chart title's own `c:rich` run properties now override the paragraph default they sit under, and a reattached source refreshes the text properties of a stored chart. A DOCX chart paints the tracking its text properties declare instead of only reserving room for it.
+
 ## 0.1.0
 
 ### Minor Changes

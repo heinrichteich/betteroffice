@@ -1,5 +1,21 @@
 # @betteroffice/xlsx
 
+## 0.2.0
+
+### Minor Changes
+
+- fb06233: Add font-aware range printing with device-specific grid geometry and optional print gridlines. Paint cell and preview fonts at their declared point size, with consistent text alignment across canvas and raster rendering.
+
+### Patch Changes
+
+- 5069ad2: Keep accepted spreadsheet proposals undoable in collaborative sessions, preserve pending proposals through remote edits, and require a refreshed review when calculated previews change. Reject document suggestions that overlap partially tracked text. Existing public signatures and wire fields remain unchanged.
+- 93971b5: Remove outdated early-release warnings from package READMEs and link the JavaScript guide and changelogs.
+- d926fb0: Correct tint proportions in shared OOXML color resolution so lighter theme colors blend toward white as authored.
+- cae162d: Drop redundant buffer copies around the wasm boundary and per collaboration update.
+- 5798031: Load Excel shared formulas with correct absolute and relative references for
+  recalculation and round-trip saves.
+- 13016f2: Support whole-column formula references such as `VLOOKUP(...,S:V,...)`.
+
 ## 0.1.0
 
 ### Minor Changes
