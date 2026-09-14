@@ -121,3 +121,40 @@ test('a reviewer drag from shape A to shape B creates a connector that follows m
     canvasPrototype.getContext = getContext;
   }
 });
+
+test('dropping on a shape interior far from any connection point still glues to the nearest point', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  try {
+    let ready: Ready | undefined;
+    const view = render(<VsdxEditor file={foundation} fonts={[]} onReady={(api) => { ready = api; }} />);
+    await waitFor(() => expect(ready).toBeDefined());
+    const rectangle = standardShapeById('rectangle')!;
+    let fromId = '';
+    await act(async () => {
+      fromId = ready!.handle.addShape('page:1', rectangle.draft(2, 2, 1, 1)).shapeId;
+      ready!.handle.addShape('page:1', rectangle.draft(5, 2, 1, 1));
+      ready!.refresh();
+    });
+    await armConnector(view.container);
+    const canvas = document.querySelectorAll('canvas')[0] as HTMLCanvasElement;
+    const scale = 1;
+    const frame = ready!.handle.layoutPage(0);
+    stubCanvasRect(canvas, frame.width * scale, frame.height * scale);
+    const from = centreOf(ready!.handle, fromId);
+    const interior = { x: 5.3, y: 2.2 };
+    const before = ready!.handle.snapshot().pages[0].shapes.length;
+    await act(async () => { await dragPath(canvas, cssForModel(frame, from, scale), cssForModel(frame, interior, scale)); });
+    await waitFor(() => expect(ready!.handle.snapshot().pages[0].shapes.length).toBe(before + 1));
+    const page = ready!.handle.snapshot().pages[0];
+    const connector = page.shapes[page.shapes.length - 1];
+    expect(connector.name).toBe('Dynamic connector');
+    const route = connectorRouteFromFrame(ready!.handle.layoutPage(0), page.sourcePartPath, connector.sourceId)!;
+    expect(route[0]).toEqual({ x: from.x, y: from.y });
+    expect(route[route.length - 1]).toEqual({ x: 5.5, y: 2 });
+  } finally {
+    cleanup();
+    canvasPrototype.getContext = getContext;
+  }
+});
