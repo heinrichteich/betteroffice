@@ -732,16 +732,7 @@ fn cubic_arc_segment(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn close_row_emits_a_close_command_and_is_not_an_issue() {
-        let keyed = |key: &str, ty: &str, cells: Vec<Cell>| {
-            (
-                key.to_owned(),
-                ResolvedRow {
-                    key: key.into(),
-                    ..resolved_row(ty, cells)
-                },
-            )
-        };
+    fn close_row_closes_the_path_and_reports_no_issue() {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
@@ -756,29 +747,20 @@ mod tests {
             ]),
         };
         let realized = realize_geometry(&section, 1.0, 1.0);
-        assert!(
-            realized.issues.is_empty(),
-            "a Close row must not be reported unsupported: {:?}",
-            realized.issues
-        );
         assert_eq!(
-            realized.commands.last(),
-            Some(&GeometryPathCommand::Close),
-            "expected the path to close"
+            realized.commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                GeometryPathCommand::Close,
+            ]
         );
+        assert!(realized.issues.is_empty());
     }
 
     #[test]
     fn geometry_realizes_two_digit_rows_in_numeric_order() {
-        let keyed = |key: &str, ty: &str, cells: Vec<Cell>| {
-            (
-                key.to_owned(),
-                ResolvedRow {
-                    key: key.into(),
-                    ..resolved_row(ty, cells)
-                },
-            )
-        };
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
@@ -814,6 +796,15 @@ mod tests {
             del: false,
             other_attrs: vec![],
         }
+    }
+    fn keyed(key: &str, ty: &str, cells: Vec<Cell>) -> (String, ResolvedRow) {
+        (
+            key.to_owned(),
+            ResolvedRow {
+                key: key.into(),
+                ..resolved_row(ty, cells)
+            },
+        )
     }
     fn resolved_row(ty: &str, cells: Vec<Cell>) -> ResolvedRow {
         ResolvedRow {
@@ -1761,15 +1752,6 @@ mod tests {
 
     #[test]
     fn geometry_realizes_two_digit_rows_in_numeric_order_without_row_order() {
-        let keyed = |key: &str, ty: &str, cells: Vec<Cell>| {
-            (
-                key.to_owned(),
-                ResolvedRow {
-                    key: key.into(),
-                    ..resolved_row(ty, cells)
-                },
-            )
-        };
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
