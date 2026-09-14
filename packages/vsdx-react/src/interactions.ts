@@ -155,6 +155,8 @@ export const resolveRotationAngle = (start: DragStart, release: ModelPoint, snap
   return snapRotationAngle((start.angle ?? 0) + delta, snap);
 };
 const applyForward = (transform: Affine, point: ModelPoint): ModelPoint => ({ x: transform.a * point.x + transform.c * point.y + transform.e, y: transform.b * point.x + transform.d * point.y + transform.f });
+/** Expresses a page-axis nudge as the drag that would cover the same screen distance. */
+export const resolveNudgeGeometry = (start: DragStart, dx: number, dy: number): { x: number; y: number; width: number; height: number } => resolveDragGeometry({ ...start, canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 } }, { x: dx, y: dy });
 export const previewOutline = (start: DragStart, release: ModelPoint, paintTransform: Affine, snap = false): ModelPoint[] => {
   const geometry = resolveDragGeometry(start, release);
   const angle = start.rotate ? resolveRotationAngle(start, release, snap) : (start.angle ?? 0);
@@ -212,7 +214,7 @@ export const rotationGripPosition = (corners: readonly ModelPoint[], zoom: numbe
   const offset = SELECTION_ROTATE_OFFSET_CSS / Math.max(zoom, 1e-6);
   return { x: topCenter.x + (outX / length) * offset, y: topCenter.y + (outY / length) * offset };
 };
-export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: readonly ModelPoint[], dpr: number, scale: number): void => {
+export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: readonly ModelPoint[], dpr: number, scale: number, resizeHandles: readonly ResizeHandle[] = RESIZE_HANDLES): void => {
   if (corners.length < 4) return;
   const zoom = Number.isFinite(scale) && scale > 0 ? scale : 1;
   const handle = SELECTION_HANDLE_CSS / zoom;
@@ -234,7 +236,7 @@ export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: 
     context.moveTo(topCenter.x, topCenter.y);
     context.lineTo(grip.x, grip.y);
     context.stroke();
-    for (const key of RESIZE_HANDLES) {
+    for (const key of resizeHandles) {
       const anchor = handles[key];
       context.fillStyle = SELECTION_HANDLE_FILL;
       context.fillRect(anchor.x - handle / 2, anchor.y - handle / 2, handle, handle);

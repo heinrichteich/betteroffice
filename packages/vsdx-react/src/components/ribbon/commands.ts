@@ -87,6 +87,25 @@ export function numericCellValue(shape: ShapeSnapshot, name: string, fallback?: 
   return parsed;
 }
 
+/** True when a ShapeSheet lock cell evaluates to the enabled value 1. */
+export function lockCellEnabled(shape: ShapeSnapshot | null, name: string): boolean {
+  return Number(cellValue(shape, name)) === 1;
+}
+
+/** True when the stored formula for a cell carries a GUARD interception. */
+export function cellIsGuarded(shape: ShapeSnapshot | null, name: string): boolean {
+  return (cellFormula(shape, name) ?? '').toUpperCase().includes('GUARD');
+}
+
+export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'LockHeight', 'LockAspect'] as const;
+
+/** True when a handle resize would be refused by a lock or a GUARD on its pin or size. */
+export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
+  if (!shape) return false;
+  if (HANDLE_RESIZE_LOCKS.some((lock) => lockCellEnabled(shape, lock))) return true;
+  return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => cellIsGuarded(shape, cell));
+}
+
 export function createRibbonCommands(
   handle: DiagramHandle | null,
   selection: VsdxShapeSelection | null,

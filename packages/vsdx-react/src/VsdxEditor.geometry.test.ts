@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
 import { canvasPointerPosition, inchFormula, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
-import { previewOutline, resolveRotationAngle } from './interactions';
+import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
 
 const frame: PageDisplayList = {
   contractVersion: 4,
@@ -174,4 +174,15 @@ test('a flipped handle resize grows outward on both axes', () => {
   expect(resolveDragGeometry(flipX, { x: 2, y: 0 }).width).toBeCloseTo(22, 10);
   const flipY = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'n' as const, pin: { x: 0, y: 0 }, size: { width: 20, height: 10 }, flipY: true };
   expect(resolveDragGeometry(flipY, { x: 0, y: 2 }).height).toBeCloseTo(12, 10);
+});
+test('a nudge inside a rotated and scaled group matches the equivalent drag', () => {
+  const parentTransforms = [{ a: 0, b: 2, c: -2, d: 0, e: 10, f: 20 }];
+  const base = { canvas: { x: 0, y: 0 }, model: { x: 10, y: 20 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, parentTransforms };
+  const dx = 1 / 96;
+  const dy = 0;
+  const dragged = resolveDragGeometry(base, { x: 10 + dx, y: 20 + dy });
+  const nudged = resolveNudgeGeometry(base, dx, dy);
+  expect(nudged.x).toBeCloseTo(dragged.x, 10);
+  expect(nudged.y).toBeCloseTo(dragged.y, 10);
+  expect(nudged.x).not.toBeCloseTo(2 + dx, 6);
 });

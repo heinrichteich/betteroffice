@@ -890,6 +890,78 @@ test('a refused handle resize rolls the pin move back', async () => {
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
+test('a handle resize on a move-locked shape commits neither size nor pin', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  const errors: Error[] = [];
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} onError={(error) => { errors.push(error); }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 4, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
+    const moves: string[][] = [];
+    const originalMove = handle.moveShape.bind(handle);
+    handle.moveShape = ((...args: [string, string, string, string]) => { moves.push([...args]); return originalMove(...args); }) as DiagramHandle['moveShape'];
+    const resizes: string[][] = [];
+    const originalResize = handle.resizeShape.bind(handle);
+    handle.resizeShape = ((...args: [string, string, string, string]) => { resizes.push([...args]); return originalResize(...args); }) as DiagramHandle['resizeShape'];
+    await act(async () => { ready!.refresh(); });
+    const { selectionCorners } = await import('./VsdxEditor');
+    const canvases = view.container.querySelectorAll('canvas');
+    const main = canvases[0] as HTMLCanvasElement;
+    const overlay = canvases[1] as HTMLCanvasElement;
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    (main as unknown as { releasePointerCapture: (id: number) => void }).releasePointerCapture = () => {};
+    (main as unknown as { hasPointerCapture: (id: number) => boolean }).hasPointerCapture = () => false;
+    overlay.getContext = ((() => new Proxy({}, { get: () => () => {}, set: () => true })) as unknown as typeof overlay.getContext);
+    const { fireEvent } = await import('@testing-library/react');
+    const pageId = handle.snapshot().pages[0].id;
+    const added = await act(async () => handle.addShape(pageId, { name: 'locked', cells: [
+      { locator: { cellName: 'PinX' }, formula: '1' },
+      { locator: { cellName: 'PinY' }, formula: '1' },
+      { locator: { cellName: 'Width' }, formula: '2' },
+      { locator: { cellName: 'Height' }, formula: '1' },
+      { locator: { cellName: 'LockMoveX' }, formula: '1' },
+    ] }));
+    const lockedId = (added as unknown as { shapeId: string }).shapeId;
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: lockedId })) as unknown as DiagramHandle['hitTest'];
+    await act(async () => { ready!.refresh(); });
+    fireEvent.pointerDown(main, { pointerId: 1, clientX: 100, clientY: 100 });
+    await act(async () => {});
+    fireEvent.pointerUp(main, { pointerId: 1, clientX: 100, clientY: 100 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toContain(`selected shape ${lockedId}`);
+    const shapeBefore = handle.snapshot().pages[0].shapes.find((shape) => shape.id === lockedId);
+    const pinX = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinX')?.value);
+    const pinY = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinY')?.value);
+    const width = Number(shapeBefore?.cells.find((cell) => cell.name === 'Width')?.value);
+    const height = Number(shapeBefore?.cells.find((cell) => cell.name === 'Height')?.value);
+    const corners = selectionCorners(handle.snapshot().pages[0], fakeFrame as never, { pageId, shapeId: lockedId, hit: { kind: 'shape', shapeId: lockedId } });
+    expect(corners).not.toBeNull();
+    const se = selectionHandlePositions(corners!).handles.se;
+    fireEvent.pointerDown(main, { pointerId: 2, clientX: se.x, clientY: se.y });
+    await act(async () => {});
+    fireEvent.pointerMove(main, { pointerId: 2, clientX: se.x + 48, clientY: se.y + 48 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    fireEvent.pointerUp(main, { pointerId: 2, clientX: se.x + 48, clientY: se.y + 48 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(moves).toHaveLength(0);
+    expect(resizes).toHaveLength(0);
+    const shapeAfter = handle.snapshot().pages[0].shapes.find((shape) => shape.id === lockedId);
+    expect(Number(shapeAfter?.cells.find((cell) => cell.name === 'Width')?.value)).toBeCloseTo(width, 6);
+    expect(Number(shapeAfter?.cells.find((cell) => cell.name === 'Height')?.value)).toBeCloseTo(height, 6);
+    expect(Number(shapeAfter?.cells.find((cell) => cell.name === 'PinX')?.value)).toBeCloseTo(pinX, 6);
+    expect(Number(shapeAfter?.cells.find((cell) => cell.name === 'PinY')?.value)).toBeCloseTo(pinY, 6);
+    expect(errors.length).toBeGreaterThan(0);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
 test('the canvas is focusable and ArrowUp nudges PinY by one screen pixel', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
