@@ -112,10 +112,10 @@ test('a handle resize from nw moves the pin so the se corner stays put', () => {
   const geometry = resolveDragGeometry(start, { x: -1, y: 1 });
   expect(geometry.width).toBeCloseTo(3, 10);
   expect(geometry.height).toBeCloseTo(2, 10);
-  expect(geometry.x).toBeCloseTo(4.5, 10);
-  expect(geometry.y).toBeCloseTo(2.5, 10);
-  expect(geometry.x + geometry.width / 2).toBeCloseTo(6, 10);
-  expect(geometry.y - geometry.height / 2).toBeCloseTo(1.5, 10);
+  expect(geometry.x).toBeCloseTo(4, 10);
+  expect(geometry.y).toBeCloseTo(2, 10);
+  expect(geometry.x - 1 + geometry.width).toBeCloseTo(6, 10);
+  expect(geometry.y - 0.5).toBeCloseTo(1.5, 10);
   const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
   const corners = previewOutline(start, { x: -1, y: 1 }, identity);
   const se = { x: (corners[1].x + corners[1].x) / 2, y: corners[1].y };

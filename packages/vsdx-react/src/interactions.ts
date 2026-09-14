@@ -37,14 +37,10 @@ const yDownHandle = (handle: ResizeHandle): ResizeHandle => {
   return handle;
 };
 export const snapRotationAngle = (angle: number, snap: boolean): number => snap ? Math.round(angle / ROTATION_SNAP_STEP) * ROTATION_SNAP_STEP : angle;
-const pinFractions = (start: DragStart): { fx: number; fy: number; fvx: number; fvy: number } => {
-  const width = start.size.width;
-  const height = start.size.height;
-  const locPin = start.locPin ?? { x: width / 2, y: height / 2 };
-  const fx = width > 0 ? locPin.x / width : 0.5;
-  const fy = height > 0 ? locPin.y / height : 0.5;
-  return { fx, fy, fvx: start.flipX ? 1 - fx : fx, fvy: start.flipY ? 1 - fy : fy };
-};
+const locPinInches = (start: DragStart): { x: number; y: number } => ({
+  x: start.locPin?.x ?? start.size.width / 2,
+  y: start.locPin?.y ?? start.size.height / 2,
+});
 export const resolveDragGeometry = (start: DragStart, release: ModelPoint): { x: number; y: number; width: number; height: number } => {
   const toParent = (point: ModelPoint) => (start.parentTransforms ?? []).reduce((local, transform) => canvasPointToModel(transform, local.x, local.y), point);
   const origin = toParent(start.model);
@@ -58,7 +54,9 @@ export const resolveDragGeometry = (start: DragStart, release: ModelPoint): { x:
     const flipSignY = start.flipY ? -1 : 1;
     const localX = (cos * deltaX + sin * deltaY) * flipSignX;
     const localY = (-sin * deltaX + cos * deltaY) * flipSignY;
-    const { fx, fy } = pinFractions(start);
+    const locPin = locPinInches(start);
+    const fx = start.size.width > 0 ? locPin.x / start.size.width : 0.5;
+    const fy = start.size.height > 0 ? locPin.y / start.size.height : 0.5;
     const visualHandle: ResizeHandle = start.handle;
     const localHandle: ResizeHandle = ((): ResizeHandle => {
       let mapped: ResizeHandle = visualHandle;
@@ -72,14 +70,14 @@ export const resolveDragGeometry = (start: DragStart, release: ModelPoint): { x:
       }
       return mapped;
     })();
-    const boxX = start.pin.x - fx * start.size.width;
-    const boxY = start.pin.y - fy * start.size.height;
+    const boxX = start.pin.x - locPin.x;
+    const boxY = start.pin.y - locPin.y;
     const box: FrameBounds = { x: boxX, y: boxY, width: start.size.width, height: start.size.height };
     const next = resizedBounds(box, yDownHandle(localHandle), { x: localX, y: localY }, MIN_SHAPE_INCHES);
-    const nextLocPinX = fx * next.width;
-    const nextLocPinY = fy * next.height;
-    const shiftX = (next.x + nextLocPinX) - (boxX + fx * start.size.width);
-    const shiftY = (next.y + nextLocPinY) - (boxY + fy * start.size.height);
+    const newLocPinX = start.locPin?.x === undefined ? fx * next.width : locPin.x;
+    const newLocPinY = start.locPin?.y === undefined ? fy * next.height : locPin.y;
+    const shiftX = (next.x + newLocPinX) - (boxX + locPin.x);
+    const shiftY = (next.y + newLocPinY) - (boxY + locPin.y);
     const unflippedX = shiftX * flipSignX;
     const unflippedY = shiftY * flipSignY;
     return { x: start.pin.x + cos * unflippedX - sin * unflippedY, y: start.pin.y + sin * unflippedX + cos * unflippedY, width: next.width, height: next.height };
@@ -111,7 +109,13 @@ export const previewOutline = (start: DragStart, release: ModelPoint, paintTrans
   const geometry = resolveDragGeometry(start, release);
   const angle = start.rotate ? resolveRotationAngle(start, release, snap) : (start.angle ?? 0);
   const cos = Math.cos(angle), sin = Math.sin(angle);
-  const { fvx, fvy } = pinFractions(start);
+  const locPin = locPinInches(start);
+  const oldFx = start.size.width > 0 ? locPin.x / start.size.width : 0.5;
+  const oldFy = start.size.height > 0 ? locPin.y / start.size.height : 0.5;
+  const effFx = start.locPin?.x === undefined ? oldFx : (geometry.width > 0 ? locPin.x / geometry.width : 0.5);
+  const effFy = start.locPin?.y === undefined ? oldFy : (geometry.height > 0 ? locPin.y / geometry.height : 0.5);
+  const fvx = start.flipX ? 1 - effFx : effFx;
+  const fvy = start.flipY ? 1 - effFy : effFy;
   const centreOffsetX = (0.5 - fvx) * geometry.width;
   const centreOffsetY = (0.5 - fvy) * geometry.height;
   const centre = { x: geometry.x + cos * centreOffsetX - sin * centreOffsetY, y: geometry.y + sin * centreOffsetX + cos * centreOffsetY };

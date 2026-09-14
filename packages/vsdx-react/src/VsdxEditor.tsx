@@ -358,15 +358,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       }
       const geometry = resolveDragGeometry(pointer, point.model);
       if (pointer.handle) {
-        const rollbackX = inchFormula(pointer.pin.x);
-        const rollbackY = inchFormula(pointer.pin.y);
+        handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
         handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
-        try {
-          handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
-        } catch (value) {
-          try { handle.moveShape(selected.pageId, selected.shapeId, rollbackX, rollbackY); } catch { void 0; }
-          throw value;
-        }
       }
       else if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
       else handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));

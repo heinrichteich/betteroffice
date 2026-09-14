@@ -690,7 +690,7 @@ test('a resize from a handle moves the pin with moveShape and resizeShape', asyn
     expect(moves).toHaveLength(1);
     expect(resizes).toHaveLength(1);
     expect(Number(resizes[0][2])).toBeGreaterThan(width);
-    expect(Number(moves[0][2])).not.toBeCloseTo(pinX, 6);
+    expect(Number(moves[0][2])).toBeCloseTo(pinX, 6);
     expect(Number(moves[0][3])).not.toBeCloseTo(pinY, 6);
     expect(view.container.querySelector('output')).toBeNull();
     expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');

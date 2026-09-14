@@ -121,10 +121,10 @@ test('a resize from nw keeps the se corner fixed', () => {
   const geometry = resolveDragGeometry(start, { x: -1, y: 1 });
   expect(geometry.width).toBeCloseTo(3, 10);
   expect(geometry.height).toBeCloseTo(2, 10);
-  expect(geometry.x).toBeCloseTo(4.5, 10);
-  expect(geometry.y).toBeCloseTo(2.5, 10);
-  expect(geometry.x + geometry.width / 2).toBeCloseTo(6, 10);
-  expect(geometry.y - geometry.height / 2).toBeCloseTo(1.5, 10);
+  expect(geometry.x).toBeCloseTo(4, 10);
+  expect(geometry.y).toBeCloseTo(2, 10);
+  expect(geometry.x - 1 + geometry.width).toBeCloseTo(6, 10);
+  expect(geometry.y - 0.5).toBeCloseTo(1.5, 10);
 });
 test('the rotation grip produces the expected angle', () => {
   const start = { canvas: { x: 0, y: 0 }, model: { x: 1, y: 0 }, resize: false, rotate: true, pin: { x: 0, y: 0 }, size: { width: 2, height: 1 }, angle: 0 };
@@ -163,7 +163,7 @@ test('locPin governs the handle box instead of cancelling out', () => {
   const edge = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 0, y: 0.5 }, size: { width: 2, height: 1 } };
   const grownCentred = resolveDragGeometry(centred, { x: 1, y: 0 });
   expect(grownCentred.width).toBeCloseTo(3, 10);
-  expect(grownCentred.x).toBeCloseTo(5.5, 10);
+  expect(grownCentred.x).toBeCloseTo(5, 10);
   const grownEdge = resolveDragGeometry(edge, { x: 1, y: 0 });
   expect(grownEdge.width).toBeCloseTo(3, 10);
   expect(grownEdge.x).toBeCloseTo(5, 10);
@@ -235,4 +235,29 @@ test('the rotation grip follows local north instead of the screen top', () => {
   const upperNorth = { x: (upper[2].x + upper[3].x) / 2, y: (upper[2].y + upper[3].y) / 2 };
   expect(selectionHandlePositions(lower).topCenter.x).toBeCloseTo(lowerNorth.x, 8);
   expect(selectionHandlePositions(upper).topCenter.x).toBeCloseTo(upperNorth.x, 8);
+});
+test('a literal off-centre LocPin previews exactly what the commit renders', () => {
+  const frame = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+  const locPin = { x: 0.5, y: 0.5 };
+  const east = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin, size: { width: 2, height: 1 } };
+  const grown = resolveDragGeometry(east, { x: 1, y: 0 });
+  expect(grown.width).toBeCloseTo(3, 10);
+  const committedLeft = grown.x - locPin.x;
+  expect(committedLeft).toBeCloseTo(4.5, 10);
+  expect(committedLeft + grown.width).toBeCloseTo(7.5, 10);
+  const eastCorners = previewOutline(east, { x: 1, y: 0 }, frame);
+  expect(Math.min(...eastCorners.map((corner) => corner.x))).toBeCloseTo(committedLeft, 10);
+  expect(Math.max(...eastCorners.map((corner) => corner.x))).toBeCloseTo(committedLeft + grown.width, 10);
+  const northWest = { ...east, handle: 'nw' as const };
+  const stretched = resolveDragGeometry(northWest, { x: -1, y: 1 });
+  expect(stretched.width).toBeCloseTo(3, 10);
+  expect(stretched.height).toBeCloseTo(2, 10);
+  const committedRight = 5 - locPin.x + 2;
+  expect(stretched.x - locPin.x + stretched.width).toBeCloseTo(committedRight, 10);
+  expect(stretched.x - locPin.x).toBeCloseTo(committedRight - stretched.width, 10);
+  const northCorners = previewOutline(northWest, { x: -1, y: 1 }, frame);
+  expect(Math.min(...northCorners.map((corner) => corner.x))).toBeCloseTo(stretched.x - locPin.x, 10);
+  expect(Math.max(...northCorners.map((corner) => corner.x))).toBeCloseTo(committedRight, 10);
+  expect(Math.min(...northCorners.map((corner) => corner.y))).toBeCloseTo(stretched.y - locPin.y, 10);
+  expect(Math.max(...northCorners.map((corner) => corner.y))).toBeCloseTo(stretched.y - locPin.y + stretched.height, 10);
 });
