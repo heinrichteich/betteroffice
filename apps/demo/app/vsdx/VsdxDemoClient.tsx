@@ -120,7 +120,7 @@ export function VsdxDemoClient() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".vsdx"
+            accept=".vsdx,.vstx"
             aria-label="Choose a Visio file"
             data-testid="vsdx-file-input"
             style={{ display: "none" }}
@@ -169,7 +169,7 @@ export function VsdxDemoClient() {
           <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center bg-white/70 p-8" role="status">
             <div className="grid w-[min(440px,100%)] place-items-center rounded-md border-2 border-dashed border-acc bg-white px-8 py-10 text-center">
               <p className="mb-1 text-[16px] font-[650]">Drop to open the diagram</p>
-              <p className="text-[13px] text-mute">Only .vsdx files, opened locally in your browser.</p>
+              <p className="text-[13px] text-mute">Only .vsdx and .vstx files, opened locally in your browser.</p>
             </div>
           </div>
         )}
