@@ -95,8 +95,17 @@ describe('VSDX wasm boundary', () => {
 
   test('decodes wasm text diagnostic categories using wire casing', () => {
     const diagram = openDiagram(textAccounting, { clientId: 9011 });
-    const diagnostics = diagram.layoutPage(0).primitives.flatMap(primitive => primitive.kind === 'textBox' ? primitive.paragraphs.flatMap(paragraph => paragraph.runs.flatMap(run => run.diagnostics)) : []);
+    const diagnostics = diagram.layoutPage(0).primitives.flatMap(primitive => primitive.kind === 'textBox' ? primitive.paragraphs.flatMap(paragraph => paragraph.runs.flatMap(run => run.diagnostics ?? [])) : []);
     expect(diagnostics).toContainEqual(expect.objectContaining({ category: 'fidelity', code: 'unregistered-font' }));
+    diagram.dispose();
+  });
+
+  test('omits diagnostics from runs laid out with a registered face', async () => {
+    const bytes = new Uint8Array(await readFile(resolve(root, 'packages/fonts/assets/LiberationSans-Bold.ttf')));
+    const diagram = openDiagram(demo, { clientId: 9013, fonts: [{ family: 'Arial', bold: true, bytes }] });
+    const runs = diagram.layoutPage(0).primitives.flatMap(primitive => primitive.kind === 'textBox' ? primitive.paragraphs.flatMap(paragraph => paragraph.runs) : []);
+    expect(runs.length).toBeGreaterThan(0);
+    expect(runs.every(run => run.diagnostics === undefined)).toBe(true);
     diagram.dispose();
   });
 
