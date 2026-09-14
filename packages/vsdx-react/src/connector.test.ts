@@ -2,6 +2,12 @@ import { expect, test } from 'bun:test';
 import type { PageDisplayList, ShapeSnapshot } from '@betteroffice/vsdx';
 import {
   arrowheadPolygon,
+  autoConnectArrowAt,
+  autoConnectArrowCenter,
+  autoConnectArrowCss,
+  autoConnectArrowsForShape,
+  autoConnectHaloHit,
+  autoConnectMetrics,
   classifyConnectorEndpoint,
   connectionPointsForShape,
   connectorDraft,
@@ -15,8 +21,10 @@ import {
   movedShapePoints,
   nearestConnectionPoint,
   nearestConnectionPointAnywhere,
+  paintAutoConnectOverlay,
   paintConnectorEndpoint,
   paintConnectorOverlay,
+  quickShapePlacement,
   reroutePreviewForMove,
   routeConnector,
 } from './connector';
@@ -317,4 +325,89 @@ test('prefers the threshold snap over an interior fallback', () => {
   const shapes = [placedShape('a', 2, 2), placedShape('b', 5, 2)];
   expect(dropTargetForPoint(shapes, { x: 2.5, y: 2 })?.point.side).toBe('east');
   expect(nearestConnectionPointAnywhere(connectionPointsForShape(shapes[0]), { x: 9, y: 9 })?.side).toBe('north');
+});
+
+test('offers one autoconnect arrow per edge and none for connectors', () => {
+  const target = shape({ PinX: '2', PinY: '3', Width: '4', Height: '2', LocPinX: '2', LocPinY: '1' });
+  const arrows = autoConnectArrowsForShape(target);
+  expect(arrows.map((arrow) => arrow.side)).toEqual(['north', 'east', 'south', 'west']);
+  expect(arrows.map((arrow) => arrow.point.toCell)).toEqual(['Connections.X1', 'Connections.X2', 'Connections.X3', 'Connections.X4']);
+  expect(autoConnectArrowsForShape(shape({ OneD: '1', PinX: '1', PinY: '1', Width: '1', Height: '1' }))).toEqual([]);
+  expect(autoConnectArrowsForShape(shape({ PinX: '1' }))).toEqual([]);
+});
+
+test('holds chevron centres a fixed screen distance outside the edge at every zoom', () => {
+  const target = shape({ PinX: '2', PinY: '2', Width: '2', Height: '2' });
+  const arrows = autoConnectArrowsForShape(target);
+  for (const zoom of [0.5, 1, 1.5]) {
+    const metrics = autoConnectMetrics(frame, zoom);
+    expect(metrics.pixelsPerInch).toBeCloseTo(96 * zoom, 10);
+    for (const arrow of arrows) {
+      const css = autoConnectArrowCss(arrow, frame, zoom);
+      const edge = modelToPage(frame, arrow.point);
+      const gap = Math.hypot(css.x - edge.x * zoom, css.y - edge.y * zoom);
+      expect(gap).toBeCloseTo(18, 8);
+    }
+  }
+  const east = arrows.find((arrow) => arrow.side === 'east')!;
+  const centre = autoConnectArrowCenter(east, frame, 1);
+  expect(centre.x).toBeGreaterThan(east.point.x);
+  expect(centre.y).toBeCloseTo(east.point.y, 10);
+});
+
+test('hit-tests chevrons in screen pixels, not model inches', () => {
+  const target = shape({ PinX: '2', PinY: '2', Width: '2', Height: '2' });
+  const arrows = autoConnectArrowsForShape(target);
+  const east = arrows.find((arrow) => arrow.side === 'east')!;
+  const page = modelToPage(frame, autoConnectArrowCenter(east, frame, 1));
+  expect(autoConnectArrowAt(arrows, frame, 1, page)?.side).toBe('east');
+  expect(autoConnectArrowAt(arrows, frame, 1, { x: 0, y: 0 })).toBeNull();
+  expect(autoConnectArrowAt([], frame, 1, page)).toBeNull();
+  const zoomed = modelToPage(frame, autoConnectArrowCenter(east, frame, 1.5));
+  expect(autoConnectArrowAt(arrows, frame, 1.5, zoomed)?.side).toBe('east');
+});
+
+test('holds the hover halo across the edge-to-chevron gap at every zoom', () => {
+  const target = shape({ PinX: '2', PinY: '2', Width: '2', Height: '2' });
+  for (const zoom of [0.5, 1, 1.5]) {
+    const east = modelToPage(frame, { x: 3, y: 2 });
+    expect(autoConnectHaloHit(target, frame, zoom, east)).toBe(true);
+    expect(autoConnectHaloHit(target, frame, zoom, { x: east.x + 39 / zoom, y: east.y })).toBe(true);
+    expect(autoConnectHaloHit(target, frame, zoom, { x: east.x + 41 / zoom, y: east.y })).toBe(false);
+    expect(autoConnectHaloHit(target, frame, zoom, { x: 0, y: 0 })).toBe(false);
+  }
+  expect(autoConnectHaloHit(shape({ OneD: '1', PinX: '1', PinY: '1', Width: '1', Height: '1' }), frame, 1, { x: 96, y: 960 })).toBe(false);
+  expect(autoConnectHaloHit(shape({ PinX: '1' }), frame, 1, { x: 96, y: 960 })).toBe(false);
+});
+
+test('offsets a quick-shape insert past the source edge with opposing glue', () => {
+  const target = shape({ PinX: '2', PinY: '2', Width: '2', Height: '2' });
+  const east = quickShapePlacement(target, 'east', 2, 2)!;
+  expect(east.x).toBeCloseTo(4.5, 10);
+  expect(east.y).toBeCloseTo(2, 10);
+  expect(east.from.side).toBe('east');
+  expect(east.to).toEqual({ side: 'west', x: 3.5, y: 2, toCell: 'Connections.X4' });
+  const north = quickShapePlacement(target, 'north', 2, 2)!;
+  expect(north.y).toBeCloseTo(4.5, 10);
+  expect(north.to).toEqual(expect.objectContaining({ side: 'south', toCell: 'Connections.X3' }));
+  const south = quickShapePlacement(target, 'south', 2, 2)!;
+  expect(south.to).toEqual(expect.objectContaining({ side: 'north', toCell: 'Connections.X1' }));
+  const west = quickShapePlacement(target, 'west', 2, 2)!;
+  expect(west.to).toEqual(expect.objectContaining({ side: 'east', toCell: 'Connections.X2' }));
+  expect(quickShapePlacement(target, 'east', 0, 1)).toBeNull();
+  expect(quickShapePlacement(shape({ PinX: '1' }), 'east', 1, 1)).toBeNull();
+});
+
+test('paints nothing without arrows or alpha', () => {
+  const calls: string[] = [];
+  const ctx = new Proxy({}, {
+    get: (_target, name: string) => (..._args: unknown[]) => { calls.push(name); return undefined; },
+    set: () => true,
+  }) as unknown as CanvasRenderingContext2D;
+  paintAutoConnectOverlay(ctx, frame, 1, 1, null);
+  paintAutoConnectOverlay(ctx, frame, 1, 1, { arrows: [], hovered: null, alpha: 1 });
+  paintAutoConnectOverlay(ctx, frame, 1, 1, { arrows: autoConnectArrowsForShape(shape({ PinX: '2', PinY: '2', Width: '2', Height: '2' })), hovered: null, alpha: 0 });
+  expect(calls).toEqual([]);
+  paintAutoConnectOverlay(ctx, frame, 1, 1, { arrows: autoConnectArrowsForShape(shape({ PinX: '2', PinY: '2', Width: '2', Height: '2' })), hovered: 'east', alpha: 1 });
+  expect(calls.filter((name) => name === 'fill').length).toBe(4);
 });

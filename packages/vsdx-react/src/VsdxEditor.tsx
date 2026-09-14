@@ -4,12 +4,12 @@ import { canvasPointToModel, initWasm, openDiagram, paintPage, sizeCanvasForPage
 import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent, ReactNode } from 'react';
-import { connectionPointsForShape, connectorDraft, connectorEndpointGlue, connectorGlue, connectorRouteFromFrame, dropTargetForPoint, isConnectorShape, nearestConnectionPointAnywhere, paintConnectorOverlay, reroutePreviewForMove, routeConnector } from './connector';
-import type { ConnectionPoint, ConnectorOverlayRoute, ConnectorOverlayScene } from './connector';
+import { AUTO_CONNECT_FADE_MS, QUICK_SHAPE_IDS, autoConnectArrowAt, autoConnectArrowCss, autoConnectArrowsForShape, autoConnectHaloHit, connectionPointsForShape, connectorDraft, connectorEndpointGlue, connectorGlue, connectorRouteFromFrame, dropTargetForPoint, isConnectorShape, nearestConnectionPointAnywhere, paintAutoConnectOverlay, paintConnectorOverlay, quickShapePlacement, reroutePreviewForMove, routeConnector } from './connector';
+import type { AutoConnectSide, ConnectionPoint, ConnectorOverlayRoute, ConnectorOverlayScene } from './connector';
 import { Ribbon } from './components/ribbon/Ribbon';
 import { RibbonCommandsProvider, findShapePlacement, numericCellValue } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
-import { standardShapes } from './components/shapes/shapeLibrary';
+import { standardShapeById, standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
 import { StatusBar, clampZoom } from './components/statusbar';
 
@@ -81,6 +81,15 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   zoomRef.current = zoom;
   const hoverShapeRef = useRef<string | null>(null);
   const connectorDragRef = useRef<{ pageId: string; from: { shapeId: string; point: ConnectionPoint }; current: ModelPoint; snap: { shapeId: string; point: ConnectionPoint } | null } | null>(null);
+  const autoHoverRef = useRef<string | null>(null);
+  const autoArrowRef = useRef<{ shapeId: string; side: AutoConnectSide } | null>(null);
+  const autoAlphaRef = useRef(0);
+  const autoFadeStartRef = useRef(0);
+  const autoFrameRef = useRef<number | null>(null);
+  const [quickMenu, setQuickMenu] = useState<{ shapeId: string; side: AutoConnectSide; x: number; y: number } | null>(null);
+  const quickMenuRef = useRef(quickMenu);
+  quickMenuRef.current = quickMenu;
+  const quickMenuNodeRef = useRef<HTMLDivElement | null>(null);
   const reroutePreviewRef = useRef<ReadonlyArray<readonly ModelPoint[]>>([]);
   const [loading, setLoading] = useState(Boolean(file));
   onReadyRef.current = onReady;
@@ -143,14 +152,58 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       reroutePreview: reroutePreviewRef.current,
       connectors,
     };
-    paintConnectorOverlay(context, frame, window.devicePixelRatio || 1, zoomRef.current, scene);
+    const dpr = window.devicePixelRatio || 1;
+    paintConnectorOverlay(context, frame, dpr, zoomRef.current, scene);
+    if (!connectorModeRef.current && !connectorDragRef.current && autoHoverRef.current) {
+      const placement = findShapePlacement(page.shapes, autoHoverRef.current);
+      if (placement && placement.siblings === page.shapes && !isConnectorShape(placement.shape)) {
+        paintAutoConnectOverlay(context, frame, dpr, zoomRef.current, {
+          arrows: autoConnectArrowsForShape(placement.shape),
+          hovered: autoArrowRef.current?.shapeId === placement.shape.id ? autoArrowRef.current.side : null,
+          alpha: autoAlphaRef.current,
+        });
+      }
+    }
   }, []);
+
+  const cancelAutoFade = useCallback(() => {
+    if (autoFrameRef.current !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(autoFrameRef.current);
+    autoFrameRef.current = null;
+  }, []);
+
+  const startAutoFade = useCallback(() => {
+    cancelAutoFade();
+    autoFadeStartRef.current = performance.now();
+    autoAlphaRef.current = 0;
+    if (typeof requestAnimationFrame !== 'function') { autoAlphaRef.current = 1; paintOverlayNow(); return; }
+    const tick = () => {
+      autoAlphaRef.current = Math.min(1, (performance.now() - autoFadeStartRef.current) / AUTO_CONNECT_FADE_MS);
+      paintOverlayNow();
+      autoFrameRef.current = autoAlphaRef.current < 1 ? requestAnimationFrame(tick) : null;
+    };
+    autoFrameRef.current = requestAnimationFrame(tick);
+  }, [cancelAutoFade, paintOverlayNow]);
+
+  const hideAutoConnect = useCallback(() => {
+    cancelAutoFade();
+    autoHoverRef.current = null;
+    autoArrowRef.current = null;
+    autoAlphaRef.current = 0;
+    if (quickMenuRef.current) setQuickMenu(null);
+    paintOverlayNow();
+  }, [cancelAutoFade, paintOverlayNow]);
+
+  useEffect(() => () => { if (autoFrameRef.current !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(autoFrameRef.current); }, []);
 
   const setConnectorActive = useCallback((active: boolean) => {
     connectorDragRef.current = null;
     hoverShapeRef.current = null;
     pointerRef.current = null;
     reroutePreviewRef.current = [];
+    autoHoverRef.current = null;
+    autoArrowRef.current = null;
+    autoAlphaRef.current = 0;
+    if (quickMenuRef.current) setQuickMenu(null);
     setConnectorMode(active);
     paintOverlayNow();
   }, [paintOverlayNow]);
@@ -168,6 +221,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === 'Escape') {
         if (connectorModeRef.current || connectorDragRef.current) setConnectorActive(false);
+        else hideAutoConnect();
         return;
       }
       if (event.altKey && (event.key === '3' || event.key === '³')) {
@@ -178,7 +232,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [setConnectorActive, toggleConnector]);
+  }, [hideAutoConnect, setConnectorActive, toggleConnector]);
 
   useEffect(() => {
     sessionRef.current = { file, clientId: sessionClientId, initialUpdate };
@@ -279,6 +333,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (!handle || !frame || !page) return;
     const pointer = pointerRef.current;
     if (!connectorModeRef.current && pointer) {
+      if (autoHoverRef.current || autoArrowRef.current || quickMenuRef.current) {
+        autoHoverRef.current = null;
+        autoArrowRef.current = null;
+        autoAlphaRef.current = 0;
+        if (quickMenuRef.current) setQuickMenu(null);
+      }
       try {
         const selected = selectionRef.current;
         const placement = selected && selected.pageId === page.id ? findShapePlacement(page.shapes, selected.shapeId) : null;
@@ -293,7 +353,52 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       } catch (value) { reportError(value); }
       return;
     }
-    if (!connectorModeRef.current) return;
+    if (!connectorModeRef.current) {
+      try {
+        const point = canvasPointerPosition(event, frame);
+        const drag = connectorDragRef.current;
+        if (drag) {
+          drag.current = point.model;
+          drag.snap = connectorTargetForPoint(page.shapes, handle, point.canvas, point.model);
+          paintOverlayNow();
+          return;
+        }
+        if (autoHoverRef.current) {
+          const hoveredPlacement = findShapePlacement(page.shapes, autoHoverRef.current);
+          const arrows = hoveredPlacement && hoveredPlacement.siblings === page.shapes && !isConnectorShape(hoveredPlacement.shape)
+            ? autoConnectArrowsForShape(hoveredPlacement.shape)
+            : [];
+          const arrow = autoConnectArrowAt(arrows, frame, zoomRef.current, point.canvas);
+          const next = arrow ? { shapeId: autoHoverRef.current, side: arrow.side } : null;
+          const previous = autoArrowRef.current;
+          if ((next === null) !== (previous === null) || next?.side !== previous?.side || next?.shapeId !== previous?.shapeId) {
+            autoArrowRef.current = next;
+            if (next && arrow) {
+              const anchor = autoConnectArrowCss(arrow, frame, zoomRef.current);
+              setQuickMenu({ shapeId: next.shapeId, side: next.side, x: anchor.x, y: anchor.y });
+            } else if (quickMenuRef.current) setQuickMenu(null);
+            paintOverlayNow();
+          }
+          if (arrow) return;
+        }
+        const hit = handle.hitTest(point.canvas.x, point.canvas.y);
+        const placement = hit ? findShapePlacement(page.shapes, hit.shapeId) : null;
+        const hovered = placement && placement.siblings === page.shapes && !isConnectorShape(placement.shape) ? placement.shape.id : null;
+        if (hovered !== autoHoverRef.current) {
+          if (!hovered && autoHoverRef.current) {
+            const kept = findShapePlacement(page.shapes, autoHoverRef.current);
+            if (kept && kept.siblings === page.shapes && !isConnectorShape(kept.shape) &&
+              autoConnectHaloHit(kept.shape, frame, zoomRef.current, point.canvas)) return;
+          }
+          autoHoverRef.current = hovered;
+          autoArrowRef.current = null;
+          if (quickMenuRef.current) setQuickMenu(null);
+          if (hovered) startAutoFade();
+          else { autoAlphaRef.current = 0; paintOverlayNow(); }
+        }
+      } catch (value) { reportError(value); }
+      return;
+    }
     try {
       const point = canvasPointerPosition(event, frame);
       const drag = connectorDragRef.current;
@@ -309,7 +414,13 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       if (hovered !== hoverShapeRef.current) { hoverShapeRef.current = hovered; paintOverlayNow(); }
     } catch (value) { reportError(value); }
   };
-  const onPointerLeave = () => {
+  const onPointerLeave = (event: PointerEvent<HTMLCanvasElement>) => {
+    if (!connectorModeRef.current && !connectorDragRef.current) {
+      const next = event.relatedTarget as Node | null;
+      if (next && quickMenuNodeRef.current?.contains(next)) return;
+      if (autoHoverRef.current || autoArrowRef.current || quickMenuRef.current) hideAutoConnect();
+      return;
+    }
     if (!connectorModeRef.current || connectorDragRef.current) return;
     if (hoverShapeRef.current) { hoverShapeRef.current = null; paintOverlayNow(); }
   };
@@ -337,6 +448,29 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     reroutePreviewRef.current = [];
     try {
       const point = canvasPointerPosition(event, frame);
+      if (autoHoverRef.current) {
+        const hoveredPlacement = findShapePlacement(page.shapes, autoHoverRef.current);
+        const arrows = hoveredPlacement && hoveredPlacement.siblings === page.shapes && !isConnectorShape(hoveredPlacement.shape)
+          ? autoConnectArrowsForShape(hoveredPlacement.shape)
+          : [];
+        const arrow = autoConnectArrowAt(arrows, frame, zoomRef.current, point.canvas);
+        if (arrow) {
+          const sourceId = autoHoverRef.current;
+          connectorDragRef.current = { pageId: page.id, from: { shapeId: sourceId, point: arrow.point }, current: point.model, snap: null };
+          autoHoverRef.current = null;
+          autoArrowRef.current = null;
+          autoAlphaRef.current = 0;
+          if (quickMenuRef.current) setQuickMenu(null);
+          setSelection({ pageId: page.id, shapeId: sourceId, hit: { kind: 'shape', shapeId: sourceId } });
+          capturePointer(event);
+          paintOverlayNow();
+          return;
+        }
+      }
+      if (quickMenuRef.current) setQuickMenu(null);
+      autoHoverRef.current = null;
+      autoArrowRef.current = null;
+      autoAlphaRef.current = 0;
       handle.layoutPage(modelRef.current.pageIndex);
       const hit = handle.hitTest(point.canvas.x, point.canvas.y);
       setSelection(hit ? { pageId: page.id, shapeId: hit.shapeId, hit } : null);
@@ -410,6 +544,29 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       refresh(undefined, true);
     } catch (value) { reportError(value); }
   }, [refresh, reportError]);
+  const insertQuickShape = useCallback((shape: StandardShape, sourceId: string, side: AutoConnectSide) => {
+    const handle = handleRef.current; const current = modelRef.current;
+    const page = current.snapshot?.pages[current.pageIndex];
+    if (!handle || !page) return;
+    try {
+      const live = handle.snapshot();
+      const livePage = live.pages.find((item) => item.id === page.id);
+      const placement = livePage ? findShapePlacement(livePage.shapes, sourceId) : null;
+      if (!livePage || !placement || placement.siblings !== livePage.shapes || isConnectorShape(placement.shape)) return;
+      const source = placement.shape;
+      const layout = quickShapePlacement(source, side, Math.max(0.25, numericCellValue(source, 'Width', 1)), Math.max(0.25, numericCellValue(source, 'Height', 1)));
+      if (!layout) return;
+      const receipt = handle.addConnectedShape(page.id, shape.draft(layout.x, layout.y, layout.width, layout.height), connectorDraft(layout.from, layout.to), connectorGlue(source.id, layout.from), layout.to.toCell);
+      refresh(undefined, true);
+      setSelection({ pageId: page.id, shapeId: receipt.shape.shapeId, hit: { kind: 'shape', shapeId: receipt.shape.shapeId } });
+    } catch (value) { reportError(value); }
+    autoHoverRef.current = null;
+    autoArrowRef.current = null;
+    autoAlphaRef.current = 0;
+    setQuickMenu(null);
+    paintOverlayNow();
+  }, [refresh, reportError, paintOverlayNow]);
+  const quickMenuShapes = useMemo(() => QUICK_SHAPE_IDS.map((id) => standardShapeById(id)).filter((shape): shape is StandardShape => Boolean(shape)), []);
   const reorderPage = useCallback((pageId: string, toIndex: number) => {
     const handle = handleRef.current;
     if (!handle) return;
@@ -434,8 +591,17 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
       <div style={styles.canvasFrame}>
-        <canvas ref={mainCanvasRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={onPointerLeave} onPointerUp={onPointerUp} onPointerCancel={() => { pointerRef.current = null; connectorDragRef.current = null; reroutePreviewRef.current = []; paintOverlayNow(); }} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={connectorMode ? { ...styles.canvas, cursor: 'crosshair' } : styles.canvas} />
+        <canvas ref={mainCanvasRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={onPointerLeave} onPointerUp={onPointerUp} onPointerCancel={() => { pointerRef.current = null; connectorDragRef.current = null; reroutePreviewRef.current = []; autoHoverRef.current = null; autoArrowRef.current = null; autoAlphaRef.current = 0; if (quickMenuRef.current) setQuickMenu(null); paintOverlayNow(); }} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={connectorMode ? { ...styles.canvas, cursor: 'crosshair' } : styles.canvas} />
         <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
+        {quickMenu && model.frame && (
+          <div ref={quickMenuNodeRef} role="menu" aria-label={t('shapesPanel.quickShapes')} style={{ ...styles.quickMenu, left: Math.max(4, Math.min(quickMenu.x + 16, model.frame.width * zoom - 44)), top: Math.max(100, Math.min(quickMenu.y, model.frame.height * zoom - 100)) }} onMouseLeave={() => { autoArrowRef.current = null; setQuickMenu(null); paintOverlayNow(); }}>
+            {quickMenuShapes.map((shape) => (
+              <button key={shape.id} type="button" role="menuitem" aria-label={t(shape.nameKey)} title={t(shape.nameKey)} onClick={() => insertQuickShape(shape, quickMenu.shapeId, quickMenu.side)} style={styles.quickShape}>
+                <svg aria-hidden="true" viewBox="0 0 1 1" preserveAspectRatio="xMidYMid meet" style={styles.quickPreview}><path d={shape.preview} /></svg>
+              </button>
+            ))}
+          </div>
+        )}
         {selection && <output style={styles.selection}>{t('shapes.selected', { name: selection.shapeId })}</output>}
       </div>
       {integrity.length > 0 && <section role="alert" style={styles.integrity}><strong>{t('diagnostics.integrityHeading')}</strong>{integrity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</section>}
@@ -556,4 +722,4 @@ function fontFaceEqual(left: VsdxFontFace, right: VsdxFontFace): boolean { retur
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean { return left === right || (left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index])); }
 function resolveImage(assetId: string, handle: DiagramHandle | null, cache: { current: Map<string, Promise<CanvasImageSource | null>> }, message: string): Promise<CanvasImageSource | null> { const existing = cache.current.get(assetId); if (existing) return existing; const pending = decodeImage(handle?.mediaBytes(assetId), message); cache.current.set(assetId, pending); return pending; }
 async function decodeImage(bytes: Uint8Array | undefined, message: string): Promise<CanvasImageSource | null> { if (!bytes) return null; const blob = new Blob([bytes.slice()]); if (typeof createImageBitmap === 'function') return createImageBitmap(blob); const url = URL.createObjectURL(blob); try { return await new Promise<HTMLImageElement>((resolve, reject) => { const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(new Error(message)); image.src = url; }); } finally { URL.revokeObjectURL(url); } }
-const styles: Record<string, CSSProperties> = { root: { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 480, color: '#172033', background: '#f3f5f8', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }, titleBar: { display: 'flex', alignItems: 'center', gap: 12, minHeight: 32, padding: '0 14px', background: '#f8fafc', borderBottom: '1px solid #d8dee9', fontSize: 13 }, contentRow: { display: 'flex', flex: 1, minHeight: 0 }, workspace: { position: 'relative', display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', overflow: 'auto' }, canvasFrame: { position: 'relative', flex: '0 0 auto' }, canvas: { display: 'block', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' }, overlay: { position: 'absolute', inset: 0, pointerEvents: 'none' }, selection: { position: 'absolute', top: 8, left: 8, padding: '4px 6px', color: '#fff', background: '#2563eb', fontSize: 12 }, integrity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 12, color: '#7f1d1d', background: '#fef2f2', border: '1px solid #fca5a5' }, fidelity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 8, color: '#475569', background: '#fff', fontSize: 12 }, error: { position: 'absolute', left: 14, right: 14, bottom: 14, padding: 10, color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0' } };
+const styles: Record<string, CSSProperties> = { root: { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 480, color: '#172033', background: '#f3f5f8', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }, titleBar: { display: 'flex', alignItems: 'center', gap: 12, minHeight: 32, padding: '0 14px', background: '#f8fafc', borderBottom: '1px solid #d8dee9', fontSize: 13 }, contentRow: { display: 'flex', flex: 1, minHeight: 0 }, workspace: { position: 'relative', display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', overflow: 'auto' }, canvasFrame: { position: 'relative', flex: '0 0 auto' }, canvas: { display: 'block', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' }, overlay: { position: 'absolute', inset: 0, pointerEvents: 'none' }, quickMenu: { position: 'absolute', zIndex: 3, display: 'flex', flexDirection: 'column', gap: 4, padding: 4, background: '#fff', border: '1px solid #d8dee9', borderRadius: 6, boxShadow: '0 8px 24px rgba(27, 39, 61, 0.18)', transform: 'translateY(-50%)' }, quickShape: { appearance: 'none', display: 'grid', placeItems: 'center', width: 32, height: 32, padding: 3, border: '1px solid transparent', borderRadius: 4, background: 'transparent', cursor: 'pointer' }, quickPreview: { width: 24, height: 24, overflow: 'visible', fill: '#fff', stroke: '#172033', strokeWidth: 0.05 }, selection: { position: 'absolute', top: 8, left: 8, padding: '4px 6px', color: '#fff', background: '#2563eb', fontSize: 12 }, integrity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 12, color: '#7f1d1d', background: '#fef2f2', border: '1px solid #fca5a5' }, fidelity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 8, color: '#475569', background: '#fff', fontSize: 12 }, error: { position: 'absolute', left: 14, right: 14, bottom: 14, padding: 10, color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0' } };

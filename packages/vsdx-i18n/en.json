@@ -34,6 +34,7 @@
     "searchPlaceholder": "Search shapes",
     "categoriesLabel": "Shape categories",
     "standardShapes": "Standard Shapes",
+    "quickShapes": "Quick Shapes",
     "empty": "No shapes found",
     "shape": {
       "rectangle": "Rectangle",

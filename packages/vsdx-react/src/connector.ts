@@ -4,6 +4,45 @@ import { cellValue } from './components/ribbon/commands';
 
 export type ConnectorSide = 'north' | 'east' | 'south' | 'west' | 'centre';
 
+/** Edge sides that grow an AutoConnect chevron; the centre never does. */
+export type AutoConnectSide = Exclude<ConnectorSide, 'centre'>;
+
+export const AUTO_CONNECT_SIDES: readonly AutoConnectSide[] = ['north', 'east', 'south', 'west'];
+
+/** A hover chevron outside one shape edge, glued to that edge's connection point. */
+export interface AutoConnectArrow { side: AutoConnectSide; point: ConnectionPoint; }
+
+/** Paint and hit state for the hover chevrons of one shape. */
+export interface AutoConnectOverlayState {
+  arrows: readonly AutoConnectArrow[];
+  hovered: AutoConnectSide | null;
+  alpha: number;
+}
+
+/** Screen-pixel look of the chevrons; geometry below derives from these. */
+export const AUTO_CONNECT_GAP_PX = 10;
+export const AUTO_CONNECT_SIZE_PX = 16;
+export const AUTO_CONNECT_HIT_PX = 26;
+/** Hover halo in screen pixels; keeps arrows alive across the edge-to-chevron gap. */
+export const AUTO_CONNECT_HALO_PX = 40;
+/** Chevron fade on hover, in milliseconds. */
+export const AUTO_CONNECT_FADE_MS = 120;
+/** Gap between a source shape and a Quick-Shape insert, in model inches. */
+export const QUICK_SHAPE_GAP_INCHES = 0.5;
+
+/** Thumbnail ids for the Quick-Shapes flyout, in display order. */
+export const QUICK_SHAPE_IDS: readonly string[] = ['rectangle', 'square', 'circle', 'ellipse', 'rightTriangle'];
+
+/** Centre and size of a Quick-Shape insert offset from a source edge, in model inches. */
+export interface QuickShapePlacement {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  from: ConnectionPoint;
+  to: ConnectionPoint;
+}
+
 /** A snap target in model inches. Centre glue is dynamic; outline glue pins to a Connection row. */
 export interface ConnectionPoint extends ModelPoint { side: ConnectorSide; toCell?: string; }
 
@@ -75,6 +114,106 @@ export function connectionPointsForShape(shape: ShapeSnapshot): ConnectionPoint[
     { side: 'west', x: bounds.left, y: centreY, toCell: 'Connections.X4' },
     { side: 'centre', x: bounds.centre.x, y: bounds.centre.y },
   ];
+}
+
+/** Edge midpoints as AutoConnect arrows; connectors and boundless shapes offer none. */
+export function autoConnectArrowsForShape(shape: ShapeSnapshot): AutoConnectArrow[] {
+  if (isConnectorShape(shape)) return [];
+  const arrows: AutoConnectArrow[] = [];
+  for (const point of connectionPointsForShape(shape)) {
+    if (point.side !== 'centre') arrows.push({ side: point.side, point });
+  }
+  return arrows;
+}
+
+const AUTO_CONNECT_DIRS: Record<AutoConnectSide, ModelPoint> = {
+  north: { x: 0, y: 1 },
+  east: { x: 1, y: 0 },
+  south: { x: 0, y: -1 },
+  west: { x: -1, y: 0 },
+};
+
+function oppositeSide(side: AutoConnectSide): AutoConnectSide {
+  return side === 'north' ? 'south' : side === 'south' ? 'north' : side === 'east' ? 'west' : 'east';
+}
+
+/** Screen-pixel density of one model inch; chevron geometry derives from it. */
+export function autoConnectMetrics(frame: PageDisplayList, zoom: number): { pagePerModel: number; pixelsPerInch: number; modelPerPixel: number } {
+  const scale = Math.hypot(frame.paintTransform.a, frame.paintTransform.b);
+  const pagePerModel = Number.isFinite(scale) && scale > 0 ? scale : 96;
+  const pixelsPerInch = pagePerModel * (Number.isFinite(zoom) && zoom > 0 ? zoom : 1);
+  return { pagePerModel, pixelsPerInch, modelPerPixel: 1 / pixelsPerInch };
+}
+
+/** Chevron centre in model inches, held a fixed screen-pixel gap outside the edge. */
+export function autoConnectArrowCenter(arrow: AutoConnectArrow, frame: PageDisplayList, zoom: number): ModelPoint {
+  const metrics = autoConnectMetrics(frame, zoom);
+  const dir = AUTO_CONNECT_DIRS[arrow.side];
+  const offset = (AUTO_CONNECT_GAP_PX + AUTO_CONNECT_SIZE_PX / 2) * metrics.modelPerPixel;
+  return { x: arrow.point.x + dir.x * offset, y: arrow.point.y + dir.y * offset };
+}
+
+/** Nearest chevron within the screen-pixel hit radius of a canvas point. */
+export function autoConnectArrowAt(arrows: readonly AutoConnectArrow[], frame: PageDisplayList, zoom: number, canvas: ModelPoint): AutoConnectArrow | null {
+  if (!arrows.length) return null;
+  const metrics = autoConnectMetrics(frame, zoom);
+  const radius = (AUTO_CONNECT_HIT_PX / 2) * metrics.modelPerPixel;
+  let best: AutoConnectArrow | null = null;
+  let bestDistance = radius;
+  for (const arrow of arrows) {
+    const page = modelToPage(frame, autoConnectArrowCenter(arrow, frame, zoom));
+    const distance = Math.hypot(page.x - canvas.x, page.y - canvas.y) / metrics.pagePerModel;
+    if (distance <= bestDistance) { best = arrow; bestDistance = distance; }
+  }
+  return best;
+}
+
+/** Chevron centre in canvas CSS pixels, for anchoring the Quick-Shapes flyout. */
+export function autoConnectArrowCss(arrow: AutoConnectArrow, frame: PageDisplayList, zoom: number): ModelPoint {
+  const page = modelToPage(frame, autoConnectArrowCenter(arrow, frame, zoom));
+  return { x: page.x * zoom, y: page.y * zoom };
+}
+
+/** True while a canvas point stays near a hovered shape, in screen pixels. */
+export function autoConnectHaloHit(shape: ShapeSnapshot, frame: PageDisplayList, zoom: number, canvas: ModelPoint): boolean {
+  const points = connectionPointsForShape(shape);
+  if (!points.length || isConnectorShape(shape)) return false;
+  const north = points.find((point) => point.side === 'north');
+  const east = points.find((point) => point.side === 'east');
+  const south = points.find((point) => point.side === 'south');
+  const west = points.find((point) => point.side === 'west');
+  if (!north || !east || !south || !west) return false;
+  const topLeft = modelToPage(frame, { x: west.x, y: north.y });
+  const bottomRight = modelToPage(frame, { x: east.x, y: south.y });
+  const halo = AUTO_CONNECT_HALO_PX / (Number.isFinite(zoom) && zoom > 0 ? zoom : 1);
+  const left = Math.min(topLeft.x, bottomRight.x) - halo;
+  const right = Math.max(topLeft.x, bottomRight.x) + halo;
+  const top = Math.min(topLeft.y, bottomRight.y) - halo;
+  const bottom = Math.max(topLeft.y, bottomRight.y) + halo;
+  return canvas.x >= left && canvas.x <= right && canvas.y >= top && canvas.y <= bottom;
+}
+
+/** Insert geometry for a Quick-Shape dropped from one source edge, in model inches. */
+export function quickShapePlacement(source: ShapeSnapshot, side: AutoConnectSide, width: number, height: number, gap = QUICK_SHAPE_GAP_INCHES): QuickShapePlacement | null {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  const points = connectionPointsForShape(source);
+  const from = points.find((point) => point.side === side);
+  if (!from) return null;
+  const toCell = `Connections.X${AUTO_CONNECT_SIDES.indexOf(oppositeSide(side)) + 1}`;
+  if (side === 'east') {
+    const left = from.x + gap;
+    return { x: left + width / 2, y: from.y, width, height, from, to: { side: oppositeSide(side), x: left, y: from.y, toCell } };
+  }
+  if (side === 'west') {
+    const right = from.x - gap;
+    return { x: right - width / 2, y: from.y, width, height, from, to: { side: oppositeSide(side), x: right, y: from.y, toCell } };
+  }
+  if (side === 'north') {
+    const bottom = from.y + gap;
+    return { x: from.x, y: bottom + height / 2, width, height, from, to: { side: oppositeSide(side), x: from.x, y: bottom, toCell } };
+  }
+  const top = from.y - gap;
+  return { x: from.x, y: top - height / 2, width, height, from, to: { side: oppositeSide(side), x: from.x, y: top, toCell } };
 }
 
 /** Matches the engine RoutStyle rule: nonzero style bends horizontal-first. */
@@ -386,4 +525,35 @@ export function paintConnectorOverlay(ctx: CanvasRenderingContext2D, frame: Page
     ctx.restore();
     paintArrowhead(ctx, route, '#172033');
   }
+}
+
+/** Grey hover chevrons at a fixed screen size; zoom scales only their model-inch math. */
+export function paintAutoConnectOverlay(ctx: CanvasRenderingContext2D, frame: PageDisplayList, dpr: number, zoom: number, state: AutoConnectOverlayState | null): void {
+  if (!state || !state.arrows.length || !(state.alpha > 0)) return;
+  applyModelTransform(ctx, frame, dpr, zoom);
+  const metrics = autoConnectMetrics(frame, zoom);
+  const half = (AUTO_CONNECT_SIZE_PX / 2) * metrics.modelPerPixel;
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, Math.min(1, state.alpha));
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  for (const arrow of state.arrows) {
+    const center = autoConnectArrowCenter(arrow, frame, zoom);
+    const dir = AUTO_CONNECT_DIRS[arrow.side];
+    const tip = { x: center.x + dir.x * half, y: center.y + dir.y * half };
+    const base = { x: center.x - dir.x * half, y: center.y - dir.y * half };
+    const first = { x: base.x - dir.y * half * 0.9, y: base.y + dir.x * half * 0.9 };
+    const second = { x: base.x + dir.y * half * 0.9, y: base.y - dir.x * half * 0.9 };
+    ctx.beginPath();
+    ctx.moveTo(tip.x, tip.y);
+    ctx.lineTo(first.x, first.y);
+    ctx.lineTo(second.x, second.y);
+    ctx.closePath();
+    ctx.fillStyle = state.hovered === arrow.side ? '#374151' : '#6b7280';
+    ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.5 * metrics.modelPerPixel;
+    ctx.stroke();
+  }
+  ctx.restore();
 }

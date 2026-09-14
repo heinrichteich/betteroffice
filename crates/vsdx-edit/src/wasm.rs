@@ -139,6 +139,16 @@ struct AddConnectorArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AddConnectedShapeArgs {
+    page_id: String,
+    shape_draft: FormulaShapeDraft,
+    connector_draft: FormulaShapeDraft,
+    from: ConnectorGlueArgs,
+    to_cell: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 struct FormulaShapeDraft {
     name: Option<String>,
@@ -361,6 +371,11 @@ impl VsdxDocument {
         self.add_connector_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = addConnectedShapeJson)]
+    pub fn add_connected_shape_json(&self, args: &str) -> Result<String, JsValue> {
+        self.add_connected_shape_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = save)]
     pub fn save(&self) -> Result<Vec<u8>, JsValue> {
         self.save_inner().map_err(js_error)
@@ -515,6 +530,26 @@ impl VsdxDocument {
                     shape_id: args.to.shape_id,
                     to_cell: args.to.to_cell,
                 },
+            )
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn add_connected_shape_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddConnectedShapeArgs = parse_args_inner(args)?;
+        let shape_draft = args.shape_draft.try_into().map_err(str::to_owned)?;
+        let connector_draft = args.connector_draft.try_into().map_err(str::to_owned)?;
+        self.session
+            .add_connected_shape(
+                &local_context(),
+                &args.page_id,
+                &shape_draft,
+                &connector_draft,
+                &crate::ConnectorGlue {
+                    shape_id: args.from.shape_id,
+                    to_cell: args.from.to_cell,
+                },
+                args.to_cell.as_deref(),
             )
             .map_err(|error| error.to_string())
             .and_then(json_inner)

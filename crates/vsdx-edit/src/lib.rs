@@ -2248,6 +2248,81 @@ mod tests {
     }
 
     #[test]
+    fn connected_shape_insert_undoes_as_one_step() {
+        let session = DiagramSession::open(
+            include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
+            703,
+        )
+        .unwrap();
+        let context = EditCtx::local("connector");
+        let from = session
+            .add_shape(&context, "page:1", &rect_draft("1", "1"))
+            .unwrap();
+        session.add_undo_barrier();
+        let before = session.snapshot().unwrap().pages[0].shapes.len();
+        let receipt = session
+            .add_connected_shape(
+                &context,
+                "page:1",
+                &rect_draft("5", "1"),
+                &connector_draft(),
+                &ConnectorGlue {
+                    shape_id: from.shape_id.clone(),
+                    to_cell: None,
+                },
+                Some("Connections.X4"),
+            )
+            .unwrap();
+        assert_ne!(receipt.shape.shape_id, receipt.connector.shape_id);
+        let page = &session.snapshot().unwrap().pages[0];
+        assert_eq!(page.shapes.len(), before + 2);
+        assert!(
+            page.shapes
+                .iter()
+                .any(|shape| shape.id == receipt.shape.shape_id)
+        );
+        assert!(
+            page.shapes
+                .iter()
+                .any(|shape| shape.id == receipt.connector.shape_id)
+        );
+        let package = session.package().unwrap();
+        let part = package.page_part_paths[0].clone();
+        let connectivity = vsdx_resolve::Resolver::new(&package)
+            .resolve_page_connectivity(&part)
+            .unwrap();
+        let connector = connectivity.connectors.get(&4).unwrap();
+        assert_eq!(connector.glue.len(), 2);
+        session.add_undo_barrier();
+        assert!(session.undo());
+        let page = &session.snapshot().unwrap().pages[0];
+        assert_eq!(page.shapes.len(), before);
+        assert!(
+            page.shapes
+                .iter()
+                .all(|shape| shape.id != receipt.shape.shape_id)
+        );
+        assert!(
+            page.shapes
+                .iter()
+                .all(|shape| shape.id != receipt.connector.shape_id)
+        );
+        assert!(session.redo());
+        let page = &session.snapshot().unwrap().pages[0];
+        assert_eq!(page.shapes.len(), before + 2);
+        assert!(
+            page.shapes
+                .iter()
+                .any(|shape| shape.id == receipt.shape.shape_id)
+        );
+        assert!(
+            page.shapes
+                .iter()
+                .any(|shape| shape.id == receipt.connector.shape_id)
+        );
+    }
+
+    #[test]
     fn connector_glue_to_a_connection_row_resolves() {
         let session = DiagramSession::open(
             include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
