@@ -123,18 +123,11 @@ struct DeleteShapeArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ConnectorGlueArgs {
-    shape_id: String,
-    to_cell: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct AddConnectorArgs {
     page_id: String,
     draft: FormulaShapeDraft,
-    from: ConnectorGlueArgs,
-    to: ConnectorGlueArgs,
+    from: crate::ConnectorGlue,
+    to: crate::ConnectorGlue,
 }
 
 #[derive(Deserialize)]
@@ -507,14 +500,8 @@ impl VsdxDocument {
                 &local_context(),
                 &args.page_id,
                 &draft,
-                &crate::ConnectorGlue {
-                    shape_id: args.from.shape_id,
-                    to_cell: args.from.to_cell,
-                },
-                &crate::ConnectorGlue {
-                    shape_id: args.to.shape_id,
-                    to_cell: args.to.to_cell,
-                },
+                &args.from,
+                &args.to,
             )
             .map_err(|error| error.to_string())
             .and_then(json_inner)

@@ -5,6 +5,7 @@ export class VsdxDocument {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
+    addConnectorJson(args: string): string;
     addShapeJson(args: string): string;
     applyUpdateJson(update: Uint8Array): string;
     canRedo(): boolean;
@@ -60,6 +61,7 @@ export interface InitOutput {
     readonly vsdxrenderer_new: () => number;
     readonly vsdxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly __wbg_vsdxdocument_free: (a: number, b: number) => void;
+    readonly vsdxdocument_addConnectorJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_canRedo: (a: number) => number;

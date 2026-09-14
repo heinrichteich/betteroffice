@@ -269,7 +269,10 @@ describe('VSDX wasm boundary', () => {
       { locator: { cellName: 'EndY' }, formula: '2' },
     ] }, { shapeId: from.shapeId }, { shapeId: to.shapeId, toCell: 'PinX' });
     const live = diagram.layoutPage(0);
-    expect(live.primitives).toContainEqual(expect.objectContaining({ id: `${diagram.snapshot().pages[0].sourcePartPath}:4`, kind: 'shape' }));
+    expect(live.primitives).toContainEqual(expect.objectContaining({
+      id: `${diagram.snapshot().pages[0].sourcePartPath}:4`, kind: 'shape',
+      path: [{ type: 'move', x: 1, y: 1 }, { type: 'line', x: 5, y: 1 }],
+    }));
     const saved = diagram.save();
     diagram.dispose();
 
