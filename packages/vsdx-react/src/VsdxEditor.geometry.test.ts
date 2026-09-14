@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { canvasPointerPosition, inchFormula, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
+import { anchoredZoomScroll, canvasPointerPosition, centredPageScroll, inchFormula, resolveDragGeometry, selectionCorners, stillSelectable, surfaceSize, zoomForWheelDelta } from './VsdxEditor';
 import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
 
 const frame: PageDisplayList = {
@@ -185,4 +185,38 @@ test('a nudge inside a rotated and scaled group matches the equivalent drag', ()
   expect(nudged.x).toBeCloseTo(dragged.x, 10);
   expect(nudged.y).toBeCloseTo(dragged.y, 10);
   expect(nudged.x).not.toBeCloseTo(2 + dx, 6);
+});
+
+test('the scrollable surface pads the page extent at every zoom', () => {
+  for (const zoom of [0.5, 1, 1.5]) {
+    const surface = surfaceSize(frame.width, frame.height, zoom, 2000);
+    expect(surface.width).toBeCloseTo(frame.width * zoom + 4000, 8);
+    expect(surface.height).toBeCloseTo(frame.height * zoom + 4000, 8);
+    expect(surface.width).toBeGreaterThan(frame.width * zoom);
+    expect(surface.height).toBeGreaterThan(frame.height * zoom);
+  }
+});
+
+test('a pointer-anchored zoom keeps the canvas point under the cursor', () => {
+  for (const [oldZoom, newZoom] of [[1, 1.5], [1.5, 1], [1, 0.5], [0.5, 1]] as const) {
+    const cssX = 192 * oldZoom;
+    const cssY = 192 * oldZoom;
+    const target = anchoredZoomScroll(2000, 2000, cssX, cssY, oldZoom, newZoom);
+    expect((cssX / oldZoom) * newZoom - (target.left - 2000)).toBeCloseTo(cssX, 8);
+    expect((cssY / oldZoom) * newZoom - (target.top - 2000)).toBeCloseTo(cssY, 8);
+  }
+});
+
+test('ctrl+wheel steps the zoom multiplicatively in both directions', () => {
+  const zoomedIn = zoomForWheelDelta(1, -100);
+  const zoomedOut = zoomForWheelDelta(1, 100);
+  expect(zoomedIn).toBeGreaterThan(1);
+  expect(zoomedOut).toBeLessThan(1);
+  expect(zoomForWheelDelta(1, 0)).toBeCloseTo(1, 10);
+});
+
+test('fit centres the page extent inside the workspace', () => {
+  const centred = centredPageScroll(frame.width, frame.height, 1, 1200, 800, 2000);
+  expect(centred.left).toBeCloseTo(2000 + 816 / 2 - 600, 8);
+  expect(centred.top).toBeCloseTo(2000 + 1056 / 2 - 400, 8);
 });

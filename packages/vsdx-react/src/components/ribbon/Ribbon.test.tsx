@@ -98,12 +98,25 @@ test('disabled commands keep their labels and stay out of the tab order', () => 
 
 test('tabs without commands render an honest empty state', () => {
   const view = renderRibbon(stubDiagram(), null);
-  for (const name of ['Design', 'Review', 'View', 'Help']) {
+  for (const name of ['Design', 'Review', 'Help']) {
     fireEvent.click(view.getByRole('tab', { name }));
     expect(view.getByText(en.ribbon.empty)).not.toBeNull();
   }
+  fireEvent.click(view.getByRole('tab', { name: 'View' }));
+  expect(view.queryByText(en.ribbon.empty)).toBeNull();
+  expect(view.getByTestId('vsdx-ribbon-view-panel')).not.toBeNull();
+  expect(view.getByTestId('vsdx-view-page-breaks')).not.toBeNull();
   fireEvent.click(view.getByRole('tab', { name: 'Insert' }));
   expect(view.queryByText(en.ribbon.empty)).toBeNull();
+  view.unmount();
+});
+
+test('the view tab toggles page breaks off by default', () => {
+  const view = renderRibbon(stubDiagram(), null);
+  fireEvent.click(view.getByRole('tab', { name: 'View' }));
+  const toggle = view.getByTestId('vsdx-view-page-breaks');
+  expect(toggle.getAttribute('aria-pressed')).toBe('false');
+  expect(toggle.textContent).toContain(en.ribbon.commands.pageBreaks);
   view.unmount();
 });
 

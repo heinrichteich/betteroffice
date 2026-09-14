@@ -84,7 +84,14 @@ function HomePanel({ t }: { t: TFunction }) {
   </div>;
 }
 
-export function Ribbon({ t }: { t: TFunction }) {
+function ViewPanel({ t, showPageBreaks, onTogglePageBreaks }: { t: TFunction; showPageBreaks: boolean; onTogglePageBreaks: () => void }) {
+  const pressed = showPageBreaks;
+  return <div style={styles.surface} data-testid="vsdx-ribbon-view-panel">
+    <RibbonRun label={t('ribbon.groups.view')}><button type="button" aria-pressed={pressed} data-testid="vsdx-view-page-breaks" onMouseDown={(event) => event.preventDefault()} onClick={() => onTogglePageBreaks()} style={{ ...styles.toggle, background: pressed ? '#ebf3fc' : 'transparent' }}><span aria-hidden="true" style={{ ...styles.checkbox, borderColor: pressed ? '#0f6cbd' : '#8a8886', background: pressed ? '#0f6cbd' : 'transparent', color: '#ffffff' }}>{pressed ? '✓' : ''}</span><span>{t('ribbon.commands.pageBreaks')}</span></button></RibbonRun>
+  </div>;
+}
+
+export function Ribbon({ t, showPageBreaks, onTogglePageBreaks }: { t: TFunction; showPageBreaks?: boolean; onTogglePageBreaks?: () => void }) {
   const [active, setActive] = useState<RibbonTab>('home');
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const select = (next: RibbonTab) => setActive(next);
@@ -104,7 +111,7 @@ export function Ribbon({ t }: { t: TFunction }) {
       return <button ref={(node) => { tabRefs.current[index] = node; }} key={tab} id={`vsdx-ribbon-tab-${tab}`} type="button" role="tab" aria-selected={selected} aria-controls={`vsdx-ribbon-panel-${tab}`} tabIndex={selected ? 0 : -1} onClick={() => select(tab)} onKeyDown={(event) => onKeyDown(event, index)} style={styles.tab}><span style={{ ...styles.tabLabel, borderBottomColor: selected ? '#0f6cbd' : 'transparent', color: '#242424', fontWeight: selected ? 600 : 400 }}>{t(`ribbon.tabs.${tab}`)}</span></button>;
     })}</div>
     <div id={`vsdx-ribbon-panel-${active}`} role="tabpanel" aria-labelledby={`vsdx-ribbon-tab-${active}`} style={styles.panel}>
-      {active === 'home' ? <HomePanel t={t} /> : active === 'file' ? <div style={styles.surface}><RibbonRun label={t('ribbon.groups.file')}><CommandButton id="download" icon="download" label={t('ribbon.commands.download')} /></RibbonRun></div> : active === 'insert' ? <div style={styles.surface}><RibbonRun label={t('ribbon.groups.insert')}><CommandButton id="addShape" icon="add" label={t('ribbon.commands.addShape')} /></RibbonRun></div> : <div style={styles.surface}><EmptyState t={t} /></div>}
+      {active === 'home' ? <HomePanel t={t} /> : active === 'file' ? <div style={styles.surface}><RibbonRun label={t('ribbon.groups.file')}><CommandButton id="download" icon="download" label={t('ribbon.commands.download')} /></RibbonRun></div> : active === 'insert' ? <div style={styles.surface}><RibbonRun label={t('ribbon.groups.insert')}><CommandButton id="addShape" icon="add" label={t('ribbon.commands.addShape')} /></RibbonRun></div> : active === 'view' ? <ViewPanel t={t} showPageBreaks={Boolean(showPageBreaks)} onTogglePageBreaks={() => onTogglePageBreaks?.()} /> : <div style={styles.surface}><EmptyState t={t} /></div>}
     </div>
   </section>;
 }
@@ -122,6 +129,8 @@ const styles: Record<string, CSSProperties> = {
   colorInput: { position: 'absolute', inset: 0, opacity: 0, width: '100%', height: '100%', cursor: 'inherit' },
   formulaInput: { width: 56, height: 28, boxSizing: 'border-box', border: '1px solid #d1d1d1', borderRadius: 4, color: 'inherit', background: '#ffffff', fontSize: 12, padding: '0 6px' },
   split: { display: 'inline-flex', alignItems: 'stretch' },
+  toggle: { appearance: 'none', display: 'inline-flex', alignItems: 'center', gap: 8, minHeight: 32, padding: '0 10px', border: 0, borderRadius: 4, color: '#242424', background: 'transparent', cursor: 'pointer', fontSize: 13 },
+  checkbox: { display: 'inline-grid', placeItems: 'center', width: 16, height: 16, border: '1px solid', borderRadius: 2, fontSize: 12, lineHeight: 1 },
   splitMain: { appearance: 'none', display: 'inline-grid', placeItems: 'center', width: 28, height: 32, padding: 0, border: 0, borderRadius: '4px 0 0 4px', boxSizing: 'border-box' },
   splitChevron: { appearance: 'none', display: 'inline-grid', placeItems: 'center', width: 16, height: 32, padding: 0, border: 0, borderRadius: '0 4px 4px 0', boxSizing: 'border-box' },
   empty: { display: 'flex', alignItems: 'center', height: 32, padding: '0 8px', color: '#424242', fontSize: 12 },

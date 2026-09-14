@@ -21,10 +21,10 @@
     "saved": "Saved",
     "dirty": "Unsaved changes",
     "tabs": { "file": "File", "home": "Home", "insert": "Insert", "design": "Design", "review": "Review", "view": "View", "help": "Help" },
-    "groups": { "file": "File", "history": "History", "clipboard": "Clipboard", "font": "Font", "paragraph": "Paragraph", "insert": "Insert", "shape": "Shape", "arrange": "Arrange" },
+    "groups": { "file": "File", "history": "History", "clipboard": "Clipboard", "font": "Font", "paragraph": "Paragraph", "insert": "Insert", "shape": "Shape", "arrange": "Arrange", "view": "Show" },
     "commands": {
       "undo": "Undo", "redo": "Redo", "delete": "Delete selected", "fillColor": "Fill color", "lineColor": "Line color", "lineWeight": "Line weight", "linePattern": "Line pattern",
-      "bringToFront": "Bring to Front", "bringForward": "Bring Forward", "sendBackward": "Send Backward", "sendToBack": "Send to Back", "rotateLeft": "Rotate left", "rotateRight": "Rotate right", "flipHorizontal": "Flip horizontal", "flipVertical": "Flip vertical", "addShape": "Add shape", "download": "Download"
+      "bringToFront": "Bring to Front", "bringForward": "Bring Forward", "sendBackward": "Send Backward", "sendToBack": "Send to Back", "rotateLeft": "Rotate left", "rotateRight": "Rotate right", "flipHorizontal": "Flip horizontal", "flipVertical": "Flip vertical", "addShape": "Add shape", "download": "Download", "pageBreaks": "Page breaks"
     }
   },
   "contextMenu": { "label": "Shape actions" },

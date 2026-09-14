@@ -75,6 +75,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const initialUpdate = sessionSwitchBlocked ? sessionRef.current.initialUpdate : requestedInitialUpdate;
   const [zoom, setZoom] = useState(1);
   const [shapesCollapsed, setShapesCollapsed] = useState(false);
+  const [showPageBreaks, setShowPageBreaks] = useState(false);
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ top: number; left: number } | null>(null);
@@ -83,6 +84,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const previewFrameRef = useRef<number | null>(null);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
+  const spaceHeldRef = useRef(false);
+  const panRef = useRef<{ pointerId: number; startX: number; startY: number; startLeft: number; startTop: number } | null>(null);
   const [loading, setLoading] = useState(Boolean(file));
   onReadyRef.current = onReady;
   onChangeRef.current = onChange;
@@ -217,6 +220,77 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
 
   useEffect(() => () => { if (previewFrameRef.current !== null) cancelAnimationFrame(previewFrameRef.current); }, []);
 
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const frame = modelRef.current.frame;
+    if (!frame) return;
+    workspace.scrollLeft = Math.max(0, SURFACE_PAD + (frame.width * zoomRef.current) / 2 - workspace.clientWidth / 2);
+    workspace.scrollTop = Math.max(0, SURFACE_PAD + (frame.height * zoomRef.current) / 2 - workspace.clientHeight / 2);
+  }, [model.frame, model.pageIndex]);
+
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const onWheelNative = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        const oldZoom = zoomRef.current;
+        const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 512 : 1;
+        const next = clampZoom(oldZoom * Math.exp(-event.deltaY * unit / 300));
+        if (next === oldZoom) return;
+        const canvas = mainCanvasRef.current;
+        const frame = modelRef.current.frame;
+        if (!canvas || !frame) { setZoom(next); return; }
+        const rect = canvas.getBoundingClientRect();
+        const cssX = event.clientX - rect.left;
+        const cssY = event.clientY - rect.top;
+        const target = anchoredZoomScroll(workspace.scrollLeft, workspace.scrollTop, cssX, cssY, oldZoom, next);
+        setZoom(next);
+        requestAnimationFrame(() => {
+          const live = workspaceRef.current;
+          if (!live) return;
+          live.scrollLeft = target.left;
+          live.scrollTop = target.top;
+        });
+        return;
+      }
+      if (event.shiftKey) {
+        event.preventDefault();
+        workspace.scrollLeft += event.deltaY !== 0 ? event.deltaY : event.deltaX;
+      }
+    };
+    workspace.addEventListener('wheel', onWheelNative, { passive: false });
+    return () => workspace.removeEventListener('wheel', onWheelNative);
+  }, []);
+
+  useEffect(() => {
+    const onKeyUp = (event: globalThis.KeyboardEvent) => {
+      if (event.key === ' ' || event.key === 'Spacebar') {
+        spaceHeldRef.current = false;
+        const canvas = mainCanvasRef.current;
+        if (canvas && !panRef.current) canvas.style.cursor = '';
+      }
+    };
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape' && panRef.current) {
+        const pan = panRef.current;
+        panRef.current = null;
+        spaceHeldRef.current = false;
+        const canvas = mainCanvasRef.current;
+        if (canvas) {
+          canvas.style.cursor = '';
+          try {
+            if (typeof canvas.hasPointerCapture !== 'function' || canvas.hasPointerCapture(pan.pointerId)) canvas.releasePointerCapture(pan.pointerId);
+          } catch { void 0; }
+        }
+      }
+    };
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('keydown', onKeyDown);
+    return () => { window.removeEventListener('keyup', onKeyUp); window.removeEventListener('keydown', onKeyDown); };
+  }, []);
+
   const clearDragPreview = () => {
     if (previewFrameRef.current !== null) { cancelAnimationFrame(previewFrameRef.current); previewFrameRef.current = null; }
     dragPreviewRef.current = null;
@@ -258,7 +332,16 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
     if (!handle || !frame || !page) return;
     if (event.button === 2) return;
-    if (pointerRef.current) return;
+    if (pointerRef.current || panRef.current) return;
+    const workspace = workspaceRef.current;
+    if (workspace && (event.button === 1 || (spaceHeldRef.current && event.button === 0))) {
+      panRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startLeft: workspace.scrollLeft, startTop: workspace.scrollTop };
+      try { event.currentTarget.setPointerCapture(event.pointerId); } catch { void 0; }
+      event.currentTarget.style.cursor = 'grabbing';
+      event.preventDefault();
+      return;
+    }
+    if (spaceHeldRef.current) return;
     pointerRef.current = null; dragPreviewRef.current = null;
     try {
       const point = canvasPointerPosition(event, frame);
@@ -309,12 +392,23 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     } catch (value) { reportError(value); }
   };
   const onPointerMove = (event: PointerEvent<HTMLCanvasElement>) => {
+    const pan = panRef.current;
+    if (pan) {
+      if (pan.pointerId !== event.pointerId) return;
+      const workspace = workspaceRef.current;
+      if (workspace) {
+        workspace.scrollLeft = pan.startLeft - (event.clientX - pan.startX);
+        workspace.scrollTop = pan.startTop - (event.clientY - pan.startY);
+      }
+      return;
+    }
     const start = pointerRef.current;
     if (!start) {
       try {
         const current = modelRef.current; const frame = current.frame;
         const page = current.snapshot?.pages[current.pageIndex];
         const active = selectionRef.current;
+        if (spaceHeldRef.current) { event.currentTarget.style.cursor = 'grab'; return; }
         if (!frame || !page || !active || active.pageId !== page.id) { event.currentTarget.style.cursor = ''; return; }
         const corners = selectionCorners(page, frame, active);
         if (!corners) { event.currentTarget.style.cursor = ''; return; }
@@ -355,6 +449,16 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     } catch (value) { reportError(value); }
   };
   const onPointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
+    const pan = panRef.current;
+    if (pan) {
+      if (pan.pointerId !== event.pointerId) return;
+      panRef.current = null;
+      event.currentTarget.style.cursor = spaceHeldRef.current ? 'grab' : '';
+      try {
+        if (typeof event.currentTarget.hasPointerCapture !== 'function' || event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+      } catch { void 0; }
+      return;
+    }
     const pointer = pointerRef.current;
     if (!pointer) return;
     if (pointer.pointerId !== undefined && pointer.pointerId !== event.pointerId) return;
@@ -392,12 +496,24 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     } catch (value) { reportError(value); }
   };
   const onPointerCancel = (event: PointerEvent<HTMLCanvasElement>) => {
+    const pan = panRef.current;
+    if (pan && pan.pointerId === event.pointerId) {
+      panRef.current = null;
+      event.currentTarget.style.cursor = spaceHeldRef.current ? 'grab' : '';
+      return;
+    }
     const pointer = pointerRef.current;
     if (!pointer) return;
     if (pointer.pointerId !== undefined && pointer.pointerId !== event.pointerId) return;
     pointerRef.current = null; clearDragPreview();
   };
   const onLostPointerCapture = (event: PointerEvent<HTMLCanvasElement>) => {
+    const pan = panRef.current;
+    if (pan && pan.pointerId === event.pointerId) {
+      panRef.current = null;
+      event.currentTarget.style.cursor = spaceHeldRef.current ? 'grab' : '';
+      return;
+    }
     const pointer = pointerRef.current;
     if (!pointer) return;
     if (pointer.pointerId !== undefined && pointer.pointerId !== event.pointerId) return;
@@ -425,6 +541,19 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   };
   const commandsRef = useRef<RibbonCommands | null>(null);
   const cancelActiveDrag = () => {
+    const pan = panRef.current;
+    if (pan) {
+      panRef.current = null;
+      spaceHeldRef.current = false;
+      const canvas = mainCanvasRef.current;
+      if (canvas) {
+        canvas.style.cursor = '';
+        try {
+          if (typeof canvas.hasPointerCapture !== 'function' || canvas.hasPointerCapture(pan.pointerId)) canvas.releasePointerCapture(pan.pointerId);
+        } catch { void 0; }
+      }
+      return true;
+    }
     const pointer = pointerRef.current;
     if (!pointer) return false;
     pointerRef.current = null;
@@ -459,6 +588,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     } catch (value) { reportError(value); }
   };
   const onCanvasKeyDown = (event: KeyboardEvent<HTMLCanvasElement>) => {
+    if (event.key === ' ' || event.key === 'Spacebar') {
+      spaceHeldRef.current = true;
+      event.currentTarget.style.cursor = panRef.current ? 'grabbing' : 'grab';
+      event.preventDefault();
+      return;
+    }
     const intent = canvasKeyboardIntent(event, zoomRef.current);
     if (!intent) return;
     event.preventDefault();
@@ -466,8 +601,14 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (intent.kind === 'undo') { if (commands?.undo.enabled) commands.undo.run(); return; }
     if (intent.kind === 'redo') { if (commands?.redo.enabled) commands.redo.run(); return; }
     if (intent.kind === 'delete') { if (commands?.delete.enabled) commands.delete.run(); return; }
-    if (intent.kind === 'escape') { cancelActiveDrag(); closeContextMenu(); setSelection(null); return; }
+    if (intent.kind === 'escape') { cancelActiveDrag(); spaceHeldRef.current = false; event.currentTarget.style.cursor = ''; closeContextMenu(); setSelection(null); return; }
     nudgeSelection(intent.dx, intent.dy);
+  };
+  const onCanvasKeyUp = (event: KeyboardEvent<HTMLCanvasElement>) => {
+    if (event.key === ' ' || event.key === 'Spacebar') {
+      spaceHeldRef.current = false;
+      if (!panRef.current) event.currentTarget.style.cursor = '';
+    }
   };
   const onCanvasFocus = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = '2px solid #0f6cbd'; event.currentTarget.style.outlineOffset = '2px'; };
   const onCanvasBlur = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = ''; event.currentTarget.style.outlineOffset = ''; };
@@ -490,25 +631,37 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const frame = modelRef.current.frame; const workspace = workspaceRef.current;
     if (!frame || !workspace || frame.width <= 0 || frame.height <= 0) return;
     const rect = workspace.getBoundingClientRect();
-    setZoom(clampZoom(Math.min((rect.width - WORKSPACE_MARGIN) / frame.width, (rect.height - WORKSPACE_MARGIN) / frame.height)));
+    const next = clampZoom(Math.min((rect.width - WORKSPACE_MARGIN) / frame.width, (rect.height - WORKSPACE_MARGIN) / frame.height));
+    setZoom(next);
+    requestAnimationFrame(() => {
+      const live = workspaceRef.current;
+      if (!live) return;
+      live.scrollLeft = Math.max(0, SURFACE_PAD + (frame.width * next) / 2 - live.clientWidth / 2);
+      live.scrollTop = Math.max(0, SURFACE_PAD + (frame.height * next) / 2 - live.clientHeight / 2);
+    });
   }, []);
   const download = useCallback((bytes: Uint8Array) => { const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer; const url = URL.createObjectURL(new Blob([buffer], { type: 'application/vnd.visio' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'diagram.vsdx'; anchor.click(); URL.revokeObjectURL(url); setDirty(false); }, []);
   const integrity = diagnostics.filter((diagnostic) => diagnostic.category === 'integrity');
   const fidelity = diagnostics.filter((diagnostic) => diagnostic.category === 'fidelity');
+  const surfaceWidth = model.frame ? model.frame.width * zoom + SURFACE_PAD * 2 : 0;
+  const surfaceHeight = model.frame ? model.frame.height * zoom + SURFACE_PAD * 2 : 0;
   return <div className={className} style={styles.root} aria-label={t('editor.appLabel')}>
     <header style={styles.titleBar}><strong>{t('ribbon.documentName')}</strong><span style={{ color: dirty ? '#a16207' : '#526273' }}>{dirty ? t('ribbon.dirty') : t('ribbon.saved')}</span></header>
     <RibbonCommandsProvider handle={handleRef.current} snapshot={model.snapshot} pageId={model.snapshot?.pages[model.pageIndex]?.id} selection={selection} onMutation={() => refresh(undefined, true)} onError={reportError} onDownload={download}>
     <RibbonCommandsBridge target={commandsRef} />
-    <Ribbon t={t} />
+    <Ribbon t={t} showPageBreaks={showPageBreaks} onTogglePageBreaks={() => setShowPageBreaks((value) => !value)} />
     <div style={styles.contentRow}>
     {leftPanel === undefined ? <ShapesPanel shapes={standardShapes} collapsed={shapesCollapsed} onToggleCollapsed={() => setShapesCollapsed((value) => !value)} onInsert={insertShape} t={t} /> : leftPanel}
     <main ref={workspaceRef} style={styles.workspace}>
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
-      <div style={styles.canvasFrame}>
-        <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
-        <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
-      </div>
+      {model.frame && <div style={{ ...styles.surface, width: surfaceWidth, height: surfaceHeight }}>
+        <div style={{ ...styles.canvasFrame, left: SURFACE_PAD, top: SURFACE_PAD }}>
+          <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onKeyUp={onCanvasKeyUp} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
+          <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
+          {showPageBreaks && <div data-testid="vsdx-page-breaks" aria-hidden="true" style={styles.pageBreaks} />}
+        </div>
+      </div>}
       {contextMenu && selection && <ShapeContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
       {integrity.length > 0 && <section role="alert" style={styles.integrity}><strong>{t('diagnostics.integrityHeading')}</strong>{integrity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</section>}
       {fidelity.length > 0 && <details style={styles.fidelity}><summary>{t('diagnostics.fidelityHeading')}</summary>{fidelity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</details>}
@@ -521,6 +674,34 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
 }
 
 const WORKSPACE_MARGIN = 32;
+export const SURFACE_PAD = 2000;
+
+/** CSS size of the scrollable white surface for a page extent and zoom. */
+export function surfaceSize(frameWidth: number, frameHeight: number, zoom: number, pad = SURFACE_PAD): { width: number; height: number } {
+  return { width: frameWidth * zoom + pad * 2, height: frameHeight * zoom + pad * 2 };
+}
+
+/** Scroll origin that centres the page extent inside its workspace. */
+export function centredPageScroll(frameWidth: number, frameHeight: number, zoom: number, clientWidth: number, clientHeight: number, pad = SURFACE_PAD): { left: number; top: number } {
+  return {
+    left: Math.max(0, pad + (frameWidth * zoom) / 2 - clientWidth / 2),
+    top: Math.max(0, pad + (frameHeight * zoom) / 2 - clientHeight / 2),
+  };
+}
+
+/** Scroll adjustment keeping the canvas point under the pointer stable across zoom. */
+export function anchoredZoomScroll(scrollLeft: number, scrollTop: number, cssX: number, cssY: number, oldZoom: number, newZoom: number): { left: number; top: number } {
+  const safeOld = Number.isFinite(oldZoom) && oldZoom > 0 ? oldZoom : 1;
+  const pageX = cssX / safeOld;
+  const pageY = cssY / safeOld;
+  return { left: scrollLeft + pageX * newZoom - cssX, top: scrollTop + pageY * newZoom - cssY };
+}
+
+/** Multiplicative zoom step for a ctrl+wheel delta. */
+export function zoomForWheelDelta(zoom: number, deltaY: number, deltaMode = 0): number {
+  const unit = deltaMode === 1 ? 16 : deltaMode === 2 ? 512 : 1;
+  return clampZoom(zoom * Math.exp(-deltaY * unit / 300));
+}
 
 export function canvasPointerPosition(event: PointerEvent<HTMLCanvasElement> | MouseEvent<HTMLCanvasElement>, frame: PageDisplayList): { canvas: ModelPoint; model: ModelPoint } {
   const rect = event.currentTarget.getBoundingClientRect();
@@ -609,4 +790,4 @@ function fontFaceEqual(left: VsdxFontFace, right: VsdxFontFace): boolean { retur
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean { return left === right || (left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index])); }
 function resolveImage(assetId: string, handle: DiagramHandle | null, cache: { current: Map<string, Promise<CanvasImageSource | null>> }, message: string): Promise<CanvasImageSource | null> { const existing = cache.current.get(assetId); if (existing) return existing; const pending = decodeImage(handle?.mediaBytes(assetId), message); cache.current.set(assetId, pending); return pending; }
 async function decodeImage(bytes: Uint8Array | undefined, message: string): Promise<CanvasImageSource | null> { if (!bytes) return null; const blob = new Blob([bytes.slice()]); if (typeof createImageBitmap === 'function') return createImageBitmap(blob); const url = URL.createObjectURL(blob); try { return await new Promise<HTMLImageElement>((resolve, reject) => { const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(new Error(message)); image.src = url; }); } finally { URL.revokeObjectURL(url); } }
-const styles: Record<string, CSSProperties> = { root: { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 480, color: '#172033', background: '#f3f5f8', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }, titleBar: { display: 'flex', alignItems: 'center', gap: 12, minHeight: 32, padding: '0 14px', background: '#f8fafc', borderBottom: '1px solid #d8dee9', fontSize: 13 }, contentRow: { display: 'flex', flex: 1, minHeight: 0 }, workspace: { position: 'relative', display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', overflow: 'auto' }, canvasFrame: { position: 'relative', flex: '0 0 auto' }, canvas: { display: 'block', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' }, overlay: { position: 'absolute', inset: 0, pointerEvents: 'none' }, integrity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 12, color: '#7f1d1d', background: '#fef2f2', border: '1px solid #fca5a5' }, fidelity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 8, color: '#475569', background: '#fff', fontSize: 12 }, error: { position: 'absolute', left: 14, right: 14, bottom: 14, padding: 10, color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0' } };
+const styles: Record<string, CSSProperties> = { root: { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 480, color: '#172033', background: '#f3f5f8', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }, titleBar: { display: 'flex', alignItems: 'center', gap: 12, minHeight: 32, padding: '0 14px', background: '#f8fafc', borderBottom: '1px solid #d8dee9', fontSize: 13 }, contentRow: { display: 'flex', flex: 1, minHeight: 0 }, workspace: { position: 'relative', display: 'block', flex: 1, minHeight: 0, overflow: 'auto', background: '#ffffff' }, surface: { position: 'relative', background: '#ffffff' }, canvasFrame: { position: 'absolute' }, canvas: { display: 'block', background: '#ffffff', border: 0, padding: 0, margin: 0, touchAction: 'none' }, overlay: { position: 'absolute', inset: 0, pointerEvents: 'none' }, pageBreaks: { position: 'absolute', inset: 0, pointerEvents: 'none', border: '1px dashed #8a94a6', boxSizing: 'border-box' }, integrity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 12, color: '#7f1d1d', background: '#fef2f2', border: '1px solid #fca5a5' }, fidelity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 8, color: '#475569', background: '#fff', fontSize: 12 }, error: { position: 'absolute', left: 14, right: 14, bottom: 14, padding: 10, color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0' } };
