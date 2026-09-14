@@ -1808,7 +1808,7 @@ mod tests {
 
     #[test]
     fn group_subshape_snapshot_and_story_match_render_resolution() {
-        let source = include_bytes!("../../vsdx-resolve/tests/fixtures/group-master-shape.vsdx");
+        let source = include_bytes!("../../vsdx-parse/tests/fixtures/group-master-shape.vsdx");
         let package = vsdx_parse::parse_vsdx(source).unwrap();
         let page = &package.page_part_paths[0];
         let resolver = vsdx_resolve::Resolver::new(&package);

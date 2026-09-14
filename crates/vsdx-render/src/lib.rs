@@ -4475,7 +4475,7 @@ mod tests {
     #[test]
     fn group_subshapes_render_master_geometry_and_text_with_page_formatting() {
         let package = vsdx_parse::parse_vsdx(include_bytes!(
-            "../../vsdx-resolve/tests/fixtures/group-master-shape.vsdx"
+            "../../vsdx-parse/tests/fixtures/group-master-shape.vsdx"
         ))
         .unwrap();
         let page = &package.page_part_paths[0];

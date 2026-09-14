@@ -2029,7 +2029,10 @@ const GROUP_PAGE: &str = "visio/pages/page1.xml";
 
 fn group_master_package() -> &'static VsdxPackage {
     static PACKAGE: std::sync::LazyLock<VsdxPackage> = std::sync::LazyLock::new(|| {
-        parse_vsdx(include_bytes!("../tests/fixtures/group-master-shape.vsdx")).unwrap()
+        parse_vsdx(include_bytes!(
+            "../../vsdx-parse/tests/fixtures/group-master-shape.vsdx"
+        ))
+        .unwrap()
     });
     &PACKAGE
 }
@@ -2149,17 +2152,16 @@ fn tally_group_lookups(package: &VsdxPackage, tally: &mut LookupTally) -> usize 
 }
 
 #[test]
-fn group_lookup_only_adds_absent_cells() {
+fn group_lookup_adds_and_changes_cells_without_losing_any() {
     let mut tally = LookupTally::default();
     assert_eq!(tally_group_lookups(group_master_package(), &mut tally), 2);
-    eprintln!("VSDX synthetic group lookup: {tally:?}");
     assert_eq!(tally.lost, 0);
     assert!(tally.gained > 0);
     assert!(tally.changed > 0);
 }
 
 #[test]
-fn corpus_group_lookup_only_adds_absent_cells() {
+fn corpus_group_lookup_adds_cells_without_losing_any() {
     let Some(dir) = std::env::var_os("VSDX_CORPUS_DIR") else {
         eprintln!("skipping group lookup corpus test: VSDX_CORPUS_DIR is unset");
         return;
