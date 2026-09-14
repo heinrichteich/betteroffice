@@ -1,8 +1,9 @@
 import { expect, test } from 'bun:test';
+import { modelPointToCanvas } from '@betteroffice/vsdx';
 import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { canvasPointerPosition, inchFormula, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
-import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
+import { canvasPointerPosition, dragStartForShape, inchFormula, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
+import { paintSelectionFrame, previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
 
 const frame: PageDisplayList = {
   contractVersion: 4,
@@ -185,4 +186,105 @@ test('a nudge inside a rotated and scaled group matches the equivalent drag', ()
   expect(nudged.x).toBeCloseTo(dragged.x, 10);
   expect(nudged.y).toBeCloseTo(dragged.y, 10);
   expect(nudged.x).not.toBeCloseTo(2 + dx, 6);
+});
+
+function groupCell(name: string, value: string) {
+  return { locator: { sheet: 'document' as const, shapeId: null, section: null, row: null, cellName: name }, name, formula: null, value };
+}
+
+function groupedPage() {
+  const child = (id: string, sourceId: number, pinX: string, pinY: string) => ({
+    id, sourceId, name: null, children: [],
+    cells: [groupCell('PinX', pinX), groupCell('PinY', pinY), groupCell('Width', '1.6'), groupCell('Height', '1.1'), groupCell('LocPinX', '0.8'), groupCell('LocPinY', '0.55')],
+  });
+  return {
+    id: 'page',
+    sourcePartPath: 'visio/pages/page1.xml',
+    name: 'Page',
+    shapes: [{
+      id: 'group', sourceId: 10, name: null,
+      children: [child('read', 11, '1.2', '1.4'), child('edit', 12, '3.2', '1.4')],
+      cells: [groupCell('PinX', '6.8'), groupCell('PinY', '3.7'), groupCell('Width', '3.6'), groupCell('Height', '1.1'), groupCell('LocPinX', '1.8'), groupCell('LocPinY', '0.55')],
+    }],
+  };
+}
+
+function groupedFrame() {
+  return {
+    contractVersion: 4 as const,
+    width: 960,
+    height: 720,
+    paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 },
+    primitives: [{
+      kind: 'group' as const, id: 'visio/pages/page1.xml:10', zOrder: 7,
+      transform: { a: 1, b: 0, c: 0, d: 1, e: 5, f: 3.15 },
+      primitives: [
+        { kind: 'shape' as const, id: 'visio/pages/page1.xml:11', zOrder: 3, path: [] },
+        { kind: 'shape' as const, id: 'visio/pages/page1.xml:12', zOrder: 5, path: [] },
+      ],
+    }],
+  };
+}
+
+test('a group child selection frame composes the display-list group transform', () => {
+  const page = groupedPage();
+  const groupFrame = groupedFrame();
+  const read = page.shapes[0].children[0];
+  const start = dragStartForShape(page, groupFrame, read);
+  expect(start.parentTransforms).toEqual([{ a: 1, b: 0, c: 0, d: 1, e: 5, f: 3.15 }]);
+  const corners = selectionCorners(page, groupFrame, { pageId: 'page', shapeId: 'read', hit: { kind: 'shape', shapeId: 'read' } });
+  expect(corners).not.toBeNull();
+  const centre = { x: (corners![0].x + corners![2].x) / 2, y: (corners![0].y + corners![2].y) / 2 };
+  const page_pin = { x: 1.2 + 5, y: 1.4 + 3.15 };
+  const expected = modelPointToCanvas({ a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, page_pin.x, page_pin.y);
+  expect(centre.x).toBeCloseTo(expected.x, 8);
+  expect(centre.y).toBeCloseTo(expected.y, 8);
+  const localOnly = modelPointToCanvas({ a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, 1.2, 1.4);
+  expect(Math.hypot(centre.x - localOnly.x, centre.y - localOnly.y)).toBeGreaterThan(100);
+});
+
+test('a group child drag converts the page delta into the parent frame', () => {
+  const page = groupedPage();
+  const groupFrame = groupedFrame();
+  const read = page.shapes[0].children[0];
+  const base = dragStartForShape({ shapes: page.shapes, sourcePartPath: page.sourcePartPath }, groupFrame, read);
+  const grab = { x: 1.2 + 5, y: 1.4 + 3.15 };
+  const start = { canvas: { x: 0, y: 0 }, model: grab, resize: false, ...base };
+  const geometry = resolveDragGeometry(start, { x: grab.x, y: grab.y + 0.5 });
+  expect(geometry.x).toBeCloseTo(1.2, 10);
+  expect(geometry.y).toBeCloseTo(1.9, 10);
+  expect(geometry.width).toBeCloseTo(1.6, 10);
+  expect(geometry.height).toBeCloseTo(1.1, 10);
+  const corners = previewOutline(start, { x: grab.x, y: grab.y + 0.5 }, { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 });
+  const centre = { x: (corners[0].x + corners[2].x) / 2, y: (corners[0].y + corners[2].y) / 2 };
+  const expected = modelPointToCanvas({ a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, geometry.x + 5, geometry.y + 3.15);
+  expect(centre.x).toBeCloseTo(expected.x, 8);
+  expect(centre.y).toBeCloseTo(expected.y, 8);
+  const nudged = resolveNudgeGeometry({ canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, ...base }, 0, 0.5);
+  expect(nudged.x).toBeCloseTo(1.2, 10);
+  expect(nudged.y).toBeCloseTo(1.9, 10);
+});
+
+test('pointer mapping and selection paint stay stable at 50, 100, and 150 percent zoom', () => {
+  for (const zoom of [0.5, 1, 1.5]) {
+    const at = (canvasX: number, canvasY: number) => pointerAt(canvasX * zoom, canvasY * zoom, zoom);
+    expect(canvasPointerPosition(at(192, 864), frame).model).toEqual({ x: 2, y: 2 });
+    expect(canvasPointerPosition(at(0, 1056), frame).model).toEqual({ x: 0, y: 0 });
+  }
+  const page = groupedPage();
+  const groupFrame = groupedFrame();
+  const corners = selectionCorners(page, groupFrame, { pageId: 'page', shapeId: 'edit', hit: { kind: 'shape', shapeId: 'edit' } });
+  expect(corners).not.toBeNull();
+  for (const zoom of [0.5, 1, 1.5]) {
+    const calls: string[] = [];
+    const context = new Proxy({ canvas: {} }, {
+      get(target, key) {
+        if (key in target) return Reflect.get(target, key);
+        return (...args: unknown[]) => { calls.push(`${String(key)}:${args.join(',')}`); };
+      },
+      set(target, key, value) { calls.push(`${String(key)}=${String(value)}`); Reflect.set(target, key, value); return true; },
+    }) as unknown as CanvasRenderingContext2D;
+    paintSelectionFrame(context, corners!, 1, zoom);
+    expect(calls).toContain(`setTransform:${zoom},0,0,${zoom},0,0`);
+  }
 });

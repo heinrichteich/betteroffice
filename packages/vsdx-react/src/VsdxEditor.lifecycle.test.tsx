@@ -1183,3 +1183,124 @@ test('a right-click during a drag opens no menu and adds no commit', async () =>
     expect(moves).toHaveLength(1);
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
+
+function demoChildPaths(handle: DiagramHandle, pageIndex = 0): Map<string, string> {
+  const frame = handle.layoutPage(pageIndex) as unknown as {
+    primitives: Array<{ kind: string; id: string; primitives?: Array<{ kind: string; id: string; path?: unknown }> }>;
+  };
+  const paths = new Map<string, string>();
+  for (const primitive of frame.primitives) {
+    if (primitive.kind !== 'group' || !primitive.primitives) continue;
+    for (const child of primitive.primitives) {
+      if (child.kind === 'shape') paths.set(child.id, JSON.stringify(child.path));
+    }
+  }
+  return paths;
+}
+
+function demoGroupChildren(handle: DiagramHandle): { pageId: string; leafId: (child: { sourceId: number }) => string; readId: string; editId: string; readLeaf: string; editLeaf: string } {
+  const page = handle.snapshot().pages[0];
+  const group = page.shapes.find((shape) => shape.name === 'Capability group')!;
+  const leafId = (child: { sourceId: number }): string => `${page.sourcePartPath}:${child.sourceId}`;
+  return { pageId: page.id, leafId, readId: group.children[0].id, editId: group.children[1].id, readLeaf: leafId(group.children[0]), editLeaf: leafId(group.children[1]) };
+}
+
+interface TestAffine { a: number; b: number; c: number; d: number; e: number; f: number; }
+
+function composeAffine(outer: TestAffine, inner: TestAffine): TestAffine {
+  return {
+    a: outer.a * inner.a + outer.c * inner.b,
+    b: outer.b * inner.a + outer.d * inner.b,
+    c: outer.a * inner.c + outer.c * inner.d,
+    d: outer.b * inner.c + outer.d * inner.d,
+    e: outer.a * inner.e + outer.c * inner.f + outer.e,
+    f: outer.b * inner.e + outer.d * inner.f + outer.f,
+  };
+}
+
+function leafPageCentre(frame: vsdx.PageDisplayList, leafId: string): { x: number; y: number } {
+  const identity: TestAffine = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+  const apply = (transform: TestAffine, point: { x: number; y: number }): { x: number; y: number } => ({
+    x: transform.a * point.x + transform.c * point.y + transform.e,
+    y: transform.b * point.x + transform.d * point.y + transform.f,
+  });
+  const visit = (primitives: vsdx.PagePrimitive[], ancestor: TestAffine): { x: number; y: number } | null => {
+    for (const primitive of primitives) {
+      if (primitive.kind === 'group') {
+        const found = visit(primitive.primitives, primitive.transform ? composeAffine(ancestor, primitive.transform) : ancestor);
+        if (found) return found;
+      } else if (primitive.id === leafId && primitive.kind === 'shape') {
+        const points = primitive.path.filter((command) => typeof command.x === 'number' && typeof command.y === 'number');
+        const xs = points.map((point) => Number(point.x));
+        const ys = points.map((point) => Number(point.y));
+        const centre = { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 };
+        return apply(ancestor, centre);
+      }
+    }
+    return null;
+  };
+  const found = visit(frame.primitives, identity);
+  if (!found) throw new Error(`leaf primitive ${leafId} is not part of the display list`);
+  return found;
+}
+
+test('group child overlays land on the painted shapes', async () => {
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  const handle = originalOpenDiagram(fixture, {});
+  try {
+    const { selectionCorners } = await import('./VsdxEditor');
+    const page = handle.snapshot().pages[0];
+    const frame = handle.layoutPage(0);
+    const { readId, editId, readLeaf, editLeaf } = demoGroupChildren(handle);
+    for (const [shapeId, leafId] of [[readId, readLeaf], [editId, editLeaf]] as const) {
+      const corners = selectionCorners(page, frame as never, { pageId: page.id, shapeId, hit: { kind: 'shape', shapeId } });
+      expect(corners).not.toBeNull();
+      const centre = { x: (corners![0].x + corners![2].x) / 2, y: (corners![0].y + corners![2].y) / 2 };
+      const painted = leafPageCentre(frame, leafId);
+      const canvas = vsdx.modelPointToCanvas(frame.paintTransform, painted.x, painted.y);
+      expect(centre.x).toBeCloseTo(canvas.x, 3);
+      expect(centre.y).toBeCloseTo(canvas.y, 3);
+    }
+  } finally { handle.dispose(); }
+});
+
+test('dragging a group child moves it exactly and leaves its sibling untouched', async () => {
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  const handle = originalOpenDiagram(fixture, {});
+  try {
+    const before = demoChildPaths(handle);
+    const { pageId, readId, readLeaf, editLeaf } = demoGroupChildren(handle);
+    handle.moveShape(pageId, readId, '1.2', '1.9');
+    const after = demoChildPaths(handle);
+    const readBefore = JSON.parse(before.get(readLeaf)!);
+    const readAfter = JSON.parse(after.get(readLeaf)!);
+    expect(readAfter.length).toBe(readBefore.length);
+    for (const [index, command] of readAfter.entries()) {
+      expect(Number(command.x)).toBeCloseTo(Number(readBefore[index].x), 6);
+      expect(Number(command.y)).toBeCloseTo(Number(readBefore[index].y) + 0.5, 6);
+    }
+    expect(after.get(editLeaf)).toBe(before.get(editLeaf));
+    expect(handle.canUndo()).toBe(true);
+    handle.undo();
+    const restored = demoChildPaths(handle);
+    expect(restored.get(readLeaf)).toBe(before.get(readLeaf));
+    expect(restored.get(editLeaf)).toBe(before.get(editLeaf));
+  } finally { handle.dispose(); }
+});
+
+test('deleting a group child leaves its sibling untouched', async () => {
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  const handle = originalOpenDiagram(fixture, {});
+  try {
+    const before = demoChildPaths(handle);
+    const { pageId, readId, readLeaf, editLeaf } = demoGroupChildren(handle);
+    handle.deleteShape(pageId, readId);
+    const after = demoChildPaths(handle);
+    expect(after.has(readLeaf)).toBe(false);
+    expect(after.get(editLeaf)).toBe(before.get(editLeaf));
+    handle.undo();
+    const restored = demoChildPaths(handle);
+    expect(restored.get(readLeaf)).toBe(before.get(readLeaf));
+    expect(restored.get(editLeaf)).toBe(before.get(editLeaf));
+  } finally { handle.dispose(); }
+});

@@ -240,19 +240,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     }
   };
 
-  const dragStartForPlacement = (page: { shapes: readonly ShapeSnapshot[]; sourcePartPath: string }, shape: ShapeSnapshot, frame: PageDisplayList): Omit<DragStart, 'canvas' | 'model' | 'resize' | 'pointerId' | 'startX' | 'startY'> => {
-    const width = numericCellValue(shape, 'Width');
-    const height = numericCellValue(shape, 'Height');
-    return {
-      parentTransforms: shapeParentTransforms(frame.primitives, `${page.sourcePartPath}:${shape.sourceId}`) ?? [],
-      angle: numericCellValue(shape, 'Angle', 0),
-      flipX: numericCellValue(shape, 'FlipX', 0) === 1,
-      flipY: numericCellValue(shape, 'FlipY', 0) === 1,
-      pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
-      locPin: { x: numericCellValue(shape, 'LocPinX', width / 2), y: numericCellValue(shape, 'LocPinY', height / 2) },
-      size: { width, height },
-    };
-  };
+  const dragStartForPlacement = (page: { shapes: readonly ShapeSnapshot[]; sourcePartPath: string }, shape: ShapeSnapshot, frame: PageDisplayList): Omit<DragStart, 'canvas' | 'model' | 'resize' | 'pointerId' | 'startX' | 'startY'> =>
+    dragStartForShape(page, frame, shape);
 
   const onPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
@@ -551,29 +540,35 @@ export function stillSelectable(snapshot: DiagramSnapshot, pageIndex: number, se
   return Boolean(page && page.id === selection.pageId && findShapePlacement(page.shapes, selection.shapeId));
 }
 
-/** Current selection corners in scale-1 canvas coordinates for overlay paint and hit tests. */
-export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, selection: VsdxShapeSelection): ModelPoint[] | null {
-  const placement = findShapePlacement(page.shapes, selection.shapeId);
-  if (!placement) return null;
-  const shape: ShapeSnapshot = placement.shape;
+/** Single DragStart construction shared by the overlay, drag, and nudge paths. */
+export function dragStartForShape(page: { shapes: readonly ShapeSnapshot[]; sourcePartPath: string }, frame: PageDisplayList, shape: ShapeSnapshot): Omit<DragStart, 'canvas' | 'model' | 'resize' | 'pointerId' | 'startX' | 'startY'> {
   const width = numericCellValue(shape, 'Width');
   const height = numericCellValue(shape, 'Height');
-  const start: DragStart = {
-    canvas: { x: 0, y: 0 },
-    model: { x: 0, y: 0 },
-    resize: false,
-    pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
-    locPin: { x: numericCellValue(shape, 'LocPinX', width / 2), y: numericCellValue(shape, 'LocPinY', height / 2) },
-    size: { width, height },
+  return {
     parentTransforms: shapeParentTransforms(frame.primitives, `${page.sourcePartPath}:${shape.sourceId}`) ?? [],
     angle: numericCellValue(shape, 'Angle', 0),
     flipX: numericCellValue(shape, 'FlipX', 0) === 1,
     flipY: numericCellValue(shape, 'FlipY', 0) === 1,
+    pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
+    locPin: { x: numericCellValue(shape, 'LocPinX', width / 2), y: numericCellValue(shape, 'LocPinY', height / 2) },
+    size: { width, height },
+  };
+}
+
+/** Current selection corners in scale-1 canvas coordinates for overlay paint and hit tests. */
+export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, selection: VsdxShapeSelection): ModelPoint[] | null {
+  const placement = findShapePlacement(page.shapes, selection.shapeId);
+  if (!placement) return null;
+  const start: DragStart = {
+    canvas: { x: 0, y: 0 },
+    model: { x: 0, y: 0 },
+    resize: false,
+    ...dragStartForShape(page, frame, placement.shape),
   };
   return previewOutline(start, { x: 0, y: 0 }, frame.paintTransform);
 }
 
-export function collectDiagnostics(frame: PageDisplayList): TextDiagnostic[] { const result: TextDiagnostic[] = []; const work = frame.primitives.map((primitive) => ({ primitive, depth: 0 })); while (work.length) { const current = work.pop(); if (!current || current.depth >= 256) continue; if (current.primitive.kind === 'textBox') for (const paragraph of current.primitive.paragraphs) for (const run of paragraph.runs) result.push(...run.diagnostics); if (current.primitive.kind === 'group') for (const primitive of current.primitive.primitives) work.push({ primitive, depth: current.depth + 1 }); } return result; }
+export function collectDiagnostics(frame: PageDisplayList): TextDiagnostic[] { const result: TextDiagnostic[] = []; const work = frame.primitives.map((primitive) => ({ primitive, depth: 0 })); while (work.length) { const current = work.pop(); if (!current || current.depth >= 256) continue; if (current.primitive.kind === 'textBox') for (const paragraph of current.primitive.paragraphs) for (const run of paragraph.runs) result.push(...(run.diagnostics ?? [])); if (current.primitive.kind === 'group') for (const primitive of current.primitive.primitives) work.push({ primitive, depth: current.depth + 1 }); } return result; }
 /** Latest ribbon commands for the canvas keyboard layer, which lives outside the provider. */
 function RibbonCommandsBridge({ target }: { target: { current: RibbonCommands | null } }) {
   const commands = useRibbonCommands();
