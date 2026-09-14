@@ -550,6 +550,10 @@ impl Renderer {
         let transforms = vsdx_resolve::scene_transforms(page, shapes, |id, shape, name| {
             evaluated(package, references.as_ref(), shape, id, name)
         });
+        let unflipped =
+            vsdx_resolve::scene_transforms_without_flips(page, shapes, |id, shape, name| {
+                evaluated(package, references.as_ref(), shape, id, name)
+            });
         let page_height = page_dimension(&resolver, package, page_part, "PageHeight")
             .ok_or_else(|| RenderError::PageDimensions("PageHeight is unavailable".into()))?;
         let page_width = page_dimension(&resolver, package, page_part, "PageWidth")
@@ -583,6 +587,7 @@ impl Renderer {
                 references.as_ref(),
                 shapes,
                 &transforms,
+                &unflipped,
                 page_part,
                 shape,
                 0,
@@ -621,6 +626,7 @@ impl Renderer {
         references: Option<&PageShapeReferences>,
         shapes: &BTreeMap<u32, ResolvedShape>,
         transforms: &BTreeMap<u32, SceneTransform>,
+        unflipped: &BTreeMap<u32, SceneTransform>,
         page_part: &str,
         shape: &Shape,
         depth: usize,
@@ -744,6 +750,7 @@ impl Renderer {
                     references,
                     shapes,
                     transforms,
+                    unflipped,
                     page_part,
                     child,
                     depth + 1,
@@ -849,6 +856,10 @@ impl Renderer {
             stroke,
             transform: Affine::identity(),
         });
+        let text_scene = unflipped
+            .get(&shape.id)
+            .map(|entry| entry.scene)
+            .unwrap_or(transform.local);
         self.text(
             package,
             resolver,
@@ -858,7 +869,7 @@ impl Renderer {
             resolved,
             id,
             bounds,
-            affine(transform.local).compose(Affine {
+            affine(text_scene).compose(Affine {
                 a: 1.0,
                 b: 0.0,
                 c: 0.0,
@@ -1444,7 +1455,7 @@ fn bake_group_transform(primitive: &mut Primitive, matrix: Affine) {
             *transform = Affine::identity();
         }
         Primitive::Image { transform, .. } => *transform = matrix.compose(*transform),
-        Primitive::TextBox { transform, .. } => *transform = matrix.compose(*transform),
+        Primitive::TextBox { .. } => {}
         Primitive::Placeholder {
             x,
             y,
@@ -3378,6 +3389,64 @@ mod tests {
     }
 
     #[test]
+    fn flipped_shape_keeps_text_unmirrored() {
+        for (flip_x, flip_y) in [(1, 0), (0, 1), (1, 1)] {
+            let mut flipped = shape(1, 4.0, 4.0);
+            flipped
+                .children
+                .push(ShapeChild::Text(vec![TextToken::Literal("ab".into())]));
+            with_cell(&mut flipped, "FlipX", &flip_x.to_string());
+            with_cell(&mut flipped, "FlipY", &flip_y.to_string());
+            let list = render(vec![flipped]);
+            let Primitive::TextBox { transform, .. } = text_box(&list) else {
+                unreachable!()
+            };
+            assert_point_close((transform.a, transform.b), (1.0, 0.0));
+            assert_point_close((transform.c, transform.d), (0.0, 1.0));
+            assert_point_close((transform.e, transform.f), (0.0, 0.0));
+        }
+    }
+
+    #[test]
+    fn rotated_flipped_shape_keeps_rotation_without_mirror() {
+        for (flip_x, flip_y) in [(1, 0), (0, 1), (1, 1)] {
+            let mut flipped = shape(1, 4.0, 4.0);
+            flipped
+                .children
+                .push(ShapeChild::Text(vec![TextToken::Literal("ab".into())]));
+            with_cell(
+                &mut flipped,
+                "Angle",
+                &std::f64::consts::FRAC_PI_4.to_string(),
+            );
+            with_cell(&mut flipped, "FlipX", &flip_x.to_string());
+            with_cell(&mut flipped, "FlipY", &flip_y.to_string());
+            let list = render(vec![flipped]);
+            let Primitive::TextBox { transform, .. } = text_box(&list) else {
+                unreachable!()
+            };
+            assert_point_close(
+                (transform.a, transform.b),
+                (
+                    std::f32::consts::FRAC_1_SQRT_2,
+                    std::f32::consts::FRAC_1_SQRT_2,
+                ),
+            );
+            assert_point_close(
+                (transform.c, transform.d),
+                (
+                    -std::f32::consts::FRAC_1_SQRT_2,
+                    std::f32::consts::FRAC_1_SQRT_2,
+                ),
+            );
+            assert_point_close(
+                (transform.e, transform.f),
+                (4.0, 4.0 - 4.0 * std::f32::consts::SQRT_2),
+            );
+        }
+    }
+
+    #[test]
     fn forty_five_degree_group_preserves_image_orientation_and_all_corners() {
         let mut image = shape(2, 1.0, 2.0);
         image.children.push(ShapeChild::ForeignData(ForeignData {
@@ -4214,10 +4283,6 @@ mod tests {
         let GeometryPathCommand::Move { x, y } = path[0] else {
             unreachable!()
         };
-        // These values were calculated by hand from the composed outer and inner affine,
-        // M = [[-0.94190204, 1.8844845, 9.487798], [-1.1970047, 0.27151108, 10.472947]].
-        // Each expected AABB is min/max(M(corner)) for the original source rectangle;
-        // the image corners and text caret are direct substitutions into that same affine.
         assert_point_close((x as f32, y as f32), (9.487798, 10.472947));
         let Primitive::TextBox {
             x,
@@ -4231,21 +4296,18 @@ mod tests {
         else {
             unreachable!()
         };
-        // The text box's own x/y/width/height stay in the shape's local, pre-transform frame;
-        // `transform` is the same composed outer/inner affine M documented above, and carries
-        // the local text box, its lines and its caret stops into scene coordinates.
         assert_point_close((*x, *y), (0.0, 0.0));
         assert_point_close((*width, *height), (1.0, 1.0));
-        assert_point_close((transform.a, transform.b), (-0.94190204, -1.1970047));
-        assert_point_close((transform.c, transform.d), (1.8844845, 0.27151108));
-        assert_point_close((transform.e, transform.f), (9.487798, 10.472947));
+        assert_point_close((transform.a, transform.b), (1.5075876, 0.21720883));
+        assert_point_close((transform.c, transform.d), (1.1773777, 1.4962559));
+        assert_point_close((transform.e, transform.f), (8.433663, 8.884547));
         assert_point_close(
             transform.apply_point(lines[0].x, lines[0].y),
-            (9.487798, 10.472947),
+            (8.433663, 8.884547),
         );
         assert_point_close(
             transform.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
-            (9.409306, 10.373197),
+            (8.559296, 8.902648),
         );
         let Primitive::Image {
             x,
@@ -4283,7 +4345,7 @@ mod tests {
         let z_orders = inner.iter().map(z_order).collect::<Vec<_>>();
         assert_eq!(z_orders, vec![2, 3, 4, 5]);
         assert_eq!(
-            hit_test(&list, 9.487798 * 96.0, (11.0 - 10.472947) * 96.0),
+            hit_test(&list, 8.433663 * 96.0, (11.0 - 8.884547) * 96.0),
             Some(HitTestResult::Text {
                 shape_id: "visio/pages/page1.xml:3".into(),
                 position: 0,
