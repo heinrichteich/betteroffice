@@ -106,3 +106,108 @@ test('tabs without commands render an honest empty state', () => {
   expect(view.queryByText(en.ribbon.empty)).toBeNull();
   view.unmount();
 });
+
+function cell(name: string, value: string) {
+  return { locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: value, value };
+}
+
+function richDiagram(shapes: Array<{ id: string; cells?: Array<ReturnType<typeof cell>> }>, calls: { reorder: unknown[][]; mutation: number }) {
+  return {
+    snapshot: () => ({ pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: shapes.map((shape) => ({ id: shape.id, sourceId: 1, name: shape.id, children: [], cells: shape.cells ?? [] })) }] }),
+    canUndo: () => true,
+    canRedo: () => true,
+    reorderShape: (...args: unknown[]) => { calls.reorder.push(args); return {}; },
+  } as unknown as DiagramHandle;
+}
+
+function selectionFor(shapeId: string) {
+  return { pageId: 'page', shapeId, hit: { kind: 'shape' as const, shapeId } };
+}
+
+function openArrange(view: ReturnType<typeof render>, toggleId: string) {
+  const toggle = view.container.querySelector(`[data-split-toggle="${toggleId}"]`) as HTMLElement;
+  expect(toggle.getAttribute('aria-haspopup')).toBe('menu');
+  fireEvent.click(toggle);
+  expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  return toggle;
+}
+
+test('opening a split menu moves focus to the first enabled item', () => {
+  const view = renderRibbon(stubDiagram(['one', 'two']), selectionFor('one'));
+  const toggle = openArrange(view, 'bringToFront');
+  const menu = view.getByRole('menu');
+  expect(menu).not.toBeNull();
+  const first = view.getByRole('menuitem', { name: en.ribbon.commands.bringToFront });
+  expect(document.activeElement).toBe(first);
+  expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  view.unmount();
+});
+
+test('opening a split menu focuses the checked item when one is checked', () => {
+  const calls = { reorder: [] as unknown[][], mutation: 0 };
+  const diagram = richDiagram([{ id: 'one', cells: [cell('FlipX', '1'), cell('FlipY', '0')] }], calls);
+  cleanup();
+  const view = render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selectionFor('one')} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} /></RibbonCommandsProvider>);
+  const toggle = view.container.querySelector('[data-split-toggle="rotateRight"]') as HTMLElement;
+  fireEvent.click(toggle);
+  const checked = view.getByRole('menuitemcheckbox', { name: en.ribbon.commands.flipHorizontal });
+  expect(checked.getAttribute('aria-checked')).toBe('true');
+  expect(document.activeElement).toBe(checked);
+  view.unmount();
+});
+
+test('arrow keys cycle and wrap while home and end jump', () => {
+  const view = renderRibbon(stubDiagram(['one', 'two']), selectionFor('one'));
+  openArrange(view, 'bringToFront');
+  const first = view.getByRole('menuitem', { name: en.ribbon.commands.bringToFront });
+  const second = view.getByRole('menuitem', { name: en.ribbon.commands.bringForward });
+  expect(document.activeElement).toBe(first);
+  fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' });
+  expect(document.activeElement).toBe(second);
+  fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' });
+  expect(document.activeElement).toBe(first);
+  fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowUp' });
+  expect(document.activeElement).toBe(second);
+  fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Home' });
+  expect(document.activeElement).toBe(first);
+  fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'End' });
+  expect(document.activeElement).toBe(second);
+  view.unmount();
+});
+
+test('escape closes the menu and returns focus to the trigger', () => {
+  const view = renderRibbon(stubDiagram(['one', 'two']), selectionFor('one'));
+  const toggle = openArrange(view, 'bringToFront');
+  expect(view.queryByRole('menu')).not.toBeNull();
+  fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' });
+  expect(view.queryByRole('menu')).toBeNull();
+  expect(document.activeElement).toBe(toggle);
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  view.unmount();
+});
+
+test('activating an item runs the command and returns focus to the trigger', () => {
+  const calls = { reorder: [] as unknown[][], mutation: 0 };
+  const diagram = richDiagram([{ id: 'one' }, { id: 'two' }], calls);
+  cleanup();
+  const view = render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selectionFor('one')} onMutation={() => { calls.mutation += 1; }} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} /></RibbonCommandsProvider>);
+  const toggle = view.container.querySelector('[data-split-toggle="bringToFront"]') as HTMLElement;
+  fireEvent.click(toggle);
+  const item = view.getByRole('menuitem', { name: en.ribbon.commands.bringToFront });
+  fireEvent.click(item);
+  expect(calls.reorder.length).toBe(1);
+  expect(calls.mutation).toBe(1);
+  expect(view.queryByRole('menu')).toBeNull();
+  expect(document.activeElement).toBe(toggle);
+  view.unmount();
+});
+
+test('tab closes the menu instead of trapping focus', () => {
+  const view = renderRibbon(stubDiagram(['one', 'two']), selectionFor('one'));
+  openArrange(view, 'bringToFront');
+  expect(view.queryByRole('menu')).not.toBeNull();
+  fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Tab' });
+  expect(view.queryByRole('menu')).toBeNull();
+  expect(view.container.querySelector('[role="menu"]')).toBeNull();
+  view.unmount();
+});

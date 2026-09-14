@@ -31,9 +31,10 @@ function RibbonRun({ label, children }: { label: string; children?: ReactNode })
 
 function Divider() { return <div role="separator" aria-orientation="vertical" style={styles.divider} />; }
 
-function SplitMenuItem({ id, icon, label, close }: { id: RibbonCommandId; icon: IconName; label: string; close: () => void }) {
+function SplitMenuItem({ id, icon, label, itemRef, onSelect }: { id: RibbonCommandId; icon: IconName; label: string; itemRef: (node: HTMLButtonElement | null) => void; onSelect: () => void }) {
   const command = useRibbonCommands()[id];
-  return <button type="button" role="menuitem" disabled={!command.enabled} aria-label={label} data-command-id={id} onMouseDown={(event) => event.preventDefault()} onClick={() => { command.run(); close(); }} onMouseOver={(event) => { if (command.enabled) event.currentTarget.style.backgroundColor = '#f5f5f5'; }} onMouseOut={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; }} style={{ ...styles.menuItem, color: command.enabled ? '#242424' : '#b4b4b4' }}><RibbonIcon name={icon} size={18} /><span>{label}</span></button>;
+  const checkable = command.active !== undefined;
+  return <button ref={itemRef} type="button" role={checkable ? 'menuitemcheckbox' : 'menuitem'} aria-checked={checkable ? command.active : undefined} disabled={!command.enabled} aria-label={label} data-command-id={id} tabIndex={-1} onMouseDown={(event) => event.preventDefault()} onClick={() => { command.run(); onSelect(); }} onMouseOver={(event) => { if (command.enabled) event.currentTarget.style.backgroundColor = '#f5f5f5'; }} onMouseOut={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; }} style={{ ...styles.menuItem, color: command.enabled ? '#242424' : '#b4b4b4' }}><RibbonIcon name={icon} size={18} /><span>{label}</span></button>;
 }
 
 function RibbonSplitButton({ defaultId, defaultIcon, entries, label }: { defaultId: RibbonCommandId; defaultIcon: IconName; entries: ReadonlyArray<{ id: RibbonCommandId; icon: IconName }>; label: (id: RibbonCommandId) => string }) {
@@ -41,11 +42,26 @@ function RibbonSplitButton({ defaultId, defaultIcon, entries, label }: { default
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const focusIntent = useRef<'first' | 'last' | null>(null);
   const [pos, setPos] = useState({ top: 0, left: 0 });
   const fallback = entries[0] ?? { id: defaultId, icon: defaultIcon };
   const current = commands[fallback.id];
   const anyEnabled = entries.some((entry) => commands[entry.id].enabled);
   const close = useCallback(() => setOpen(false), []);
+  const closeAndFocus = useCallback(() => { setOpen(false); triggerRef.current?.focus(); }, []);
+  const openMenu = useCallback((intent: 'first' | 'last') => { focusIntent.current = intent; setOpen(true); }, []);
+  const focusItem = useCallback((index: number) => { itemRefs.current[index]?.focus(); }, []);
+  const enabledIndices = entries.map((entry, index) => (commands[entry.id].enabled ? index : -1)).filter((index) => index >= 0);
+  const firstEnabled = enabledIndices[0] ?? -1;
+  const lastEnabled = enabledIndices[enabledIndices.length - 1] ?? -1;
+  const checkedEnabled = enabledIndices.find((index) => commands[entries[index].id].active === true) ?? -1;
+  const step = useCallback((from: number, delta: 1 | -1) => {
+    if (enabledIndices.length === 0) return -1;
+    const at = enabledIndices.indexOf(from);
+    if (at === -1) return delta === 1 ? (enabledIndices[0] ?? -1) : (enabledIndices[enabledIndices.length - 1] ?? -1);
+    return enabledIndices[(at + delta + enabledIndices.length) % enabledIndices.length] ?? -1;
+  }, [enabledIndices]);
   useEffect(() => {
     if (!open || !triggerRef.current) return;
     const rect = triggerRef.current.getBoundingClientRect();
@@ -53,11 +69,18 @@ function RibbonSplitButton({ defaultId, defaultIcon, entries, label }: { default
   }, [open]);
   useEffect(() => {
     if (!open) return;
+    const intent = focusIntent.current;
+    focusIntent.current = null;
+    const target = intent === 'last' ? lastEnabled : intent === 'first' ? (checkedEnabled >= 0 ? checkedEnabled : firstEnabled) : (checkedEnabled >= 0 ? checkedEnabled : firstEnabled);
+    if (target >= 0) focusItem(target);
+  }, [open, firstEnabled, lastEnabled, checkedEnabled, focusItem]);
+  useEffect(() => {
+    if (!open) return;
     function onOutside(event: MouseEvent) {
       const target = event.target as Node;
       if (triggerRef.current && !triggerRef.current.contains(target) && menuRef.current && !menuRef.current.contains(target)) close();
     }
-    function onEscape(event: globalThis.KeyboardEvent) { if (event.key === 'Escape') close(); }
+    function onEscape(event: globalThis.KeyboardEvent) { if (event.key === 'Escape') closeAndFocus(); }
     function onScroll() { close(); }
     document.addEventListener('mousedown', onOutside);
     document.addEventListener('keydown', onEscape);
@@ -67,14 +90,28 @@ function RibbonSplitButton({ defaultId, defaultIcon, entries, label }: { default
       document.removeEventListener('keydown', onEscape);
       window.removeEventListener('scroll', onScroll, true);
     };
-  }, [open, close]);
+  }, [open, close, closeAndFocus]);
+  function onTriggerKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+    if (event.key === 'ArrowDown') { event.preventDefault(); if (!open && anyEnabled) openMenu('first'); }
+    else if (event.key === 'ArrowUp') { event.preventDefault(); if (!open && anyEnabled) openMenu('last'); }
+  }
+  function onMenuKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Escape') { event.preventDefault(); closeAndFocus(); return; }
+    if (event.key === 'Tab') { close(); return; }
+    const active = document.activeElement;
+    const currentIndex = itemRefs.current.findIndex((node) => node === active);
+    if (event.key === 'ArrowDown') { event.preventDefault(); const next = step(currentIndex, 1); if (next >= 0) focusItem(next); }
+    else if (event.key === 'ArrowUp') { event.preventDefault(); const next = step(currentIndex, -1); if (next >= 0) focusItem(next); }
+    else if (event.key === 'Home') { event.preventDefault(); if (firstEnabled >= 0) focusItem(firstEnabled); }
+    else if (event.key === 'End') { event.preventDefault(); if (lastEnabled >= 0) focusItem(lastEnabled); }
+  }
   return (
     <span style={styles.split}>
       <button type="button" disabled={!current.enabled} aria-label={label(fallback.id)} data-command-id={fallback.id} onMouseDown={(event) => event.preventDefault()} onClick={() => current.run()} className="vsdx-cmd-btn vsdx-split-main" style={{ ...styles.splitMain, color: current.enabled ? '#242424' : '#b4b4b4', cursor: current.enabled ? 'pointer' : 'default' }}><RibbonIcon name={fallback.icon} size={20} /></button>
-      <button ref={triggerRef} type="button" disabled={!anyEnabled} aria-label={`${label(fallback.id)} options`} aria-haspopup="menu" aria-expanded={open} data-split-toggle={fallback.id} onMouseDown={(event) => event.preventDefault()} onClick={() => anyEnabled && setOpen((value) => !value)} className="vsdx-cmd-btn" style={{ ...styles.splitChevron, color: anyEnabled ? '#242424' : '#b4b4b4', background: open ? '#ebebeb' : 'transparent', cursor: anyEnabled ? 'pointer' : 'default' }}><svg width={10} height={10} viewBox="0 0 10 10" aria-hidden="true" focusable="false" style={{ display: 'block' }}><path d="m2 3.5 3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg></button>
+      <button ref={triggerRef} type="button" disabled={!anyEnabled} aria-label={`${label(fallback.id)} options`} aria-haspopup="menu" aria-expanded={open} data-split-toggle={fallback.id} onMouseDown={(event) => event.preventDefault()} onClick={() => { if (!anyEnabled) return; if (open) close(); else openMenu('first'); }} onKeyDown={onTriggerKeyDown} className="vsdx-cmd-btn" style={{ ...styles.splitChevron, color: anyEnabled ? '#242424' : '#b4b4b4', background: open ? '#ebebeb' : 'transparent', cursor: anyEnabled ? 'pointer' : 'default' }}><svg width={10} height={10} viewBox="0 0 10 10" aria-hidden="true" focusable="false" style={{ display: 'block' }}><path d="m2 3.5 3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg></button>
       {open && (
-        <div ref={menuRef} role="menu" aria-label={`${label(fallback.id)} options`} onMouseDown={(event) => event.preventDefault()} style={{ ...styles.menu, top: pos.top, left: pos.left }}>
-          {entries.map((entry) => <SplitMenuItem key={entry.id} id={entry.id} icon={entry.icon} label={label(entry.id)} close={close} />)}
+        <div ref={menuRef} role="menu" aria-label={`${label(fallback.id)} options`} onMouseDown={(event) => event.preventDefault()} onKeyDown={onMenuKeyDown} style={{ ...styles.menu, top: pos.top, left: pos.left }}>
+          {entries.map((entry, index) => <SplitMenuItem key={entry.id} id={entry.id} icon={entry.icon} label={label(entry.id)} itemRef={(node) => { itemRefs.current[index] = node; }} onSelect={closeAndFocus} />)}
         </div>
       )}
     </span>
