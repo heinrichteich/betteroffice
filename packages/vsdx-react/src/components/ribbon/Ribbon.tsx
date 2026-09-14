@@ -3,7 +3,7 @@ import type { CSSProperties, KeyboardEvent, ReactNode } from 'react';
 import type { TFunction } from '@betteroffice/vsdx-i18n';
 import { CommandMenu } from './CommandMenu';
 import { RibbonIcon } from './RibbonIcon';
-import { useRibbonCommands } from './commands';
+import { LINE_PATTERN_OPTIONS, parseLinePatternInput, parseLineWeightInput, useRibbonCommands } from './commands';
 import type { RibbonCommandId } from './commands';
 
 const tabs = ['file', 'home', 'insert', 'design', 'review', 'view', 'help'] as const;
@@ -18,12 +18,59 @@ function CommandButton({ id, icon, label }: { id: RibbonCommandId; icon: IconNam
 
 function ColorButton({ id, icon, label }: { id: RibbonCommandId; icon: IconName; label: string }) {
   const command = useRibbonCommands()[id];
-  return <label title={label} className="vsdx-cmd-btn" style={{ ...styles.button, color: command.enabled ? '#242424' : '#b4b4b4', cursor: command.enabled ? 'pointer' : 'default', position: 'relative' }}><RibbonIcon name={icon} size={20} /><span aria-hidden="true" style={{ position: 'absolute', bottom: 4, width: 16, height: 3, borderRadius: 1, background: command.value ?? '#000000' }} /><input type="color" value={command.value ?? '#000000'} disabled={!command.enabled} aria-label={label} data-command-id={id} onChange={(event) => command.run(event.target.value)} style={styles.colorInput} /></label>;
+  return <label title={label} className="vsdx-cmd-btn" style={{ ...styles.button, color: command.enabled ? '#242424' : '#b4b4b4', cursor: command.enabled ? 'pointer' : 'default', position: 'relative' }}><RibbonIcon name={icon} size={20} /><span aria-hidden="true" style={{ position: 'absolute', bottom: 4, width: 16, height: 3, borderRadius: 1, background: command.value ?? '#000000' }} /><input type="color" value={command.value ?? '#000000'} disabled={!command.enabled} aria-label={label} title={label} data-command-id={id} onChange={(event) => command.run(event.target.value)} style={styles.colorInput} /></label>;
 }
 
-function LineFormulaControl({ id, label, icon }: { id: 'lineWeight' | 'linePattern'; label: string; icon: IconName }) {
-  const command = useRibbonCommands()[id];
-  return <label title={label} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: command.enabled ? '#242424' : '#b4b4b4' }}><RibbonIcon name={icon} size={18} /><input key={command.value} aria-label={label} data-command-id={id} disabled={!command.enabled} defaultValue={command.value ?? ''} onBlur={(event) => { const next = event.currentTarget.value; if (next !== (command.value ?? '')) command.run(next); }} style={styles.formulaInput} /></label>;
+/** Validated weight field. Commits on blur or Enter, reverts on invalid blur. */
+function LineWeightControl({ label, icon }: { label: string; icon: IconName }) {
+  const command = useRibbonCommands()['lineWeight'];
+  const current = command.value ?? '';
+  const [draft, setDraft] = useState(current);
+  const [invalid, setInvalid] = useState(false);
+  useEffect(() => { setDraft(current); setInvalid(false); }, [current]);
+  const hint = `${label}: positive length, e.g. 0.018`;
+  const commit = (raw: string): boolean => {
+    if (raw.trim() === current) { setInvalid(false); return true; }
+    if (parseLineWeightInput(raw) === null) return false;
+    command.run(raw);
+    return true;
+  };
+  return <label title={invalid ? hint : label} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: command.enabled ? '#242424' : '#b4b4b4' }}><RibbonIcon name={icon} size={18} /><input
+    aria-label={label}
+    title={invalid ? hint : label}
+    data-command-id="lineWeight"
+    disabled={!command.enabled}
+    value={draft}
+    aria-invalid={invalid || undefined}
+    onChange={(event) => { setDraft(event.target.value); if (invalid) setInvalid(false); }}
+    onBlur={(event) => { if (!commit(event.currentTarget.value)) { setDraft(current); setInvalid(false); } }}
+    onKeyDown={(event) => {
+      if (event.key === 'Enter') { event.preventDefault(); if (!commit(event.currentTarget.value)) setInvalid(true); }
+      else if (event.key === 'Escape') { event.preventDefault(); setDraft(current); setInvalid(false); event.currentTarget.blur(); }
+    }}
+    style={invalid ? { ...styles.formulaInput, border: '1px solid #c42b1c', outline: '1px solid #c42b1c' } : styles.formulaInput}
+  /></label>;
+}
+
+/** Pattern picker. A select cannot hold an out-of-range value, so 999 is unreachable. */
+function LinePatternControl({ label, icon }: { label: string; icon: IconName }) {
+  const command = useRibbonCommands()['linePattern'];
+  const selected = parseLinePatternInput(command.value ?? '');
+  const custom = selected === null && command.enabled && command.value ? command.value : null;
+  const title = custom ? `${label}: ${custom}` : label;
+  return <label title={title} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: command.enabled ? '#242424' : '#b4b4b4' }}><RibbonIcon name={icon} size={18} /><select
+    aria-label={label}
+    title={title}
+    data-command-id="linePattern"
+    disabled={!command.enabled}
+    value={selected ?? ''}
+    onChange={(event) => { if (event.target.value !== '') command.run(event.target.value); }}
+    onKeyDown={(event) => { if (event.key === 'Escape') event.currentTarget.blur(); }}
+    style={styles.formulaInput}
+  >
+    {selected === null ? <option value="">{custom ? `Custom (${custom})` : '—'}</option> : null}
+    {LINE_PATTERN_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+  </select></label>;
 }
 
 function RibbonRun({ label, children }: { label: string; children?: ReactNode }) {
@@ -55,8 +102,8 @@ function RibbonSplitButton({ defaultId, defaultIcon, entries, label }: { default
   }
   return (
     <span style={styles.split}>
-      <button type="button" disabled={!current.enabled} aria-label={label(fallback.id)} data-command-id={fallback.id} onMouseDown={(event) => event.preventDefault()} onClick={() => current.run()} className="vsdx-cmd-btn vsdx-split-main" style={{ ...styles.splitMain, color: current.enabled ? '#242424' : '#b4b4b4', cursor: current.enabled ? 'pointer' : 'default' }}><RibbonIcon name={fallback.icon} size={20} /></button>
-      <button ref={triggerRef} type="button" disabled={!anyEnabled} aria-label={`${label(fallback.id)} options`} aria-haspopup="menu" aria-expanded={open} data-split-toggle={fallback.id} onMouseDown={(event) => event.preventDefault()} onClick={() => { if (!anyEnabled) return; if (open) close(); else openMenu('first'); }} onKeyDown={onTriggerKeyDown} className="vsdx-cmd-btn" style={{ ...styles.splitChevron, color: anyEnabled ? '#242424' : '#b4b4b4', background: open ? '#ebebeb' : 'transparent', cursor: anyEnabled ? 'pointer' : 'default' }}><svg width={10} height={10} viewBox="0 0 10 10" aria-hidden="true" focusable="false" style={{ display: 'block' }}><path d="m2 3.5 3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg></button>
+      <button type="button" disabled={!current.enabled} aria-label={label(fallback.id)} title={label(fallback.id)} data-command-id={fallback.id} onMouseDown={(event) => event.preventDefault()} onClick={() => current.run()} className="vsdx-cmd-btn vsdx-split-main" style={{ ...styles.splitMain, color: current.enabled ? '#242424' : '#b4b4b4', cursor: current.enabled ? 'pointer' : 'default' }}><RibbonIcon name={fallback.icon} size={20} /></button>
+      <button ref={triggerRef} type="button" disabled={!anyEnabled} aria-label={`${label(fallback.id)} options`} title={`${label(fallback.id)} options`} aria-haspopup="menu" aria-expanded={open} data-split-toggle={fallback.id} onMouseDown={(event) => event.preventDefault()} onClick={() => { if (!anyEnabled) return; if (open) close(); else openMenu('first'); }} onKeyDown={onTriggerKeyDown} className="vsdx-cmd-btn" style={{ ...styles.splitChevron, color: anyEnabled ? '#242424' : '#b4b4b4', background: open ? '#ebebeb' : 'transparent', cursor: anyEnabled ? 'pointer' : 'default' }}><svg width={10} height={10} viewBox="0 0 10 10" aria-hidden="true" focusable="false" style={{ display: 'block' }}><path d="m2 3.5 3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg></button>
       {open && (
         <CommandMenu menuLabel={`${label(fallback.id)} options`} entries={entries} position={pos} anchorRef={triggerRef} initialFocus={intent} label={label} onClose={close} onCloseAndFocus={closeAndFocus} />
       )}
@@ -75,7 +122,7 @@ function HomePanel({ t }: { t: TFunction }) {
     <Divider />
     <RibbonRun label={t('ribbon.groups.insert')}><CommandButton id="delete" icon="delete" label={label('delete')} /><CommandButton id="addShape" icon="add" label={label('addShape')} /></RibbonRun>
     <Divider />
-    <RibbonRun label={t('ribbon.groups.shape')}><ColorButton id="fillColor" icon="fill" label={label('fillColor')} /><ColorButton id="lineColor" icon="line" label={label('lineColor')} /><LineFormulaControl id="lineWeight" icon="weight" label={label('lineWeight')} /><LineFormulaControl id="linePattern" icon="pattern" label={label('linePattern')} /></RibbonRun>
+    <RibbonRun label={t('ribbon.groups.shape')}><ColorButton id="fillColor" icon="fill" label={label('fillColor')} /><ColorButton id="lineColor" icon="line" label={label('lineColor')} /><LineWeightControl icon="weight" label={label('lineWeight')} /><LinePatternControl icon="pattern" label={label('linePattern')} /></RibbonRun>
     <Divider />
     <RibbonRun label={t('ribbon.groups.arrange')}>
       <RibbonSplitButton defaultId="bringToFront" defaultIcon="front" label={label} entries={[{ id: 'bringToFront', icon: 'front' }, { id: 'bringForward', icon: 'forward' }, { id: 'sendBackward', icon: 'backward' }, { id: 'sendToBack', icon: 'back' }]} />

@@ -41,7 +41,11 @@ test('home surface is one flat row with no group-label text nodes', () => {
   expect(view.queryByText(en.ribbon.groups.paragraph)).toBeNull();
   expect(view.queryByText(en.ribbon.groups.history)).toBeNull();
   expect(view.queryByText(en.ribbon.groups.arrange)).toBeNull();
-  for (const group of panel.querySelectorAll('[role="group"]')) expect(group.textContent?.trim() ?? '').toBe('');
+  for (const group of panel.querySelectorAll('[role="group"]')) {
+    const clone = group.cloneNode(true) as HTMLElement;
+    clone.querySelectorAll('select').forEach((node) => node.remove());
+    expect(clone.textContent?.trim() ?? '').toBe('');
+  }
   expect(panel.querySelectorAll('[role="separator"]').length).toBeGreaterThan(0);
   view.unmount();
 });
@@ -74,7 +78,7 @@ test('every rendered command maps to a command id from commands.ts', () => {
   const rendered = view.container.querySelectorAll('[data-command-id]');
   expect(rendered.length).toBeGreaterThan(0);
   for (const node of rendered) expect(valid.has(node.getAttribute('data-command-id') ?? '')).toBe(true);
-  for (const node of view.container.querySelectorAll('button[aria-label], input[aria-label]')) {
+  for (const node of view.container.querySelectorAll('button[aria-label], input[aria-label], select[aria-label]')) {
     if (node.hasAttribute('data-split-toggle')) continue;
     const role = node.parentElement?.getAttribute('role');
     if (role === 'tab' || node.getAttribute('role') === 'tab') continue;
@@ -86,7 +90,7 @@ test('every rendered command maps to a command id from commands.ts', () => {
 test('disabled commands keep their labels and stay out of the tab order', () => {
   const view = renderRibbon(stubDiagram(), null);
   const panel = view.getByTestId('vsdx-ribbon-home-panel');
-  const disabled = [...panel.querySelectorAll('button[disabled], input[disabled]')];
+  const disabled = [...panel.querySelectorAll('button[disabled], input[disabled], select[disabled]')];
   expect(disabled.length).toBeGreaterThan(0);
   for (const node of disabled) {
     expect(node.getAttribute('aria-label') ?? '').not.toBe('');
@@ -199,6 +203,63 @@ test('activating an item runs the command and returns focus to the trigger', () 
   expect(calls.mutation).toBe(1);
   expect(view.queryByRole('menu')).toBeNull();
   expect(document.activeElement).toBe(toggle);
+  view.unmount();
+});
+
+test('every home control and split caret exposes a tooltip', () => {
+  const diagram = stubDiagram(['one']);
+  const view = renderRibbon(diagram, selectionFor('one'));
+  const panel = view.getByTestId('vsdx-ribbon-home-panel');
+  const controls = [...panel.querySelectorAll('[data-command-id]')] as HTMLElement[];
+  expect(controls.length).toBeGreaterThan(0);
+  for (const node of controls) expect(node.getAttribute('title') ?? '').not.toBe('');
+  for (const toggle of panel.querySelectorAll('[data-split-toggle]')) expect(toggle.getAttribute('title') ?? '').not.toBe('');
+  view.unmount();
+});
+
+test('line weight commits on Enter, flags invalid text, and reverts on invalid blur', () => {
+  const calls: string[] = [];
+  const diagram = {
+    snapshot: () => ({ pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: [{ id: 'one', sourceId: 1, name: 'one', children: [], cells: [cell('LineWeight', '0.01')] }] }] }),
+    canUndo: () => false,
+    canRedo: () => false,
+    setCellFormula: (...args: unknown[]) => { calls.push(String(args[3])); return {}; },
+  } as unknown as DiagramHandle;
+  cleanup();
+  const view = render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selectionFor('one')} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} /></RibbonCommandsProvider>);
+  const weight = view.container.querySelector('[data-command-id="lineWeight"]') as HTMLInputElement;
+  fireEvent.change(weight, { target: { value: '0.05' } });
+  fireEvent.keyDown(weight, { key: 'Enter' });
+  expect(calls).toEqual(['0.05']);
+  fireEvent.change(weight, { target: { value: '-5' } });
+  fireEvent.keyDown(weight, { key: 'Enter' });
+  expect(calls).toEqual(['0.05']);
+  expect(weight.getAttribute('aria-invalid')).toBe('true');
+  fireEvent.blur(weight);
+  expect(weight.value).toBe('0.01');
+  expect(weight.hasAttribute('aria-invalid')).toBe(false);
+  fireEvent.change(weight, { target: { value: 'abc' } });
+  fireEvent.blur(weight);
+  expect(calls).toEqual(['0.05']);
+  expect(weight.value).toBe('0.01');
+  view.unmount();
+});
+
+test('line pattern is a bounded picker that commits named options', () => {
+  const calls: string[] = [];
+  const diagram = {
+    snapshot: () => ({ pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: [{ id: 'one', sourceId: 1, name: 'one', children: [], cells: [cell('LinePattern', '1')] }] }] }),
+    canUndo: () => false,
+    canRedo: () => false,
+    setCellFormula: (...args: unknown[]) => { calls.push(String(args[3])); return {}; },
+  } as unknown as DiagramHandle;
+  cleanup();
+  const view = render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selectionFor('one')} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} /></RibbonCommandsProvider>);
+  const pattern = view.container.querySelector('[data-command-id="linePattern"]') as HTMLSelectElement;
+  expect(pattern.tagName).toBe('SELECT');
+  expect(pattern.value).toBe('1');
+  fireEvent.change(pattern, { target: { value: '4' } });
+  expect(calls).toEqual(['4']);
   view.unmount();
 });
 

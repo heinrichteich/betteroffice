@@ -19,7 +19,9 @@ pub fn paint(
         .map(|_| colour(package, references, shape, shape_id, "LineColor"))
         .transpose()?
         .map(|color| {
-            let width = number(shape, "LineWeight").unwrap_or(0.01) as f32;
+            let width = number(shape, "LineWeight")
+                .filter(|candidate| candidate.is_finite() && *candidate > 0.0)
+                .unwrap_or(0.01) as f32;
             if !width.is_finite() {
                 return Err::<Stroke, String>("non-finite stroke width".into());
             }

@@ -622,6 +622,41 @@ mod tests {
     }
 
     #[test]
+    fn identical_formula_rewrites_skip_the_undo_stack() {
+        let session = session();
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "PinX",
+            None,
+            None,
+            Some("3"),
+            Some("3"),
+        );
+        let receipt = session
+            .set_cell_formula(
+                &EditCtx::local("test"),
+                "page:1",
+                "page:1:shape:1",
+                "PinX",
+                "3",
+            )
+            .unwrap();
+        assert_eq!(receipt.before.as_deref(), Some("3"));
+        assert!(!session.can_undo());
+        session
+            .set_cell_formula(
+                &EditCtx::local("test"),
+                "page:1",
+                "page:1:shape:1",
+                "PinX",
+                "4",
+            )
+            .unwrap();
+        assert!(session.can_undo());
+    }
+
+    #[test]
     fn drafts_fail_atomically_for_invalid_or_duplicate_locators() {
         let session = session();
         let cell = CellSnapshot {

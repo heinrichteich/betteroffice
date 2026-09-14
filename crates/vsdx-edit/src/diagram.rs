@@ -609,6 +609,15 @@ impl DiagramSession {
         };
         let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
         let before = map_string(&cell, &txn, "formula");
+        if before.as_deref() == Some(formula.as_str()) {
+            return Ok(CellFormulaReceipt {
+                page_id: page_id.to_owned(),
+                shape_id: shape_id.to_owned(),
+                cell_name: target.cell_name,
+                before,
+                after: formula,
+            });
+        }
         cell.insert(&mut txn, "formula", formula.as_str());
         Ok(CellFormulaReceipt {
             page_id: page_id.to_owned(),
