@@ -39,11 +39,11 @@ use std::sync::Arc;
 
 use docx_layout::types::{
     BlockId, BorderStyle, BoxEdges, CellBorderSpec, CellBorders, ChartBlock, ColumnBreakBlock,
-    ColumnLayout, FieldRun, FloatingTablePosition, HyperlinkInfo, ImageRun, ImageRunPosition,
-    LayoutBlock, LineBreakRun, ListNumPr, PageBreakBlock, PageMargins, ParagraphAttrs,
-    ParagraphBlock, ParagraphBorders, ParagraphIndent, ParagraphSpacing, Run, RunFontSlots,
-    RunFormatting, RunLanguageSlots, SdtGroup, SectionBreakBlock, SectionBreakType, ShapeBlock,
-    Size, SpacingExplicit, TabRun, TabStop, TableBlock, TableCell, TableRow, TextRun,
+    ColumnLayout, FieldRun, FloatingTablePosition, HorizontalRule, HyperlinkInfo, ImageRun,
+    ImageRunPosition, LayoutBlock, LineBreakRun, ListNumPr, PageBreakBlock, PageMargins,
+    ParagraphAttrs, ParagraphBlock, ParagraphBorders, ParagraphIndent, ParagraphSpacing, Run,
+    RunFontSlots, RunFormatting, RunLanguageSlots, SdtGroup, SectionBreakBlock, SectionBreakType,
+    ShapeBlock, Size, SpacingExplicit, TabRun, TabStop, TableBlock, TableCell, TableRow, TextRun,
     UnderlineSpec,
 };
 use serde_json::{Map as JsonMap, Value};
@@ -78,6 +78,8 @@ pub struct RenderEnv {
     pub numeric_ids: BTreeMap<String, f64>,
     /// Include hidden text in visible layout without changing the document.
     pub show_hidden_text: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paragraph_spacing_line_px: Option<f64>,
 }
 
 impl RenderEnv {
@@ -483,6 +485,50 @@ fn lower_story<T: ReadTxn>(
                     paragraph_runs.push(RawRun {
                         kind: RawRunKind::Image(lower_image_run(&image, txn, &formatting, env)),
                         formatting,
+                        story_start: story_index,
+                        story_end: story_index + 1,
+                        pm_start: paragraph_pm_units,
+                        pm_end: paragraph_pm_units + 1,
+                        inline_sdt_widget: None,
+                    });
+                    story_index += 1;
+                    paragraph_pm_units += 1;
+                    at_block_boundary = false;
+                }
+                Out::YMap(rule)
+                    if shared_map_string(&rule, txn, "_kind").as_deref()
+                        == Some("horizontalRule") =>
+                {
+                    let Some(rule) = shared_any(&rule, txn, "rule")
+                        .filter(|value| {
+                            any_map(value).is_some_and(|map| {
+                                ["width", "widthPercent", "height"].iter().all(|key| {
+                                    !matches!(map.get(*key), Some(Any::Number(value)) if !value.is_finite())
+                                })
+                            })
+                        })
+                        .and_then(|value| any_json(&value))
+                        .and_then(|value| {
+                            serde_json::from_value::<docx_parse::vml::HorizontalRule>(value).ok()
+                        })
+                    else {
+                        return Err(BridgeError::UnsupportedEmbed {
+                            story: story_id.to_owned(),
+                            index: story_index,
+                        });
+                    };
+                    paragraph_runs.push(RawRun {
+                        kind: RawRunKind::HorizontalRule(HorizontalRule {
+                            width: rule.width.map(|width| width / 9_525.0),
+                            width_percent: rule.width_percent,
+                            height: rule.height / 9_525.0,
+                            alignment: rule.alignment,
+                            no_shade: rule.no_shade,
+                            color: rule.color,
+                            pm_start: 0.0,
+                            pm_end: 0.0,
+                        }),
+                        formatting: lower_run_formatting(attributes, env),
                         story_start: story_index,
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
@@ -1702,6 +1748,7 @@ enum RawRunKind {
     Text(String),
     Tab,
     Image(ImageRun),
+    HorizontalRule(HorizontalRule),
     LineBreak,
     Field {
         field_type: String,
@@ -1985,6 +2032,15 @@ fn flush_paragraph<T: ReadTxn>(
         }
     }
     let raw_runs = coalesce_runs(raw_runs);
+    let mut attrs = lower_paragraph_attrs(&values, pilcrow_attributes, env, list_state);
+    for raw in &raw_runs {
+        if let RawRunKind::HorizontalRule(rule) = &raw.kind {
+            let mut rule = rule.clone();
+            rule.pm_start = (paragraph_pm_start + 1 + u64::from(raw.pm_start)) as f64;
+            rule.pm_end = (paragraph_pm_start + 1 + u64::from(raw.pm_end)) as f64;
+            attrs.horizontal_rules.push(rule);
+        }
+    }
     let mut runs: Vec<Run> = raw_runs
         .into_iter()
         .map(|raw| raw_run_to_layout(raw, paragraph_pm_start))
@@ -1996,12 +2052,7 @@ fn flush_paragraph<T: ReadTxn>(
         id: BlockId::Str(para_id.clone()),
         para_id: (!para_id.is_empty() && !para_id_is_generated).then_some(para_id),
         runs,
-        attrs: Some(lower_paragraph_attrs(
-            &values,
-            pilcrow_attributes,
-            env,
-            list_state,
-        )),
+        attrs: Some(attrs),
         pm_start: Some(paragraph_pm_start as f64),
         pm_end: Some((paragraph_pm_start + u64::from(paragraph_pm_units) + 2) as f64),
     }
@@ -2194,6 +2245,13 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
     let pm_start = Some((paragraph_pm_start + 1 + u64::from(raw.pm_start)) as f64);
     let pm_end = Some((paragraph_pm_start + 1 + u64::from(raw.pm_end)) as f64);
     match raw.kind {
+        RawRunKind::HorizontalRule(_) => Run::Text(TextRun {
+            fmt: raw.formatting,
+            text: "\u{200b}".to_owned(),
+            pm_start,
+            pm_end,
+            inline_sdt_widget: raw.inline_sdt_widget,
+        }),
         RawRunKind::Text(text) => Run::Text(TextRun {
             fmt: raw.formatting,
             text,
@@ -2727,7 +2785,7 @@ fn lower_paragraph_attrs(
         style_id: paragraph_style_id(values),
         ..ParagraphAttrs::default()
     };
-    lower_paragraph_spacing(values, &mut result);
+    lower_paragraph_spacing(values, &mut result, env.paragraph_spacing_line_px);
     lower_paragraph_indent(values, &mut result);
     lower_paragraph_tabs(values, &mut result);
 
@@ -2881,11 +2939,34 @@ fn lower_paragraph_border(
     })
 }
 
-fn lower_paragraph_spacing(values: &BTreeMap<String, Any>, result: &mut ParagraphAttrs) {
+fn lower_paragraph_spacing(
+    values: &BTreeMap<String, Any>,
+    result: &mut ParagraphAttrs,
+    line_px: Option<f64>,
+) {
+    let line_px = line_px
+        .filter(|line| line.is_finite() && *line > 0.0)
+        .unwrap_or(16.0);
     let spacing_map = values.get("spacing").and_then(any_map);
     let original = values.get("_originalFormatting").and_then(any_map);
-    let auto_before = original.and_then(|map| map_bool(map, "beforeAutospacing")) == Some(true);
-    let auto_after = original.and_then(|map| map_bool(map, "afterAutospacing")) == Some(true);
+    let auto_before = values
+        .get("beforeAutospacing")
+        .and_then(any_bool)
+        .or_else(|| original.and_then(|map| map_bool(map, "beforeAutospacing")))
+        == Some(true);
+    let auto_after = values
+        .get("afterAutospacing")
+        .and_then(any_bool)
+        .or_else(|| original.and_then(|map| map_bool(map, "afterAutospacing")))
+        == Some(true);
+    let before_lines = (!auto_before)
+        .then(|| value_number(values.get("spaceBeforeLines")))
+        .flatten()
+        .filter(|value| value.is_finite() && *value > 0.0);
+    let after_lines = (!auto_after)
+        .then(|| value_number(values.get("spaceAfterLines")))
+        .flatten()
+        .filter(|value| value.is_finite() && *value > 0.0);
     let before = value_number(values.get("spaceBefore"))
         .or_else(|| spacing_map.and_then(|map| map_number(map, "before")));
     let after = value_number(values.get("spaceAfter"))
@@ -2895,17 +2976,30 @@ fn lower_paragraph_spacing(values: &BTreeMap<String, Any>, result: &mut Paragrap
     let line_rule = value_string(values.get("lineSpacingRule"))
         .or_else(|| spacing_map.and_then(|map| map_string(map, "lineRule")));
 
-    if auto_before || auto_after || before.is_some() || after.is_some() || line.is_some() {
+    if auto_before
+        || auto_after
+        || before.is_some()
+        || after.is_some()
+        || line.is_some()
+        || before_lines.is_some()
+        || after_lines.is_some()
+    {
         let mut spacing = ParagraphSpacing {
+            before_lines,
+            after_lines,
             before: if auto_before {
                 Some(AUTO_PARAGRAPH_SPACING_PX)
             } else {
-                before.map(twips_to_pixels)
+                before_lines
+                    .map(|lines| lines * line_px / 100.0)
+                    .or_else(|| before.map(twips_to_pixels))
             },
             after: if auto_after {
                 Some(AUTO_PARAGRAPH_SPACING_PX)
             } else {
-                after.map(twips_to_pixels)
+                after_lines
+                    .map(|lines| lines * line_px / 100.0)
+                    .or_else(|| after.map(twips_to_pixels))
             },
             ..ParagraphSpacing::default()
         };
@@ -3461,6 +3555,64 @@ mod tests {
                 .map(|(key, value)| (key.to_owned(), value))
                 .collect::<HashMap<_, _>>(),
         ))
+    }
+
+    #[test]
+    fn horizontal_rule_payloads_reject_invalid_values_and_recover_positions() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/horizontal_rule_payloads.json"
+        ))
+        .unwrap();
+        let valid = Any::from_json(&cases[0]["payload"]["rule"].to_string()).unwrap();
+        for case in cases {
+            let doc = EditingDoc::new(7);
+            doc.create_story("body", "AB", "Normal", "left").unwrap();
+            let payload = case["payload"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key.clone(), Any::from_json(&value.to_string()).unwrap()))
+                .collect();
+            doc.apply_raw_ops(
+                "body",
+                vec![RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "horizontalRule".to_owned(),
+                    payload,
+                    attrs: Attrs::new(),
+                }],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+            let lowered = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default());
+            if case["valid"] == true {
+                assert!(lowered.is_ok(), "{}: {lowered:?}", case["name"]);
+            } else {
+                assert!(
+                    matches!(lowered, Err(BridgeError::UnsupportedEmbed { story, index: 1 }) if story == "body"),
+                    "{}",
+                    case["name"]
+                );
+                doc.set_embed_attrs(
+                    &EditCtx::local("", DATE),
+                    Position::new("body", 1),
+                    vec![("rule".to_owned(), valid.clone())],
+                )
+                .unwrap();
+            }
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!()
+            };
+            let rules = &paragraph.attrs.as_ref().unwrap().horizontal_rules;
+            assert_eq!(rules.len(), 1);
+            assert_eq!((rules[0].pm_start, rules[0].pm_end), (2.0, 3.0));
+            let Run::Text(tail) = paragraph.runs.last().unwrap() else {
+                panic!()
+            };
+            assert_eq!(tail.text, "B");
+            assert_eq!((tail.pm_start, tail.pm_end), (Some(3.0), Some(4.0)));
+        }
     }
 
     #[test]

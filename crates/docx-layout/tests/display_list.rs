@@ -1899,6 +1899,67 @@ fn table_cell_content_insets_border_and_honors_valign() {
 }
 
 #[test]
+fn nested_floating_table_offsets_are_relative_to_the_cell_content() {
+    use serde_json::json;
+
+    for (floating, expected_x) in [
+        (json!({ "horzAnchor": "margin", "tblpX": 28.0 }), 85.0),
+        (json!({ "horzAnchor": "text", "tblpX": 20.0 }), 77.0),
+        (json!({ "tblpX": 0.0 }), 57.0),
+        (json!({ "horzAnchor": "text", "tblpX": -5.0 }), 52.0),
+        (json!({ "tblpXSpec": "left", "tblpX": 30.0 }), 57.0),
+        (json!({ "tblpXSpec": "center", "tblpX": 30.0 }), 110.0),
+        (json!({ "tblpXSpec": "right" }), 163.0),
+        (json!({ "horzAnchor": "page", "tblpXSpec": "center" }), 67.0),
+        (json!({ "tblpXSpec": "inside" }), 67.0),
+        (json!({ "tblpXSpec": "outside" }), 67.0),
+        (serde_json::Value::Null, 67.0),
+    ] {
+        let nested_measure = json!({ "kind": "table", "columnWidths": [80.0], "totalHeight": 40.0,
+            "rows": [{ "height": 40.0, "cells": [{ "width": 80.0, "height": 20.0,
+                "blocks": [{ "kind": "paragraph", "totalHeight": 20.0,
+                    "lines": [{ "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 4,
+                        "width": 24.0, "ascent": 12.0, "descent": 4.0, "lineHeight": 20.0 }]
+                }]
+            }] }]
+        });
+        let input = json!({
+            "measured": [{
+                "block": { "kind": "table", "id": 7, "rows": [{ "cells": [{
+                    "padding": { "left": 7.0, "right": 7.0 },
+                    "blocks": [{ "kind": "table", "id": 8, "indent": 10.0,
+                        "floating": floating, "rows": [{ "cells": [{
+                            "padding": { "left": 0.0, "right": 0.0 },
+                            "blocks": [{ "kind": "paragraph", "id": 80,
+                                "runs": [{ "kind": "text", "text": "logo" }] }]
+                        }] }]
+                    }]
+                }] }] },
+                "measure": { "kind": "table", "columnWidths": [200.0], "totalHeight": 60.0,
+                    "rows": [{ "height": 60.0, "cells": [{ "width": 200.0, "height": 40.0,
+                        "blocks": [nested_measure]
+                    }] }]
+                }
+            }],
+            "options": {},
+            "layout": { "pages": [{ "size": { "w": 400.0, "h": 200.0 }, "margins": {},
+                "fragments": [{ "kind": "table", "blockId": 7, "x": 50.0, "y": 50.0,
+                    "width": 200.0, "height": 60.0, "rowStart": 0, "rowEnd": 1 }]
+            }] }
+        });
+
+        let dl = build_dl(&input.to_string());
+        let text = text_prims(&dl.pages[0].primitives);
+        let logo = text.iter().find(|primitive| primitive.0 == "logo").unwrap();
+        assert!(
+            (logo.1 - expected_x).abs() < 0.01,
+            "logo x {} != {expected_x}",
+            logo.1
+        );
+    }
+}
+
+#[test]
 fn carried_table_borders_preserve_cell_content_across_slices() {
     use serde_json::json;
 
