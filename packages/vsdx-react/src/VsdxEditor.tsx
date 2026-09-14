@@ -208,6 +208,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const surfaceWidth = frame.width * zoom + SURFACE_PAD * 2;
     const surfaceHeight = frame.height * zoom + SURFACE_PAD * 2;
     const effective = sizeCanvasForSurface(canvas, surfaceWidth, surfaceHeight, window.devicePixelRatio || 1);
+    context.setTransform(1, 0, 0, 1, 0, 0);
     context.clearRect(0, 0, canvas.width, canvas.height);
     const snapshot = model.snapshot;
     const page = snapshot?.pages[model.pageIndex];
@@ -310,6 +311,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const context = overlay.getContext('2d'); if (!context) return;
     const currentSelection = selectionRef.current;
     const page = current.snapshot?.pages[current.pageIndex];
+    context.setTransform(1, 0, 0, 1, 0, 0);
     context.clearRect(0, 0, overlay.width, overlay.height);
     if (currentSelection && page) {
       try {
@@ -448,6 +450,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         const context = overlay.getContext('2d'); if (!context) return;
         try {
           const corners = previewOutline(liveStart, release, liveFrame.paintTransform, snap);
+          context.setTransform(1, 0, 0, 1, 0, 0);
           context.clearRect(0, 0, overlay.width, overlay.height);
           const previewDpr = surfaceDpr(liveFrame, zoomRef.current);
           paintDragPreview(context, corners, previewDpr, zoomRef.current, SURFACE_ORIGIN);

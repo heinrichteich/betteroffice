@@ -841,6 +841,93 @@ test('the overlay paints the selection frame at a zoom other than 1', async () =
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
+test('the drawable canvas covers the surface and page breaks tile it', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 4, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    await act(async () => { ready!.refresh(); });
+    const canvases = view.container.querySelectorAll('canvas');
+    const main = canvases[0] as HTMLCanvasElement;
+    const overlay = canvases[1] as HTMLCanvasElement;
+    expect(main.style.width).toBe('4960px');
+    expect(main.style.height).toBe('4720px');
+    expect(overlay.style.width).toBe('4960px');
+    expect(overlay.style.height).toBe('4720px');
+    expect(view.container.querySelector('[data-testid="vsdx-page-breaks"]')).toBeNull();
+    const { fireEvent } = await import('@testing-library/react');
+    fireEvent.click(view.getByRole('tab', { name: 'View' }));
+    fireEvent.click(view.getByTestId('vsdx-view-page-breaks'));
+    const grid = view.container.querySelector('[data-testid="vsdx-page-breaks"]');
+    expect(grid).not.toBeNull();
+    const lines = Array.from(grid!.children) as HTMLElement[];
+    const vertical = lines.filter((line) => line.style.top === '0px').map((line) => Number.parseFloat(line.style.left)).sort((a, b) => a - b);
+    const horizontal = lines.filter((line) => line.style.left === '0px').map((line) => Number.parseFloat(line.style.top)).sort((a, b) => a - b);
+    expect(vertical.length).toBeGreaterThan(2);
+    expect(horizontal.length).toBeGreaterThan(2);
+    expect(vertical).toContain(2000);
+    expect(vertical).toContain(2960);
+    expect(horizontal).toContain(2000);
+    expect(horizontal).toContain(2720);
+    for (let i = 1; i < vertical.length; i += 1) expect(vertical[i] - vertical[i - 1]).toBeCloseTo(960, 8);
+    for (let i = 1; i < horizontal.length; i += 1) expect(horizontal[i] - horizontal[i - 1]).toBeCloseTo(720, 8);
+    fireEvent.click(view.getByRole('button', { name: 'Zoom in' }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
+    expect(main.style.width).toBe('5440px');
+    expect(main.style.height).toBe('5080px');
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
+test('a shape dragged beyond the page stays selectable and movable', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 4, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
+    await act(async () => { ready!.refresh(); });
+    const { selectionCorners } = await import('./VsdxEditor');
+    const canvases = view.container.querySelectorAll('canvas');
+    const main = canvases[0] as HTMLCanvasElement;
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    (main as unknown as { releasePointerCapture: (id: number) => void }).releasePointerCapture = () => {};
+    (main as unknown as { hasPointerCapture: (id: number) => boolean }).hasPointerCapture = () => false;
+    const { fireEvent } = await import('@testing-library/react');
+    fireEvent.pointerDown(main, { pointerId: 1, clientX: 480, clientY: 360 });
+    await act(async () => {});
+    fireEvent.pointerUp(main, { pointerId: 1, clientX: 480, clientY: 360 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(main.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
+    fireEvent.pointerDown(main, { pointerId: 2, clientX: 480, clientY: 360 });
+    await act(async () => {});
+    fireEvent.pointerMove(main, { pointerId: 2, clientX: -2000, clientY: 360 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    fireEvent.pointerUp(main, { pointerId: 2, clientX: -2000, clientY: 360 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    const page = handle.snapshot().pages[0];
+    const moved = page.shapes.find((shape) => shape.id === 'page:1:shape:20');
+    expect(Number(moved?.cells.find((cell) => cell.name === 'PinX')?.value)).toBeLessThan(0);
+    expect(main.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
+    const corners = selectionCorners(page, fakeFrame as never, { pageId: page.id, shapeId: 'page:1:shape:20', hit: { kind: 'shape', shapeId: 'page:1:shape:20' } });
+    expect(corners).not.toBeNull();
+    expect(Math.min(...corners!.map((corner) => corner.x))).toBeLessThan(0);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
 test('a refused handle resize rolls the pin move back', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;

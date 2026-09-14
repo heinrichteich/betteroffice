@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { VsdxDocument, VsdxRenderer } from './generated/vsdx_wasm.js';
-import { initWasm, openDiagram } from '../index';
+import { initWasm, modelPointToCanvas, openDiagram } from '../index';
 import type { FormulaShapeDraft } from '../types';
 
 const root = resolve(import.meta.dir, '../../../..');
@@ -218,6 +218,31 @@ describe('VSDX wasm boundary', () => {
     await Promise.all(Object.keys(original.files).filter(path => path !== editedPart).map(async path => {
       expect(await result.file(path)!.async('uint8array')).toEqual(await original.file(path)!.async('uint8array'));
     }));
+  });
+
+  test('persists a shape moved outside the page through save and reopen', () => {
+    const diagram = openDiagram(demo, { clientId: 9052 });
+    const page = diagram.snapshot().pages[0];
+    const frame = diagram.layoutPage(0);
+    let hit = null as ReturnType<typeof diagram.hitTest>;
+    for (let y = 12; y < frame.height && !hit; y += 24) for (let x = 12; x < frame.width && !hit; x += 24) hit = diagram.hitTest(x, y);
+    expect(hit).not.toBeNull();
+    diagram.moveShape(page.id, hit!.shapeId, '-2', '-1');
+    const moved = diagram.layoutPage(0);
+    const outside = modelPointToCanvas(moved.paintTransform, -2, -1);
+    expect(diagram.hitTest(outside.x, outside.y)?.shapeId).toBe(hit!.shapeId);
+    const saved = diagram.save();
+    diagram.dispose();
+
+    const reopened = openDiagram(saved, { clientId: 9053 });
+    try {
+      const shape = reopened.snapshot().pages[0].shapes.find(entry => entry.id === hit!.shapeId);
+      expect(shape?.cells.find(cell => cell.name === 'PinX')?.formula).toBe('-2');
+      expect(shape?.cells.find(cell => cell.name === 'PinY')?.formula).toBe('-1');
+      const next = reopened.layoutPage(0);
+      const position = modelPointToCanvas(next.paintTransform, -2, -1);
+      expect(reopened.hitTest(position.x, position.y)?.shapeId).toBe(hit!.shapeId);
+    } finally { reopened.dispose(); }
   });
 
   test('persists an added shape through the public WASM boundary', async () => {
