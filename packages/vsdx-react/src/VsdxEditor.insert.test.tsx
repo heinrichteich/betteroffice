@@ -126,7 +126,8 @@ test('keeps a separate insert cascade for each page', async () => {
   const rectangle = view.getByRole('button', { name: 'Rectangle' });
   const visited = pins(handle, 1).length;
   const insertOn = async (pageName: string) => {
-    await act(async () => { fireEvent.click(view.getByRole('tab', { name: pageName })); });
+    const tab = await view.findByRole('tab', { name: pageName });
+    await act(async () => { fireEvent.click(tab); });
     await act(async () => { fireEvent.click(rectangle); });
   };
   await insertOn('Product map');
