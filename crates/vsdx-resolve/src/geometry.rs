@@ -731,9 +731,6 @@ fn cubic_arc_segment(
 
 #[cfg(test)]
 mod tests {
-    /// A `Close` row is standard Visio geometry and every shape the editor inserts ends with one.
-    /// Without an arm it fell through to `UnsupportedRowType`, so the path never closed: the stroke
-    /// pass left it open and the shape rendered a side short.
     #[test]
     fn close_row_emits_a_close_command_and_is_not_an_issue() {
         let keyed = |key: &str, ty: &str, cells: Vec<Cell>| {
