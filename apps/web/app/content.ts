@@ -67,7 +67,7 @@ export const EDITORS = [
   {
     name: "Diagrams",
     format: "vsdx",
-    desc: "VSDX editor with a tabbed ribbon, a standard-shape gallery, a page tab strip and a zoom status bar, for moving, Shift-drag resizing, adding and deleting shapes, setting fill and line colour, and saving diagrams. No resize-handle or connector-drag UI.",
+    desc: "VSDX editor with a tabbed ribbon, a standard-shape gallery, a page tab strip and a zoom status bar, for moving, Shift-drag resizing, adding and deleting shapes, setting fill and line colour, and saving diagrams. It opens Visio drawings and templates. No resize-handle or connector-drag UI.",
     status: "source preview",
   },
 ];
@@ -107,7 +107,7 @@ export const PACKAGES = [
   {
     name: "@betteroffice/vsdx",
     sourceOnly: true,
-    desc: "VSDX core — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, saving, and collaboration. addConnector adds a 1D connector glued to two shapes at their pins or existing connection points.",
+    desc: "VSDX core — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, saving, and collaboration on Visio drawings and templates. addConnector adds a 1D connector glued to two shapes at their pins or existing connection points.",
   },
   {
     name: "@betteroffice/vsdx-react",
