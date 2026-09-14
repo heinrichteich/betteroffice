@@ -51,6 +51,13 @@ DOCX layout omits hidden content by default. Set `showHiddenText: true` in `YrsR
 
 The browser React editor renders supported bitmap-only WMF wrappers. Custom browser image loaders can use `presentationImageBlob(bytes)` from `@betteroffice/pptx` for the same limited WMF support.
 
+### Diagrams — `.vsdx`
+
+| package | registry | what it does |
+|---|---|---|
+| `@betteroffice/vsdx` | source (`packages/vsdx`) | framework-free .vsdx diagram core — parsing, transactional editing with glued connectors, and rendering in Rust through WebAssembly |
+| `@betteroffice/vsdx-react` | source (`packages/vsdx-react`) | drop-in React .vsdx editor with orthogonal connector-routing UI that glues to shapes and follows them on move |
+
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
 [crates.io](https://docs.betteroffice.dev/docs/rust),

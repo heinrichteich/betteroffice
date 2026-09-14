@@ -43,7 +43,14 @@ function HomePanel({ t }: { t: TFunction }) {
 
 function Divider() { return <div role="separator" style={styles.divider} />; }
 
-export function Ribbon({ t }: { t: TFunction }) {
+export interface RibbonConnectorToggle { active: boolean; disabled: boolean; onToggle: () => void; }
+
+function ConnectorToggle({ t, connector }: { t: TFunction; connector: RibbonConnectorToggle }) {
+  const label = `${t('ribbon.commands.connector')} (Alt+3)`;
+  return <button type="button" disabled={connector.disabled} aria-label={label} aria-pressed={connector.active} title={label} onMouseDown={(event) => event.preventDefault()} onClick={() => connector.onToggle()} style={{ ...styles.button, color: connector.disabled ? '#9aa5b4' : '#27364a', background: connector.active ? '#dbeafe' : 'transparent', cursor: connector.disabled ? 'default' : 'pointer' }}><RibbonIcon name="connector" /></button>;
+}
+
+export function Ribbon({ t, connector }: { t: TFunction; connector?: RibbonConnectorToggle }) {
   const [active, setActive] = useState<RibbonTab>('home');
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const select = (next: RibbonTab) => setActive(next);
@@ -58,7 +65,7 @@ export function Ribbon({ t }: { t: TFunction }) {
   };
   return <section aria-label={t('ribbon.label')} style={styles.root}>
     <div role="tablist" aria-label={t('ribbon.tabsLabel')} style={styles.tabs}>{tabs.map((tab, index) => <button ref={(node) => { tabRefs.current[index] = node; }} key={tab} id={`vsdx-ribbon-tab-${tab}`} type="button" role="tab" aria-selected={active === tab} aria-controls={`vsdx-ribbon-panel-${tab}`} tabIndex={active === tab ? 0 : -1} onClick={() => select(tab)} onKeyDown={(event) => onKeyDown(event, index)} style={{ ...styles.tab, borderBottomColor: active === tab ? '#2563eb' : 'transparent', color: active === tab ? '#174ea6' : '#425466' }}>{t(`ribbon.tabs.${tab}`)}</button>)}</div>
-    <div id={`vsdx-ribbon-panel-${active}`} role="tabpanel" aria-labelledby={`vsdx-ribbon-tab-${active}`} style={styles.panel}>{active === 'home' ? <HomePanel t={t} /> : active === 'file' ? <div style={styles.surface}><RibbonGroup label={t('ribbon.groups.file')}><CommandButton id="download" icon="download" label={t('ribbon.commands.download')} /></RibbonGroup></div> : <div style={styles.surface} />}</div>
+    <div id={`vsdx-ribbon-panel-${active}`} role="tabpanel" aria-labelledby={`vsdx-ribbon-tab-${active}`} style={styles.panel}>{active === 'home' ? <HomePanel t={t} /> : active === 'file' ? <div style={styles.surface}><RibbonGroup label={t('ribbon.groups.file')}><CommandButton id="download" icon="download" label={t('ribbon.commands.download')} /></RibbonGroup></div> : active === 'insert' ? <div style={styles.surface}>{connector ? <RibbonGroup label={t('ribbon.groups.connector')}><ConnectorToggle t={t} connector={connector} /></RibbonGroup> : null}</div> : <div style={styles.surface} />}</div>
   </section>;
 }
 

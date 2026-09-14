@@ -31,6 +31,14 @@ test('encodes the rectangle geometry cell by cell', () => {
     { locator: { section: 'Geometry', rowIndex: 3, rowType: 'LineTo', cellName: 'X' }, name: 'X', formula: 'Width*0' },
     { locator: { section: 'Geometry', rowIndex: 3, rowType: 'LineTo', cellName: 'Y' }, name: 'Y', formula: 'Height*1' },
     { locator: { section: 'Geometry', rowIndex: 4, rowType: 'Close', cellName: 'NoShow' }, name: 'NoShow', formula: '0' },
+    { locator: { section: 'Connection', rowIndex: 0, rowType: 'Connection', cellName: 'X' }, name: 'X', formula: 'Width*0.5' },
+    { locator: { section: 'Connection', rowIndex: 0, rowType: 'Connection', cellName: 'Y' }, name: 'Y', formula: 'Height*1' },
+    { locator: { section: 'Connection', rowIndex: 1, rowType: 'Connection', cellName: 'X' }, name: 'X', formula: 'Width*1' },
+    { locator: { section: 'Connection', rowIndex: 1, rowType: 'Connection', cellName: 'Y' }, name: 'Y', formula: 'Height*0.5' },
+    { locator: { section: 'Connection', rowIndex: 2, rowType: 'Connection', cellName: 'X' }, name: 'X', formula: 'Width*0.5' },
+    { locator: { section: 'Connection', rowIndex: 2, rowType: 'Connection', cellName: 'Y' }, name: 'Y', formula: 'Height*0' },
+    { locator: { section: 'Connection', rowIndex: 3, rowType: 'Connection', cellName: 'X' }, name: 'X', formula: 'Width*0' },
+    { locator: { section: 'Connection', rowIndex: 3, rowType: 'Connection', cellName: 'Y' }, name: 'Y', formula: 'Height*0.5' },
   ]);
 });
 
@@ -42,6 +50,14 @@ test('encodes the computed hexagon cell by cell', () => {
   expect(geometry('hexagon').slice(6)).toEqual([
     ...expected,
     { locator: { section: 'Geometry', rowIndex: 6, rowType: 'Close', cellName: 'NoShow' }, name: 'NoShow', formula: '0' },
+    { locator: { section: 'Connection', rowIndex: 0, rowType: 'Connection', cellName: 'X' }, name: 'X', formula: 'Width*0.5' },
+    { locator: { section: 'Connection', rowIndex: 0, rowType: 'Connection', cellName: 'Y' }, name: 'Y', formula: 'Height*1' },
+    { locator: { section: 'Connection', rowIndex: 1, rowType: 'Connection', cellName: 'X' }, name: 'X', formula: 'Width*1' },
+    { locator: { section: 'Connection', rowIndex: 1, rowType: 'Connection', cellName: 'Y' }, name: 'Y', formula: 'Height*0.5' },
+    { locator: { section: 'Connection', rowIndex: 2, rowType: 'Connection', cellName: 'X' }, name: 'X', formula: 'Width*0.5' },
+    { locator: { section: 'Connection', rowIndex: 2, rowType: 'Connection', cellName: 'Y' }, name: 'Y', formula: 'Height*0' },
+    { locator: { section: 'Connection', rowIndex: 3, rowType: 'Connection', cellName: 'X' }, name: 'X', formula: 'Width*0' },
+    { locator: { section: 'Connection', rowIndex: 3, rowType: 'Connection', cellName: 'Y' }, name: 'Y', formula: 'Height*0.5' },
   ]);
 });
 

@@ -1,9 +1,11 @@
 import { createT, deepMerge, diagnosticMessage, en } from '@betteroffice/vsdx-i18n';
 import type { Translations } from '@betteroffice/vsdx-i18n';
 import { canvasPointToModel, initWasm, openDiagram, paintPage, sizeCanvasForPage } from '@betteroffice/vsdx';
-import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
+import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent, ReactNode } from 'react';
+import { connectionPointsForShape, connectorDraft, connectorEndpointGlue, connectorGlue, connectorRouteFromFrame, dropTargetForPoint, isConnectorShape, nearestConnectionPointAnywhere, paintConnectorOverlay, reroutePreviewForMove, routeConnector } from './connector';
+import type { ConnectionPoint, ConnectorOverlayRoute, ConnectorOverlayScene } from './connector';
 import { Ribbon } from './components/ribbon/Ribbon';
 import { RibbonCommandsProvider, findShapePlacement, numericCellValue } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
@@ -70,6 +72,16 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
   const pointerRef = useRef<DragStart | null>(null);
+  const [connectorMode, setConnectorMode] = useState(false);
+  const connectorModeRef = useRef(connectorMode);
+  connectorModeRef.current = connectorMode;
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const hoverShapeRef = useRef<string | null>(null);
+  const connectorDragRef = useRef<{ pageId: string; from: { shapeId: string; point: ConnectionPoint }; current: ModelPoint; snap: { shapeId: string; point: ConnectionPoint } | null } | null>(null);
+  const reroutePreviewRef = useRef<ReadonlyArray<readonly ModelPoint[]>>([]);
   const [loading, setLoading] = useState(Boolean(file));
   onReadyRef.current = onReady;
   onChangeRef.current = onChange;
@@ -95,6 +107,78 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       setSelection((existing) => existing && stillSelectable(current, pageIndex, existing) ? existing : null);
     } catch (value) { reportError(value); }
   }, [reportError]);
+
+  const paintOverlayNow = useCallback(() => {
+    const canvas = overlayCanvasRef.current;
+    const current = modelRef.current;
+    const frame = current.frame;
+    const snapshot = current.snapshot;
+    if (!canvas || !frame || !snapshot) return;
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    const page = snapshot.pages[current.pageIndex];
+    if (!page) return;
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    const selection = selectionRef.current;
+    const connectors: ConnectorOverlayRoute[] = [];
+    for (const shape of flattenEditorShapes(page.shapes)) {
+      if (!isConnectorShape(shape)) continue;
+      const route = connectorRouteFromFrame(frame, page.sourcePartPath, shape.sourceId);
+      if (!route) continue;
+      const [beginGlue, endGlue] = connectorEndpointGlue(route, page.shapes);
+      connectors.push({ route, selected: selection?.shapeId === shape.id, beginGlue, endGlue });
+    }
+    let hoverPoints: ConnectionPoint[] = [];
+    if (connectorModeRef.current && hoverShapeRef.current) {
+      const placement = findShapePlacement(page.shapes, hoverShapeRef.current);
+      if (placement && placement.siblings === page.shapes && !isConnectorShape(placement.shape)) hoverPoints = connectionPointsForShape(placement.shape);
+    }
+    const drag = connectorDragRef.current;
+    const end = drag?.snap?.point ?? drag?.current ?? null;
+    const scene: ConnectorOverlayScene = {
+      hoverPoints,
+      snapPoint: drag?.snap?.point ?? null,
+      previewRoute: drag && end ? routeConnector(drag.from.point, end) : null,
+      reroutePreview: reroutePreviewRef.current,
+      connectors,
+    };
+    paintConnectorOverlay(context, frame, window.devicePixelRatio || 1, zoomRef.current, scene);
+  }, []);
+
+  const setConnectorActive = useCallback((active: boolean) => {
+    connectorDragRef.current = null;
+    hoverShapeRef.current = null;
+    pointerRef.current = null;
+    reroutePreviewRef.current = [];
+    setConnectorMode(active);
+    paintOverlayNow();
+  }, [paintOverlayNow]);
+
+  const toggleConnector = useCallback(() => {
+    const current = modelRef.current;
+    if (!handleRef.current || !current.snapshot?.pages[current.pageIndex] || !current.frame) return;
+    if (!connectorModeRef.current) {
+      try { handleRef.current.layoutPage(current.pageIndex); } catch (value) { reportError(value); return; }
+    }
+    setConnectorActive(!connectorModeRef.current);
+  }, [reportError, setConnectorActive]);
+
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        if (connectorModeRef.current || connectorDragRef.current) setConnectorActive(false);
+        return;
+      }
+      if (event.altKey && (event.key === '3' || event.key === '³')) {
+        if (event.repeat) return;
+        event.preventDefault();
+        toggleConnector();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [setConnectorActive, toggleConnector]);
 
   useEffect(() => {
     sessionRef.current = { file, clientId: sessionClientId, initialUpdate };
@@ -185,16 +269,75 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const canvas = overlayCanvasRef.current; const frame = model.frame;
     if (!canvas || !frame) return;
     const context = canvas.getContext('2d'); if (!context) return;
-    const dpr = window.devicePixelRatio || 1; sizeCanvasForPage(canvas, frame, dpr, zoom); context.clearRect(0, 0, canvas.width, canvas.height);
-  }, [model.frame, selection, zoom]);
+    const dpr = window.devicePixelRatio || 1; sizeCanvasForPage(canvas, frame, dpr, zoom);
+    paintOverlayNow();
+  }, [model.frame, model.snapshot, selection, zoom, connectorMode, paintOverlayNow]);
 
-  const onPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
-    const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
+  const onPointerMove = (event: PointerEvent<HTMLCanvasElement>) => {
+    const handle = handleRef.current; const current = modelRef.current; const frame = current.frame;
+    const page = current.snapshot?.pages[current.pageIndex];
     if (!handle || !frame || !page) return;
-    pointerRef.current = null;
+    const pointer = pointerRef.current;
+    if (!connectorModeRef.current && pointer) {
+      try {
+        const selected = selectionRef.current;
+        const placement = selected && selected.pageId === page.id ? findShapePlacement(page.shapes, selected.shapeId) : null;
+        if (!placement || placement.siblings !== page.shapes || isConnectorShape(placement.shape)) {
+          if (reroutePreviewRef.current.length) { reroutePreviewRef.current = []; paintOverlayNow(); }
+          return;
+        }
+        const point = canvasPointerPosition(event, frame);
+        const geometry = resolveDragGeometry(pointer, point.model);
+        reroutePreviewRef.current = reroutePreviewForMove(page.shapes, frame, page.sourcePartPath, placement.shape, geometry);
+        paintOverlayNow();
+      } catch (value) { reportError(value); }
+      return;
+    }
+    if (!connectorModeRef.current) return;
     try {
       const point = canvasPointerPosition(event, frame);
-      handle.layoutPage(model.pageIndex);
+      const drag = connectorDragRef.current;
+      if (drag) {
+        drag.current = point.model;
+        drag.snap = connectorTargetForPoint(page.shapes, handle, point.canvas, point.model);
+        paintOverlayNow();
+        return;
+      }
+      const hit = handle.hitTest(point.canvas.x, point.canvas.y);
+      const placement = hit ? findShapePlacement(page.shapes, hit.shapeId) : null;
+      const hovered = placement && placement.siblings === page.shapes && !isConnectorShape(placement.shape) ? placement.shape.id : null;
+      if (hovered !== hoverShapeRef.current) { hoverShapeRef.current = hovered; paintOverlayNow(); }
+    } catch (value) { reportError(value); }
+  };
+  const onPointerLeave = () => {
+    if (!connectorModeRef.current || connectorDragRef.current) return;
+    if (hoverShapeRef.current) { hoverShapeRef.current = null; paintOverlayNow(); }
+  };
+  const onPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
+    const handle = handleRef.current; const current = modelRef.current; const frame = current.frame; const page = current.snapshot?.pages[current.pageIndex];
+    if (!handle || !frame || !page) return;
+    if (connectorModeRef.current) {
+      pointerRef.current = null;
+      try {
+        const point = canvasPointerPosition(event, frame);
+        const target = connectorTargetForPoint(page.shapes, handle, point.canvas, point.model);
+        if (target) {
+          connectorDragRef.current = { pageId: page.id, from: target, current: point.model, snap: target };
+          setSelection({ pageId: page.id, shapeId: target.shapeId, hit: { kind: 'shape', shapeId: target.shapeId } });
+          capturePointer(event);
+        } else {
+          const hit = handle.hitTest(point.canvas.x, point.canvas.y);
+          setSelection(hit ? { pageId: page.id, shapeId: hit.shapeId, hit } : null);
+        }
+        paintOverlayNow();
+      } catch (value) { reportError(value); }
+      return;
+    }
+    pointerRef.current = null;
+    reroutePreviewRef.current = [];
+    try {
+      const point = canvasPointerPosition(event, frame);
+      handle.layoutPage(modelRef.current.pageIndex);
       const hit = handle.hitTest(point.canvas.x, point.canvas.y);
       setSelection(hit ? { pageId: page.id, shapeId: hit.shapeId, hit } : null);
       const placement = hit ? findShapePlacement(page.shapes, hit.shapeId) : null;
@@ -208,21 +351,54 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         pin: { x: numericCellValue(placement.shape, 'PinX'), y: numericCellValue(placement.shape, 'PinY') },
         size: { width: numericCellValue(placement.shape, 'Width'), height: numericCellValue(placement.shape, 'Height') },
       } : null;
-      event.currentTarget.setPointerCapture(event.pointerId);
+      capturePointer(event);
     } catch (value) { reportError(value); }
   };
   const onPointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
+    const drag = connectorDragRef.current;
+    if (connectorModeRef.current || drag) {
+      connectorDragRef.current = null;
+      const handle = handleRef.current;
+      try {
+        const current = modelRef.current;
+        const frame = current.frame;
+        const page = current.snapshot?.pages[current.pageIndex];
+        let end = drag?.snap ?? null;
+        if (drag && handle && frame && page) {
+          try {
+            const point = canvasPointerPosition(event, frame);
+            end = connectorTargetForPoint(page.shapes, handle, point.canvas, point.model) ?? drag.snap;
+          } catch { end = drag.snap; }
+        }
+        if (drag && handle && end && (end.shapeId !== drag.from.shapeId || end.point.side !== drag.from.point.side)) {
+          const live = handle.snapshot();
+          const livePage = live.pages.find((item) => item.id === drag.pageId);
+          const fromPlacement = livePage ? findShapePlacement(livePage.shapes, drag.from.shapeId) : null;
+          const endPlacement = livePage ? findShapePlacement(livePage.shapes, end.shapeId) : null;
+          if (!livePage || !fromPlacement || !endPlacement) refresh(undefined, true);
+          else {
+            const receipt = handle.addConnector(drag.pageId, connectorDraft(drag.from.point, end.point), connectorGlue(drag.from.shapeId, drag.from.point), connectorGlue(end.shapeId, end.point));
+            refresh(undefined, true);
+            setSelection({ pageId: drag.pageId, shapeId: receipt.shapeId, hit: { kind: 'shape', shapeId: receipt.shapeId } });
+          }
+        }
+      } catch (value) { reportError(value); }
+      paintOverlayNow();
+      return;
+    }
     const pointer = pointerRef.current; pointerRef.current = null;
+    reroutePreviewRef.current = [];
     const handle = handleRef.current; const selected = selection; const frame = model.frame;
-    if (!pointer || !handle || !selected || !frame) return;
+    if (!pointer || !handle || !selected || !frame) { paintOverlayNow(); return; }
     try {
       const point = canvasPointerPosition(event, frame);
-      if (Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) return;
+      if (Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) { paintOverlayNow(); return; }
       const geometry = resolveDragGeometry(pointer, point.model);
       if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
       else handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
       refresh(undefined, true);
     } catch (value) { reportError(value); }
+    paintOverlayNow();
   };
   const insertShape = useCallback((shape: StandardShape) => {
     const handle = handleRef.current; const current = modelRef.current; const frame = current.frame;
@@ -251,14 +427,14 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   return <div className={className} style={styles.root} aria-label={t('editor.appLabel')}>
     <header style={styles.titleBar}><strong>{t('ribbon.documentName')}</strong><span style={{ color: dirty ? '#a16207' : '#526273' }}>{dirty ? t('ribbon.dirty') : t('ribbon.saved')}</span></header>
     <RibbonCommandsProvider handle={handleRef.current} snapshot={model.snapshot} pageId={model.snapshot?.pages[model.pageIndex]?.id} selection={selection} onMutation={() => refresh(undefined, true)} onError={reportError} onDownload={download}>
-    <Ribbon t={t} />
+    <Ribbon t={t} connector={{ active: connectorMode, disabled: !model.frame, onToggle: toggleConnector }} />
     <div style={styles.contentRow}>
     {leftPanel === undefined ? <ShapesPanel shapes={standardShapes} collapsed={shapesCollapsed} onToggleCollapsed={() => setShapesCollapsed((value) => !value)} onInsert={insertShape} t={t} /> : leftPanel}
     <main ref={workspaceRef} style={styles.workspace}>
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
       <div style={styles.canvasFrame}>
-        <canvas ref={mainCanvasRef} onPointerDown={onPointerDown} onPointerUp={onPointerUp} onPointerCancel={() => { pointerRef.current = null; }} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
+        <canvas ref={mainCanvasRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={onPointerLeave} onPointerUp={onPointerUp} onPointerCancel={() => { pointerRef.current = null; connectorDragRef.current = null; reroutePreviewRef.current = []; paintOverlayNow(); }} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={connectorMode ? { ...styles.canvas, cursor: 'crosshair' } : styles.canvas} />
         <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
         {selection && <output style={styles.selection}>{t('shapes.selected', { name: selection.shapeId })}</output>}
       </div>
@@ -323,6 +499,36 @@ export function stillSelectable(snapshot: DiagramSnapshot, pageIndex: number, se
   const page = snapshot.pages[pageIndex];
   return Boolean(page && page.id === selection.pageId && findShapePlacement(page.shapes, selection.shapeId));
 }
+
+/** Flattens nested group children. */
+function flattenEditorShapes(shapes: readonly ShapeSnapshot[]): ShapeSnapshot[] {
+  return shapes.flatMap((shape) => [shape, ...flattenEditorShapes(shape.children)]);
+}
+
+/** Nearest point on a known shape, in model inches. */
+export function nearestPointOnShape(shapes: readonly ShapeSnapshot[], shapeId: string, at: ModelPoint): ConnectionPoint | null {
+  const placement = findShapePlacement(shapes, shapeId);
+  if (!placement || isConnectorShape(placement.shape)) return null;
+  return nearestConnectionPointAnywhere(connectionPointsForShape(placement.shape), at);
+}
+
+/** Drop target forgiving of interior drops; falls back to the hit-tested shape. */
+export function connectorTargetForPoint(shapes: readonly ShapeSnapshot[], handle: DiagramHandle, canvas: ModelPoint, at: ModelPoint): { shapeId: string; point: ConnectionPoint } | null {
+  const direct = dropTargetForPoint(shapes, at);
+  if (direct) return direct;
+  let shapeId: string | null = null;
+  try { shapeId = handle.hitTest(canvas.x, canvas.y)?.shapeId ?? null; } catch { shapeId = null; }
+  if (!shapeId) return null;
+  const point = nearestPointOnShape(shapes, shapeId, at);
+  return point ? { shapeId, point } : null;
+}
+
+/** Pointer capture is best-effort; synthetic pointers must not fail the gesture. */
+function capturePointer(event: PointerEvent<HTMLCanvasElement>): void {
+  try { event.currentTarget.setPointerCapture(event.pointerId); } catch { void 0; }
+}
+
+
 
 export function collectDiagnostics(frame: PageDisplayList): TextDiagnostic[] { const result: TextDiagnostic[] = []; const work = frame.primitives.map((primitive) => ({ primitive, depth: 0 })); while (work.length) { const current = work.pop(); if (!current || current.depth >= 256) continue; if (current.primitive.kind === 'textBox') for (const paragraph of current.primitive.paragraphs) for (const run of paragraph.runs) result.push(...run.diagnostics); if (current.primitive.kind === 'group') for (const primitive of current.primitive.primitives) work.push({ primitive, depth: current.depth + 1 }); } return result; }
 interface LoadedFont { key: string; face: FontFace; }

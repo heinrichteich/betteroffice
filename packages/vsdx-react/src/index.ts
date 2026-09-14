@@ -1,6 +1,10 @@
 export { VsdxEditor } from './VsdxEditor';
 export type { VsdxEditorApi, VsdxEditorCollaborationOptions, VsdxEditorProps, VsdxShapeSelection } from './VsdxEditor';
+export { connectorTargetForPoint, nearestPointOnShape } from './VsdxEditor';
+export { CONNECTOR_GLUE_MATCH_INCHES, CONNECTOR_SNAP_INCHES, arrowheadPolygon, classifyConnectorEndpoint, connectionPointsForShape, connectorDraft, connectorEndpointGlue, connectorGlue, connectorRouteFromFrame, dropTargetForPoint, formatInches, isConnectorShape, modelToPage, movedShapePoints, nearestConnectionPoint, nearestConnectionPointAnywhere, paintConnectorEndpoint, paintConnectorOverlay, reroutePreviewForMove, routeConnector } from './connector';
+export type { ConnectionPoint, ConnectorDragEndpoint, ConnectorEndpointGlue, ConnectorOverlayRoute, ConnectorOverlayScene, ConnectorSide, MovedShapeGeometry } from './connector';
 export { Ribbon } from './components/ribbon/Ribbon';
+export type { RibbonConnectorToggle } from './components/ribbon/Ribbon';
 export { RibbonIcon } from './components/ribbon/RibbonIcon';
 export type { RibbonIconName } from './components/ribbon/RibbonIcon';
 export { RibbonCommandsContext, RibbonCommandsProvider, createRibbonCommands, findShapePlacement, useRibbonCommands } from './components/ribbon/commands';

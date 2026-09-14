@@ -1,7 +1,8 @@
 import { expect, test } from 'bun:test';
-import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
+import type { DiagramSnapshot, PageDisplayList, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { canvasPointerPosition, inchFormula, resolveDragGeometry, stillSelectable } from './VsdxEditor';
+import { canvasPointerPosition, connectorTargetForPoint, inchFormula, resolveDragGeometry, stillSelectable } from './VsdxEditor';
+import { modelToPage } from './connector';
 
 const frame: PageDisplayList = {
   contractVersion: 4,
@@ -80,4 +81,52 @@ test('resizes along the rotated shape axes', () => {
   const geometry = resolveDragGeometry({ canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: true, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, angle: Math.PI / 2 }, { x: -2, y: 3 });
   expect(geometry.width).toBeCloseTo(7);
   expect(geometry.height).toBeCloseTo(7);
+});
+
+function cellShape(id: string, cells: Record<string, string>): ShapeSnapshot {
+  return {
+    id,
+    sourceId: id === 'a' ? 1 : 2,
+    name: null,
+    children: [],
+    cells: Object.entries(cells).map(([name, formula]) => ({
+      locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name },
+      name,
+      formula,
+      value: formula,
+    })),
+  };
+}
+
+function pointerForModel(model: { x: number; y: number }, zoom: number): PointerEvent<HTMLCanvasElement> {
+  const page = modelToPage(frame, model);
+  return pointerAt(page.x * zoom, page.y * zoom, zoom);
+}
+
+/** A centre-to-centre drag must resolve at 50%, 100% and 150% zoom. */
+test('resolves a connector drag at every review zoom', () => {
+  const shapes = [
+    cellShape('a', { PinX: '2', PinY: '2', Width: '1', Height: '1' }),
+    cellShape('b', { PinX: '5', PinY: '2', Width: '1', Height: '1' }),
+  ];
+  const silentHandle = { hitTest: () => null };
+  for (const zoom of [0.5, 1, 1.5]) {
+    const from = canvasPointerPosition(pointerForModel({ x: 2, y: 2 }, zoom), frame);
+    expect(from.model.x).toBeCloseTo(2, 8);
+    expect(from.model.y).toBeCloseTo(2, 8);
+    expect(connectorTargetForPoint(shapes, silentHandle as never, from.canvas, from.model)?.shapeId).toBe('a');
+    const to = canvasPointerPosition(pointerForModel({ x: 5, y: 2 }, zoom), frame);
+    expect(connectorTargetForPoint(shapes, silentHandle as never, to.canvas, to.model)?.shapeId).toBe('b');
+    const interior = canvasPointerPosition(pointerForModel({ x: 5.2, y: 2.1 }, zoom), frame);
+    expect(connectorTargetForPoint(shapes, silentHandle as never, interior.canvas, interior.model)?.shapeId).toBe('b');
+  }
+});
+
+/** A hit-tested shape still glues when the pointer misses every connection point. */
+test('falls back to the hit-tested shape for rotated frames', () => {
+  const shapes = [cellShape('a', { PinX: '2', PinY: '2', Width: '1', Height: '1' })];
+  const handle = { hitTest: () => ({ kind: 'shape', shapeId: 'a' }) };
+  const target = connectorTargetForPoint(shapes, handle as never, { x: 0, y: 0 }, { x: 2.1, y: 2.05 });
+  expect(target?.shapeId).toBe('a');
+  expect(target?.point.side).toBe('centre');
 });

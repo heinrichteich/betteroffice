@@ -146,9 +146,22 @@ function draftFor(id: string, path: GeometryPath, square: boolean) {
         { locator: { cellName: 'LocPinY' }, name: 'LocPinY', formula: 'Height*0.5' },
         ...geometryCells(path),
         ...Object.entries({ Angle: '0', FlipX: '0', FlipY: '0', FillPattern: '1', FillForegnd: 'RGB(255,255,255)', LinePattern: '1', LineColor: 'RGB(23,32,51)', LineWeight: '0.01' }).map(([name, formula]) => ({ locator: { cellName: name }, name, formula })),
+        ...connectionCells(),
       ],
     };
   };
+}
+
+const connectionSides: readonly Point[] = [[0.5, 1], [1, 0.5], [0.5, 0], [0, 0.5]];
+
+function connectionCells(): FormulaShapeDraft['cells'] {
+  return connectionSides.flatMap(([x, y], rowIndex) => {
+    const [xFormula, yFormula] = pointFormulas([x, y]);
+    return [
+      { locator: { section: 'Connection', rowIndex, rowType: 'Connection', cellName: 'X' }, name: 'X', formula: xFormula },
+      { locator: { section: 'Connection', rowIndex, rowType: 'Connection', cellName: 'Y' }, name: 'Y', formula: yFormula },
+    ];
+  });
 }
 
 function polygonShape(id: keyof typeof polygonVertices, extraRows: readonly GeometryRow[] = [], square = false): StandardShape {
