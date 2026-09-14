@@ -329,7 +329,7 @@ pub fn evaluate_cell(
     refs: &impl References,
     limits: &ParseLimits,
 ) -> Evaluation {
-    evaluate_cell_with_theme(name, input, refs, limits, None, true)
+    evaluate_cell_with_theme(name, input, refs, limits, None)
 }
 
 fn evaluate_cell_with_theme(
@@ -338,7 +338,6 @@ fn evaluate_cell_with_theme(
     refs: &impl References,
     limits: &ParseLimits,
     theme: Option<&Theme>,
-    slots: bool,
 ) -> Evaluation {
     if is_event_cell(name) {
         // Event/recalculation plumbing is outside the display evaluation profile.
@@ -352,7 +351,7 @@ fn evaluate_cell_with_theme(
             name,
             match refs.formula(name) {
                 Some(formula) if !formula.eq_ignore_ascii_case("Inh") => {
-                    evaluate_with_theme_at(formula, refs, limits, theme, Some(name), slots)
+                    evaluate_with_theme_at(formula, refs, limits, theme, Some(name))
                 }
                 _ => unsupported("Inh has no concrete inherited value"),
             },
@@ -360,7 +359,7 @@ fn evaluate_cell_with_theme(
     }
     normalize_host_cell_value(
         name,
-        evaluate_with_theme_at(input, refs, limits, theme, Some(name), slots),
+        evaluate_with_theme_at(input, refs, limits, theme, Some(name)),
     )
 }
 
@@ -401,7 +400,7 @@ pub fn evaluate_with_theme(
     limits: &ParseLimits,
     theme: Option<&Theme>,
 ) -> Evaluation {
-    evaluate_with_theme_at(input, refs, limits, theme, None, true)
+    evaluate_with_theme_at(input, refs, limits, theme, None)
 }
 fn evaluate_with_theme_at(
     input: &str,
@@ -409,14 +408,12 @@ fn evaluate_with_theme_at(
     limits: &ParseLimits,
     theme: Option<&Theme>,
     host: Option<&str>,
-    slots: bool,
 ) -> Evaluation {
     match parse(input, limits) {
         Ok(expr) => Engine {
             refs,
             limits,
             theme,
-            slots,
             active: HashSet::new(),
             memo: HashMap::new(),
             steps: 0,
@@ -447,14 +444,7 @@ pub fn evaluate_with_shape_package_theme(
     shape: &ResolvedShape,
     package: &VsdxPackage,
 ) -> Evaluation {
-    evaluate_with_theme_at(
-        input,
-        refs,
-        limits,
-        shape_theme(shape, package),
-        None,
-        false,
-    )
+    evaluate_with_theme_at(input, refs, limits, shape_theme(shape, package), None)
 }
 
 /// Evaluates a host cell using the shape's selected package theme.
@@ -466,14 +456,7 @@ pub fn evaluate_cell_with_shape_package_theme(
     shape: &ResolvedShape,
     package: &VsdxPackage,
 ) -> Evaluation {
-    evaluate_cell_with_theme(
-        name,
-        input,
-        refs,
-        limits,
-        shape_theme(shape, package),
-        false,
-    )
+    evaluate_cell_with_theme(name, input, refs, limits, shape_theme(shape, package))
 }
 
 /// Evaluates a sheet cell with the package's default theme when one is available.
@@ -484,7 +467,7 @@ pub fn evaluate_cell_with_package_theme(
     limits: &ParseLimits,
     package: &VsdxPackage,
 ) -> Evaluation {
-    evaluate_cell_with_theme(name, input, refs, limits, package_theme(package), false)
+    evaluate_cell_with_theme(name, input, refs, limits, package_theme(package))
 }
 
 /// Selects the shape theme, falling back to the package default.
@@ -520,8 +503,6 @@ struct Engine<'a, R> {
     refs: &'a R,
     limits: &'a ParseLimits,
     theme: Option<&'a Theme>,
-    /// Whether named theme colours may resolve; package evaluation declines them.
-    slots: bool,
     active: HashSet<String>,
     memo: HashMap<String, Evaluation>,
     steps: usize,
@@ -957,8 +938,7 @@ impl<R: References> Engine<'_, R> {
             );
         };
         let name = name.as_str();
-        let slot = self.slots.then(|| theme_slot(name)).flatten();
-        let Some(slot) = slot else {
+        let Some(slot) = theme_slot(name) else {
             return args.get(1).map_or_else(
                 || unsupported("unresolvable THEMEVAL value"),
                 |arg| self.expr(arg, d),
@@ -1265,14 +1245,54 @@ fn tint(color: Color, amount: f64) -> Color {
     hls_to_rgb(hue, saturation, (luminosity + amount).clamp(0.0, 240.0))
 }
 fn mso_tint(color: Color, percentage: f64) -> Color {
-    let target = if percentage < 0.0 { 0.0 } else { 255.0 };
-    let fraction = percentage.abs() / 100.0;
-    let channel = |value: u8| (f64::from(value) + (target - f64::from(value)) * fraction) as u8;
+    let (hue, saturation, luminosity) = rgb_to_hsl(color);
+    let fraction = percentage / 100.0;
+    let luminosity = if fraction < 0.0 {
+        luminosity * (1.0 + fraction)
+    } else {
+        luminosity + (1.0 - luminosity) * fraction
+    };
+    hsl_to_rgb(hue, saturation, luminosity.clamp(0.0, 1.0), color.alpha)
+}
+fn rgb_to_hsl(color: Color) -> (f64, f64, f64) {
+    let red = f64::from(color.red) / 255.0;
+    let green = f64::from(color.green) / 255.0;
+    let blue = f64::from(color.blue) / 255.0;
+    let high = red.max(green).max(blue);
+    let low = red.min(green).min(blue);
+    let luminosity = (high + low) / 2.0;
+    let delta = high - low;
+    if delta == 0.0 {
+        return (0.0, 0.0, luminosity);
+    }
+    let saturation = (delta / (1.0 - (2.0 * luminosity - 1.0).abs())).min(1.0);
+    let hue = if high == red {
+        ((green - blue) / delta).rem_euclid(6.0)
+    } else if high == green {
+        (blue - red) / delta + 2.0
+    } else {
+        (red - green) / delta + 4.0
+    } / 6.0;
+    (hue, saturation, luminosity)
+}
+fn hsl_to_rgb(hue: f64, saturation: f64, luminosity: f64, alpha: Option<u8>) -> Color {
+    let chroma = (1.0 - (2.0 * luminosity - 1.0).abs()) * saturation;
+    let x = chroma * (1.0 - ((hue * 6.0).rem_euclid(2.0) - 1.0).abs());
+    let (red, green, blue) = match (hue * 6.0).floor() as i32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let offset = luminosity - chroma / 2.0;
+    let channel = |value: f64| ((value + offset) * 255.0).clamp(0.0, 255.0) as u8;
     Color {
-        red: channel(color.red),
-        green: channel(color.green),
-        blue: channel(color.blue),
-        alpha: color.alpha,
+        red: channel(red),
+        green: channel(green),
+        blue: channel(blue),
+        alpha,
     }
 }
 fn rgb_to_hls(color: Color) -> (f64, f64, f64) {
@@ -1694,14 +1714,7 @@ mod tests {
         let refs = BTreeMap::from([("FillForegnd".into(), "THEMEVAL()".into())]);
         let theme = Theme::default();
         assert!(matches!(
-            evaluate_cell_with_theme(
-                "LineColor",
-                "FillForegnd",
-                &refs,
-                &limits(),
-                Some(&theme),
-                true
-            ),
+            evaluate_cell_with_theme("LineColor", "FillForegnd", &refs, &limits(), Some(&theme)),
             Evaluation::Evaluated(Evaluated {
                 value: Value::Color(Color {
                     red: 68,
@@ -1878,6 +1891,20 @@ mod tests {
                 red: 165,
                 green: 165,
                 blue: 165,
+                alpha: None
+            }
+        );
+    }
+
+    /// MSOTINT tints in HSL; linear RGB would shade this near-white to grey.
+    #[test]
+    fn msotint_tints_near_white_in_hsl() {
+        assert_eq!(
+            color("MSOTINT(RGB(254,255,255),-10)", None),
+            Color {
+                red: 203,
+                green: 255,
+                blue: 255,
                 alpha: None
             }
         );
@@ -2194,11 +2221,11 @@ mod tests {
             "corpus formula denominator changed"
         );
         assert_eq!(
-            measurement.evaluated, 3_679,
+            measurement.evaluated, 3_714,
             "published corpus evaluation count changed"
         );
         assert_eq!(
-            measurement.oracle_agreement, 3_670,
+            measurement.oracle_agreement, 3_697,
             "published corpus oracle agreement count changed"
         );
         assert_eq!(
@@ -2206,7 +2233,7 @@ mod tests {
             "published corpus oracle disagreement count changed"
         );
         assert_eq!(
-            oracle_compared, 3_670,
+            oracle_compared, 3_697,
             "published corpus comparable-oracle count changed"
         );
         assert_eq!(
@@ -2214,15 +2241,15 @@ mod tests {
             "published corpus stale-oracle exclusion count changed"
         );
         assert_eq!(
-            measurement.unsupported_known, 1_892,
+            measurement.unsupported_known, 1_919,
             "published corpus known non-goal count changed"
         );
         assert_eq!(
-            measurement.unsupported_other, 1_256,
+            measurement.unsupported_other, 1_190,
             "published corpus other unsupported count changed"
         );
         assert_eq!(
-            measurement.error, 165,
+            measurement.error, 169,
             "published corpus error count changed"
         );
         assert_eq!(
