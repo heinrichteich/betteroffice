@@ -172,7 +172,7 @@ fn is_known_cell(name: &str) -> bool {
             | "alignright"
             | "aligntop"
             | "angle"
-            | "autoGen"
+            | "autogen"
             | "avenue"
             | "b"
             | "beginarrow"
@@ -197,17 +197,17 @@ fn is_known_cell(name: &str) -> bool {
             | "dirx"
             | "diry"
             | "displaymode"
-            | "drawingresizeType"
+            | "drawingresizetype"
             | "drawingscale"
             | "drawingsizetype"
             | "endarrow"
             | "endarrowsize"
             | "endx"
             | "endy"
-            | "extraInfo"
+            | "extrainfo"
             | "fillbkgnd"
             | "fillbkgndtrans"
-            | "fillforeGnd"
+            | "fillforegnd"
             | "fillforegndtrans"
             | "fillgradientangle"
             | "fillgradientdir"
@@ -253,7 +253,7 @@ fn is_known_cell(name: &str) -> bool {
             | "piny"
             | "pos"
             | "prompt"
-            | "resizeMode"
+            | "resizemode"
             | "rightmargin"
             | "rounding"
             | "shdwbkgnd"
@@ -736,4 +736,77 @@ pub(crate) fn preserve_attribute(
         return local.eq_ignore_ascii_case("id");
     }
     false
+}
+
+#[cfg(test)]
+mod vocabulary_tests {
+    use super::{
+        is_known_cell, is_known_row_type, is_known_section, is_safe_section, is_user_cell,
+    };
+
+    /// Visio spells these cells in mixed case; vocabularies that lowercase before
+    /// matching make an arm carrying a capital unreachable, so the name is
+    /// redacted as if it were author-defined.
+    #[test]
+    fn canonical_visio_spellings_are_recognised() {
+        for name in [
+            "AutoGen",
+            "DrawingResizeType",
+            "ExtraInfo",
+            "FillForegnd",
+            "ResizeMode",
+            "PinX",
+            "PinY",
+            "LocPinX",
+            "LocPinY",
+            "BeginX",
+            "EndY",
+            "LineWeight",
+            "FillPattern",
+            "NoShow",
+        ] {
+            assert!(
+                is_known_cell(name),
+                "cell {name} fell out of the vocabulary"
+            );
+        }
+        assert!(is_known_section("Geometry"));
+        assert!(is_safe_section("Character"));
+        assert!(is_known_row_type("EllipticalArcTo"));
+        assert!(is_user_cell("Prompt"));
+    }
+
+    /// A `matches!` arm containing a capital is unreachable when the scrutinee is
+    /// lowercased first. Guards the whole class, not just the five that were wrong.
+    #[test]
+    fn lowercased_match_arms_have_no_unreachable_capitals() {
+        let whole = include_str!("visio.rs");
+        let source = &whole[..whole.find("#[cfg(test)]").unwrap_or(whole.len())];
+        let needle = ".to_ascii_lowercase().as_str(),";
+        let mut offenders = Vec::new();
+        let mut checked = 0;
+        for (index, _) in source.match_indices(needle) {
+            let rest = &source[index + needle.len()..];
+            let Some(end) = rest.find(
+                "
+    )",
+            ) else {
+                continue;
+            };
+            checked += 1;
+            for arm in rest[..end].split('"').skip(1).step_by(2) {
+                if arm.chars().any(|character| character.is_ascii_uppercase()) {
+                    offenders.push(arm.to_owned());
+                }
+            }
+        }
+        assert!(
+            checked >= 5,
+            "guard found only {checked} lowercased matches"
+        );
+        assert!(
+            offenders.is_empty(),
+            "unreachable arms (scrutinee is lowercased): {offenders:?}"
+        );
+    }
 }
