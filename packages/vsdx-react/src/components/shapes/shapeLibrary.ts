@@ -27,7 +27,15 @@ export interface StandardShape {
   id: string;
   nameKey: TranslationKey;
   preview: string;
+  defaultSize: { width: number; height: number };
   draft: (x: number, y: number, width: number, height: number) => FormulaShapeDraft;
+}
+
+/** Measured Visio default box per master, in inches. */
+export function defaultShapeSize(id: string): { width: number; height: number } {
+  if (id === 'ellipse') return { width: 1.5, height: 1 };
+  if (id === 'rectangle') return { width: 4 / 3, height: 1 };
+  return { width: 1, height: 1 };
 }
 
 export const polygonVertices: Readonly<Record<string, readonly Point[]>> = {
@@ -157,6 +165,7 @@ function polygonShape(id: keyof typeof polygonVertices, extraRows: readonly Geom
     id,
     nameKey: `shapesPanel.shape.${id}` as TranslationKey,
     preview: path.preview,
+    defaultSize: defaultShapeSize(id),
     draft: draftFor(id, path, square),
   };
 }
@@ -213,8 +222,8 @@ const cubeEdges: readonly GeometryRow[] = [
 export const standardShapes: readonly StandardShape[] = [
   polygonShape('rectangle'),
   polygonShape('square', [], true),
-  { id: 'circle', nameKey: 'shapesPanel.shape.circle', preview: circlePath.preview, draft: draftFor('circle', circlePath, true) },
-  { id: 'ellipse', nameKey: 'shapesPanel.shape.ellipse', preview: ellipsePath.preview, draft: draftFor('ellipse', ellipsePath, false) },
+  { id: 'circle', nameKey: 'shapesPanel.shape.circle', preview: circlePath.preview, defaultSize: defaultShapeSize('circle'), draft: draftFor('circle', circlePath, true) },
+  { id: 'ellipse', nameKey: 'shapesPanel.shape.ellipse', preview: ellipsePath.preview, defaultSize: defaultShapeSize('ellipse'), draft: draftFor('ellipse', ellipsePath, false) },
   polygonShape('rightTriangle'),
   polygonShape('triangle'),
   polygonShape('pentagon'),
@@ -227,10 +236,10 @@ export const standardShapes: readonly StandardShape[] = [
   polygonShape('chevron'),
   polygonShape('parallelogram'),
   polygonShape('trapezoid'),
-  { id: 'cylinder', nameKey: 'shapesPanel.shape.cylinder', preview: cylinderPath.preview, draft: draftFor('cylinder', cylinderPath, false) },
+  { id: 'cylinder', nameKey: 'shapesPanel.shape.cylinder', preview: cylinderPath.preview, defaultSize: defaultShapeSize('cylinder'), draft: draftFor('cylinder', cylinderPath, false) },
   polygonShape('cube', cubeEdges),
-  { id: 'arc', nameKey: 'shapesPanel.shape.arc', preview: arcPath.preview, draft: draftFor('arc', arcPath, false) },
-  { id: 'teardrop', nameKey: 'shapesPanel.shape.teardrop', preview: teardropPath.preview, draft: draftFor('teardrop', teardropPath, false) },
+  { id: 'arc', nameKey: 'shapesPanel.shape.arc', preview: arcPath.preview, defaultSize: defaultShapeSize('arc'), draft: draftFor('arc', arcPath, false) },
+  { id: 'teardrop', nameKey: 'shapesPanel.shape.teardrop', preview: teardropPath.preview, defaultSize: defaultShapeSize('teardrop'), draft: draftFor('teardrop', teardropPath, false) },
 ];
 
 export function standardShapeById(id: string): StandardShape | undefined {

@@ -3,13 +3,13 @@ import type { Translations } from '@betteroffice/vsdx-i18n';
 import { canvasPointToModel, initWasm, openDiagram, paintPage, sizeCanvasForPage } from '@betteroffice/vsdx';
 import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
+import type { CSSProperties, DragEvent, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
 import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
-import { ShapesPanel } from './components/shapes/ShapesPanel';
-import { standardShapes } from './components/shapes/shapeLibrary';
+import { STENCIL_DRAG_MIME, ShapesPanel } from './components/shapes/ShapesPanel';
+import { standardShapeById, standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
 import { StatusBar, clampZoom } from './components/statusbar';
 import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent } from './interactions';
@@ -81,6 +81,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const pointerRef = useRef<DragStart | null>(null);
   const dragPreviewRef = useRef<ModelPoint | null>(null);
   const previewFrameRef = useRef<number | null>(null);
+  const insertCascadeRef = useRef<{ pageId: string; count: number }>({ pageId: '', count: 0 });
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
   const [loading, setLoading] = useState(Boolean(file));
@@ -468,16 +469,41 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   };
   const onCanvasFocus = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = '2px solid #0f6cbd'; event.currentTarget.style.outlineOffset = '2px'; };
   const onCanvasBlur = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = ''; event.currentTarget.style.outlineOffset = ''; };
-  const insertShape = useCallback((shape: StandardShape) => {
-    const handle = handleRef.current; const current = modelRef.current; const frame = current.frame;
+  const insertShapeAt = useCallback((shape: StandardShape, point: ModelPoint) => {
+    const handle = handleRef.current; const current = modelRef.current;
     const page = current.snapshot?.pages[current.pageIndex];
-    if (!handle || !page || !frame) return;
+    if (!handle || !page) return;
     try {
-      const centre = canvasPointToModel(frame.paintTransform, frame.width / 2, frame.height / 2);
-      handle.addShape(page.id, shape.draft(centre.x, centre.y, 1, 1));
+      const receipt = handle.addShape(page.id, shape.draft(point.x, point.y, shape.defaultSize.width, shape.defaultSize.height));
       refresh(undefined, true);
+      setSelection({ pageId: page.id, shapeId: receipt.shapeId, hit: { kind: 'shape', shapeId: receipt.shapeId } });
     } catch (value) { reportError(value); }
   }, [refresh, reportError]);
+  const insertShape = useCallback((shape: StandardShape) => {
+    const current = modelRef.current; const frame = current.frame;
+    const page = current.snapshot?.pages[current.pageIndex];
+    if (!frame || !page) return;
+    const cascade = insertCascadeRef.current.pageId === page.id ? insertCascadeRef.current.count : 0;
+    insertCascadeRef.current = { pageId: page.id, count: cascade + 1 };
+    insertShapeAt(shape, centreInsertPoint(canvasPointToModel(frame.paintTransform, frame.width / 2, frame.height / 2), cascade));
+  }, [insertShapeAt]);
+  const onCanvasDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!handleRef.current || !modelRef.current.frame) return;
+    if (!event.dataTransfer.types.includes(STENCIL_DRAG_MIME) && !event.dataTransfer.types.includes('text/plain')) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  };
+  const onCanvasDrop = (event: DragEvent<HTMLDivElement>) => {
+    const frame = modelRef.current.frame;
+    if (!frame) return;
+    const id = (event.dataTransfer.getData(STENCIL_DRAG_MIME) || event.dataTransfer.getData('text/plain')).trim();
+    const shape = id ? standardShapeById(id) : undefined;
+    if (!shape) return;
+    event.preventDefault();
+    const canvas = mainCanvasRef.current;
+    const rect = canvas?.getBoundingClientRect() ?? event.currentTarget.getBoundingClientRect();
+    insertShapeAt(shape, dropClientToModel(frame, rect, event.clientX, event.clientY));
+  };
   const reorderPage = useCallback((pageId: string, toIndex: number) => {
     const handle = handleRef.current;
     if (!handle) return;
@@ -502,7 +528,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     <main ref={workspaceRef} style={styles.workspace}>
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
-      <div style={styles.canvasFrame}>
+      <div style={styles.canvasFrame} onDragOver={onCanvasDragOver} onDrop={onCanvasDrop}>
         <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
         <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
       </div>
@@ -518,6 +544,28 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
 }
 
 const WORKSPACE_MARGIN = 32;
+
+/** Cascade step for repeated centre inserts, in inches. */
+export const CENTRE_INSERT_STEP_IN = 0.25;
+/** Cascade length before a centre insert wraps back. */
+export const CENTRE_INSERT_CASCADE = 8;
+
+/** Offset a page-centre insert so repeated clicks cascade instead of stacking. */
+export function centreInsertPoint(centre: ModelPoint, count: number): ModelPoint {
+  const step = (Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0) % CENTRE_INSERT_CASCADE;
+  return { x: centre.x + step * CENTRE_INSERT_STEP_IN, y: centre.y - step * CENTRE_INSERT_STEP_IN };
+}
+
+interface ClientRectLike { left: number; top: number; width: number; height: number; }
+
+/** Map a drop client point onto Y-up model inches, dividing out zoom once via the canvas rect. */
+export function dropClientToModel(frame: PageDisplayList, rect: ClientRectLike, clientX: number, clientY: number): ModelPoint {
+  const canvas = {
+    x: (clientX - rect.left) * frame.width / Math.max(rect.width, 1),
+    y: (clientY - rect.top) * frame.height / Math.max(rect.height, 1),
+  };
+  return canvasPointToModel(frame.paintTransform, canvas.x, canvas.y);
+}
 
 export function canvasPointerPosition(event: PointerEvent<HTMLCanvasElement> | MouseEvent<HTMLCanvasElement>, frame: PageDisplayList): { canvas: ModelPoint; model: ModelPoint } {
   const rect = event.currentTarget.getBoundingClientRect();

@@ -1,4 +1,4 @@
-export { VsdxEditor } from './VsdxEditor';
+export { VsdxEditor, CENTRE_INSERT_CASCADE, CENTRE_INSERT_STEP_IN, centreInsertPoint, dropClientToModel } from './VsdxEditor';
 export type { VsdxEditorApi, VsdxEditorCollaborationOptions, VsdxEditorProps, VsdxShapeSelection } from './VsdxEditor';
 export { Ribbon } from './components/ribbon/Ribbon';
 export { CommandMenu, CommandMenuItem } from './components/ribbon/CommandMenu';
@@ -9,9 +9,9 @@ export { RibbonIcon } from './components/ribbon/RibbonIcon';
 export type { RibbonIconName } from './components/ribbon/RibbonIcon';
 export { RibbonCommandsContext, RibbonCommandsProvider, createRibbonCommands, findShapePlacement, isCellWriteBlocked, isDeleteBlocked, useRibbonCommands } from './components/ribbon/commands';
 export type { RibbonCommand, RibbonCommandId, RibbonCommands, RibbonCommandsProviderProps, ShapePlacement } from './components/ribbon/commands';
-export { ShapesPanel } from './components/shapes/ShapesPanel';
+export { ShapesPanel, STENCIL_DRAG_MIME } from './components/shapes/ShapesPanel';
 export type { ShapesPanelProps } from './components/shapes/ShapesPanel';
-export { standardShapeById, standardShapes } from './components/shapes/shapeLibrary';
+export { defaultShapeSize, standardShapeById, standardShapes } from './components/shapes/shapeLibrary';
 export type { StandardShape } from './components/shapes/shapeLibrary';
 export { MAX_ZOOM, MIN_ZOOM, StatusBar, ZOOM_STOPS, clampZoom, sliderPositionForZoom, zoomForSliderPosition } from './components/statusbar';
 export type { StatusBarPage, StatusBarProps } from './components/statusbar';
