@@ -78,6 +78,11 @@ pub(crate) fn seed_doc(
         let shape_order = page.insert(&mut txn, "shapes", ArrayPrelim::default());
         if let Some(sheet) = package.page_contents.get(path) {
             let resolver = Resolver::new(package);
+            let inherit = package
+                .page_part_ids
+                .get(path)
+                .and_then(|id| package.page_sheets.get(id))
+                .unwrap_or(sheet);
             for shape in sheet.shapes() {
                 let shape_id = format!("{id}:shape:{}", shape.id);
                 shape_order.push_back(&mut txn, shape_id.as_str());
@@ -85,7 +90,7 @@ pub(crate) fn seed_doc(
                     .resolve_shape(path, shape.id)
                     .map_err(|error| EditError::InvalidState(error.to_string()))?;
                 seed_shape(
-                    &sheets, &stories, &mut txn, &shape_id, &id, None, path, sheet, shape,
+                    &sheets, &stories, &mut txn, &shape_id, &id, None, path, sheet, inherit, shape,
                     &resolver, &resolved, 1,
                 )?;
             }
@@ -401,6 +406,7 @@ fn seed_shape(
     parent_id: Option<&str>,
     page_path: &str,
     page: &vsdx_parse::Sheet,
+    inherit: &vsdx_parse::Sheet,
     shape: &vsdx_parse::Shape,
     resolver: &Resolver<'_>,
     resolved: &vsdx_resolve::ResolvedShape,
@@ -477,7 +483,7 @@ fn seed_shape(
         }
     }
     let text = resolver
-        .resolve_text(shape, page)
+        .resolve_text(shape, inherit, page)
         .map_err(|error| EditError::InvalidState(error.to_string()))?;
     stories.insert(
         txn,
@@ -499,6 +505,7 @@ fn seed_shape(
             Some(id),
             page_path,
             page,
+            inherit,
             child,
             resolver,
             &child_resolved,

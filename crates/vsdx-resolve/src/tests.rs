@@ -1736,8 +1736,9 @@ fn text_markers_fields_and_style_rows_are_merged() {
     );
     value.text_style = Some(1);
     add_page(&mut package, value.clone());
+    let empty = sheet(None, vec![]);
     let tokens = Resolver::new(&package)
-        .resolve_text(&value, &sheet(None, vec![]))
+        .resolve_text(&value, &empty, &empty)
         .unwrap();
     assert!(
         matches!(tokens[0], ResolvedTextToken::CharacterRun { ref properties, .. } if matches!(properties["Font"], Lookup::Found(_)))
@@ -1787,10 +1788,10 @@ fn text_uses_effective_page_or_document_rows_and_master_stream() {
             ])],
         ),
     );
-    let page = package.page_sheets.get(&1).unwrap();
+    let contents = package.page_contents.get("page").unwrap();
     let resolved = Resolver::new(&package).resolve_shape("page", 1).unwrap();
     let tokens = Resolver::new(&package)
-        .resolve_text_in_context(&local, page, &resolved)
+        .resolve_text_in_context(&local, contents, &resolved)
         .unwrap();
     assert!(
         matches!(tokens[0], ResolvedTextToken::CharacterRun { ref properties, .. } if matches!(&properties["Font"], Lookup::Found(cell) if cell.cell.value.as_deref() == Some("page")))
@@ -2020,6 +2021,382 @@ fn style_references_supplied_by_a_master_are_consulted() {
         ),
         ("local", Provenance::StyleLine)
     );
+}
+
+#[test]
+fn group_subshape_master_shape_resolves_one_level_with_page_sheet() {
+    let mut package = package();
+    package.page_part_ids.insert("page".into(), 1);
+    package.page_sheets.insert(
+        1,
+        sheet(None, vec![SheetChild::Cell(cell("PageValue", "page"))]),
+    );
+    let mut sub = shape(2, vec![]);
+    sub.master_shape = Some(51);
+    let mut group = shape(
+        1,
+        vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+            sub,
+        )])],
+    );
+    group.master = Some(7);
+    package.page_contents.insert(
+        "page".into(),
+        sheet(
+            None,
+            vec![SheetChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+                group,
+            )])],
+        ),
+    );
+    add_master_shapes(
+        &mut package,
+        7,
+        vec![shape(
+            50,
+            vec![
+                ShapeChild::Cell(cell("PinX", "root")),
+                ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(shape(
+                    51,
+                    vec![ShapeChild::Cell(cell("PinX", "one"))],
+                ))]),
+            ],
+        )],
+    );
+    let resolver = Resolver::new(&package);
+    let shapes = resolver.resolve_page_shapes("page").unwrap();
+    assert_eq!(found(&shapes[&2], "PinX"), ("one", Provenance::MasterShape));
+    assert_eq!(found(&shapes[&2], "PageValue"), ("page", Provenance::Page));
+    assert_eq!(found(&shapes[&1], "PinX"), ("root", Provenance::Master));
+    assert_eq!(shapes[&2], resolver.resolve_shape("page", 2).unwrap());
+}
+
+#[test]
+fn group_subshape_master_shape_resolves_two_levels_with_page_sheet() {
+    let mut package = package();
+    package.page_part_ids.insert("page".into(), 1);
+    package.page_sheets.insert(
+        1,
+        sheet(None, vec![SheetChild::Cell(cell("PageValue", "page"))]),
+    );
+    let mut leaf = shape(3, vec![]);
+    leaf.master_shape = Some(51);
+    let inner = shape(
+        2,
+        vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+            leaf,
+        )])],
+    );
+    let mut outer = shape(
+        1,
+        vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+            inner,
+        )])],
+    );
+    outer.master = Some(7);
+    package.page_contents.insert(
+        "page".into(),
+        sheet(
+            None,
+            vec![SheetChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+                outer,
+            )])],
+        ),
+    );
+    add_master_shapes(
+        &mut package,
+        7,
+        vec![shape(
+            50,
+            vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+                shape(51, vec![ShapeChild::Cell(cell("PinX", "two"))]),
+            )])],
+        )],
+    );
+    let resolver = Resolver::new(&package);
+    let shapes = resolver.resolve_page_shapes("page").unwrap();
+    assert_eq!(found(&shapes[&3], "PinX"), ("two", Provenance::MasterShape));
+    assert_eq!(found(&shapes[&3], "PageValue"), ("page", Provenance::Page));
+    assert_eq!(shapes[&3], resolver.resolve_shape("page", 3).unwrap());
+}
+
+#[test]
+fn top_level_master_shape_is_unchanged_with_page_sheet() {
+    let mut package = package();
+    package.page_part_ids.insert("page".into(), 1);
+    package.page_sheets.insert(
+        1,
+        sheet(None, vec![SheetChild::Cell(cell("PageValue", "page"))]),
+    );
+    let mut local = shape(1, vec![]);
+    local.master = Some(7);
+    package.page_contents.insert(
+        "page".into(),
+        sheet(
+            None,
+            vec![SheetChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+                local,
+            )])],
+        ),
+    );
+    add_master(
+        &mut package,
+        7,
+        shape(50, vec![ShapeChild::Cell(cell("PinX", "root"))]),
+    );
+    let resolver = Resolver::new(&package);
+    let shapes = resolver.resolve_page_shapes("page").unwrap();
+    assert_eq!(found(&shapes[&1], "PinX"), ("root", Provenance::Master));
+    assert_eq!(found(&shapes[&1], "PageValue"), ("page", Provenance::Page));
+}
+
+#[test]
+fn master_internal_group_lookup_is_unchanged() {
+    let mut package = package();
+    let mut child = shape(71, vec![]);
+    child.master_shape = Some(81);
+    let child_snapshot = child.clone();
+    let mut group = shape(
+        70,
+        vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+            child,
+        )])],
+    );
+    group.master = Some(8);
+    add_master(&mut package, 7, group);
+    add_master_shapes(
+        &mut package,
+        8,
+        vec![shape(
+            80,
+            vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+                shape(81, vec![ShapeChild::Cell(cell("PinX", "nested-master"))]),
+            )])],
+        )],
+    );
+    let master_sheet = package.master_contents.get("master7").unwrap();
+    let resolved = Resolver::new(&package)
+        .resolve_shape_in_sheet(&child_snapshot, master_sheet)
+        .unwrap();
+    assert_eq!(
+        found(&resolved, "PinX"),
+        ("nested-master", Provenance::MasterShape)
+    );
+}
+
+fn collect_shapes<'a>(shape: &'a Shape, out: &mut Vec<&'a Shape>) {
+    out.push(shape);
+    for child in shape.shapes() {
+        collect_shapes(child, out);
+    }
+}
+
+#[derive(Default)]
+struct LookupTally {
+    lost: usize,
+    gained: usize,
+    changed: usize,
+}
+
+fn tally_lookup(old: Option<&Lookup>, new: Option<&Lookup>, tally: &mut LookupTally) {
+    match (old, new) {
+        (Some(Lookup::Found(old)), Some(Lookup::Found(new))) => {
+            if old != new {
+                tally.changed += 1;
+            }
+        }
+        (Some(Lookup::Found(_)), _) => {
+            tally.lost += 1;
+        }
+        (_, Some(Lookup::Found(_))) => {
+            tally.gained += 1;
+        }
+        _ => {}
+    }
+}
+
+fn tally_shape(
+    legacy: &crate::ResolvedShape,
+    current: &crate::ResolvedShape,
+    tally: &mut LookupTally,
+) {
+    let mut names = std::collections::BTreeSet::new();
+    names.extend(legacy.cells.keys().cloned());
+    names.extend(current.cells.keys().cloned());
+    for name in names {
+        tally_lookup(legacy.cells.get(&name), current.cells.get(&name), tally);
+    }
+    let mut sections = std::collections::BTreeSet::new();
+    sections.extend(legacy.sections.keys().cloned());
+    sections.extend(current.sections.keys().cloned());
+    for section in sections {
+        match (
+            legacy.sections.get(&section),
+            current.sections.get(&section),
+        ) {
+            (Some(old_section), Some(new_section)) => {
+                let mut rows = std::collections::BTreeSet::new();
+                rows.extend(old_section.rows.keys().cloned());
+                rows.extend(new_section.rows.keys().cloned());
+                for row in rows {
+                    match (old_section.rows.get(&row), new_section.rows.get(&row)) {
+                        (Some(old_row), Some(new_row)) => {
+                            let mut cells = std::collections::BTreeSet::new();
+                            cells.extend(old_row.cells.keys().cloned());
+                            cells.extend(new_row.cells.keys().cloned());
+                            for cell in cells {
+                                tally_lookup(
+                                    old_row.cells.get(&cell),
+                                    new_row.cells.get(&cell),
+                                    tally,
+                                );
+                            }
+                        }
+                        (None, Some(new_row)) => {
+                            tally.gained += new_row
+                                .cells
+                                .values()
+                                .filter(|lookup| matches!(lookup, Lookup::Found(_)))
+                                .count();
+                        }
+                        (Some(old_row), None) => {
+                            tally.lost += old_row
+                                .cells
+                                .values()
+                                .filter(|lookup| matches!(lookup, Lookup::Found(_)))
+                                .count();
+                        }
+                        (None, None) => {}
+                    }
+                }
+            }
+            (None, Some(new_section)) => {
+                tally.gained += new_section
+                    .rows
+                    .values()
+                    .flat_map(|row| row.cells.values())
+                    .filter(|lookup| matches!(lookup, Lookup::Found(_)))
+                    .count();
+            }
+            (Some(old_section), None) => {
+                tally.lost += old_section
+                    .rows
+                    .values()
+                    .flat_map(|row| row.cells.values())
+                    .filter(|lookup| matches!(lookup, Lookup::Found(_)))
+                    .count();
+            }
+            (None, None) => {}
+        }
+    }
+}
+
+/// Group sub-shape lookup resolves previously absent master cells without losing any.
+#[test]
+fn group_lookup_only_adds_absent_cells() {
+    let mut package = package();
+    package.page_part_ids.insert("page".into(), 1);
+    package.page_sheets.insert(
+        1,
+        sheet(None, vec![SheetChild::Cell(cell("PageValue", "page"))]),
+    );
+    let mut sub = shape(2, vec![ShapeChild::Cell(formula_cell("PinX", "Inh"))]);
+    sub.master_shape = Some(51);
+    let mut group = shape(
+        1,
+        vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+            sub,
+        )])],
+    );
+    group.master = Some(7);
+    package.page_contents.insert(
+        "page".into(),
+        sheet(
+            None,
+            vec![SheetChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+                group,
+            )])],
+        ),
+    );
+    add_master_shapes(
+        &mut package,
+        7,
+        vec![shape(
+            50,
+            vec![
+                ShapeChild::Cell(cell("PinX", "root")),
+                ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(shape(
+                    51,
+                    vec![
+                        ShapeChild::Cell(cell("PinX", "one")),
+                        ShapeChild::Cell(cell("PinY", "two")),
+                    ],
+                ))]),
+            ],
+        )],
+    );
+    let resolver = Resolver::new(&package);
+    let fixed = resolver.resolve_page_shapes("page").unwrap();
+    let contents = &package.page_contents["page"];
+    let inherit = package.page_sheets.get(&1).unwrap();
+    let mut shapes = Vec::new();
+    for shape in contents.shapes() {
+        collect_shapes(shape, &mut shapes);
+    }
+    let mut tally = LookupTally::default();
+    for shape in shapes {
+        let legacy = resolver.resolve_shape_in_sheet(shape, inherit).unwrap();
+        tally_shape(&legacy, &fixed[&shape.id], &mut tally);
+    }
+    eprintln!(
+        "VSDX synthetic group lookup: lost={} gained={} changed={}",
+        tally.lost, tally.gained, tally.changed
+    );
+    assert_eq!(tally.lost, 0, "group lookup must not lose resolved cells");
+    assert!(
+        tally.gained > 0,
+        "group lookup must resolve previously absent cells"
+    );
+}
+
+#[test]
+fn corpus_group_lookup_only_adds_absent_cells() {
+    let Some(dir) = std::env::var_os("VSDX_CORPUS_DIR") else {
+        eprintln!("warning: VSDX_CORPUS_DIR is unset; skipping group lookup corpus test");
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let files = ["lichtsysteme.vsdx", "soundplan.vsdx"];
+    for file in files {
+        assert!(dir.join(file).is_file(), "missing corpus file: {file}");
+    }
+    let mut tally = LookupTally::default();
+    for file in files {
+        let package = parse_vsdx(&fs::read(dir.join(file)).unwrap()).unwrap();
+        let resolver = Resolver::new(&package);
+        for page_part in package.page_contents.keys() {
+            let contents = &package.page_contents[page_part];
+            let inherit = package
+                .page_part_ids
+                .get(page_part)
+                .and_then(|id| package.page_sheets.get(id))
+                .unwrap_or(contents);
+            let fixed = resolver.resolve_page_shapes(page_part).unwrap();
+            let mut shapes = Vec::new();
+            for shape in contents.shapes() {
+                collect_shapes(shape, &mut shapes);
+            }
+            for shape in shapes {
+                let legacy = resolver.resolve_shape_in_sheet(shape, inherit).unwrap();
+                tally_shape(&legacy, &fixed[&shape.id], &mut tally);
+            }
+        }
+    }
+    eprintln!(
+        "VSDX corpus group lookup: lost={} gained={} changed={}",
+        tally.lost, tally.gained, tally.changed
+    );
+    assert_eq!(tally.lost, 0, "group lookup must not lose resolved cells");
 }
 
 #[test]

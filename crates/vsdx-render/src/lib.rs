@@ -968,13 +968,11 @@ impl Renderer {
                 "non-finite text metrics".into(),
             ));
         }
-        let page = package
-            .page_part_ids
+        let lookup = package
+            .page_contents
             .get(page_part)
-            .and_then(|id| package.page_sheets.get(id))
-            .or_else(|| package.page_contents.get(page_part))
             .ok_or_else(|| RenderError::MissingPage(page_part.into()))?;
-        let tokens = resolver.resolve_text_in_context(shape, page, resolved)?;
+        let tokens = resolver.resolve_text_in_context(shape, lookup, resolved)?;
         let mut paragraphs =
             rich_paragraphs(self, package, references, resolved, shape.id, &tokens);
         if paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()) {
@@ -4698,11 +4696,6 @@ mod tests {
         stats: &mut TextCorpusStats,
     ) {
         let contents = &package.page_contents[page_part];
-        let page = package
-            .page_part_ids
-            .get(page_part)
-            .and_then(|id| package.page_sheets.get(id))
-            .unwrap_or(contents);
         let resolver = Resolver::new(package);
         let references = PageShapeReferences::new(&resolver, page_part).ok();
         let mut text_boxes = BTreeMap::new();
@@ -4713,7 +4706,7 @@ mod tests {
                 package,
                 &resolver,
                 references.as_ref(),
-                page,
+                contents,
                 page_part,
                 shape,
                 &text_boxes,
@@ -4729,7 +4722,7 @@ mod tests {
         package: &VsdxPackage,
         resolver: &Resolver<'_>,
         references: Option<&PageShapeReferences>,
-        page: &Sheet,
+        lookup: &Sheet,
         page_part: &str,
         shape: &Shape,
         text_boxes: &BTreeMap<String, &Primitive>,
@@ -4743,7 +4736,7 @@ mod tests {
             return;
         }
         let tokens = resolver
-            .resolve_text_in_context(shape, page, &resolved)
+            .resolve_text_in_context(shape, lookup, &resolved)
             .unwrap();
         if tokens.iter().all(|token| {
             matches!(
@@ -4831,7 +4824,7 @@ mod tests {
         }
         for child in shape.shapes() {
             assert_shape_text(
-                renderer, package, resolver, references, page, page_part, child, text_boxes,
+                renderer, package, resolver, references, lookup, page_part, child, text_boxes,
                 rendered, stats,
             );
         }
