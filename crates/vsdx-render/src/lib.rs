@@ -696,7 +696,6 @@ impl Renderer {
         {
             return self.layout_connector(
                 package,
-                resolver,
                 connectivity,
                 references,
                 page_part,
@@ -704,6 +703,7 @@ impl Renderer {
                 id,
                 z_order,
                 resolved,
+                &sections,
                 state,
             );
         }
@@ -724,13 +724,10 @@ impl Renderer {
         }
         sections.sort_by_key(|section| section.index.unwrap_or(0));
         let geometry = (!sections.is_empty()).then(|| {
-            let mut geometry = vsdx_resolve::RealizedGeometry::default();
-            for section in sections {
-                let realized = realize_geometry(section, bounds.width, bounds.height);
-                geometry.commands.extend(realized.commands);
-                geometry.issues.extend(realized.issues);
-            }
-            geometry
+            sections
+                .iter()
+                .map(|section| realize_geometry(section, bounds.width, bounds.height))
+                .collect::<Vec<_>>()
         });
         let child_shapes = shape.shapes().collect::<Vec<_>>();
         if !child_shapes.is_empty() {
@@ -812,24 +809,60 @@ impl Renderer {
                 "shape has no Geometry section",
             );
         };
-        if !geometry.issues.is_empty() || geometry.commands.is_empty() {
+        let drawn = geometry
+            .iter()
+            .filter(|realized| !realized.controls.no_show)
+            .collect::<Vec<_>>();
+        let issues = drawn
+            .iter()
+            .flat_map(|realized| realized.issues.iter().cloned())
+            .collect::<Vec<_>>();
+        if !issues.is_empty() {
             return self.placeholder_at(
                 id,
                 z_order,
                 bounds,
                 state,
-                &format!("unsupported geometry: {:?}", geometry.issues),
+                &format!("unsupported geometry: {issues:?}"),
             );
         }
-        let path = geometry
-            .commands
-            .into_iter()
-            .map(|mut command| {
-                transform_affine(&mut command, affine(transform.local));
-                command
+        let paths = drawn
+            .iter()
+            .filter(|realized| !realized.commands.is_empty())
+            .map(|realized| {
+                (
+                    &realized.controls,
+                    realized
+                        .commands
+                        .iter()
+                        .cloned()
+                        .map(|mut command| {
+                            transform_affine(&mut command, affine(transform.local));
+                            command
+                        })
+                        .collect::<Vec<_>>(),
+                )
             })
             .collect::<Vec<_>>();
-        let (fill, stroke) = match paint::paint(package, references, resolved, shape.id) {
+        if paths.is_empty() && !drawn.is_empty() {
+            return self.placeholder_at(
+                id,
+                z_order,
+                bounds,
+                state,
+                "unsupported geometry: no path commands",
+            );
+        }
+        let needs_fill = paths.iter().any(|(controls, _)| !controls.no_fill);
+        let needs_stroke = paths.iter().any(|(controls, _)| !controls.no_line);
+        let (fill, stroke) = match paint::paint(
+            package,
+            references,
+            resolved,
+            shape.id,
+            needs_fill,
+            needs_stroke,
+        ) {
             Ok(paint) => paint,
             Err(reason) => {
                 return self.placeholder_at(
@@ -841,14 +874,20 @@ impl Renderer {
                 );
             }
         };
-        state.primitives.push(Primitive::Shape {
-            id: id.clone(),
-            z_order,
-            path,
-            fill,
-            stroke,
-            transform: Affine::identity(),
-        });
+        for (controls, path) in paths {
+            state.primitives.push(Primitive::Shape {
+                id: id.clone(),
+                z_order,
+                path,
+                fill: if controls.no_fill { None } else { fill.clone() },
+                stroke: if controls.no_line {
+                    None
+                } else {
+                    stroke.clone()
+                },
+                transform: Affine::identity(),
+            });
+        }
         self.text(
             package,
             resolver,
@@ -875,7 +914,6 @@ impl Renderer {
     fn layout_connector(
         &self,
         package: &VsdxPackage,
-        _resolver: &Resolver<'_>,
         connectivity: &vsdx_resolve::PageConnectivity,
         references: Option<&PageShapeReferences>,
         page_part: &str,
@@ -883,8 +921,13 @@ impl Renderer {
         id: String,
         z_order: u32,
         resolved: &ResolvedShape,
+        sections: &[&vsdx_resolve::ResolvedSection],
         state: &mut State,
     ) -> Result<(), RenderError> {
+        let visible = sections.iter().filter(|section| !section.controls.no_show);
+        if !sections.is_empty() && visible.clone().next().is_none() {
+            return Ok(());
+        }
         let Some(connector) = connectivity.connectors.get(&shape.id) else {
             return self.placeholder(
                 page_part,
@@ -933,7 +976,18 @@ impl Renderer {
                 "connector route cannot be computed: non-finite endpoint",
             );
         }
-        let (fill, stroke) = match paint::paint(package, references, resolved, shape.id) {
+        let needs_fill =
+            sections.is_empty() || visible.clone().any(|section| !section.controls.no_fill);
+        let needs_stroke =
+            sections.is_empty() || visible.clone().any(|section| !section.controls.no_line);
+        let (fill, stroke) = match paint::paint(
+            package,
+            references,
+            resolved,
+            shape.id,
+            needs_fill,
+            needs_stroke,
+        ) {
             Ok(paint) => paint,
             Err(reason) => return self.placeholder(page_part, shape, state, &reason),
         };
@@ -968,13 +1022,11 @@ impl Renderer {
                 "non-finite text metrics".into(),
             ));
         }
-        let page = package
-            .page_part_ids
+        let lookup = package
+            .page_contents
             .get(page_part)
-            .and_then(|id| package.page_sheets.get(id))
-            .or_else(|| package.page_contents.get(page_part))
             .ok_or_else(|| RenderError::MissingPage(page_part.into()))?;
-        let tokens = resolver.resolve_text_in_context(shape, page, resolved)?;
+        let tokens = resolver.resolve_text_in_context(shape, lookup, resolved)?;
         let mut paragraphs =
             rich_paragraphs(self, package, references, resolved, shape.id, &tokens);
         if paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()) {
@@ -2383,43 +2435,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unsupported_section_paint_controls_produce_placeholders() {
-        for control in ["NoFill", "NoLine", "NoShow"] {
-            for formula in ["0", "1", "Unknown(1)"] {
-                let mut shape = shape(1, 1.0, 1.0);
-                let section = shape
-                    .children
-                    .iter_mut()
-                    .find_map(|child| match child {
-                        ShapeChild::Section(section) if section.name == "Geometry" => Some(section),
-                        _ => None,
-                    })
-                    .unwrap();
-                section
-                    .children
-                    .push(SectionChild::Unknown(vsdx_parse::OpaqueXml {
-                        name: "Cell".into(),
-                        attributes: vec![
-                            ("N".into(), control.into()),
-                            ("F".into(), formula.into()),
-                            ("V".into(), "0".into()),
-                        ],
-                        children: Vec::new(),
-                    }));
-                let list = render(vec![shape]);
-                if formula == "0" {
-                    assert!(
-                        list.primitives
-                            .iter()
-                            .any(|primitive| matches!(primitive, Primitive::Shape { .. }))
-                    );
-                } else {
-                    assert!(list.primitives.iter().all(|primitive| matches!(primitive, Primitive::Placeholder { reason, .. } if reason.contains(control))));
-                }
-            }
-        }
-    }
+    mod section_controls;
 
     #[test]
     fn hit_testing_does_not_bridge_separate_subpaths() {
@@ -2442,24 +2458,27 @@ mod tests {
         let list = Renderer::default()
             .layout_page(&package, "visio/pages/page1.xml")
             .unwrap();
-        let path = list
+        let paths = list
             .primitives
             .iter()
-            .find_map(|primitive| match primitive {
+            .filter_map(|primitive| match primitive {
                 Primitive::Shape { path, .. } => Some(path),
                 _ => None,
             })
-            .unwrap();
-        assert_eq!(
-            path.iter()
-                .filter(|command| matches!(
-                    command,
-                    ooxml_drawingml::GeometryPathCommand::Move { .. }
-                ))
-                .count(),
-            2
-        );
-        assert_eq!(path.len(), 4);
+            .collect::<Vec<_>>();
+        assert_eq!(paths.len(), 2);
+        for path in &paths {
+            assert_eq!(
+                path.iter()
+                    .filter(|command| matches!(
+                        command,
+                        ooxml_drawingml::GeometryPathCommand::Move { .. }
+                    ))
+                    .count(),
+                1
+            );
+            assert_eq!(path.len(), 2);
+        }
     }
 
     fn render(shapes: Vec<Shape>) -> VsdxDisplayList {
@@ -4475,6 +4494,49 @@ mod tests {
     }
 
     #[test]
+    fn group_subshapes_render_master_geometry_and_text_with_page_formatting() {
+        let package = vsdx_parse::parse_vsdx(include_bytes!(
+            "../../vsdx-parse/tests/fixtures/group-master-shape.vsdx"
+        ))
+        .unwrap();
+        let page = &package.page_part_paths[0];
+        let renderer = Renderer::default();
+        let list = renderer.layout_page(&package, page).unwrap();
+        let mut boxes = BTreeMap::new();
+        text_boxes_by_id(&list.primitives, &mut boxes);
+        assert_eq!(boxes.len(), 2);
+        for id in [2, 4] {
+            let Primitive::TextBox {
+                width,
+                height,
+                paragraphs,
+                ..
+            } = boxes[&format!("{page}:{id}")]
+            else {
+                panic!("missing text box")
+            };
+            assert_eq!((*width, *height), (2.0, 1.0));
+            let runs = paragraphs
+                .iter()
+                .flat_map(|paragraph| &paragraph.runs)
+                .collect::<Vec<_>>();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].text, "group label");
+            assert_eq!(runs[0].size_in, 0.25);
+        }
+        let mut rendered = std::collections::BTreeSet::new();
+        assert_resolved_text(
+            &renderer,
+            &package,
+            page,
+            &list.primitives,
+            &mut rendered,
+            &mut TextCorpusStats::default(),
+        );
+        assert_eq!(rendered.len(), 2);
+    }
+
+    #[test]
     fn text_accounting_fixture_covers_resolved_text_sources() {
         let package = vsdx_parse::parse_vsdx(include_bytes!(
             "../../vsdx-parse/tests/fixtures/text-accounting.vsdx"
@@ -4698,11 +4760,6 @@ mod tests {
         stats: &mut TextCorpusStats,
     ) {
         let contents = &package.page_contents[page_part];
-        let page = package
-            .page_part_ids
-            .get(page_part)
-            .and_then(|id| package.page_sheets.get(id))
-            .unwrap_or(contents);
         let resolver = Resolver::new(package);
         let references = PageShapeReferences::new(&resolver, page_part).ok();
         let mut text_boxes = BTreeMap::new();
@@ -4713,7 +4770,7 @@ mod tests {
                 package,
                 &resolver,
                 references.as_ref(),
-                page,
+                contents,
                 page_part,
                 shape,
                 &text_boxes,
@@ -4729,7 +4786,7 @@ mod tests {
         package: &VsdxPackage,
         resolver: &Resolver<'_>,
         references: Option<&PageShapeReferences>,
-        page: &Sheet,
+        lookup: &Sheet,
         page_part: &str,
         shape: &Shape,
         text_boxes: &BTreeMap<String, &Primitive>,
@@ -4743,7 +4800,7 @@ mod tests {
             return;
         }
         let tokens = resolver
-            .resolve_text_in_context(shape, page, &resolved)
+            .resolve_text_in_context(shape, lookup, &resolved)
             .unwrap();
         if tokens.iter().all(|token| {
             matches!(
@@ -4831,7 +4888,7 @@ mod tests {
         }
         for child in shape.shapes() {
             assert_shape_text(
-                renderer, package, resolver, references, page, page_part, child, text_boxes,
+                renderer, package, resolver, references, lookup, page_part, child, text_boxes,
                 rendered, stats,
             );
         }
