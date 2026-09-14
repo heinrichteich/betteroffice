@@ -3,33 +3,44 @@ use vsdx_eval::{Evaluation, PageShapeReferences, Value, evaluate_cell_with_shape
 use vsdx_parse::{ParseLimits, VsdxPackage};
 use vsdx_resolve::{Lookup, ResolvedShape};
 
+/// Resolves only the paint channels at least one emitting section uses.
 pub fn paint(
     package: &VsdxPackage,
     references: Option<&PageShapeReferences>,
     shape: &ResolvedShape,
     shape_id: u32,
+    needs_fill: bool,
+    needs_stroke: bool,
 ) -> Result<(Option<Paint>, Option<Stroke>), String> {
-    let fill = value(shape, "FillPattern")
-        .filter(|v| *v != "0")
-        .map(|_| colour(package, references, shape, shape_id, "FillForegnd"))
-        .transpose()?
-        .map(|color| Paint::Solid { color });
-    let stroke = value(shape, "LinePattern")
-        .filter(|v| *v != "0")
-        .map(|_| colour(package, references, shape, shape_id, "LineColor"))
-        .transpose()?
-        .map(|color| {
-            let width = number(shape, "LineWeight").unwrap_or(0.01) as f32;
-            if !width.is_finite() {
-                return Err::<Stroke, String>("non-finite stroke width".into());
-            }
-            Ok(Stroke {
-                color,
-                width,
-                dashed: value(shape, "LinePattern").is_some_and(|v| v != "1"),
+    let fill = if needs_fill {
+        value(shape, "FillPattern")
+            .filter(|v| *v != "0")
+            .map(|_| colour(package, references, shape, shape_id, "FillForegnd"))
+            .transpose()?
+            .map(|color| Paint::Solid { color })
+    } else {
+        None
+    };
+    let stroke = if needs_stroke {
+        value(shape, "LinePattern")
+            .filter(|v| *v != "0")
+            .map(|_| colour(package, references, shape, shape_id, "LineColor"))
+            .transpose()?
+            .map(|color| {
+                let width = number(shape, "LineWeight").unwrap_or(0.01) as f32;
+                if !width.is_finite() {
+                    return Err::<Stroke, String>("non-finite stroke width".into());
+                }
+                Ok(Stroke {
+                    color,
+                    width,
+                    dashed: value(shape, "LinePattern").is_some_and(|v| v != "1"),
+                })
             })
-        })
-        .transpose()?;
+            .transpose()?
+    } else {
+        None
+    };
     Ok((fill, stroke))
 }
 pub fn number(shape: &ResolvedShape, name: &str) -> Option<f64> {
