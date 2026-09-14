@@ -123,6 +123,21 @@ struct DeleteShapeArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SetShapeTextArgs {
+    page_id: String,
+    shape_id: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShapeTextArgs {
+    page_id: String,
+    shape_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ConnectorGlueArgs {
     shape_id: String,
     to_cell: Option<String>,
@@ -361,6 +376,16 @@ impl VsdxDocument {
         self.add_connector_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = setShapeTextJson)]
+    pub fn set_shape_text_json(&self, args: &str) -> Result<String, JsValue> {
+        self.set_shape_text_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = shapeTextJson)]
+    pub fn shape_text_json(&self, args: &str) -> Result<String, JsValue> {
+        self.shape_text_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = save)]
     pub fn save(&self) -> Result<Vec<u8>, JsValue> {
         self.save_inner().map_err(js_error)
@@ -520,6 +545,22 @@ impl VsdxDocument {
             .and_then(json_inner)
     }
 
+    fn shape_text_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: ShapeTextArgs = parse_args_inner(args)?;
+        self.session
+            .shape_text(&args.page_id, &args.shape_id)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn set_shape_text_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: SetShapeTextArgs = parse_args_inner(args)?;
+        self.session
+            .set_shape_text(&local_context(), &args.page_id, &args.shape_id, args.text)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
     fn save_inner(&self) -> Result<Vec<u8>, String> {
         self.session.save().map_err(|error| error.to_string())
     }
@@ -586,7 +627,7 @@ mod tests {
     use crate::DiagramSession;
     use crate::diagram::MAX_SHAPE_NESTING;
     use crate::{MAX_SAFE_CLIENT_ID, PAGE_ORDER, PAGES, SHEETS};
-    use yrs::{Array, ArrayPrelim, Map, MapPrelim, Out, ReadTxn, Transact};
+    use yrs::{Array, ArrayPrelim, Map, MapPrelim, Out, ReadTxn, Transact, WriteTxn};
 
     fn document() -> VsdxDocument {
         VsdxDocument::open_collaborative(
@@ -1497,5 +1538,113 @@ mod tests {
             );
         }
         assert_eq!(document.drain_update_event(), vec![2]);
+    }
+
+    #[test]
+    fn set_shape_text_json_round_trips_through_save() {
+        let document = document();
+        let receipt: crate::TextReceipt = serde_json::from_str(
+            &document
+                .set_shape_text_json(
+                    r#"{"pageId":"page:1","shapeId":"page:1:shape:1","text":"Hello\nNew line"}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.page_id, "page:1");
+        assert_eq!(receipt.shape_id, "page:1:shape:1");
+        assert_eq!(
+            document
+                .shape_text_json_inner(r#"{"pageId":"page:1","shapeId":"page:1:shape:1"}"#)
+                .unwrap(),
+            "\"Hello\\nNew line\""
+        );
+        let saved = document.save_inner().unwrap();
+        let reopened = DiagramSession::open(&saved, 2).unwrap();
+        assert_eq!(
+            reopened
+                .shape_text("page:1", "page:1:shape:1")
+                .unwrap(),
+            "Hello\nNew line"
+        );
+        let package = reopened.package().unwrap();
+        let part = package.page_part_paths.first().unwrap().clone();
+        let shape = package.page_contents[&part]
+            .shapes()
+            .find(|shape| shape.id == 1)
+            .unwrap();
+        assert_eq!(
+            shape.text(),
+            Some([vsdx_parse::TextToken::Literal("Hello\nNew line".to_owned())].as_slice())
+        );
+        assert_eq!(receipt.before.is_empty(), false);
+    }
+
+    #[test]
+    fn set_shape_text_json_refuses_locked_text() {
+        let document = document();
+        add_cell(&document, "LockTextEdit", "LockTextEdit", "1");
+        assert_eq!(
+            document
+                .set_shape_text_json_inner(
+                    r#"{"pageId":"page:1","shapeId":"page:1:shape:1","text":"blocked"}"#
+                )
+                .unwrap_err(),
+            "invalid diagram state: LockTextEdit protects this text-edit gesture"
+        );
+        assert_ne!(
+            document
+                .shape_text_json_inner(r#"{"pageId":"page:1","shapeId":"page:1:shape:1"}"#)
+                .unwrap(),
+            "\"blocked\""
+        );
+    }
+
+    #[test]
+    fn set_shape_text_json_rejects_forbidden_characters() {
+        assert!(document()
+            .set_shape_text_json_inner(
+                "{\"pageId\":\"page:1\",\"shapeId\":\"page:1:shape:1\",\"text\":\"bad\0\"}"
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn remote_text_edits_apply_but_locked_text_is_rejected() {
+        let live = document();
+        let peer = DiagramSession::open_from_update(&live.encode_state_as_update(), 2).unwrap();
+        peer.set_shape_text(
+            &crate::EditCtx::local("peer"),
+            "page:1",
+            "page:1:shape:1",
+            "from a peer",
+        )
+        .unwrap();
+        let update = peer
+            .encode_diff_v1(&live.encode_state_vector())
+            .unwrap();
+        live.apply_update_json_inner(&update).unwrap();
+        assert_eq!(
+            live.session()
+                .shape_text("page:1", "page:1:shape:1")
+                .unwrap(),
+            "from a peer"
+        );
+        let locked = document();
+        add_cell(&locked, "LockTextEdit", "LockTextEdit", "1");
+        let attacker =
+            DiagramSession::open_from_update(&locked.encode_state_as_update(), 3).unwrap();
+        {
+            let mut txn = attacker.yrs_doc().transact_mut();
+            txn.get_or_insert_map(crate::STORIES)
+                .insert(&mut txn, "page:1:shape:1", "smuggled");
+        }
+        let update = attacker
+            .encode_diff_v1(&locked.encode_state_vector())
+            .unwrap();
+        assert_eq!(
+            locked.apply_update_json_inner(&update).unwrap_err(),
+            "invalid diagram state: LockTextEdit protects this text-edit gesture"
+        );
     }
 }

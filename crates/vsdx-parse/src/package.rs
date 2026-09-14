@@ -46,6 +46,13 @@ pub struct SemanticCellEdit {
     pub value: Option<String>,
 }
 
+/// Plain-text content of a shape's `Text` element.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticTextEdit {
+    pub locator: CellLocator,
+    pub text: String,
+}
+
 /// The user action that requested a ShapeSheet mutation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MutationGesture {
@@ -916,6 +923,156 @@ pub fn save_semantic_cell_edits(
             &new_container_cells,
         )
     }
+}
+
+/// Patches only the inner XML of each edited shape's `Text` element.
+pub fn save_semantic_text_edits(
+    package: &VsdxPackage,
+    edits: &[SemanticTextEdit],
+) -> Result<Vec<u8>, VsdxError> {
+    let limits = ParseLimits::default();
+    let mut part_edits: BTreeMap<String, Vec<crate::SpanEdit>> = BTreeMap::new();
+    for edit in edits {
+        validate_text_content(&edit.text, &limits)?;
+        let (page_id, shape_id) = match (&edit.locator.sheet, edit.locator.shape_id) {
+            (CellSheet::Page(page_id), Some(shape_id)) => (*page_id, shape_id),
+            _ => {
+                return Err(VsdxError::InvalidCellEdit {
+                    part: format!("{:?}", edit.locator.sheet),
+                    message: "text edits require a page shape".to_owned(),
+                });
+            }
+        };
+        let path = package
+            .page_part_ids
+            .iter()
+            .find_map(|(path, id)| (*id == page_id).then(|| path.clone()))
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: page_id.to_string(),
+                message: "page does not exist".to_owned(),
+            })?;
+        let part = package
+            .parts
+            .iter()
+            .find(|part| part.path == path)
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: path.clone(),
+                message: "part does not exist".to_owned(),
+            })?;
+        let shape = part
+            .spans
+            .iter()
+            .find(|span| {
+                local_name(&span.name) == "Shape"
+                    && attribute_equals(&part.bytes, span, "ID", &shape_id.to_string())
+            })
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: path.clone(),
+                message: format!("shape {shape_id} does not exist"),
+            })?;
+        let text = part.spans.iter().find(|span| {
+            local_name(&span.name) == "Text"
+                && nearest_parent(part, span.span, "Shape").is_some_and(|parent| parent.span == shape.span)
+        });
+        let escaped = escape_text_content(&edit.text);
+        match text {
+            Some(text) => {
+                let outer_end = text.span.end().ok_or(VsdxError::InvalidSpan)?;
+                let open_end = tag_close(&part.bytes, text.span.offset, outer_end)
+                    .ok_or(VsdxError::InvalidSpan)?;
+                if part.bytes[open_end.saturating_sub(1)] == b'/' {
+                    part_edits.entry(path).or_default().push(crate::SpanEdit {
+                        span: text.span,
+                        replacement: format!("<{}>{escaped}</{}>", text.name, text.name)
+                            .into_bytes(),
+                    });
+                } else {
+                    let inner_start = open_end + 1;
+                    let closing = part.bytes[inner_start..outer_end]
+                        .iter()
+                        .rposition(|byte| *byte == b'<')
+                        .map(|relative| relative + inner_start)
+                        .ok_or(VsdxError::InvalidSpan)?;
+                    part_edits.entry(path).or_default().push(crate::SpanEdit {
+                        span: crate::SourceSpan {
+                            offset: inner_start,
+                            length: closing - inner_start,
+                        },
+                        replacement: escaped.into_bytes(),
+                    });
+                }
+            }
+            None if edit.text.is_empty() => {}
+            None => {
+                let outer_end = shape.span.end().ok_or(VsdxError::InvalidSpan)?;
+                if outer_end >= 2 && part.bytes[outer_end - 2..outer_end] == *b"/>" {
+                    part_edits.entry(path).or_default().push(crate::SpanEdit {
+                        span: crate::SourceSpan {
+                            offset: outer_end - 2,
+                            length: 2,
+                        },
+                        replacement: format!("><Text>{escaped}</Text></{}>", shape.name).into_bytes(),
+                    });
+                } else {
+                    let closing = part.bytes[..outer_end]
+                        .iter()
+                        .rposition(|byte| *byte == b'<')
+                        .ok_or(VsdxError::InvalidSpan)?;
+                    part_edits.entry(path).or_default().push(crate::SpanEdit {
+                        span: crate::SourceSpan {
+                            offset: closing,
+                            length: 0,
+                        },
+                        replacement: format!("<Text>{escaped}</Text>").into_bytes(),
+                    });
+                }
+            }
+        }
+    }
+    if part_edits.values().all(|edits| edits.is_empty()) {
+        return write_vsdx(package);
+    }
+    let mut output = package.clone();
+    for (path, edits) in &part_edits {
+        let part = package
+            .parts
+            .iter()
+            .find(|part| &part.path == path)
+            .expect("validated source part");
+        let bytes = apply_span_edits(&part.bytes, edits)?;
+        let target = output
+            .parts
+            .iter_mut()
+            .find(|part| &part.path == path)
+            .expect("validated source part");
+        target.bytes = bytes;
+    }
+    let bytes = write_vsdx(&output)?;
+    parse_vsdx(&bytes)?;
+    Ok(bytes)
+}
+
+fn validate_text_content(value: &str, limits: &ParseLimits) -> Result<(), VsdxError> {
+    if value.len() > limits.max_xml_text_bytes {
+        return Err(VsdxError::PatchLimit { kind: "editBytes" });
+    }
+    if value.chars().any(|c| !matches!(c, '\u{9}' | '\u{A}' | '\u{D}' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}')) {
+        return Err(VsdxError::InvalidXmlCharacter);
+    }
+    Ok(())
+}
+
+fn escape_text_content(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            _ => output.push(character),
+        }
+    }
+    output
 }
 
 /// Applies structural edits and validates references; deletion removes incident Connects.
@@ -2010,6 +2167,26 @@ fn local_name(name: &str) -> &str {
     name.rsplit_once(':').map_or(name, |(_, name)| name)
 }
 
+/// Offset of the `>` closing the tag opened at `start`, skipping quoted values.
+fn tag_close(source: &[u8], start: usize, end: usize) -> Option<usize> {
+    let mut index = start;
+    let mut quote = None;
+    while index < end {
+        let byte = source[index];
+        if let Some(active) = quote {
+            if byte == active {
+                quote = None;
+            }
+        } else if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+        } else if byte == b'>' {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
 fn contains(parent: crate::SourceSpan, child: crate::SourceSpan) -> bool {
     parent.offset < child.offset
         && parent
@@ -2978,6 +3155,125 @@ mod tests {
                 .values()
                 .any(|sheet| sheet_has_value(sheet, "patched"))
         );
+    }
+
+    #[test]
+    fn saves_shape_text_without_rewriting_other_parts_or_lexical_spans() {
+        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        let package = parse_vsdx(source).unwrap();
+        let part_path = package.page_part_paths.first().unwrap().clone();
+        let page_id = package.page_part_ids.get(&part_path).copied().unwrap();
+        let edit = SemanticTextEdit {
+            locator: CellLocator {
+                sheet: CellSheet::Page(page_id),
+                shape_id: Some(1),
+                section: None,
+                section_index: None,
+                row: None,
+                cell_name: "Text".to_owned(),
+            },
+            text: "Hello & <World>\nNew line".to_owned(),
+        };
+        let before: BTreeMap<_, _> = unzip_parts(source).unwrap().into_iter().collect();
+        let saved = save_semantic_text_edits(&package, std::slice::from_ref(&edit)).unwrap();
+        let after: BTreeMap<_, _> = unzip_parts(&saved).unwrap().into_iter().collect();
+        for (path, bytes) in &before {
+            if path == &part_path {
+                let original = package.part_bytes(path).unwrap();
+                let text = package
+                    .element_spans(path)
+                    .unwrap()
+                    .iter()
+                    .find(|span| {
+                        span.name == "Text"
+                            && original[span.span.offset..span.span.end().unwrap()]
+                                .windows(b"<fld".len())
+                                .any(|window| window == b"<fld")
+                    })
+                    .unwrap();
+                let outer_end = text.span.end().unwrap();
+                let inner_start = original[text.span.offset..outer_end]
+                    .iter()
+                    .position(|byte| *byte == b'>')
+                    .unwrap()
+                    + text.span.offset
+                    + 1;
+                let closing = original[inner_start..outer_end]
+                    .iter()
+                    .rposition(|byte| *byte == b'<')
+                    .unwrap()
+                    + inner_start;
+                assert_only_span_changed(
+                    original,
+                    &after[path],
+                    crate::SourceSpan {
+                        offset: inner_start,
+                        length: closing - inner_start,
+                    },
+                    "Hello &amp; &lt;World&gt;\nNew line".len(),
+                );
+            } else {
+                assert_eq!(&after[path], bytes, "{path}");
+            }
+        }
+        let reparsed = parse_vsdx(&saved).unwrap();
+        let sheet = reparsed.page_contents.get(&part_path).unwrap();
+        let shape = sheet.shapes().find(|shape| shape.id == 1).unwrap();
+        let round_tripped = shape
+            .text()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|token| match token {
+                crate::TextToken::Literal(value) => Some(value.clone()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(round_tripped, "Hello & <World>\nNew line");
+    }
+
+    #[test]
+    fn saving_shape_text_rejects_non_shape_targets_and_forbidden_characters() {
+        let package = parse_vsdx(include_bytes!("../tests/fixtures/foundation.vsdx")).unwrap();
+        let part_path = package.page_part_paths.first().unwrap().clone();
+        let page_id = package.page_part_ids.get(&part_path).copied().unwrap();
+        let locator = |shape_id: Option<u32>| CellLocator {
+            sheet: CellSheet::Page(page_id),
+            shape_id,
+            section: None,
+            section_index: None,
+            row: None,
+            cell_name: "Text".to_owned(),
+        };
+        assert!(matches!(
+            save_semantic_text_edits(
+                &package,
+                &[SemanticTextEdit {
+                    locator: locator(None),
+                    text: "x".to_owned()
+                }]
+            ),
+            Err(VsdxError::InvalidCellEdit { .. })
+        ));
+        assert!(matches!(
+            save_semantic_text_edits(
+                &package,
+                &[SemanticTextEdit {
+                    locator: locator(Some(999)),
+                    text: "x".to_owned()
+                }]
+            ),
+            Err(VsdxError::InvalidCellEdit { .. })
+        ));
+        assert!(matches!(
+            save_semantic_text_edits(
+                &package,
+                &[SemanticTextEdit {
+                    locator: locator(Some(1)),
+                    text: "bad\0".to_owned()
+                }]
+            ),
+            Err(VsdxError::InvalidXmlCharacter)
+        ));
     }
 
     #[test]
