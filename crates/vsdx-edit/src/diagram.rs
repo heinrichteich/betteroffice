@@ -13,10 +13,12 @@ use yrs::{
 };
 
 use crate::{
-    CellFormulaReceipt, CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx, EditError,
-    EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES, ShapeDraft, ShapeReceipt,
-    ShapeSnapshot,
+    CONNECTS, CellFormulaReceipt, CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx,
+    EditError, EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES, ShapeDraft,
+    ShapeReceipt, ShapeSnapshot,
 };
+
+mod connect;
 
 const SCHEMA_VERSION: f64 = 1.0;
 pub(crate) const MAX_SHAPE_NESTING: usize = 256;
@@ -53,6 +55,7 @@ pub(crate) fn seed_doc(
     let order = txn.get_or_insert_array(PAGE_ORDER);
     let pages = txn.get_or_insert_map(PAGES);
     let sheets = txn.get_or_insert_map(SHEETS);
+    txn.get_or_insert_map(CONNECTS);
     let stories = txn.get_or_insert_map(STORIES);
     for path in &package.page_part_paths {
         let Some(page_id) = package.page_part_ids.get(path) else {
@@ -97,7 +100,8 @@ pub(crate) fn seed_doc(
 pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage> {
     let mut package = original_package_from_doc(doc)?;
     let snapshot = snapshot_doc(doc)?;
-    materialize_snapshot(&mut package, &snapshot, &original_shape_ids(doc)?)?;
+    let glue = connect::glue_records(&doc.transact())?;
+    materialize_snapshot(&mut package, &snapshot, &original_shape_ids(doc)?, &glue)?;
     package.page_part_paths = page_part_paths_for_snapshot(&package, &snapshot)?;
     Ok(package)
 }
@@ -140,6 +144,7 @@ fn materialize_snapshot(
     package: &mut vsdx_parse::VsdxPackage,
     snapshot: &DiagramSnapshot,
     original_shape_ids: &HashSet<String>,
+    glue: &[connect::GlueRecord],
 ) -> EditResult<()> {
     for page in &snapshot.pages {
         let Some(sheet) = package.page_contents.get_mut(&page.source_part_path) else {
@@ -153,6 +158,7 @@ fn materialize_snapshot(
             .copied()
             .collect();
         vsdx_parse::remove_connects_referencing_shapes(sheet, &deleted);
+        connect::materialize_page_glue(sheet, page, glue);
     }
     Ok(())
 }
@@ -683,57 +689,7 @@ impl DiagramSession {
     ) -> EditResult<ShapeReceipt> {
         validate_shape_draft(draft)?;
         let mut txn = self.transact_for(context);
-        let pages = txn
-            .get_map(PAGES)
-            .ok_or_else(|| EditError::InvalidState("missing pages map".to_owned()))?;
-        let page = map_ref(&pages, &txn, page_id)?;
-        let order = map_array(&page, &txn, "shapes")?;
-        let index = order.len(&txn);
-        let sheets = txn
-            .get_map(SHEETS)
-            .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
-        let id_prefix = format!("{page_id}:shape:added:{}:", self.client_id);
-        if sheets.len(&txn) as usize >= ParseLimits::default().max_shapes {
-            return Err(EditError::InvalidState(
-                "shape count exceeds maximum".to_owned(),
-            ));
-        }
-        let source_bound = map_u32(&page, &txn, "maxSourceId")?
-            .ok_or_else(|| EditError::InvalidState("missing page source ID bound".to_owned()))?;
-        let allocated = materialized_source_ids(&sheets, &txn, &order, source_bound)?;
-        let largest = allocated.values().copied().max().unwrap_or(source_bound);
-        largest.checked_add(1).ok_or_else(|| {
-            EditError::InvalidState("cannot allocate a materialized source ID".to_owned())
-        })?;
-        let sequence = txn.state_vector().get(&yrs::ClientID::new(self.client_id));
-        let id = format!("{id_prefix}{sequence}");
-        let shape = sheets.insert(&mut txn, id.as_str(), MapPrelim::default());
-        shape.insert(&mut txn, "id", id.as_str());
-        shape.insert(&mut txn, "pageId", page_id);
-        shape.insert(&mut txn, "sourceId", 0.0);
-        shape.insert(&mut txn, "origin", "added");
-        if let Some(name) = &draft.name {
-            shape.insert(&mut txn, "name", name.as_str());
-        }
-        let cells = shape.insert(&mut txn, "cells", MapPrelim::default());
-        shape.insert(&mut txn, "shapes", ArrayPrelim::default());
-        for cell in &draft.cells {
-            seed_cell(
-                &cells,
-                &mut txn,
-                &cell.locator,
-                cell.formula.as_deref(),
-                cell.value.as_deref(),
-                cell.row_type.as_deref(),
-            );
-        }
-        order.push_back(&mut txn, id.as_str());
-        Ok(ShapeReceipt {
-            page_id: page_id.to_owned(),
-            shape_id: id,
-            from_index: None,
-            to_index: Some(index),
-        })
+        insert_shape(&mut txn, self.client_id, page_id, draft)
     }
 
     pub fn delete_shape(
@@ -788,7 +744,7 @@ impl DiagramSession {
             .map(|entry| entry.id.clone())
             .collect::<Vec<_>>();
         order.remove_range(&mut txn, from, 1);
-        for id in removed {
+        for id in &removed {
             sheets.remove(&mut txn, id.as_str());
         }
         Ok(ShapeReceipt {
@@ -854,6 +810,65 @@ impl DiagramSession {
             },
         ])
     }
+}
+
+fn insert_shape(
+    txn: &mut TransactionMut<'_>,
+    client_id: u64,
+    page_id: &str,
+    draft: &ShapeDraft,
+) -> EditResult<ShapeReceipt> {
+    let pages = txn
+        .get_map(PAGES)
+        .ok_or_else(|| EditError::InvalidState("missing pages map".to_owned()))?;
+    let page = map_ref(&pages, txn, page_id)?;
+    let order = map_array(&page, txn, "shapes")?;
+    let index = order.len(txn);
+    let sheets = txn
+        .get_map(SHEETS)
+        .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
+    let id_prefix = format!("{page_id}:shape:added:{}:", client_id);
+    if sheets.len(txn) as usize >= ParseLimits::default().max_shapes {
+        return Err(EditError::InvalidState(
+            "shape count exceeds maximum".to_owned(),
+        ));
+    }
+    let source_bound = map_u32(&page, txn, "maxSourceId")?
+        .ok_or_else(|| EditError::InvalidState("missing page source ID bound".to_owned()))?;
+    let allocated = materialized_source_ids(&sheets, txn, &order, source_bound)?;
+    let largest = allocated.values().copied().max().unwrap_or(source_bound);
+    largest.checked_add(1).ok_or_else(|| {
+        EditError::InvalidState("cannot allocate a materialized source ID".to_owned())
+    })?;
+    let sequence = txn.state_vector().get(&yrs::ClientID::new(client_id));
+    let id = format!("{id_prefix}{sequence}");
+    let shape = sheets.insert(txn, id.as_str(), MapPrelim::default());
+    shape.insert(txn, "id", id.as_str());
+    shape.insert(txn, "pageId", page_id);
+    shape.insert(txn, "sourceId", 0.0);
+    shape.insert(txn, "origin", "added");
+    if let Some(name) = &draft.name {
+        shape.insert(txn, "name", name.as_str());
+    }
+    let cells = shape.insert(txn, "cells", MapPrelim::default());
+    shape.insert(txn, "shapes", ArrayPrelim::default());
+    for cell in &draft.cells {
+        seed_cell(
+            &cells,
+            txn,
+            &cell.locator,
+            cell.formula.as_deref(),
+            cell.value.as_deref(),
+            cell.row_type.as_deref(),
+        );
+    }
+    order.push_back(txn, id.as_str());
+    Ok(ShapeReceipt {
+        page_id: page_id.to_owned(),
+        shape_id: id,
+        from_index: None,
+        to_index: Some(index),
+    })
 }
 
 fn validate_shape_draft(draft: &ShapeDraft) -> EditResult<()> {
@@ -1024,6 +1039,7 @@ fn validate_schema(doc: &Doc) -> EditResult<()> {
             "shape is not reachable from a page shape order".to_owned(),
         ));
     }
+    connect::glue_records(&txn)?;
     Ok(())
 }
 
@@ -1151,6 +1167,7 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
         }
     }
     validate_new_cells(before, staged, &before_identities)?;
+    connect::validate_remote_glue(before, staged)?;
     Ok(())
 }
 
@@ -2026,6 +2043,7 @@ fn structural_edits(
     let txn = doc.transact();
     let pages = required_map(&txn, PAGES)?;
     let sheets = required_map(&txn, SHEETS)?;
+    let glue = connect::glue_records(&txn)?;
     let mut edits = Vec::new();
     let desired_page_ids =
         page_part_paths_for_snapshot(package, snapshot)?
@@ -2137,6 +2155,15 @@ fn structural_edits(
                 })
                 .collect::<Vec<_>>();
             structural_container_edits(*page_id, original_order, &desired, &added, &mut edits)?;
+        }
+        for pending in connect::page_glue(page, &glue) {
+            edits.push(StructuralEdit::AddConnect {
+                page_id: *page_id,
+                from_sheet: pending.from_sheet,
+                from_cell: pending.from_cell.to_owned(),
+                to_sheet: pending.to_sheet,
+                to_cell: pending.to_cell,
+            });
         }
     }
     Ok(edits)
