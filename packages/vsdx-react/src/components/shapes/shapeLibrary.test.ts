@@ -88,6 +88,27 @@ test('inserts the ellipse wider than tall and the circle square', () => {
   expect(circle.width).toBe(circle.height);
 });
 
+test('inserts the cube in a 4:3 box with inner edges at the front corner', () => {
+  const cube = defaultSize('cube');
+  expect(cube.width / cube.height).toBeCloseTo(4 / 3, 10);
+  const corners = standardShapes.find((shape) => shape.id === 'cube')!.draft(0, 0, 1, 1).cells
+    .filter((cell) => cell.locator.section === 'Geometry' && (cell.name === 'X' || cell.name === 'Y'))
+    .map((cell) => cell.formula);
+  expect(corners).toEqual([
+    'Width*0', 'Height*0',
+    'Width*0.75', 'Height*0',
+    'Width*1', 'Height*0.25',
+    'Width*1', 'Height*1',
+    'Width*0.25', 'Height*1',
+    'Width*0', 'Height*0.75',
+    'Width*0', 'Height*0.75',
+    'Width*0.75', 'Height*0.75',
+    'Width*0.75', 'Height*0',
+    'Width*0.75', 'Height*0.75',
+    'Width*1', 'Height*1',
+  ]);
+});
+
 test('follows the Visio gallery order', () => {
   expect(standardShapes.map((shape) => shape.id)).toEqual([
     'rectangle', 'square', 'circle', 'ellipse', 'rightTriangle', 'triangle', 'rotatedTriangle',
