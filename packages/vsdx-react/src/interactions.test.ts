@@ -31,6 +31,10 @@ test('previewOutline keeps a centred flip on the same visual frame', () => {
   expect(flipped).toEqual(plain);
   expect(selectionHandlePositions(flipped).handles.e).toEqual({ x: 6, y: 2 });
 });
+test('previewOutline skips the engine LocPin lookup for a shape with no height', () => {
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 0 }, locPinAtSize: () => { throw new Error('invalid resize dimensions'); } };
+  expect(previewOutline(start, { x: 1, y: 0 }, identity)).toEqual([{ x: 1, y: 3 }, { x: 5, y: 3 }, { x: 5, y: 3 }, { x: 1, y: 3 }]);
+});
 test('previewOutline maps the box through the group transform forward', () => {
   const start = { canvas: { x: 0, y: 0 }, model: { x: 10, y: 20 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, parentTransforms: [{ a: 0, b: 2, c: -2, d: 0, e: 10, f: 20 }] };
   expect(previewOutline(start, { x: 8, y: 24 }, identity)).toEqual([{ x: 7, y: 24 }, { x: 7, y: 32 }, { x: -3, y: 32 }, { x: -3, y: 24 }]);

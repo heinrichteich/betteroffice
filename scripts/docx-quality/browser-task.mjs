@@ -7,7 +7,7 @@ const [file, out, fontMode = 'cdn', base = 'http://127.0.0.1:4178'] =
   process.argv.slice(2);
 if (!file || !out)
   throw new Error(
-    'usage: browser-task.mjs input.docx|pptx|xlsx output-directory [cdn|none] [server-url]'
+    'usage: browser-task.mjs input.docx|pptx|xlsx|vsdx output-directory [cdn|none] [server-url]'
   );
 if (!['cdn', 'none'].includes(fontMode)) throw new Error('font mode must be cdn or none');
 const server = new URL(base);
@@ -19,7 +19,7 @@ if (
 if ((await readdir(out).catch(() => [])).length) throw new Error('output must be empty');
 const source = await readFile(file);
 const format = extname(file).slice(1).toLowerCase();
-if (!['docx', 'pptx', 'xlsx'].includes(format)) throw new Error('Invalid source format');
+if (!['docx', 'pptx', 'xlsx', 'vsdx'].includes(format)) throw new Error('Invalid source format');
 const profile = JSON.parse(process.env.QUALITY_CAPTURE_CONFIG ?? 'null');
 const sha256 = createHash('sha256').update(source).digest('hex');
 const metadata = {

@@ -41,9 +41,13 @@ use crate::{
 /// The paragraph attributes a style definition owns. Applying a style resets
 /// every one of them to the style's value, or clears it when the style has
 /// none — an attribute here is never left over from the previous style.
-pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 16] = [
+pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 20] = [
     "alignment",
     "spaceBefore",
+    "spaceBeforeLines",
+    "spaceAfterLines",
+    "beforeAutospacing",
+    "afterAutospacing",
     "spaceAfter",
     "lineSpacing",
     "lineSpacingRule",
@@ -76,13 +80,17 @@ pub const STYLE_CONTROLLED_MARKS: [&str; 7] = [
 /// The only paragraph properties an EMPTY second half inherits on split —
 /// pressing Enter at the end of a paragraph starts a clean one that keeps the
 /// style and vertical rhythm but nothing else.
-const INHERITED_PARA_ATTRS: [&str; 7] = [
+const INHERITED_PARA_ATTRS: [&str; 11] = [
     "defaultTextFormatting",
     "pStyle",
     "lineSpacing",
     "lineSpacingRule",
     "spaceAfter",
     "spaceBefore",
+    "spaceBeforeLines",
+    "spaceAfterLines",
+    "beforeAutospacing",
+    "afterAutospacing",
     "contextualSpacing",
 ];
 
@@ -290,6 +298,27 @@ fn apply_paragraph_attr_projection(
             return Err(OpError::ReservedKey(key.clone()));
         }
         set_or_remove(txn, map, key, Some(value.clone()));
+    }
+    if let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") {
+        let mut original = (*original).clone();
+        for key in [
+            "spaceBefore",
+            "spaceAfter",
+            "spaceBeforeLines",
+            "spaceAfterLines",
+            "beforeAutospacing",
+            "afterAutospacing",
+        ] {
+            match attrs.get(key) {
+                Some(value) if *value != Any::Null => {
+                    original.insert(key.to_owned(), value.clone());
+                }
+                _ => {
+                    original.remove(key);
+                }
+            }
+        }
+        map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
     }
     Ok(())
 }
@@ -819,6 +848,46 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
     apply(txn, map, "spaceAfter", &delta.space_after, |v| {
         Any::Number(*v)
     });
+    for (patch, key, lines_key, auto_key) in [
+        (
+            &delta.space_before,
+            "spaceBefore",
+            "spaceBeforeLines",
+            "beforeAutospacing",
+        ),
+        (
+            &delta.space_after,
+            "spaceAfter",
+            "spaceAfterLines",
+            "afterAutospacing",
+        ),
+    ] {
+        match patch {
+            Patch::Keep => continue,
+            Patch::Clear => {
+                map.remove(txn, lines_key);
+                map.remove(txn, auto_key);
+            }
+            Patch::Set(_) => {
+                map.insert(txn, lines_key, Any::Number(0.0));
+                map.insert(txn, auto_key, Any::Bool(false));
+            }
+        }
+        if let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") {
+            let mut original = (*original).clone();
+            for key in [key, lines_key, auto_key] {
+                match map.get(txn, key) {
+                    Some(Out::Any(value)) => {
+                        original.insert(key.to_owned(), value);
+                    }
+                    _ => {
+                        original.remove(key);
+                    }
+                }
+            }
+            map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
+        }
+    }
     apply(txn, map, INDENT_LEFT, &delta.indent_left, |v| {
         Any::Number(*v)
     });
