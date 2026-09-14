@@ -288,3 +288,20 @@ test('a submenu with no enabled child stays closed to keyboard and pointer', () 
     view.unmount();
   }
 });
+
+for (const nearRight of [false, true]) test(`z-order submenu ${nearRight ? 'flips left' : 'opens right'} and stays above the viewport bottom`, () => {
+  const originalRect = HTMLElement.prototype.getBoundingClientRect;
+  const left = nearRight ? window.innerWidth - 224 : 20;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    if (this.hasAttribute('data-submenu-id')) return { left, right: left + 220, top: window.innerHeight - 20, width: 220, height: 30 } as DOMRect;
+    if (this.hasAttribute('data-submenu')) return { left: 0, top: 0, width: 200, height: 80 } as DOMRect;
+    return originalRect.call(this);
+  };
+  try {
+    renderMenu();
+    const submenu = openSubmenu('bringToFront');
+    expect(submenu.style.position).toBe('fixed');
+    expect(Number.parseFloat(submenu.style.left)).toBe(nearRight ? left - 200 : left + 220);
+    expect(Number.parseFloat(submenu.style.top)).toBe(window.innerHeight - 84);
+  } finally { cleanup(); HTMLElement.prototype.getBoundingClientRect = originalRect; }
+});

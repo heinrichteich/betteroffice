@@ -12,7 +12,7 @@
     "fidelity": { "font-substituted": "A font was substituted.", "unsupported-effect": "An effect was rendered differently.", "unsupported-geometry": "A shape was approximated." },
     "unknown": "{category} notice: {code}"
   },
-  "errors": { "decodePageImage": "Could not decode page image", "openDiagram": "Could not open diagram" },
+  "errors": { "decodePageImage": "Could not decode page image", "openDiagram": "Could not open diagram", "resizeLocked": "Shape is locked and cannot be resized with handles." },
   "ribbon": {
     "label": "Diagram ribbon",
     "tabsLabel": "Ribbon tabs",
@@ -44,20 +44,32 @@
       "ellipse": "Ellipse",
       "rightTriangle": "Right Triangle",
       "triangle": "Triangle",
+      "rotatedTriangle": "Rotated Triangle",
       "pentagon": "Pentagon",
       "hexagon": "Hexagon",
       "heptagon": "Heptagon",
       "octagon": "Octagon",
       "decagon": "Decagon",
+      "cylinder": "Cylinder",
+      "parallelogram": "Parallelogram",
+      "trapezoid": "Trapezoid",
       "diamond": "Diamond",
       "cross": "Cross",
       "chevron": "Chevron",
-      "parallelogram": "Parallelogram",
-      "trapezoid": "Trapezoid",
-      "cylinder": "Cylinder",
       "cube": "Cube",
-      "arc": "Arc",
-      "teardrop": "Teardrop"
+      "teardrop": "Teardrop",
+      "semicircle": "Semicircle",
+      "halfEllipse": "Half Ellipse",
+      "cone": "Cone",
+      "invertedCone": "Inverted Cone",
+      "pyramid": "Pyramid",
+      "pointedOval": "Pointed Oval",
+      "funnel": "Funnel",
+      "star4": "4-Point Star",
+      "star5": "5-Point Star",
+      "star6": "6-Point Star",
+      "star7": "7-Point Star",
+      "star16": "16-Point Star"
     }
   }
 }
