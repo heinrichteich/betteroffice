@@ -629,7 +629,7 @@ test('concurrent pointers cannot commit or cancel each other', async () => {
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
-test('a resize from a handle moves the pin with moveShape and resizeShape', async () => {
+test('a resize from a handle commits pin and size with one transformShape', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
   canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
@@ -648,6 +648,9 @@ test('a resize from a handle moves the pin with moveShape and resizeShape', asyn
     const resizes: string[][] = [];
     const originalResize = handle.resizeShape.bind(handle);
     handle.resizeShape = ((...args: [string, string, string, string]) => { resizes.push([...args]); return originalResize(...args); }) as DiagramHandle['resizeShape'];
+    const transforms: string[][] = [];
+    const originalTransform = handle.transformShape.bind(handle);
+    handle.transformShape = ((...args: [string, string, string, string, string, string]) => { transforms.push([...args]); return originalTransform(...args); }) as DiagramHandle['transformShape'];
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
     const canvases = view.container.querySelectorAll('canvas');
@@ -675,10 +678,13 @@ test('a resize from a handle moves the pin with moveShape and resizeShape', asyn
     const pinX = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinX')?.value);
     const pinY = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinY')?.value);
     const width = Number(shapeBefore?.cells.find((cell) => cell.name === 'Width')?.value);
+    const height = Number(shapeBefore?.cells.find((cell) => cell.name === 'Height')?.value);
     const corners = selectionCorners(page, fakeFrame as never, { pageId: page.id, shapeId: 'page:1:shape:20', hit: { kind: 'shape', shapeId: 'page:1:shape:20' } });
     expect(corners).not.toBeNull();
     const se = selectionHandlePositions(corners!).handles.se;
     calls.length = 0;
+    const emitted: Uint8Array[] = [];
+    const stopEmission = handle.onUpdate((update) => { emitted.push(update); });
     fireEvent.pointerDown(main, { pointerId: 2, clientX: se.x, clientY: se.y });
     await act(async () => {});
     fireEvent.pointerMove(main, { pointerId: 2, clientX: se.x + 48, clientY: se.y + 48 });
@@ -688,11 +694,20 @@ test('a resize from a handle moves the pin with moveShape and resizeShape', asyn
     expect(calls.some((entry) => entry.startsWith('fillRect:'))).toBe(false);
     fireEvent.pointerUp(main, { pointerId: 2, clientX: se.x + 48, clientY: se.y + 48 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
-    expect(moves).toHaveLength(1);
-    expect(resizes).toHaveLength(1);
-    expect(Number(resizes[0][2])).toBeGreaterThan(width);
-    expect(Number(moves[0][2])).toBeCloseTo(pinX, 6);
-    expect(Number(moves[0][3])).not.toBeCloseTo(pinY, 6);
+    stopEmission();
+    expect(transforms).toHaveLength(1);
+    expect(moves).toHaveLength(0);
+    expect(resizes).toHaveLength(0);
+    expect(emitted).toHaveLength(1);
+    expect(Number(transforms[0][4])).toBeGreaterThan(width);
+    expect(Number(transforms[0][2])).toBeCloseTo(pinX, 6);
+    expect(Number(transforms[0][3])).not.toBeCloseTo(pinY, 6);
+    await act(async () => { handle.undo(); ready!.refresh(); });
+    const shapeUndone = handle.snapshot().pages[0].shapes.find((shape) => shape.id === 'page:1:shape:20');
+    expect(Number(shapeUndone?.cells.find((cell) => cell.name === 'PinX')?.value)).toBeCloseTo(pinX, 6);
+    expect(Number(shapeUndone?.cells.find((cell) => cell.name === 'PinY')?.value)).toBeCloseTo(pinY, 6);
+    expect(Number(shapeUndone?.cells.find((cell) => cell.name === 'Width')?.value)).toBeCloseTo(width, 6);
+    expect(Number(shapeUndone?.cells.find((cell) => cell.name === 'Height')?.value)).toBeCloseTo(height, 6);
     expect(view.container.querySelector('output')).toBeNull();
     expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
@@ -841,7 +856,7 @@ test('the overlay paints the selection frame at a zoom other than 1', async () =
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
-test('a refused handle resize rolls the pin move back', async () => {
+test('a refused handle resize commits neither pin nor size', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
   canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
@@ -876,18 +891,27 @@ test('a refused handle resize rolls the pin move back', async () => {
     const pinX = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinX')?.value);
     const pinY = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinY')?.value);
     await act(async () => { handle.setCellFormula(page.id, 'page:1:shape:20', { cellName: 'Width' }, 'GUARD(1)'); });
+    const guarded = handle.snapshot().pages[0].shapes.find((shape) => shape.id === 'page:1:shape:20');
+    const width = Number(guarded?.cells.find((cell) => cell.name === 'Width')?.value);
+    const height = Number(guarded?.cells.find((cell) => cell.name === 'Height')?.value);
     const corners = selectionCorners(handle.snapshot().pages[0], fakeFrame as never, { pageId: page.id, shapeId: 'page:1:shape:20', hit: { kind: 'shape', shapeId: 'page:1:shape:20' } });
     expect(corners).not.toBeNull();
     const se = selectionHandlePositions(corners!).handles.se;
+    const emitted: Uint8Array[] = [];
+    const stopEmission = handle.onUpdate((update) => { emitted.push(update); });
     fireEvent.pointerDown(main, { pointerId: 2, clientX: se.x, clientY: se.y });
     await act(async () => {});
     fireEvent.pointerMove(main, { pointerId: 2, clientX: se.x + 48, clientY: se.y + 48 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
     fireEvent.pointerUp(main, { pointerId: 2, clientX: se.x + 48, clientY: se.y + 48 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    stopEmission();
     const shapeAfter = handle.snapshot().pages[0].shapes.find((shape) => shape.id === 'page:1:shape:20');
     expect(Number(shapeAfter?.cells.find((cell) => cell.name === 'PinX')?.value)).toBeCloseTo(pinX, 6);
     expect(Number(shapeAfter?.cells.find((cell) => cell.name === 'PinY')?.value)).toBeCloseTo(pinY, 6);
+    expect(Number(shapeAfter?.cells.find((cell) => cell.name === 'Width')?.value)).toBeCloseTo(width, 6);
+    expect(Number(shapeAfter?.cells.find((cell) => cell.name === 'Height')?.value)).toBeCloseTo(height, 6);
+    expect(emitted).toHaveLength(0);
     expect(errors.length).toBeGreaterThan(0);
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
@@ -912,6 +936,9 @@ test('a handle resize on a move-locked shape commits neither size nor pin', asyn
     const resizes: string[][] = [];
     const originalResize = handle.resizeShape.bind(handle);
     handle.resizeShape = ((...args: [string, string, string, string]) => { resizes.push([...args]); return originalResize(...args); }) as DiagramHandle['resizeShape'];
+    const transforms: string[][] = [];
+    const originalTransform = handle.transformShape.bind(handle);
+    handle.transformShape = ((...args: [string, string, string, string, string, string]) => { transforms.push([...args]); return originalTransform(...args); }) as DiagramHandle['transformShape'];
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
     const canvases = view.container.querySelectorAll('canvas');
@@ -947,14 +974,19 @@ test('a handle resize on a move-locked shape commits neither size nor pin', asyn
     const corners = selectionCorners(handle.snapshot().pages[0], fakeFrame as never, { pageId, shapeId: lockedId, hit: { kind: 'shape', shapeId: lockedId } });
     expect(corners).not.toBeNull();
     const se = selectionHandlePositions(corners!).handles.se;
+    const emitted: Uint8Array[] = [];
+    const stopEmission = handle.onUpdate((update) => { emitted.push(update); });
     fireEvent.pointerDown(main, { pointerId: 2, clientX: se.x, clientY: se.y });
     await act(async () => {});
     fireEvent.pointerMove(main, { pointerId: 2, clientX: se.x + 48, clientY: se.y + 48 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
     fireEvent.pointerUp(main, { pointerId: 2, clientX: se.x + 48, clientY: se.y + 48 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    stopEmission();
     expect(moves).toHaveLength(0);
     expect(resizes).toHaveLength(0);
+    expect(transforms).toHaveLength(0);
+    expect(emitted).toHaveLength(0);
     const shapeAfter = handle.snapshot().pages[0].shapes.find((shape) => shape.id === lockedId);
     expect(Number(shapeAfter?.cells.find((cell) => cell.name === 'Width')?.value)).toBeCloseTo(width, 6);
     expect(Number(shapeAfter?.cells.find((cell) => cell.name === 'Height')?.value)).toBeCloseTo(height, 6);
