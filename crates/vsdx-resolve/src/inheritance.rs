@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use vsdx_parse::{
     Cell, Row, Section, Shape, ShapeChild, Sheet, SheetChild, TextToken, VsdxPackage,
@@ -11,6 +11,7 @@ use crate::{
 };
 
 const MAX_INHERITANCE_DEPTH: usize = 64;
+const GEOMETRY_SECTION_CONTROLS: [&str; 3] = ["NoFill", "NoLine", "NoShow"];
 
 pub struct Resolver<'a> {
     package: &'a VsdxPackage,
@@ -462,7 +463,7 @@ impl<'a> Resolver<'a> {
                 }
             }
         }
-        let (controls, unsupported_controls) = unsupported_geometry_controls(name, &sources);
+        let (controls, unsupported_controls) = resolve_geometry_controls(name, &sources);
         let mut out = ResolvedSection {
             name: name.into(),
             index: sources
@@ -554,16 +555,31 @@ impl<'a> Resolver<'a> {
     }
 }
 
-fn unsupported_geometry_controls(
+fn resolve_geometry_controls(
     name: &str,
     sources: &[(Provenance, Option<&Section>)],
 ) -> (crate::GeometrySectionControls, Vec<String>) {
-    let mut controls = crate::GeometrySectionControls::default();
     if name != "Geometry" {
-        return (controls, Vec::new());
+        return (crate::GeometrySectionControls::default(), Vec::new());
     }
+    let names = sources
+        .iter()
+        .filter_map(|(_, section)| *section)
+        .flat_map(|section| &section.children)
+        .filter_map(|child| match child {
+            vsdx_parse::SectionChild::Unknown(cell)
+                if cell.name.rsplit(':').next() == Some("Cell") =>
+            {
+                cell.attributes
+                    .iter()
+                    .find_map(|(name, value)| (name == "N").then_some(value.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut active = [false; GEOMETRY_SECTION_CONTROLS.len()];
     let mut unsupported = Vec::new();
-    for control in ["NoFill", "NoLine", "NoShow"] {
+    for control in names {
         for (_, section) in sources {
             let Some(section) = section else { continue };
             let Some(cell) = section.children.iter().find_map(|child| match child {
@@ -591,19 +607,29 @@ fn unsupported_geometry_controls(
             if attribute("Del") == Some("1") {
                 break;
             }
-            match evaluate_control(attribute("F").or_else(|| attribute("V"))) {
-                Some(true) => match control {
-                    "NoFill" => controls.no_fill = true,
-                    "NoLine" => controls.no_line = true,
-                    _ => controls.no_show = true,
-                },
-                Some(false) => {}
-                None => unsupported.push(control.to_owned()),
+            if let Some(index) = GEOMETRY_SECTION_CONTROLS
+                .iter()
+                .position(|name| *name == control)
+            {
+                match evaluate_control(attribute("F").or_else(|| attribute("V"))) {
+                    Some(value) => active[index] = value,
+                    None => unsupported.push(control.to_owned()),
+                }
+            } else {
+                unsupported.push(control.to_owned());
             }
             break;
         }
     }
-    (controls, unsupported)
+    let [no_fill, no_line, no_show] = active;
+    (
+        crate::GeometrySectionControls {
+            no_fill,
+            no_line,
+            no_show,
+        },
+        unsupported,
+    )
 }
 
 /// Evaluates a section control to active/inactive, or `None` when unevaluable.

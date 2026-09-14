@@ -696,7 +696,6 @@ impl Renderer {
         {
             return self.layout_connector(
                 package,
-                resolver,
                 connectivity,
                 references,
                 page_part,
@@ -704,6 +703,7 @@ impl Renderer {
                 id,
                 z_order,
                 resolved,
+                &sections,
                 state,
             );
         }
@@ -826,7 +826,7 @@ impl Renderer {
                 &format!("unsupported geometry: {issues:?}"),
             );
         }
-        let mut paths = drawn
+        let paths = drawn
             .iter()
             .filter(|realized| !realized.commands.is_empty())
             .map(|realized| {
@@ -844,39 +844,17 @@ impl Renderer {
                 )
             })
             .collect::<Vec<_>>();
-        if paths.is_empty() {
-            if drawn.is_empty() {
-                return self.text(
-                    package,
-                    resolver,
-                    references,
-                    page_part,
-                    shape,
-                    resolved,
-                    id,
-                    bounds,
-                    affine(transform.local).compose(Affine {
-                        a: 1.0,
-                        b: 0.0,
-                        c: 0.0,
-                        d: 1.0,
-                        e: -bounds.x as f32,
-                        f: -bounds.y as f32,
-                    }),
-                    state,
-                    cache,
-                );
-            }
+        if paths.is_empty() && !drawn.is_empty() {
             return self.placeholder_at(
                 id,
                 z_order,
                 bounds,
                 state,
-                &format!("unsupported geometry: {issues:?}"),
+                "unsupported geometry: no path commands",
             );
         }
-        let needs_fill = drawn.iter().any(|realized| !realized.controls.no_fill);
-        let needs_stroke = drawn.iter().any(|realized| !realized.controls.no_line);
+        let needs_fill = paths.iter().any(|(controls, _)| !controls.no_fill);
+        let needs_stroke = paths.iter().any(|(controls, _)| !controls.no_line);
         let (fill, stroke) = match paint::paint(
             package,
             references,
@@ -896,7 +874,7 @@ impl Renderer {
                 );
             }
         };
-        for (controls, path) in std::mem::take(&mut paths) {
+        for (controls, path) in paths {
             state.primitives.push(Primitive::Shape {
                 id: id.clone(),
                 z_order,
@@ -936,7 +914,6 @@ impl Renderer {
     fn layout_connector(
         &self,
         package: &VsdxPackage,
-        _resolver: &Resolver<'_>,
         connectivity: &vsdx_resolve::PageConnectivity,
         references: Option<&PageShapeReferences>,
         page_part: &str,
@@ -944,8 +921,13 @@ impl Renderer {
         id: String,
         z_order: u32,
         resolved: &ResolvedShape,
+        sections: &[&vsdx_resolve::ResolvedSection],
         state: &mut State,
     ) -> Result<(), RenderError> {
+        let visible = sections.iter().filter(|section| !section.controls.no_show);
+        if !sections.is_empty() && visible.clone().next().is_none() {
+            return Ok(());
+        }
         let Some(connector) = connectivity.connectors.get(&shape.id) else {
             return self.placeholder(
                 page_part,
@@ -994,43 +976,10 @@ impl Renderer {
                 "connector route cannot be computed: non-finite endpoint",
             );
         }
-        let sections = resolved
-            .sections
-            .values()
-            .filter(|section| section.name == "Geometry" && !section.deleted)
-            .collect::<Vec<_>>();
-        if let Some(section) = sections
-            .iter()
-            .find(|section| !section.unsupported_controls.is_empty())
-        {
-            return self.placeholder_at(
-                id,
-                z_order,
-                Bounds::default(),
-                state,
-                &format!(
-                    "unsupported Geometry section controls at IX={}: {}",
-                    section.index.unwrap_or(0),
-                    section.unsupported_controls.join(", ")
-                ),
-            );
-        }
-        let mut controls = sections
-            .iter()
-            .map(|section| section.controls)
-            .collect::<Vec<_>>();
-        if controls.is_empty() {
-            controls.push(vsdx_resolve::GeometrySectionControls::default());
-        }
-        let drawn = controls
-            .iter()
-            .filter(|controls| !controls.no_show)
-            .collect::<Vec<_>>();
-        if drawn.is_empty() {
-            return Ok(());
-        }
-        let needs_fill = drawn.iter().any(|controls| !controls.no_fill);
-        let needs_stroke = drawn.iter().any(|controls| !controls.no_line);
+        let needs_fill =
+            sections.is_empty() || visible.clone().any(|section| !section.controls.no_fill);
+        let needs_stroke =
+            sections.is_empty() || visible.clone().any(|section| !section.controls.no_line);
         let (fill, stroke) = match paint::paint(
             package,
             references,
@@ -1042,21 +991,14 @@ impl Renderer {
             Ok(paint) => paint,
             Err(reason) => return self.placeholder(page_part, shape, state, &reason),
         };
-        let route = connector_route(begin, end, paint::number(resolved, "RoutStyle"));
-        for controls in drawn {
-            state.primitives.push(Primitive::Shape {
-                id: id.clone(),
-                z_order,
-                path: route.clone(),
-                fill: if controls.no_fill { None } else { fill.clone() },
-                stroke: if controls.no_line {
-                    None
-                } else {
-                    stroke.clone()
-                },
-                transform: Affine::identity(),
-            });
-        }
+        state.primitives.push(Primitive::Shape {
+            id,
+            z_order,
+            path: connector_route(begin, end, paint::number(resolved, "RoutStyle")),
+            fill,
+            stroke,
+            transform: Affine::identity(),
+        });
         Ok(())
     }
     #[allow(clippy::too_many_arguments)]
@@ -2495,327 +2437,7 @@ mod tests {
         }
     }
 
-    fn geometry_section(index: Option<u32>, control: Option<(&str, &str)>) -> Section {
-        let mut children = vec![
-            row(0, "MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
-            row(1, "LineTo", vec![cell("X", "1"), cell("Y", "0")]),
-            row(2, "LineTo", vec![cell("X", "1"), cell("Y", "1")]),
-            row(3, "LineTo", vec![cell("X", "0"), cell("Y", "1")]),
-        ]
-        .into_iter()
-        .map(SectionChild::Row)
-        .collect::<Vec<_>>();
-        if let Some((name, formula)) = control {
-            children.push(SectionChild::Unknown(vsdx_parse::OpaqueXml {
-                name: "Cell".into(),
-                attributes: vec![
-                    ("N".into(), name.into()),
-                    ("F".into(), formula.into()),
-                    ("V".into(), "0".into()),
-                ],
-                children: Vec::new(),
-            }));
-        }
-        Section {
-            name: "Geometry".into(),
-            index,
-            del: false,
-            children,
-            other_attrs: vec![],
-        }
-    }
-
-    fn paint_control_shape(id: u32, sections: Vec<Section>) -> Shape {
-        let mut shape = shape(id, 1.0, 1.0);
-        shape
-            .children
-            .retain(|child| !matches!(child, ShapeChild::Section(_)));
-        for section in sections {
-            shape.children.push(ShapeChild::Section(section));
-        }
-        shape
-    }
-
-    fn connector_shape(id: u32, sections: Vec<Section>) -> Shape {
-        let mut shape = paint_control_shape(id, sections);
-        shape.children.extend([
-            ShapeChild::Cell(cell("OneD", "1")),
-            ShapeChild::Cell(cell("BeginX", "1")),
-            ShapeChild::Cell(cell("BeginY", "1")),
-            ShapeChild::Cell(cell("EndX", "4")),
-            ShapeChild::Cell(cell("EndY", "1")),
-        ]);
-        shape
-    }
-
-    fn with_formula(shape: &mut Shape, name: &str, formula_value: &str) {
-        shape.children.retain(
-            |child| !matches!(child, ShapeChild::Cell(Cell { name: actual, .. }) if actual == name),
-        );
-        shape.children.push(ShapeChild::Cell(Cell {
-            name: name.into(),
-            formula: Some(formula_value.into()),
-            value: None,
-            unit: None,
-            del: false,
-            other_attrs: vec![],
-        }));
-    }
-
-    fn shape_primitives(list: &VsdxDisplayList) -> Vec<&Primitive> {
-        list.primitives
-            .iter()
-            .filter(|primitive| matches!(primitive, Primitive::Shape { .. }))
-            .collect()
-    }
-
-    #[test]
-    fn geometry_no_fill_strokes_without_filling() {
-        let list = render(vec![paint_control_shape(
-            1,
-            vec![geometry_section(None, Some(("NoFill", "1")))],
-        )]);
-        let primitives = shape_primitives(&list);
-        assert_eq!(primitives.len(), 1);
-        match primitives[0] {
-            Primitive::Shape {
-                id, fill, stroke, ..
-            } => {
-                assert_eq!(id, "page:1");
-                assert!(fill.is_none());
-                assert!(stroke.is_some());
-            }
-            _ => unreachable!(),
-        }
-        assert!(
-            !list
-                .primitives
-                .iter()
-                .any(|primitive| matches!(primitive, Primitive::Placeholder { .. }))
-        );
-    }
-
-    #[test]
-    fn geometry_no_line_fills_without_stroking() {
-        let list = render(vec![paint_control_shape(
-            1,
-            vec![geometry_section(None, Some(("NoLine", "1")))],
-        )]);
-        let primitives = shape_primitives(&list);
-        assert_eq!(primitives.len(), 1);
-        match primitives[0] {
-            Primitive::Shape {
-                id, fill, stroke, ..
-            } => {
-                assert_eq!(id, "page:1");
-                assert!(fill.is_some());
-                assert!(stroke.is_none());
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn geometry_no_show_emits_no_geometry_primitive() {
-        let list = render(vec![paint_control_shape(
-            1,
-            vec![geometry_section(None, Some(("NoShow", "1")))],
-        )]);
-        assert!(
-            shape_primitives(&list).is_empty(),
-            "hidden section must not draw"
-        );
-        assert!(
-            !list
-                .primitives
-                .iter()
-                .any(|primitive| matches!(primitive, Primitive::Placeholder { .. })),
-            "invisible is not broken"
-        );
-    }
-
-    #[test]
-    fn geometry_hidden_section_does_not_hide_sibling_sections() {
-        let list = render(vec![paint_control_shape(
-            1,
-            vec![
-                geometry_section(Some(0), Some(("NoShow", "1"))),
-                geometry_section(Some(1), None),
-            ],
-        )]);
-        let primitives = shape_primitives(&list);
-        assert_eq!(primitives.len(), 1);
-        match primitives[0] {
-            Primitive::Shape { id, path, .. } => {
-                assert_eq!(id, "page:1");
-                assert!(!path.is_empty());
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn geometry_sections_carry_their_own_paint() {
-        let list = render(vec![paint_control_shape(
-            1,
-            vec![
-                geometry_section(Some(0), Some(("NoFill", "1"))),
-                geometry_section(Some(1), Some(("NoLine", "1"))),
-            ],
-        )]);
-        let primitives = shape_primitives(&list);
-        assert_eq!(primitives.len(), 2);
-        for primitive in &primitives {
-            match primitive {
-                Primitive::Shape { id, .. } => assert_eq!(*id, "page:1"),
-                _ => unreachable!(),
-            }
-        }
-        match (primitives[0], primitives[1]) {
-            (
-                Primitive::Shape {
-                    fill: first_fill,
-                    stroke: first_stroke,
-                    ..
-                },
-                Primitive::Shape {
-                    fill: second_fill,
-                    stroke: second_stroke,
-                    ..
-                },
-            ) => {
-                assert!(first_fill.is_none());
-                assert!(first_stroke.is_some());
-                assert!(second_fill.is_some());
-                assert!(second_stroke.is_none());
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn geometry_inactive_controls_paint_normally() {
-        for control in ["NoFill", "NoLine", "NoShow"] {
-            let list = render(vec![paint_control_shape(
-                1,
-                vec![geometry_section(None, Some((control, "0")))],
-            )]);
-            let primitives = shape_primitives(&list);
-            assert_eq!(primitives.len(), 1, "{control}");
-            match primitives[0] {
-                Primitive::Shape { fill, stroke, .. } => {
-                    assert!(fill.is_some(), "{control}");
-                    assert!(stroke.is_some(), "{control}");
-                }
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    #[test]
-    fn geometry_unevaluable_control_draws_and_reports_uncertainty() {
-        let mut section = geometry_section(None, None);
-        section
-            .children
-            .push(SectionChild::Unknown(vsdx_parse::OpaqueXml {
-                name: "Cell".into(),
-                attributes: vec![
-                    ("N".into(), "NoFill".into()),
-                    ("F".into(), "Unknown(1)".into()),
-                    ("V".into(), "0".into()),
-                ],
-                children: Vec::new(),
-            }));
-        let list = render(vec![paint_control_shape(1, vec![section])]);
-        assert!(
-            list.primitives.iter().any(
-                |primitive| matches!(primitive, Primitive::Placeholder { id, reason, .. } if id == "page:1" && reason.contains("NoFill"))
-            )
-        );
-    }
-
-    #[test]
-    fn connector_no_show_emits_no_geometry_primitive() {
-        let list = render(vec![connector_shape(
-            1,
-            vec![geometry_section(None, Some(("NoShow", "1")))],
-        )]);
-        assert!(shape_primitives(&list).is_empty());
-        assert!(
-            !list
-                .primitives
-                .iter()
-                .any(|primitive| matches!(primitive, Primitive::Placeholder { .. }))
-        );
-    }
-
-    #[test]
-    fn connector_no_line_fills_without_stroking() {
-        let list = render(vec![connector_shape(
-            1,
-            vec![geometry_section(None, Some(("NoLine", "1")))],
-        )]);
-        let primitives = shape_primitives(&list);
-        assert_eq!(primitives.len(), 1);
-        match primitives[0] {
-            Primitive::Shape {
-                id, fill, stroke, ..
-            } => {
-                assert_eq!(id, "page:1");
-                assert!(fill.is_some());
-                assert!(stroke.is_none());
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn unused_paint_channel_does_not_block_the_used_channel() {
-        let mut no_fill =
-            paint_control_shape(1, vec![geometry_section(None, Some(("NoFill", "1")))]);
-        with_formula(&mut no_fill, "FillForegnd", "Unknown(1)");
-        let list = render(vec![no_fill]);
-        let primitives = shape_primitives(&list);
-        assert_eq!(primitives.len(), 1);
-        match primitives[0] {
-            Primitive::Shape {
-                id, fill, stroke, ..
-            } => {
-                assert_eq!(id, "page:1");
-                assert!(fill.is_none());
-                assert!(stroke.is_some());
-            }
-            _ => unreachable!(),
-        }
-        assert!(
-            !list
-                .primitives
-                .iter()
-                .any(|primitive| matches!(primitive, Primitive::Placeholder { .. }))
-        );
-        let mut no_line =
-            paint_control_shape(1, vec![geometry_section(None, Some(("NoLine", "1")))]);
-        with_formula(&mut no_line, "LineColor", "Unknown(1)");
-        let list = render(vec![no_line]);
-        let primitives = shape_primitives(&list);
-        assert_eq!(primitives.len(), 1);
-        match primitives[0] {
-            Primitive::Shape {
-                id, fill, stroke, ..
-            } => {
-                assert_eq!(id, "page:1");
-                assert!(fill.is_some());
-                assert!(stroke.is_none());
-            }
-            _ => unreachable!(),
-        }
-        assert!(
-            !list
-                .primitives
-                .iter()
-                .any(|primitive| matches!(primitive, Primitive::Placeholder { .. }))
-        );
-    }
+    mod section_controls;
 
     #[test]
     fn hit_testing_does_not_bridge_separate_subpaths() {

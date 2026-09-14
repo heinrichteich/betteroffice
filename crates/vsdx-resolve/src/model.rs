@@ -181,8 +181,7 @@ pub struct GeometrySectionControls {
 }
 
 impl GeometrySectionControls {
-    /// Reports whether no control is active.
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         !self.no_fill && !self.no_line && !self.no_show
     }
 }
@@ -191,7 +190,7 @@ impl GeometrySectionControls {
 pub struct RealizedGeometry {
     pub commands: Vec<GeometryPathCommand>,
     pub issues: Vec<GeometryIssue>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "GeometrySectionControls::is_empty")]
     pub controls: GeometrySectionControls,
 }
 

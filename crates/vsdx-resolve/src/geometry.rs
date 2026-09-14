@@ -1,8 +1,7 @@
 use crate::{GeometryIssue, Lookup, RealizedGeometry, ResolvedSection};
 use ooxml_drawingml::GeometryPathCommand;
 
-/// Realizes a Geometry section in the shape's local drawing units. `Rel*` coordinates
-/// are fractions of `width` and `height`, giving absolute points in local space.
+/// Realizes local geometry, scaling relative coordinates by width and height.
 pub fn realize_geometry(section: &ResolvedSection, width: f64, height: f64) -> RealizedGeometry {
     let mut out = RealizedGeometry {
         controls: section.controls,
