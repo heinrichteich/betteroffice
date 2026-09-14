@@ -11,3 +11,17 @@ private Visio corpus or Microsoft Visio compatibility checks.
 Use `--record` from a clean checkout to replace the baseline with measurements
 at the recorded commit. Compare results on the same machine and configuration;
 the checked-in historical baseline alone does not establish a performance gain.
+
+## VSDX private-corpus survey
+
+Run `VSDX_EXPLORE_DIR=<dir> cargo run -p betteroffice-vsdx-bench --bin explore`
+to sweep every `*.vsdx` and `*.vstx` in `<dir>` (non-recursive) and report parse,
+round-trip, resolve, evaluate, render, geometry-row and section-visibility counts.
+JSON goes to stdout, a truncated human summary to stderr, and `--json-only`
+suppresses the summary. The directory is never committed; the output holds file
+names, numeric counts, and bounded category labels only — no cell values,
+formulas, shape text, or other document content. Histogram keys are fixed
+categories (evaluator error classes, Visio function names with cross-sheet
+references folded into `<sheet-ref>`, geometry row types, section-control
+names, parse error kinds), capped at 20 entries each, and parse failures are
+reported by error kind rather than message.
