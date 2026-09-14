@@ -189,7 +189,7 @@ fn rewrite_start(
     start: BytesStart<'_>,
     element: &str,
     state: &mut RewriteState<'_>,
-    stack: &[String],
+    _stack: &[String],
     is_empty: bool,
 ) -> Result<BytesStart<'static>, RedactError> {
     let format = state.format;
@@ -227,7 +227,8 @@ fn rewrite_start(
             .map(|(_, value)| value.clone());
     }
     let visio_active = visio::is_visio(format);
-    let mut visio_redact_values = false;
+    let visio_part =
+        visio_active && visio::is_visio_part(path) && !path.to_ascii_lowercase().ends_with(".rels");
     if visio_active && visio::is_section(element) {
         if !state.visio_sections.is_empty() {
             return Err(visio::ambiguous(path, "nested Section"));
@@ -238,38 +239,18 @@ fn rewrite_start(
                 .push(visio::attribute_named(&attributes, "N"));
         }
     }
-    if visio_active && visio::is_cell(element) {
-        if state.visio_sections.len() > 1 {
-            return Err(visio::ambiguous(path, "nested Section"));
-        }
-        match visio::attribute_named(&attributes, "N").as_deref() {
-            Some(name) if visio::is_data_cell(name) => match state.visio_sections.last() {
-                None => return Err(visio::ambiguous(path, "data Cell outside Section")),
-                Some(None) => {
-                    return Err(visio::ambiguous(path, "data Cell in unnamed Section"));
-                }
-                Some(Some(section)) if visio::is_user_section(section) => {
-                    if !stack.last().is_some_and(|parent| visio::is_row(parent)) {
-                        return Err(visio::ambiguous(path, "data Cell outside Row"));
-                    }
-                    visio_redact_values = true;
-                }
-                Some(Some(_)) => {}
-            },
-            None => {
-                if state
-                    .visio_sections
-                    .last()
-                    .is_some_and(|section| section.as_deref().is_some_and(visio::is_user_section))
-                {
-                    return Err(visio::ambiguous(path, "unnamed Cell in user Section"));
-                }
-            }
-            Some(_) => {}
-        }
+    if visio_active && visio::is_cell(element) && state.visio_sections.len() > 1 {
+        return Err(visio::ambiguous(path, "nested Section"));
     }
 
     let (relationship, external) = relationship_mode(path, element, &attributes);
+    let visio_section = state.visio_sections.last().cloned().flatten();
+    let visio_section_missing = state.visio_sections.last().is_some();
+    let visio_cell = if visio::is_cell(element) {
+        visio::attribute_named(&attributes, "N")
+    } else {
+        None
+    };
     let mut wrote_target_mode = false;
     if format == Format::Xlsx && element == "c" {
         state.cell_type = None;
@@ -338,11 +319,22 @@ fn rewrite_start(
                 }
                 .to_owned(),
             )
-        } else if (visio_redact_values
-            && (local.eq_ignore_ascii_case("V") || local.eq_ignore_ascii_case("F")))
-            || (!key.starts_with("xmlns")
-                && !(schema && is_unqualified(&key) && schema::preserve_attribute(element, local))
-                && sensitive_attribute(format, path, element, local, &value))
+        } else if visio_part && !key.starts_with("xmlns") {
+            let section = if visio_section_missing {
+                Some(visio_section.as_deref().unwrap_or(""))
+            } else {
+                None
+            };
+            let preserve =
+                visio::preserve_attribute(element, &key, &value, section, visio_cell.as_deref());
+            if preserve {
+                None
+            } else {
+                Some(placeholder(&value))
+            }
+        } else if !key.starts_with("xmlns")
+            && !(schema && is_unqualified(&key) && schema::preserve_attribute(element, local))
+            && sensitive_attribute(format, path, element, local, &value)
         {
             Some(placeholder(&value))
         } else {
@@ -477,7 +469,7 @@ fn replacement_kind(
             "v" => Some(Replacement::Number),
             _ => None,
         },
-        Format::Vsdx | Format::Vstx => visio::contains_text(stack).then_some(Replacement::Text),
+        Format::Vsdx | Format::Vstx => visio::redact_text(path).then_some(Replacement::Text),
         Format::Auto => None,
     }
 }
