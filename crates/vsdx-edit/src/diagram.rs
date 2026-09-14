@@ -219,6 +219,40 @@ fn valid_glue_target(cell: &str) -> bool {
         .is_some_and(|ordinal| ordinal >= 1)
 }
 
+/// Reports whether `to_cell` names a connection row present on the target.
+fn connection_point_exists<T: ReadTxn>(
+    sheets: &yrs::MapRef,
+    txn: &T,
+    target_id: &str,
+    to_cell: &str,
+) -> bool {
+    let Some(row) = to_cell
+        .strip_prefix("Connections.X")
+        .and_then(|ordinal| ordinal.parse::<u32>().ok())
+        .and_then(|ordinal| ordinal.checked_sub(1))
+    else {
+        return true;
+    };
+    let Some(yrs::Out::YMap(shape)) = sheets.get(txn, target_id) else {
+        return false;
+    };
+    let Ok(cells) = map_map(&shape, txn, "cells") else {
+        return false;
+    };
+    for (_, value) in cells.iter(txn) {
+        let yrs::Out::YMap(cell) = value else {
+            continue;
+        };
+        if map_string(&cell, txn, "section").as_deref() != Some("Connection") {
+            continue;
+        }
+        if map_u32(&cell, txn, "rowIndex").ok().flatten() == Some(row) {
+            return true;
+        }
+    }
+    false
+}
+
 fn glue_text_valid(value: &str) -> bool {
     let limits = ParseLimits::default();
     value.len() <= limits.max_attribute_bytes
@@ -228,6 +262,7 @@ fn glue_text_valid(value: &str) -> bool {
             .all(|c| matches!(c, '\t' | '\r' | '\n' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'))
 }
 
+/// Explicit numeric `OneD` decides alone, matching the resolver.
 fn draft_is_one_d(draft: &ShapeDraft) -> bool {
     let mut endpoints = HashSet::new();
     for cell in &draft.cells {
@@ -237,14 +272,9 @@ fn draft_is_one_d(draft: &ShapeDraft) -> bool {
         match cell.name.as_str() {
             "OneD" => {
                 let formula = cell.formula.as_deref().unwrap_or_default();
-                let truthy = formula
-                    .trim_start_matches('=')
-                    .trim()
-                    .parse::<f64>()
-                    .map(|value| value != 0.0)
-                    .unwrap_or(true);
-                if truthy {
-                    return true;
+                match formula.trim_start_matches('=').trim().parse::<f64>() {
+                    Ok(value) => return value != 0.0,
+                    Err(_) => return true,
                 }
             }
             "BeginX" | "BeginY" | "EndX" | "EndY" => {
@@ -982,6 +1012,16 @@ impl DiagramSession {
                 return Err(EditError::ShapeNotFound(target.clone()));
             }
         }
+        for (target, cell) in [
+            (&from.shape_id, from_cell.as_str()),
+            (&to.shape_id, to_cell.as_str()),
+        ] {
+            if !connection_point_exists(&sheets, &txn, target.as_str(), cell) {
+                return Err(EditError::InvalidState(
+                    "connector glue references a missing connection point".to_owned(),
+                ));
+            }
+        }
         let id_prefix = format!("{page_id}:shape:added:{}:", self.client_id);
         if sheets.len(&txn) as usize >= ParseLimits::default().max_shapes {
             return Err(EditError::InvalidState(
@@ -1471,6 +1511,35 @@ pub(crate) fn normalize_concurrent_orders(staged: &Doc) -> EditResult<()> {
                 order.remove_range(&mut txn, index, 1);
             }
         }
+    }
+    Ok(())
+}
+
+/// Drops staged glue referencing a missing shape, keeping the rest.
+pub(crate) fn prune_concurrent_glue(_before: &Doc, staged: &Doc) -> EditResult<()> {
+    let mut txn = staged.transact_mut_with(crate::REMOTE_ORIGIN);
+    let sheets = required_map(&txn, SHEETS)?;
+    let Some(connects) = txn.get_map(CONNECTS) else {
+        return Ok(());
+    };
+    let mut doomed = Vec::new();
+    for (key, value) in connects.iter(&txn) {
+        let Out::YMap(entry) = value else {
+            continue;
+        };
+        let connector = map_string(&entry, &txn, "connectorId");
+        let target = map_string(&entry, &txn, "targetId");
+        let (Some(connector), Some(target)) = (connector, target) else {
+            continue;
+        };
+        if sheets.get(&txn, connector.as_str()).is_none()
+            || sheets.get(&txn, target.as_str()).is_none()
+        {
+            doomed.push(key.to_owned());
+        }
+    }
+    for key in doomed {
+        connects.remove(&mut txn, key.as_str());
     }
     Ok(())
 }
