@@ -19,51 +19,233 @@ const FONT_BYTES: &[u8] =
 const KNOWN_CELLS: [&str; 4] = ["PinX", "PinY", "Width", "Height"];
 const VISIBILITY_CONTROLS: [&str; 3] = ["NoFill", "NoLine", "NoShow"];
 const HISTOGRAM_CAP: usize = 20;
-/// Function names the evaluator itself recognises, taken from the call dispatch in
-/// `vsdx-eval`, the mutation policy next to it, the deferred-call list below, and the
-/// `"No Formula"` literal `vsdx-formula` parses into a call.
-const KNOWN_FUNCTIONS: [&str; 36] = [
+/// Standard Visio ShapeSheet function vocabulary from the Microsoft
+/// Functions (Visio ShapeSheet Reference), plus the `No Formula` literal and
+/// the internal `_XFTRIGGER` call the harness must not bucket as author-defined.
+const KNOWN_FUNCTIONS: [&str; 213] = [
     "ABS",
+    "ACOS",
     "AND",
+    "ANG360",
+    "ANGLEALONGPATH",
+    "ANGLETOLOC",
+    "ANGLETOPAR",
+    "ARG",
+    "ASIN",
+    "ATAN",
     "ATAN2",
+    "BITAND",
+    "BITNOT",
+    "BITOR",
+    "BITXOR",
+    "BKGPAGENAME",
+    "BLEND",
+    "BLOB",
+    "BLUE",
+    "BOUND",
+    "BOUNDINGBOXDIST",
+    "BOUNDINGBOXRECT",
+    "CALLOUTCOUNT",
+    "CALLOUTTARGETREF",
+    "CALLTHIS",
+    "CATEGORY",
     "CEILING",
+    "CHAR",
+    "COMPANY",
+    "CONTAINERCOUNT",
+    "CONTAINERMEMBERCOUNT",
+    "CONTAINERSHEETREF",
     "COS",
+    "COSH",
+    "CREATOR",
+    "CY",
+    "DATA1",
+    "DATA2",
+    "DATA3",
+    "DATE",
+    "DATETIME",
+    "DATEVALUE",
+    "DAY",
+    "DAYOFYEAR",
+    "DECIMALSEP",
+    "DEFAULTEVENT",
+    "DEG",
     "DEPENDSON",
+    "DESCRIPTION",
+    "DIRECTORY",
+    "DISTTOPATH",
+    "DOCCREATION",
+    "DOCLASTEDIT",
+    "DOCLASTPRINT",
+    "DOCLASTSAVE",
+    "DOCMD",
+    "DOOLEVERB",
+    "EVALCELL",
+    "EVALTEXT",
+    "FIELDPICTURE",
+    "FILENAME",
+    "FIND",
     "FLOOR",
+    "FONT",
+    "FONTTOID",
+    "FORMAT",
+    "FORMATEX",
+    "FORMULAEXISTS",
+    "GETREF",
+    "GETVAL",
+    "GOTOPAGE",
+    "GRAVITY",
+    "GREEN",
     "GUARD",
+    "HASCATEGORY",
+    "HELP",
+    "HOUR",
+    "HSL",
+    "HUE",
+    "HUEDIFF",
+    "HYPERLINK",
+    "HYPERLINKBASE",
+    "ID",
     "IF",
+    "IFERROR",
+    "INDEX",
     "INT",
+    "INTERSECTX",
+    "INTERSECTY",
+    "INTUP",
+    "IS1D",
+    "ISERR",
+    "ISERRNA",
+    "ISERROR",
+    "ISERRVALUE",
+    "ISTHEMED",
+    "KEYWORDS",
+    "LANGUAGE",
+    "LEFT",
+    "LEN",
+    "LISTMEMBERCOUNT",
+    "LISTORDER",
+    "LISTSEP",
+    "LISTSHEETREF",
+    "LN",
+    "LOC",
+    "LOCTOLOC",
+    "LOCTOPAR",
+    "LOCALFORMULAEXISTS",
+    "LOG10",
+    "LOOKUP",
+    "LOWER",
+    "LUM",
     "LUMDIFF",
+    "MAGNITUDE",
+    "MANAGER",
+    "MASTERNAME",
     "MAX",
+    "MID",
     "MIN",
+    "MINUTE",
     "MOD",
+    "MODULUS",
+    "MONTH",
+    "MSOSHADE",
     "MSOTINT",
-    "NO FORMULA",
+    "NA",
+    "NAME",
+    "NEARESTPOINTONPATH",
     "NOT",
+    "NOW",
+    "NURBS",
+    "OPENFILE",
+    "OPENGROUPWIN",
+    "OPENSHEETWIN",
+    "OPENTEXTWIN",
     "OR",
+    "PAGECOUNT",
+    "PAGENAME",
+    "PAGENUMBER",
+    "PAR",
+    "PATHLENGTH",
+    "PATHSEGMENT",
     "PI",
+    "PLAYSOUND",
+    "PNT",
+    "PNTX",
+    "PNTY",
+    "POINTALONGPATH",
+    "POLYLINE",
+    "POW",
+    "QUEUEMARKEREVENT",
+    "RAD",
+    "RAND",
+    "RECTSECT",
+    "RED",
+    "REF",
+    "REPLACE",
+    "REPT",
+    "REWIDEN",
     "RGB",
+    "RIGHT",
     "ROUND",
+    "RUNADDON",
+    "RUNADDONWARGS",
+    "RUNMACRO",
     "SAT",
+    "SATDIFF",
+    "SECOND",
+    "SEGMENTCOUNT",
     "SETATREF",
     "SETATREFEVAL",
     "SETATREFEXPR",
+    "SETF",
     "SHADE",
+    "SHAPETEXT",
+    "SHEETREF",
     "SIGN",
     "SIN",
+    "SINH",
     "SQRT",
+    "STRSAME",
+    "STRSAMEEX",
+    "SUBJECT",
+    "SUBSTITUTE",
     "SUM",
     "TAN",
+    "TANH",
+    "TEXTHEIGHT",
+    "TEXTWIDTH",
+    "THEME",
+    "THEMECBV",
     "THEMEGUARD",
+    "THEMERESTORE",
     "THEMEVAL",
+    "TIME",
+    "TIMEVALUE",
     "TINT",
+    "TITLE",
+    "TONE",
+    "TRIM",
     "TRUNC",
+    "TYPE",
+    "TYPEDESC",
+    "UNICHAR",
+    "UPPER",
+    "USE",
+    "USERUI",
+    "VERSION",
+    "WEEKDAY",
+    "YEAR",
+    "NO FORMULA",
     "_XFTRIGGER",
 ];
-/// Geometry row types the resolver realises or explicitly rejects, taken from the
-/// row dispatch and the early-out list in `vsdx-resolve`.
-const KNOWN_GEOMETRY_ROWS: [&str; 12] = [
+/// Standard Visio Geometry-section row vocabulary from the Microsoft
+/// Row element (Geometry Section) (Visio XML) documentation, plus the absolute
+/// `CubBezTo` and `QuadBezTo` rows the ShapeSheet reference defines alongside
+/// their `Rel` forms. Deliberately independent of the resolver's match arms so
+/// unimplemented standard rows stay legible instead of collapsing into the
+/// author-defined bucket.
+const KNOWN_GEOMETRY_ROWS: [&str; 17] = [
     "ArcTo",
+    "CubBezTo",
     "Ellipse",
     "EllipticalArcTo",
     "InfiniteLine",
@@ -71,8 +253,12 @@ const KNOWN_GEOMETRY_ROWS: [&str; 12] = [
     "MoveTo",
     "NURBSTo",
     "PolylineTo",
+    "QuadBezTo",
+    "RelCubBezTo",
+    "RelEllipticalArcTo",
     "RelLineTo",
     "RelMoveTo",
+    "RelQuadBezTo",
     "SplineKnot",
     "SplineStart",
 ];
@@ -97,10 +283,13 @@ struct FileSurvey {
     unsupported_constructs: BTreeMap<String, usize>,
     unsupported_other_kinds: BTreeMap<String, usize>,
     error_kinds: BTreeMap<String, usize>,
-    painted: usize,
-    placeholders: usize,
+    painted_only_shapes: usize,
+    placeholder_shapes: usize,
     hidden: usize,
     unrendered: usize,
+    primitives_emitted: usize,
+    primitives_painted: usize,
+    primitives_placeholdered: usize,
     placeholder_reasons: BTreeMap<String, usize>,
     render_page_errors: usize,
     geometry_rows: BTreeMap<String, usize>,
@@ -131,10 +320,13 @@ struct Aggregate {
     unsupported_constructs: BTreeMap<String, usize>,
     unsupported_other_kinds: BTreeMap<String, usize>,
     error_kinds: BTreeMap<String, usize>,
-    painted: usize,
-    placeholders: usize,
+    painted_only_shapes: usize,
+    placeholder_shapes: usize,
     hidden: usize,
     unrendered: usize,
+    primitives_emitted: usize,
+    primitives_painted: usize,
+    primitives_placeholdered: usize,
     placeholder_reasons: BTreeMap<String, usize>,
     render_page_errors: usize,
     geometry_rows: BTreeMap<String, usize>,
@@ -250,10 +442,13 @@ fn survey(bytes: &[u8], name: &str) -> FileSurvey {
     survey.unsupported_other_kinds = measurement.unsupported_other_kinds;
     survey.error_kinds = measurement.error_kinds;
     let render = render_pages(&package);
-    survey.painted = render.painted;
-    survey.placeholders = render.placeholders;
+    survey.painted_only_shapes = render.shapes_painted_only;
+    survey.placeholder_shapes = render.shapes_placeholdered;
     survey.hidden = count_hidden(&package, &render.placeholder_ids, &render.failed_pages);
     survey.unrendered = render.unrendered;
+    survey.primitives_emitted = render.primitives_emitted;
+    survey.primitives_painted = render.primitives_painted;
+    survey.primitives_placeholdered = render.primitives_placeholdered;
     survey.placeholder_reasons = render.reasons;
     survey.render_page_errors = render.page_errors;
     let geometry = count_geometry(&package);
@@ -321,10 +516,13 @@ fn aggregate(files: &[FileSurvey]) -> Aggregate {
             &file.unsupported_other_kinds,
         );
         merge(&mut total.error_kinds, &file.error_kinds);
-        total.painted += file.painted;
-        total.placeholders += file.placeholders;
+        total.painted_only_shapes += file.painted_only_shapes;
+        total.placeholder_shapes += file.placeholder_shapes;
         total.hidden += file.hidden;
         total.unrendered += file.unrendered;
+        total.primitives_emitted += file.primitives_emitted;
+        total.primitives_painted += file.primitives_painted;
+        total.primitives_placeholdered += file.primitives_placeholdered;
         merge(&mut total.placeholder_reasons, &file.placeholder_reasons);
         total.render_page_errors += file.render_page_errors;
         merge(&mut total.geometry_rows, &file.geometry_rows);
@@ -393,7 +591,7 @@ fn print_summary(files: &[FileSurvey], total: &Aggregate) {
             None => "not attempted",
         };
         eprintln!(
-            "{} parse={} pages={} shapes={} roundtrip={} formulas={}/{} painted={} placeholders={} hidden={} unrendered={}",
+            "{} parse={} pages={} shapes={} roundtrip={} formulas={}/{} shapes_painted_only={} shapes_placeholdered={} hidden={} unrendered={} primitives={}/{}/{}",
             file.name,
             if file.parse_ok { "ok" } else { "error" },
             file.page_count,
@@ -401,10 +599,13 @@ fn print_summary(files: &[FileSurvey], total: &Aggregate) {
             roundtrip,
             file.evaluated,
             file.total,
-            file.painted,
-            file.placeholders,
+            file.painted_only_shapes,
+            file.placeholder_shapes,
             file.hidden,
             file.unrendered,
+            file.primitives_emitted,
+            file.primitives_painted,
+            file.primitives_placeholdered,
         );
         if let Some(error) = &file.parse_error {
             eprintln!("  parse error: {error}");
@@ -427,8 +628,16 @@ fn print_summary(files: &[FileSurvey], total: &Aggregate) {
         total.evaluated, total.unsupported_known, total.unsupported_other, total.error, total.total,
     );
     eprintln!(
-        "aggregate render painted={} placeholders={} hidden={} unrendered={} page_errors={}",
-        total.painted, total.placeholders, total.hidden, total.unrendered, total.render_page_errors,
+        "aggregate render shapes_painted_only={} shapes_placeholdered={} hidden={} unrendered={} page_errors={}",
+        total.painted_only_shapes,
+        total.placeholder_shapes,
+        total.hidden,
+        total.unrendered,
+        total.render_page_errors,
+    );
+    eprintln!(
+        "aggregate primitives emitted={} painted={} placeholdered={}",
+        total.primitives_emitted, total.primitives_painted, total.primitives_placeholdered,
     );
     eprintln!(
         "aggregate geometry page NURBSTo={} SplineStart={} SplineKnot={} master NURBSTo={} SplineStart={} SplineKnot={}",
@@ -1011,18 +1220,23 @@ fn references<'a>(cells: impl Iterator<Item = (String, &'a Cell)>) -> BTreeMap<S
 }
 
 struct RenderCounts {
-    painted: usize,
-    placeholders: usize,
+    shapes_painted_only: usize,
+    shapes_placeholdered: usize,
+    primitives_emitted: usize,
+    primitives_painted: usize,
+    primitives_placeholdered: usize,
     unrendered: usize,
     reasons: BTreeMap<String, usize>,
+    painted_ids: BTreeSet<String>,
     placeholder_ids: BTreeSet<String>,
     failed_pages: BTreeSet<String>,
     page_errors: usize,
 }
 
 /// Renders every page with default limits; shapes on failed pages are counted as
-/// unrendered so painted, placeholders, hidden and unrendered reconcile with the
-/// shape count on every input.
+/// unrendered so painted-only shapes, placeholder shapes, hidden and unrendered
+/// reconcile with the shape count on every input. A shape that emits both a
+/// painted and a placeholder primitive counts as a placeholder shape.
 fn render_pages(package: &vsdx_parse::VsdxPackage) -> RenderCounts {
     render_pages_with_limits(package, RenderLimits::default())
 }
@@ -1033,10 +1247,14 @@ fn render_pages_with_limits(
     limits: RenderLimits,
 ) -> RenderCounts {
     let mut counts = RenderCounts {
-        painted: 0,
-        placeholders: 0,
+        shapes_painted_only: 0,
+        shapes_placeholdered: 0,
+        primitives_emitted: 0,
+        primitives_painted: 0,
+        primitives_placeholdered: 0,
         unrendered: 0,
         reasons: BTreeMap::new(),
+        painted_ids: BTreeSet::new(),
         placeholder_ids: BTreeSet::new(),
         failed_pages: BTreeSet::new(),
         page_errors: 0,
@@ -1055,11 +1273,12 @@ fn render_pages_with_limits(
     }
     for page in &package.page_part_paths {
         match renderer.layout_page(package, page) {
-            Ok(list) => count_primitives(
+            Ok(list) => tally_primitives(
                 &list.primitives,
-                &mut counts.painted,
-                &mut counts.placeholders,
+                &mut counts.primitives_painted,
+                &mut counts.primitives_placeholdered,
                 &mut counts.reasons,
+                &mut counts.painted_ids,
                 &mut counts.placeholder_ids,
             ),
             Err(_) => {
@@ -1069,6 +1288,12 @@ fn render_pages_with_limits(
             }
         }
     }
+    counts.primitives_emitted = counts.primitives_painted + counts.primitives_placeholdered;
+    counts.shapes_placeholdered = counts.placeholder_ids.len();
+    counts.shapes_painted_only = counts
+        .painted_ids
+        .difference(&counts.placeholder_ids)
+        .count();
     counts
 }
 
@@ -1081,28 +1306,43 @@ fn page_shape_count(package: &vsdx_parse::VsdxPackage, page: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn count_primitives(
+/// Tallies one display list at both levels: distinct shape ids per bucket for
+/// reconciliation, plus raw primitive counts for diagnostics. Text boxes share
+/// their shape's id but carry no geometry verdict, so they touch neither level.
+/// A mixed shape id lands in both id sets; the caller reports it once, as a
+/// placeholder shape.
+fn tally_primitives(
     primitives: &[Primitive],
     painted: &mut usize,
-    placeholders: &mut usize,
+    placeholdered: &mut usize,
     reasons: &mut BTreeMap<String, usize>,
-    ids: &mut BTreeSet<String>,
+    painted_ids: &mut BTreeSet<String>,
+    placeholder_ids: &mut BTreeSet<String>,
 ) {
     for primitive in primitives {
         match primitive {
-            Primitive::Shape { .. } | Primitive::Image { .. } => {
+            Primitive::Shape { id, .. } | Primitive::Image { id, .. } => {
                 *painted += 1;
+                painted_ids.insert(id.clone());
             }
             Primitive::Placeholder { id, reason, .. } => {
-                *placeholders += 1;
+                *placeholdered += 1;
                 *reasons
                     .entry(classify_placeholder_reason(reason))
                     .or_default() += 1;
-                ids.insert(id.clone());
+                placeholder_ids.insert(id.clone());
             }
-            Primitive::Group { primitives, .. } => {
+            Primitive::Group { id, primitives, .. } => {
                 *painted += 1;
-                count_primitives(primitives, painted, placeholders, reasons, ids);
+                painted_ids.insert(id.clone());
+                tally_primitives(
+                    primitives,
+                    painted,
+                    placeholdered,
+                    reasons,
+                    painted_ids,
+                    placeholder_ids,
+                );
             }
             Primitive::TextBox { .. } => {}
         }
@@ -1369,8 +1609,10 @@ fn section_controls(resolved: &ResolvedShape) -> Vec<String> {
 mod tests {
     use super::{
         classify_placeholder_reason, count_hidden, count_shapes, fold_call_name, fold_row_type,
-        measure_formulas, render_pages_with_limits, survey,
+        measure_formulas, render_pages_with_limits, survey, tally_primitives,
     };
+    use std::collections::{BTreeMap, BTreeSet};
+    use vsdx_render::{Affine, Primitive};
 
     #[test]
     fn foundation_fixture_survey_is_consistent() {
@@ -1383,8 +1625,12 @@ mod tests {
             file.total
         );
         assert_eq!(
-            file.painted + file.placeholders + file.hidden + file.unrendered,
+            file.painted_only_shapes + file.placeholder_shapes + file.hidden + file.unrendered,
             file.shape_count
+        );
+        assert_eq!(
+            file.primitives_emitted,
+            file.primitives_painted + file.primitives_placeholdered
         );
     }
 
@@ -1404,19 +1650,99 @@ mod tests {
         let shape_count: usize = package.page_contents.values().map(count_shapes).sum();
         let hidden = count_hidden(&package, &render.placeholder_ids, &render.failed_pages);
         assert_eq!(
-            render.painted + render.placeholders + hidden + render.unrendered,
+            render.shapes_painted_only + render.shapes_placeholdered + hidden + render.unrendered,
             shape_count
         );
+        assert_eq!(
+            render.primitives_emitted,
+            render.primitives_painted + render.primitives_placeholdered
+        );
+    }
+
+    #[test]
+    fn multi_section_shape_reconciles_at_shape_level() {
+        let primitives = vec![
+            Primitive::Shape {
+                id: "page:1".to_owned(),
+                z_order: 0,
+                path: Vec::new(),
+                fill: None,
+                stroke: None,
+                transform: Affine::identity(),
+            },
+            Primitive::Placeholder {
+                id: "page:1".to_owned(),
+                z_order: 1,
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+                reason: "shape has no Geometry section".to_owned(),
+            },
+            Primitive::Shape {
+                id: "page:2".to_owned(),
+                z_order: 2,
+                path: Vec::new(),
+                fill: None,
+                stroke: None,
+                transform: Affine::identity(),
+            },
+        ];
+        let mut painted = 0;
+        let mut placeholdered = 0;
+        let mut reasons = BTreeMap::new();
+        let mut painted_ids = BTreeSet::new();
+        let mut placeholder_ids = BTreeSet::new();
+        tally_primitives(
+            &primitives,
+            &mut painted,
+            &mut placeholdered,
+            &mut reasons,
+            &mut painted_ids,
+            &mut placeholder_ids,
+        );
+        let shapes_placeholdered = placeholder_ids.len();
+        let shapes_painted_only = painted_ids.difference(&placeholder_ids).count();
+        assert_eq!((painted, placeholdered), (2, 1));
+        assert_eq!((shapes_painted_only, shapes_placeholdered), (1, 1));
+        assert_eq!(shapes_painted_only + shapes_placeholdered, 2);
+        assert_ne!(painted + placeholdered, 2);
     }
 
     #[test]
     fn unknown_function_and_row_names_fold_into_fixed_buckets() {
         assert_eq!(fold_call_name("SUM"), "SUM");
         assert_eq!(fold_call_name("sum"), "SUM");
+        assert_eq!(fold_call_name("ACOS"), "ACOS");
         assert_eq!(fold_call_name("Sheet.1!Width"), "<sheet-ref>");
         assert_eq!(fold_call_name("EVILFUNC"), "<unknown-function>");
         assert_eq!(fold_row_type("LineTo"), "LineTo");
+        assert_eq!(fold_row_type("CubBezTo"), "CubBezTo");
+        assert_eq!(fold_row_type("QuadBezTo"), "QuadBezTo");
+        assert_eq!(fold_row_type("RelCubBezTo"), "RelCubBezTo");
+        assert_eq!(fold_row_type("RelQuadBezTo"), "RelQuadBezTo");
+        assert_eq!(fold_row_type("RelEllipticalArcTo"), "RelEllipticalArcTo");
         assert_eq!(fold_row_type("EVILTYPE"), "<unknown-row-type>");
+    }
+
+    #[test]
+    fn standard_but_unimplemented_rows_stay_legible() {
+        assert_eq!(
+            classify_placeholder_reason(
+                "unsupported geometry: [UnsupportedRowType(\"RelCubBezTo\")]"
+            ),
+            "unsupported geometry: unimplemented row type RelCubBezTo"
+        );
+        assert_eq!(
+            classify_placeholder_reason("unsupported geometry: [UnsupportedRowType(\"CubBezTo\")]"),
+            "unsupported geometry: unimplemented row type CubBezTo"
+        );
+        assert_eq!(
+            classify_placeholder_reason(
+                "unsupported geometry: [UnsupportedRowType(\"QuadBezTo\")]"
+            ),
+            "unsupported geometry: unimplemented row type QuadBezTo"
+        );
     }
 
     #[test]

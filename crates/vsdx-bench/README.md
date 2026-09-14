@@ -20,13 +20,18 @@ round-trip, resolve, evaluate, render, geometry-row and section-visibility count
 JSON goes to stdout, a truncated human summary to stderr, and `--json-only`
 suppresses the summary. The directory is never committed; the output holds file
 names, numeric counts, and bounded category labels only — no cell values,
-formulas, shape text, or other document content. Histogram keys are fixed
-categories (evaluator error classes, evaluator-known Visio function names with
-cross-sheet references folded into `<sheet-ref>` and anything else in
-`<unknown-function>`, known geometry row types with anything else in
+formulas, shape text, colour literals, author-defined names, or other document
+content. Histogram keys are fixed
+categories (evaluator error classes, standard Visio function names with
+cross-sheet references folded into `<sheet-ref>` and author-defined names in
+`<unknown-function>`, standard Geometry row types with author-defined names in
 `<unknown-row-type>`, geometry placeholders that name only the failure kind and
 row type, section-control names, parse error kinds), capped at 20 entries each,
 and parse failures are reported by error kind rather than message. Render
-reconciliation is exact: `painted + placeholders + hidden + unrendered` equals
+reconciliation is exact at shape level: `shapesPaintedOnly +
+shapesPlaceholdered + hidden + unrendered` equals
 the shape count, where `unrendered` counts the shapes on pages whose layout
-failed.
+failed and a shape with both a painted and a placeholder primitive counts as
+`shapesPlaceholdered`. Primitive counts (`primitivesEmitted`,
+`primitivesPainted`, `primitivesPlaceholdered`) are reported separately for
+diagnostics and are not shape counts.
