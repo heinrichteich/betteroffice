@@ -11,7 +11,7 @@ use vsdx_parse::{
     Cell, ParseLimits, Row, Section, Shape, ShapeChild, ShapesChild, Sheet, VsdxError, parse_vsdx,
     write_vsdx,
 };
-use vsdx_render::{Primitive, Renderer};
+use vsdx_render::{Primitive, RenderLimits, Renderer};
 use vsdx_resolve::{Lookup, ResolvedShape, Resolver};
 
 const FONT_BYTES: &[u8] =
@@ -19,6 +19,63 @@ const FONT_BYTES: &[u8] =
 const KNOWN_CELLS: [&str; 4] = ["PinX", "PinY", "Width", "Height"];
 const VISIBILITY_CONTROLS: [&str; 3] = ["NoFill", "NoLine", "NoShow"];
 const HISTOGRAM_CAP: usize = 20;
+/// Function names the evaluator itself recognises, taken from the call dispatch in
+/// `vsdx-eval`, the mutation policy next to it, the deferred-call list below, and the
+/// `"No Formula"` literal `vsdx-formula` parses into a call.
+const KNOWN_FUNCTIONS: [&str; 36] = [
+    "ABS",
+    "AND",
+    "ATAN2",
+    "CEILING",
+    "COS",
+    "DEPENDSON",
+    "FLOOR",
+    "GUARD",
+    "IF",
+    "INT",
+    "LUMDIFF",
+    "MAX",
+    "MIN",
+    "MOD",
+    "MSOTINT",
+    "NO FORMULA",
+    "NOT",
+    "OR",
+    "PI",
+    "RGB",
+    "ROUND",
+    "SAT",
+    "SETATREF",
+    "SETATREFEVAL",
+    "SETATREFEXPR",
+    "SHADE",
+    "SIGN",
+    "SIN",
+    "SQRT",
+    "SUM",
+    "TAN",
+    "THEMEGUARD",
+    "THEMEVAL",
+    "TINT",
+    "TRUNC",
+    "_XFTRIGGER",
+];
+/// Geometry row types the resolver realises or explicitly rejects, taken from the
+/// row dispatch and the early-out list in `vsdx-resolve`.
+const KNOWN_GEOMETRY_ROWS: [&str; 12] = [
+    "ArcTo",
+    "Ellipse",
+    "EllipticalArcTo",
+    "InfiniteLine",
+    "LineTo",
+    "MoveTo",
+    "NURBSTo",
+    "PolylineTo",
+    "RelLineTo",
+    "RelMoveTo",
+    "SplineKnot",
+    "SplineStart",
+];
 
 #[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +100,7 @@ struct FileSurvey {
     painted: usize,
     placeholders: usize,
     hidden: usize,
+    unrendered: usize,
     placeholder_reasons: BTreeMap<String, usize>,
     render_page_errors: usize,
     geometry_rows: BTreeMap<String, usize>,
@@ -76,6 +134,7 @@ struct Aggregate {
     painted: usize,
     placeholders: usize,
     hidden: usize,
+    unrendered: usize,
     placeholder_reasons: BTreeMap<String, usize>,
     render_page_errors: usize,
     geometry_rows: BTreeMap<String, usize>,
@@ -193,7 +252,8 @@ fn survey(bytes: &[u8], name: &str) -> FileSurvey {
     let render = render_pages(&package);
     survey.painted = render.painted;
     survey.placeholders = render.placeholders;
-    survey.hidden = count_hidden(&package, &render.placeholder_ids);
+    survey.hidden = count_hidden(&package, &render.placeholder_ids, &render.failed_pages);
+    survey.unrendered = render.unrendered;
     survey.placeholder_reasons = render.reasons;
     survey.render_page_errors = render.page_errors;
     let geometry = count_geometry(&package);
@@ -264,6 +324,7 @@ fn aggregate(files: &[FileSurvey]) -> Aggregate {
         total.painted += file.painted;
         total.placeholders += file.placeholders;
         total.hidden += file.hidden;
+        total.unrendered += file.unrendered;
         merge(&mut total.placeholder_reasons, &file.placeholder_reasons);
         total.render_page_errors += file.render_page_errors;
         merge(&mut total.geometry_rows, &file.geometry_rows);
@@ -332,7 +393,7 @@ fn print_summary(files: &[FileSurvey], total: &Aggregate) {
             None => "not attempted",
         };
         eprintln!(
-            "{} parse={} pages={} shapes={} roundtrip={} formulas={}/{} painted={} placeholders={} hidden={}",
+            "{} parse={} pages={} shapes={} roundtrip={} formulas={}/{} painted={} placeholders={} hidden={} unrendered={}",
             file.name,
             if file.parse_ok { "ok" } else { "error" },
             file.page_count,
@@ -343,6 +404,7 @@ fn print_summary(files: &[FileSurvey], total: &Aggregate) {
             file.painted,
             file.placeholders,
             file.hidden,
+            file.unrendered,
         );
         if let Some(error) = &file.parse_error {
             eprintln!("  parse error: {error}");
@@ -365,8 +427,8 @@ fn print_summary(files: &[FileSurvey], total: &Aggregate) {
         total.evaluated, total.unsupported_known, total.unsupported_other, total.error, total.total,
     );
     eprintln!(
-        "aggregate render painted={} placeholders={} hidden={} page_errors={}",
-        total.painted, total.placeholders, total.hidden, total.render_page_errors,
+        "aggregate render painted={} placeholders={} hidden={} unrendered={} page_errors={}",
+        total.painted, total.placeholders, total.hidden, total.unrendered, total.render_page_errors,
     );
     eprintln!(
         "aggregate geometry page NURBSTo={} SplineStart={} SplineKnot={} master NURBSTo={} SplineStart={} SplineKnot={}",
@@ -484,10 +546,19 @@ fn resolve_absent(package: &vsdx_parse::VsdxPackage) -> BTreeMap<String, usize> 
 
 /// Counts page shapes that yield no primitive: deleted and NoShow subtrees plus the
 /// unvisited children of shapes the renderer placeholdered without descending into.
-fn count_hidden(package: &vsdx_parse::VsdxPackage, placeholder_ids: &BTreeSet<String>) -> usize {
+/// Shapes on failed pages are skipped here; the render pass counts them as unrendered
+/// so the buckets stay disjoint.
+fn count_hidden(
+    package: &vsdx_parse::VsdxPackage,
+    placeholder_ids: &BTreeSet<String>,
+    failed_pages: &BTreeSet<String>,
+) -> usize {
     let resolver = Resolver::new(package);
     let mut hidden = 0;
     for page in &package.page_part_paths {
+        if failed_pages.contains(page) {
+            continue;
+        }
         let Ok(shapes) = resolver.resolve_page_shapes(page) else {
             continue;
         };
@@ -764,7 +835,8 @@ fn collect_unsupported(expression: &Expr, counts: &mut BTreeMap<String, usize>) 
     }
 }
 
-/// Folds cross-sheet call scopes into one bucket so per-shape references cannot fan out the histogram.
+/// Folds cross-sheet call scopes into one bucket so per-shape references cannot fan out
+/// the histogram, and folds any other unrecognised function name into a fixed bucket.
 fn fold_call_name(name: &str) -> String {
     let upper = name.to_ascii_uppercase();
     let is_cross_sheet = upper.contains('!')
@@ -777,7 +849,10 @@ fn fold_call_name(name: &str) -> String {
     if is_cross_sheet {
         return "<sheet-ref>".to_owned();
     }
-    upper
+    if KNOWN_FUNCTIONS.contains(&upper.as_str()) {
+        return upper;
+    }
+    "<unknown-function>".to_owned()
 }
 
 /// Reduces an evaluator message to its error class, dropping any document-derived tail.
@@ -810,7 +885,8 @@ fn classify_error(message: &str) -> String {
     "other".to_owned()
 }
 
-/// Reduces an evaluator unsupported reason to a bounded key, keeping only the function name tail.
+/// Reduces an evaluator unsupported reason to a bounded key, keeping only recognised
+/// function names and folding anything else into a fixed bucket.
 fn classify_unsupported(reason: &str) -> String {
     if is_static_unsupported_reason(reason) {
         return reason.to_owned();
@@ -937,25 +1013,44 @@ fn references<'a>(cells: impl Iterator<Item = (String, &'a Cell)>) -> BTreeMap<S
 struct RenderCounts {
     painted: usize,
     placeholders: usize,
+    unrendered: usize,
     reasons: BTreeMap<String, usize>,
     placeholder_ids: BTreeSet<String>,
+    failed_pages: BTreeSet<String>,
     page_errors: usize,
 }
 
+/// Renders every page with default limits; shapes on failed pages are counted as
+/// unrendered so painted, placeholders, hidden and unrendered reconcile with the
+/// shape count on every input.
 fn render_pages(package: &vsdx_parse::VsdxPackage) -> RenderCounts {
+    render_pages_with_limits(package, RenderLimits::default())
+}
+
+/// Renders every page under the given limits, keeping the same reconciliation.
+fn render_pages_with_limits(
+    package: &vsdx_parse::VsdxPackage,
+    limits: RenderLimits,
+) -> RenderCounts {
     let mut counts = RenderCounts {
         painted: 0,
         placeholders: 0,
+        unrendered: 0,
         reasons: BTreeMap::new(),
         placeholder_ids: BTreeSet::new(),
+        failed_pages: BTreeSet::new(),
         page_errors: 0,
     };
-    let mut renderer = Renderer::default();
+    let mut renderer = Renderer::new(limits);
     if renderer
         .register_font("sans-serif", false, false, FONT_BYTES.to_vec())
         .is_err()
     {
         counts.page_errors = package.page_part_paths.len();
+        for page in &package.page_part_paths {
+            counts.failed_pages.insert(page.clone());
+            counts.unrendered += page_shape_count(package, page);
+        }
         return counts;
     }
     for page in &package.page_part_paths {
@@ -969,10 +1064,21 @@ fn render_pages(package: &vsdx_parse::VsdxPackage) -> RenderCounts {
             ),
             Err(_) => {
                 counts.page_errors += 1;
+                counts.failed_pages.insert(page.clone());
+                counts.unrendered += page_shape_count(package, page);
             }
         }
     }
     counts
+}
+
+/// Counts the shapes on one page, including nested children.
+fn page_shape_count(package: &vsdx_parse::VsdxPackage, page: &str) -> usize {
+    package
+        .page_contents
+        .get(page)
+        .map(count_shapes)
+        .unwrap_or(0)
 }
 
 fn count_primitives(
@@ -1009,11 +1115,11 @@ fn classify_placeholder_reason(reason: &str) -> String {
         return section_control_class(detail);
     }
     if let Some(detail) = reason.strip_prefix("unsupported geometry") {
-        let rows = geometry_issue_rows(detail);
-        if rows.is_empty() {
+        let buckets = geometry_issue_buckets(detail);
+        if buckets.is_empty() {
             return "unsupported geometry".to_owned();
         }
-        return format!("unsupported geometry: {}", rows.join(", "));
+        return buckets.join(", ");
     }
     if reason.starts_with("unresolvable colour") {
         return "unresolvable colour".to_owned();
@@ -1068,30 +1174,89 @@ fn section_control_class(detail: &str) -> String {
     )
 }
 
-/// Extracts geometry-issue row types while dropping cell names and other Debug detail.
-fn geometry_issue_rows(detail: &str) -> Vec<String> {
-    let mut rows = BTreeSet::new();
-    for marker in [
-        "row_type: \"",
-        "UnsupportedRowType(\"",
-        "UnsupportedSectionControl(\"",
-    ] {
-        let mut rest = detail;
-        while let Some(found) = rest.find(marker) {
-            rest = &rest[found + marker.len()..];
-            let end = rest.find('"').unwrap_or(rest.len());
-            let name = &rest[..end];
-            if !name.is_empty()
-                && name.len() <= 64
-                && name
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric())
-            {
-                rows.insert(name.to_owned());
-            }
-        }
+/// Folds a document-derived geometry row type into the resolver's fixed vocabulary.
+fn fold_row_type(row_type: &str) -> &str {
+    if KNOWN_GEOMETRY_ROWS.contains(&row_type) {
+        row_type
+    } else {
+        "<unknown-row-type>"
     }
-    rows.into_iter().collect()
+}
+
+/// Reduces renderer geometry issues to bounded buckets that keep the failure kind while
+/// dropping cell names and folding unknown row types into a fixed bucket.
+fn geometry_issue_buckets(detail: &str) -> Vec<String> {
+    let mut buckets = BTreeSet::new();
+    collect_row_type_buckets(detail, &mut buckets);
+    collect_geometry_cell_buckets(detail, "MissingCell", "missing cell in", &mut buckets);
+    collect_geometry_cell_buckets(
+        detail,
+        "UnevaluatedCell",
+        "unevaluated cell in",
+        &mut buckets,
+    );
+    collect_geometry_control_buckets(detail, &mut buckets);
+    buckets.into_iter().collect()
+}
+
+/// Buckets each `UnsupportedRowType` by its whitelisted row type.
+fn collect_row_type_buckets(detail: &str, buckets: &mut BTreeSet<String>) {
+    const MARKER: &str = "UnsupportedRowType(\"";
+    let mut rest = detail;
+    while let Some(found) = rest.find(MARKER) {
+        rest = &rest[found + MARKER.len()..];
+        let end = rest.find('"').unwrap_or(rest.len());
+        buckets.insert(format!(
+            "unsupported geometry: unimplemented row type {}",
+            fold_row_type(&rest[..end])
+        ));
+    }
+}
+
+/// Buckets each `MissingCell`/`UnevaluatedCell` by kind and whitelisted row type,
+/// dropping the cell name.
+fn collect_geometry_cell_buckets(
+    detail: &str,
+    variant: &str,
+    kind: &str,
+    buckets: &mut BTreeSet<String>,
+) {
+    const FIELD: &str = "row_type: \"";
+    let mut rest = detail;
+    while let Some(found) = rest.find(variant) {
+        rest = &rest[found + variant.len()..];
+        let Some(field) = rest.find(FIELD) else {
+            continue;
+        };
+        if rest[..field].contains('}') {
+            continue;
+        }
+        rest = &rest[field + FIELD.len()..];
+        let end = rest.find('"').unwrap_or(rest.len());
+        buckets.insert(format!(
+            "unsupported geometry: {kind} {}",
+            fold_row_type(&rest[..end])
+        ));
+    }
+}
+
+/// Buckets each `UnsupportedSectionControl` by its whitelisted control name.
+fn collect_geometry_control_buckets(detail: &str, buckets: &mut BTreeSet<String>) {
+    const MARKER: &str = "UnsupportedSectionControl(\"";
+    let mut rest = detail;
+    while let Some(found) = rest.find(MARKER) {
+        rest = &rest[found + MARKER.len()..];
+        let end = rest.find('"').unwrap_or(rest.len());
+        let control = &rest[..end];
+        buckets.insert(format!(
+            "unsupported geometry: section control {}",
+            if VISIBILITY_CONTROLS.contains(&control) {
+                control
+            } else {
+                "<unknown-control>"
+            }
+        ));
+    }
 }
 
 struct GeometryCounts {
@@ -1124,7 +1289,12 @@ fn count_geometry_rows(sheet: &Sheet, rows: &mut BTreeMap<String, usize>) {
                     continue;
                 }
                 *rows
-                    .entry(row.row_type.clone().unwrap_or_else(|| "(none)".to_owned()))
+                    .entry(
+                        row.row_type
+                            .as_deref()
+                            .map_or("<unknown-row-type>", fold_row_type)
+                            .to_owned(),
+                    )
                     .or_default() += 1;
             }
         }
@@ -1197,7 +1367,10 @@ fn section_controls(resolved: &ResolvedShape) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{measure_formulas, survey};
+    use super::{
+        classify_placeholder_reason, count_hidden, count_shapes, fold_call_name, fold_row_type,
+        measure_formulas, render_pages_with_limits, survey,
+    };
 
     #[test]
     fn foundation_fixture_survey_is_consistent() {
@@ -1210,8 +1383,65 @@ mod tests {
             file.total
         );
         assert_eq!(
-            file.painted + file.placeholders + file.hidden,
+            file.painted + file.placeholders + file.hidden + file.unrendered,
             file.shape_count
+        );
+    }
+
+    #[test]
+    fn failed_page_shapes_still_reconcile() {
+        let bytes = include_bytes!("../../../vsdx-parse/tests/fixtures/foundation.vsdx");
+        let package = vsdx_parse::parse_vsdx(bytes).expect("parse foundation fixture");
+        let render = render_pages_with_limits(
+            &package,
+            vsdx_render::RenderLimits {
+                max_shapes: 0,
+                ..vsdx_render::RenderLimits::default()
+            },
+        );
+        assert!(render.page_errors > 0);
+        assert!(render.unrendered > 0);
+        let shape_count: usize = package.page_contents.values().map(count_shapes).sum();
+        let hidden = count_hidden(&package, &render.placeholder_ids, &render.failed_pages);
+        assert_eq!(
+            render.painted + render.placeholders + hidden + render.unrendered,
+            shape_count
+        );
+    }
+
+    #[test]
+    fn unknown_function_and_row_names_fold_into_fixed_buckets() {
+        assert_eq!(fold_call_name("SUM"), "SUM");
+        assert_eq!(fold_call_name("sum"), "SUM");
+        assert_eq!(fold_call_name("Sheet.1!Width"), "<sheet-ref>");
+        assert_eq!(fold_call_name("EVILFUNC"), "<unknown-function>");
+        assert_eq!(fold_row_type("LineTo"), "LineTo");
+        assert_eq!(fold_row_type("EVILTYPE"), "<unknown-row-type>");
+    }
+
+    #[test]
+    fn geometry_placeholder_buckets_keep_the_failure_kind() {
+        assert_eq!(
+            classify_placeholder_reason("unsupported geometry: [UnsupportedRowType(\"NURBSTo\")]"),
+            "unsupported geometry: unimplemented row type NURBSTo"
+        );
+        assert_eq!(
+            classify_placeholder_reason(
+                "unsupported geometry: [MissingCell { row_type: \"LineTo\", cell: \"A\" }]"
+            ),
+            "unsupported geometry: missing cell in LineTo"
+        );
+        assert_eq!(
+            classify_placeholder_reason(
+                "unsupported geometry: [UnevaluatedCell { row_type: \"LineTo\", cell: \"A\" }]"
+            ),
+            "unsupported geometry: unevaluated cell in LineTo"
+        );
+        assert_eq!(
+            classify_placeholder_reason(
+                "unsupported geometry: [MissingCell { row_type: \"EVILTYPE\", cell: \"A\" }]"
+            ),
+            "unsupported geometry: missing cell in <unknown-row-type>"
         );
     }
 
