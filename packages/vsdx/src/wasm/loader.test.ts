@@ -637,6 +637,42 @@ function findGroupWithSiblings<T extends { children: T[] }>(shapes: T[]): T | un
   return flattenShapes(shapes).find(shape => shape.children.length > 1);
 }
 
+test('each geometry section selects and moves the same shape', async () => {
+  const archive = await JSZip.loadAsync(foundation);
+  const section = (index: number, control: string, offset: number) => {
+    const rows = [[0, 0], [1, 0], [1, 1], [0, 1]].map(([x, y], row) =>
+      `<Row IX="${row}" T="${row === 0 ? 'MoveTo' : 'LineTo'}"><Cell N="X" V="${x + offset}"/><Cell N="Y" V="${y}"/></Row>`
+    ).join('');
+    return `<Section N="Geometry" IX="${index}"><Cell N="${control}" V="1"/>${rows}</Section>`;
+  };
+  const cells = Object.entries({
+    Width: 1, Height: 1, PinX: 1, PinY: 1, LocPinX: 0, LocPinY: 0,
+    FillPattern: 1, LinePattern: 1, LineWeight: 0.02,
+  }).map(([name, value]) => `<Cell N="${name}" V="${value}"/>`).join('');
+  archive.file('visio/pages/page1.xml',
+    '<PageContents xmlns="http://schemas.microsoft.com/office/visio/2012/main"><Shapes><Shape ID="1">' +
+    cells + '<Cell N="FillForegnd" F="RGB(1,2,3)"/><Cell N="LineColor" F="RGB(4,5,6)"/>' +
+    section(10, 'NoFill', 2) + section(2, 'NoLine', 0) + '</Shape></Shapes></PageContents>'
+  );
+  const pages = await archive.file('visio/pages/pages.xml')!.async('string');
+  archive.file('visio/pages/pages.xml', pages.replace('</PageSheet>', '<Cell N="PageHeight" V="8"/></PageSheet>'));
+  const diagram = openDiagram(await archive.generateAsync({ type: 'uint8array' }));
+  try {
+    const page = diagram.snapshot().pages[0];
+    const shapeId = page.shapes[0].id;
+    const frame = diagram.layoutPage(0);
+    expect(frame.primitives).toHaveLength(2);
+    const hit = (x: number, y: number) => diagram.hitTest(x * 96, (8 - y) * 96);
+    const selection = hit(1.5, 1.5);
+    expect(selection).toEqual({ kind: 'shape', shapeId });
+    expect(hit(3.5, 1)).toEqual(selection);
+    diagram.moveShape(page.id, selection!.shapeId, '2', '2');
+    expect(diagram.layoutPage(0).primitives).toHaveLength(2);
+    expect(hit(2.5, 2.5)).toEqual(selection);
+    expect(hit(4.5, 2)).toEqual(selection);
+  } finally { diagram.dispose(); }
+});
+
 test('hit testing returns a shape ID accepted by editing commands', () => {
   const diagram = openDiagram(demo, { clientId: 9080 });
   try {
