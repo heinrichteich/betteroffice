@@ -1736,8 +1736,11 @@ fn text_markers_fields_and_style_rows_are_merged() {
     );
     value.text_style = Some(1);
     add_page(&mut package, value.clone());
-    let tokens = Resolver::new(&package)
-        .resolve_text(&value, &sheet(None, vec![]))
+    let resolver = Resolver::new(&package);
+    let empty = sheet(None, vec![]);
+    let resolved = resolver.resolve_shape_in_sheet(&value, &empty).unwrap();
+    let tokens = resolver
+        .resolve_text_in_context(&value, &empty, &resolved)
         .unwrap();
     assert!(
         matches!(tokens[0], ResolvedTextToken::CharacterRun { ref properties, .. } if matches!(properties["Font"], Lookup::Found(_)))

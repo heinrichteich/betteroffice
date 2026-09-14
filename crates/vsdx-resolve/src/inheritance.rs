@@ -118,14 +118,6 @@ impl<'a> Resolver<'a> {
         }
         Ok(())
     }
-    pub fn resolve_text(
-        &self,
-        shape: &Shape,
-        sheet: &Sheet,
-    ) -> Result<Vec<ResolvedTextToken>, ResolveError> {
-        let resolved = self.resolve_shape_in_sheet(shape, sheet)?;
-        self.resolve_text_in_context(shape, sheet, &resolved)
-    }
     /// `lookup` locates enclosing groups for `MasterShape=` resolution.
     pub fn resolve_text_in_context(
         &self,
