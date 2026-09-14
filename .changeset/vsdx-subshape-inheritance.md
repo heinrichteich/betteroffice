@@ -2,6 +2,5 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Resolve group sub-shapes that carry `MasterShape` without their own `Master`. The resolver passed
-the PageSheet where a shape-lookup sheet was needed, and a PageSheet holds no shapes, so every such
-sub-shape inherited nothing and rendered as a placeholder.
+Resolve inherited cells, geometry, and text for group sub-shapes that use `MasterShape` without their own `Master`.
+Keep inherited text formatting consistent between rendering and edit sessions.

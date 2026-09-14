@@ -4473,6 +4473,49 @@ mod tests {
     }
 
     #[test]
+    fn group_subshapes_render_master_geometry_and_text_with_page_formatting() {
+        let package = vsdx_parse::parse_vsdx(include_bytes!(
+            "../../vsdx-resolve/tests/fixtures/group-master-shape.vsdx"
+        ))
+        .unwrap();
+        let page = &package.page_part_paths[0];
+        let renderer = Renderer::default();
+        let list = renderer.layout_page(&package, page).unwrap();
+        let mut boxes = BTreeMap::new();
+        text_boxes_by_id(&list.primitives, &mut boxes);
+        assert_eq!(boxes.len(), 2);
+        for id in [2, 4] {
+            let Primitive::TextBox {
+                width,
+                height,
+                paragraphs,
+                ..
+            } = boxes[&format!("{page}:{id}")]
+            else {
+                panic!("missing text box")
+            };
+            assert_eq!((*width, *height), (2.0, 1.0));
+            let runs = paragraphs
+                .iter()
+                .flat_map(|paragraph| &paragraph.runs)
+                .collect::<Vec<_>>();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].text, "group label");
+            assert_eq!(runs[0].size_in, 0.25);
+        }
+        let mut rendered = std::collections::BTreeSet::new();
+        assert_resolved_text(
+            &renderer,
+            &package,
+            page,
+            &list.primitives,
+            &mut rendered,
+            &mut TextCorpusStats::default(),
+        );
+        assert_eq!(rendered.len(), 2);
+    }
+
+    #[test]
     fn text_accounting_fixture_covers_resolved_text_sources() {
         let package = vsdx_parse::parse_vsdx(include_bytes!(
             "../../vsdx-parse/tests/fixtures/text-accounting.vsdx"

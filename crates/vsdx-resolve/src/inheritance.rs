@@ -118,15 +118,13 @@ impl<'a> Resolver<'a> {
         }
         Ok(())
     }
-    /// `page` supplies inherited cell values, `lookup` locates enclosing groups.
     pub fn resolve_text(
         &self,
         shape: &Shape,
-        page: &Sheet,
-        lookup: &Sheet,
+        sheet: &Sheet,
     ) -> Result<Vec<ResolvedTextToken>, ResolveError> {
-        let resolved = self.resolve_shape_ref(shape, page, lookup)?;
-        self.resolve_text_in_context(shape, lookup, &resolved)
+        let resolved = self.resolve_shape_in_sheet(shape, sheet)?;
+        self.resolve_text_in_context(shape, sheet, &resolved)
     }
     /// `lookup` locates enclosing groups for `MasterShape=` resolution.
     pub fn resolve_text_in_context(
