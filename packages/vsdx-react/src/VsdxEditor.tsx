@@ -212,6 +212,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const onPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
     if (!handle || !frame || !page) return;
+    if (pointerRef.current) return;
     pointerRef.current = null; dragPreviewRef.current = null;
     try {
       const point = canvasPointerPosition(event, frame);
@@ -239,7 +240,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const start = pointerRef.current;
     if (!start) return;
     if (start.pointerId !== undefined && start.pointerId !== event.pointerId) return;
-    if (start.startX !== undefined && start.startY !== undefined && !passedDragThreshold(start.startX, start.startY, event.clientX, event.clientY)) return;
+    if (start.startX !== undefined && start.startY !== undefined && !start.thresholdPassed) {
+      if (!passedDragThreshold(start.startX, start.startY, event.clientX, event.clientY)) return;
+      start.thresholdPassed = true;
+    }
     const frame = modelRef.current.frame;
     if (!frame) return;
     try {
@@ -259,23 +263,36 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     } catch (value) { reportError(value); }
   };
   const onPointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
-    const pointer = pointerRef.current; pointerRef.current = null;
+    const pointer = pointerRef.current;
+    if (!pointer) return;
+    if (pointer.pointerId !== undefined && pointer.pointerId !== event.pointerId) return;
+    pointerRef.current = null;
     const hadPreview = dragPreviewRef.current !== null;
     clearDragPreview();
     const handle = handleRef.current; const selected = selection; const frame = model.frame;
-    if (!pointer || !handle || !selected || !frame) return;
+    if (!handle || !selected || !frame) return;
     try {
       const point = canvasPointerPosition(event, frame);
-      if (!hadPreview && pointer.startX !== undefined && pointer.startY !== undefined && !passedDragThreshold(pointer.startX, pointer.startY, event.clientX, event.clientY)) return;
-      if (!hadPreview && Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) return;
+      if (!pointer.thresholdPassed && !hadPreview && pointer.startX !== undefined && pointer.startY !== undefined && !passedDragThreshold(pointer.startX, pointer.startY, event.clientX, event.clientY)) return;
+      if (!pointer.thresholdPassed && !hadPreview && Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) return;
       const geometry = resolveDragGeometry(pointer, point.model);
       if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
       else handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
       refresh(undefined, true);
     } catch (value) { reportError(value); }
   };
-  const onPointerCancel = () => { pointerRef.current = null; clearDragPreview(); };
-  const onLostPointerCapture = () => { pointerRef.current = null; clearDragPreview(); };
+  const onPointerCancel = (event: PointerEvent<HTMLCanvasElement>) => {
+    const pointer = pointerRef.current;
+    if (!pointer) return;
+    if (pointer.pointerId !== undefined && pointer.pointerId !== event.pointerId) return;
+    pointerRef.current = null; clearDragPreview();
+  };
+  const onLostPointerCapture = (event: PointerEvent<HTMLCanvasElement>) => {
+    const pointer = pointerRef.current;
+    if (!pointer) return;
+    if (pointer.pointerId !== undefined && pointer.pointerId !== event.pointerId) return;
+    pointerRef.current = null; clearDragPreview();
+  };
   const insertShape = useCallback((shape: StandardShape) => {
     const handle = handleRef.current; const current = modelRef.current; const frame = current.frame;
     const page = current.snapshot?.pages[current.pageIndex];

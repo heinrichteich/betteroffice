@@ -1,6 +1,6 @@
 import { canvasPointToModel, modelPointToCanvas } from '@betteroffice/vsdx';
 import type { Affine, ModelPoint } from '@betteroffice/vsdx';
-export interface DragStart { canvas: ModelPoint; model: ModelPoint; resize: boolean; pin: ModelPoint; size: { width: number; height: number }; parentTransforms?: readonly Affine[]; angle?: number; flipX?: boolean; flipY?: boolean; pointerId?: number; startX?: number; startY?: number; }
+export interface DragStart { canvas: ModelPoint; model: ModelPoint; resize: boolean; pin: ModelPoint; size: { width: number; height: number }; parentTransforms?: readonly Affine[]; angle?: number; flipX?: boolean; flipY?: boolean; pointerId?: number; startX?: number; startY?: number; thresholdPassed?: boolean; }
 const MIN_SHAPE_INCHES = 0.01;
 export const passedDragThreshold = (startX: number, startY: number, clientX: number, clientY: number, threshold = 4): boolean => Math.hypot(clientX - startX, clientY - startY) >= threshold;
 export const resolveDragGeometry = (start: DragStart, release: ModelPoint): { x: number; y: number; width: number; height: number } => {
