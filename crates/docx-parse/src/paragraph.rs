@@ -24,7 +24,7 @@ use crate::shape::{
 use crate::smart_art::{SmartArtContext, is_smart_art_drawing, parse_smart_art_from_drawing};
 use crate::styles::{DocDefaults, StyleMap};
 use crate::theme::Theme;
-use crate::vml::parse_vml_image_content;
+use crate::vml::{parse_horizontal_rule, parse_vml_image_content};
 use crate::xml::{ParseBudget, ParseError, XmlElement, XmlNode, parse_javascript_integer_prefix};
 
 const MAX_FIELD_NESTING: usize = 32;
@@ -307,9 +307,11 @@ pub fn parse_document_paragraph_properties(
     if let Some(spacing) = properties.child("w", "spacing") {
         let before = spacing
             .parse_numeric_attribute(Some("w"), "before", 1.0)
+            .or(value.space_before_lines)
             .map(|_| true);
         let after = spacing
             .parse_numeric_attribute(Some("w"), "after", 1.0)
+            .or(value.space_after_lines)
             .map(|_| true);
         if before.is_some() || after.is_some() {
             value.spacing_explicit = Some(SpacingExplicit { before, after });
@@ -1004,6 +1006,11 @@ fn parse_drawing_owned(
     drawing: Option<&mut DrawingContext<'_>>,
 ) -> Result<Vec<RunContent>, ParseError> {
     if matches!(element.local_name(), "pict" | "object") {
+        if let Some(rule) = parse_horizontal_rule(element) {
+            return Ok(vec![RunContent::HorizontalRule {
+                rule: Box::new(rule),
+            }]);
+        }
         let media = drawing.as_ref().map(|context| context.media);
         return Ok(parse_vml_image_content(element, relationships, media)
             .map(|image| RunContent::Drawing {
