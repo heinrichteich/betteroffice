@@ -414,7 +414,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       const point = canvasPointerPosition(event, frame);
       handle.layoutPage(model.pageIndex);
       const hit = handle.hitTest(point.canvas.x, point.canvas.y);
-      if (!hit) return;
+      if (!hit) {
+        closeContextMenu();
+        return;
+      }
       const active = selectionRef.current;
       if (!active || active.pageId !== page.id || active.shapeId !== hit.shapeId) setSelection({ pageId: page.id, shapeId: hit.shapeId, hit });
       setContextMenu({ top: event.clientY, left: event.clientX });
