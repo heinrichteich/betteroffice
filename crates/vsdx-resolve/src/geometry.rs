@@ -735,6 +735,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
