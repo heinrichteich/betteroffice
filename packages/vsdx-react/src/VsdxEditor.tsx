@@ -3,14 +3,15 @@ import type { Translations } from '@betteroffice/vsdx-i18n';
 import { canvasPointToModel, initWasm, openDiagram, paintPage, sizeCanvasForPage } from '@betteroffice/vsdx';
 import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, PointerEvent, ReactNode } from 'react';
+import type { CSSProperties, FocusEvent, KeyboardEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
-import { RibbonCommandsProvider, findShapePlacement, numericCellValue } from './components/ribbon/commands';
+import { RibbonCommandsProvider, findShapePlacement, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
+import type { RibbonCommands } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
 import { StatusBar, clampZoom } from './components/statusbar';
-import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, resolveDragGeometry, resolveRotationAngle, resizeCursor } from './interactions';
+import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, resolveDragGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent } from './interactions';
 import type { DragStart, ResizeHandle } from './interactions';
 export { resolveDragGeometry };
 export type { DragStart };
@@ -378,6 +379,43 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (pointer.pointerId !== undefined && pointer.pointerId !== event.pointerId) return;
     pointerRef.current = null; clearDragPreview();
   };
+  const commandsRef = useRef<RibbonCommands | null>(null);
+  const cancelActiveDrag = () => {
+    const pointer = pointerRef.current;
+    if (!pointer) return false;
+    pointerRef.current = null;
+    clearDragPreview();
+    const canvas = mainCanvasRef.current;
+    if (canvas && pointer.pointerId !== undefined) {
+      try {
+        if (typeof canvas.hasPointerCapture !== 'function' || canvas.hasPointerCapture(pointer.pointerId)) canvas.releasePointerCapture(pointer.pointerId);
+      } catch { void 0; }
+    }
+    return true;
+  };
+  const nudgeSelection = (dx: number, dy: number) => {
+    const handle = handleRef.current; const selected = selectionRef.current;
+    if (!handle || !selected) return;
+    try {
+      const placement = findShapePlacement(handle.snapshot().pages.find((page) => page.id === selected.pageId)?.shapes ?? [], selected.shapeId);
+      if (!placement) return;
+      handle.moveShape(selected.pageId, selected.shapeId, inchFormula(numericCellValue(placement.shape, 'PinX') + dx), inchFormula(numericCellValue(placement.shape, 'PinY') + dy));
+      refresh(undefined, true);
+    } catch (value) { reportError(value); }
+  };
+  const onCanvasKeyDown = (event: KeyboardEvent<HTMLCanvasElement>) => {
+    const intent = canvasKeyboardIntent(event, zoomRef.current);
+    if (!intent) return;
+    event.preventDefault();
+    const commands = commandsRef.current;
+    if (intent.kind === 'undo') { if (commands?.undo.enabled) commands.undo.run(); return; }
+    if (intent.kind === 'redo') { if (commands?.redo.enabled) commands.redo.run(); return; }
+    if (intent.kind === 'delete') { if (commands?.delete.enabled) commands.delete.run(); return; }
+    if (intent.kind === 'escape') { cancelActiveDrag(); setSelection(null); return; }
+    nudgeSelection(intent.dx, intent.dy);
+  };
+  const onCanvasFocus = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = '2px solid #0f6cbd'; event.currentTarget.style.outlineOffset = '2px'; };
+  const onCanvasBlur = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = ''; event.currentTarget.style.outlineOffset = ''; };
   const insertShape = useCallback((shape: StandardShape) => {
     const handle = handleRef.current; const current = modelRef.current; const frame = current.frame;
     const page = current.snapshot?.pages[current.pageIndex];
@@ -405,6 +443,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   return <div className={className} style={styles.root} aria-label={t('editor.appLabel')}>
     <header style={styles.titleBar}><strong>{t('ribbon.documentName')}</strong><span style={{ color: dirty ? '#a16207' : '#526273' }}>{dirty ? t('ribbon.dirty') : t('ribbon.saved')}</span></header>
     <RibbonCommandsProvider handle={handleRef.current} snapshot={model.snapshot} pageId={model.snapshot?.pages[model.pageIndex]?.id} selection={selection} onMutation={() => refresh(undefined, true)} onError={reportError} onDownload={download}>
+    <RibbonCommandsBridge target={commandsRef} />
     <Ribbon t={t} />
     <div style={styles.contentRow}>
     {leftPanel === undefined ? <ShapesPanel shapes={standardShapes} collapsed={shapesCollapsed} onToggleCollapsed={() => setShapesCollapsed((value) => !value)} onInsert={insertShape} t={t} /> : leftPanel}
@@ -412,7 +451,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
       <div style={styles.canvasFrame}>
-        <canvas ref={mainCanvasRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
+        <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onKeyDown={onCanvasKeyDown} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
         <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
       </div>
       {integrity.length > 0 && <section role="alert" style={styles.integrity}><strong>{t('diagnostics.integrityHeading')}</strong>{integrity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</section>}
@@ -482,6 +521,13 @@ export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, sel
 }
 
 export function collectDiagnostics(frame: PageDisplayList): TextDiagnostic[] { const result: TextDiagnostic[] = []; const work = frame.primitives.map((primitive) => ({ primitive, depth: 0 })); while (work.length) { const current = work.pop(); if (!current || current.depth >= 256) continue; if (current.primitive.kind === 'textBox') for (const paragraph of current.primitive.paragraphs) for (const run of paragraph.runs) result.push(...run.diagnostics); if (current.primitive.kind === 'group') for (const primitive of current.primitive.primitives) work.push({ primitive, depth: current.depth + 1 }); } return result; }
+/** Latest ribbon commands for the canvas keyboard layer, which lives outside the provider. */
+function RibbonCommandsBridge({ target }: { target: { current: RibbonCommands | null } }) {
+  const commands = useRibbonCommands();
+  useEffect(() => { target.current = commands; }, [commands, target]);
+  target.current = commands;
+  return null;
+}
 interface LoadedFont { key: string; face: FontFace; }
 async function loadFonts(fonts: ReadonlyArray<VsdxFontFace>): Promise<LoadedFont[]> {
   if (typeof FontFace === 'undefined' || typeof document === 'undefined') return [];

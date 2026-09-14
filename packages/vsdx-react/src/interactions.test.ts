@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { canvasPointToModel, modelPointToCanvas } from '@betteroffice/vsdx';
 import type { ModelPoint } from '@betteroffice/vsdx';
-import { RESIZE_HANDLES, hitTestSelection, paintSelectionFrame, paintDragPreview, passedDragThreshold, previewOutline, resizedBounds, resizeCursor, resolveDragGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions } from './interactions';
+import { RESIZE_HANDLES, canvasKeyboardIntent, hitTestSelection, isEditableKeyboardTarget, keyboardNudgeStep, paintSelectionFrame, paintDragPreview, passedDragThreshold, previewOutline, resizedBounds, resizeCursor, resolveDragGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions } from './interactions';
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 };
 const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 test('passedDragThreshold needs four css pixels by default', () => {
@@ -260,4 +260,45 @@ test('a literal off-centre LocPin previews exactly what the commit renders', () 
   expect(Math.max(...northCorners.map((corner) => corner.x))).toBeCloseTo(committedRight, 10);
   expect(Math.min(...northCorners.map((corner) => corner.y))).toBeCloseTo(stretched.y - locPin.y, 10);
   expect(Math.max(...northCorners.map((corner) => corner.y))).toBeCloseTo(stretched.y - locPin.y + stretched.height, 10);
+});
+test('canvas keyboard maps history, delete and escape intents', () => {
+  expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true }, 1)).toEqual({ kind: 'undo' });
+  expect(canvasKeyboardIntent({ key: 'Z', metaKey: true, shiftKey: true }, 1)).toEqual({ kind: 'redo' });
+  expect(canvasKeyboardIntent({ key: 'y', ctrlKey: true }, 1)).toEqual({ kind: 'redo' });
+  expect(canvasKeyboardIntent({ key: 'Y', metaKey: true }, 1)).toEqual({ kind: 'redo' });
+  expect(canvasKeyboardIntent({ key: 'Delete' }, 1)).toEqual({ kind: 'delete' });
+  expect(canvasKeyboardIntent({ key: 'Backspace' }, 1)).toEqual({ kind: 'delete' });
+  expect(canvasKeyboardIntent({ key: 'Escape' }, 1)).toEqual({ kind: 'escape' });
+  expect(canvasKeyboardIntent({ key: 'a', ctrlKey: true }, 1)).toBeNull();
+  expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true, altKey: true }, 1)).toBeNull();
+  expect(canvasKeyboardIntent({ key: 'Delete', ctrlKey: true }, 1)).toBeNull();
+  expect(canvasKeyboardIntent({ key: 'Escape', ctrlKey: true }, 1)).toBeNull();
+});
+test('canvas keyboard nudges one screen pixel with Y up and ten with shift', () => {
+  expect(keyboardNudgeStep(1)).toBeCloseTo(1 / 96, 10);
+  expect(keyboardNudgeStep(2)).toBeCloseTo(1 / 192, 10);
+  expect(canvasKeyboardIntent({ key: 'ArrowUp' }, 1)).toEqual({ kind: 'nudge', dx: 0, dy: 1 / 96 });
+  expect(canvasKeyboardIntent({ key: 'ArrowDown' }, 1)).toEqual({ kind: 'nudge', dx: 0, dy: -1 / 96 });
+  expect(canvasKeyboardIntent({ key: 'ArrowLeft' }, 2)).toEqual({ kind: 'nudge', dx: -1 / 192, dy: 0 });
+  const right = canvasKeyboardIntent({ key: 'ArrowRight', shiftKey: true }, 1);
+  expect(right?.kind).toBe('nudge');
+  if (right?.kind === 'nudge') { expect(right.dx).toBeCloseTo(10 / 96, 10); expect(right.dy).toBe(0); }
+  const up = canvasKeyboardIntent({ key: 'ArrowUp', shiftKey: true }, 2);
+  expect(up?.kind).toBe('nudge');
+  if (up?.kind === 'nudge') { expect(up.dy).toBeCloseTo(10 / 192, 10); expect(up.dx).toBe(0); }
+  expect(canvasKeyboardIntent({ key: 'ArrowUp', ctrlKey: true }, 1)).toBeNull();
+  expect(canvasKeyboardIntent({ key: 'ArrowUp', altKey: true }, 1)).toBeNull();
+});
+test('canvas keyboard produces no intent from editable targets', () => {
+  const input = { tagName: 'INPUT' };
+  const textarea = { tagName: 'textarea' };
+  const editable = { tagName: 'DIV', isContentEditable: true };
+  expect(isEditableKeyboardTarget(input)).toBe(true);
+  expect(isEditableKeyboardTarget(textarea)).toBe(true);
+  expect(isEditableKeyboardTarget(editable)).toBe(true);
+  expect(isEditableKeyboardTarget({ tagName: 'CANVAS' })).toBe(false);
+  expect(canvasKeyboardIntent({ key: 'Delete', target: input }, 1)).toBeNull();
+  expect(canvasKeyboardIntent({ key: 'ArrowUp', target: input }, 1)).toBeNull();
+  expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true, target: textarea }, 1)).toBeNull();
+  expect(canvasKeyboardIntent({ key: 'Escape', target: editable }, 1)).toBeNull();
 });

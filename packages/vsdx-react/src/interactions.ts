@@ -13,6 +13,56 @@ export const SELECTION_ROTATE_RADIUS_CSS = 5;
 export const SELECTION_ROTATE_OFFSET_CSS = 18;
 export const HANDLE_HIT_TOLERANCE_CSS = 6;
 export const ROTATION_SNAP_STEP = Math.PI / 12;
+export const CANVAS_KEYBOARD_DPI = 96;
+export const CANVAS_KEYBOARD_NUDGE_MULTIPLIER = 10;
+export type CanvasKeyboardIntent = { kind: 'undo' } | { kind: 'redo' } | { kind: 'delete' } | { kind: 'escape' } | { kind: 'nudge'; dx: number; dy: number };
+export interface CanvasKeyboardEventLike { key: string; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean; altKey?: boolean; target?: unknown; }
+/** One screen pixel in model inches at the given zoom. */
+export const keyboardNudgeStep = (zoom: number): number => {
+  const safe = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+  return 1 / (CANVAS_KEYBOARD_DPI * safe);
+};
+export const isEditableKeyboardTarget = (target: unknown): boolean => {
+  if (!target || typeof target !== 'object') return false;
+  const element = target as { tagName?: unknown; isContentEditable?: unknown; contentEditable?: unknown; closest?: unknown };
+  const tag = typeof element.tagName === 'string' ? element.tagName.toUpperCase() : '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  if (element.isContentEditable === true) return true;
+  if (typeof element.contentEditable === 'string' && element.contentEditable.toLowerCase() === 'true') return true;
+  if (typeof element.closest === 'function') {
+    try {
+      const editable = (element.closest as (selector: string) => unknown)('[contenteditable="true"], input, textarea, select');
+      if (editable) return true;
+    } catch { void 0; }
+  }
+  return false;
+};
+/** Pure key-to-intent mapping for the editor canvas. Y is up, so ArrowUp yields +dy. */
+export const canvasKeyboardIntent = (event: CanvasKeyboardEventLike, zoom: number): CanvasKeyboardIntent | null => {
+  if (isEditableKeyboardTarget(event.target)) return null;
+  const ctrl = Boolean(event.ctrlKey);
+  const meta = Boolean(event.metaKey);
+  const shift = Boolean(event.shiftKey);
+  const alt = Boolean(event.altKey);
+  const mod = ctrl || meta;
+  const key = event.key;
+  if (key === 'Escape') return mod || alt ? null : { kind: 'escape' };
+  if (mod && !alt) {
+    const lower = key.toLowerCase();
+    if (lower === 'z' && !shift) return { kind: 'undo' };
+    if (lower === 'y' && !shift) return { kind: 'redo' };
+    if (lower === 'z' && shift) return { kind: 'redo' };
+    return null;
+  }
+  if (mod || alt) return null;
+  if (key === 'Delete' || key === 'Backspace') return { kind: 'delete' };
+  const step = keyboardNudgeStep(zoom) * (shift ? CANVAS_KEYBOARD_NUDGE_MULTIPLIER : 1);
+  if (key === 'ArrowLeft') return { kind: 'nudge', dx: -step, dy: 0 };
+  if (key === 'ArrowRight') return { kind: 'nudge', dx: step, dy: 0 };
+  if (key === 'ArrowUp') return { kind: 'nudge', dx: 0, dy: step };
+  if (key === 'ArrowDown') return { kind: 'nudge', dx: 0, dy: -step };
+  return null;
+};
 export const passedDragThreshold = (startX: number, startY: number, clientX: number, clientY: number, threshold = 4): boolean => Math.hypot(clientX - startX, clientY - startY) >= threshold;
 export const resizeCursor = (handle: ResizeHandle): string => {
   if (handle === 'nw' || handle === 'se') return 'nwse-resize';
