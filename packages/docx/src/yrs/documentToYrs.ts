@@ -320,9 +320,20 @@ function runMarks(
   const runStyleFormatting = run.formatting?.styleId
     ? styleResolver?.getRunStyleOwnProperties(run.formatting.styleId)
     : undefined;
-  return formattingToMarks(
+  const marks = formattingToMarks(
     mergeTextFormatting(mergeTextFormatting(styleFormatting, runStyleFormatting), run.formatting)
   );
+  const styleId = run.formatting?.styleId;
+  const styleName = styleId ? styleResolver?.getStyle(styleId)?.name : undefined;
+  if ([styleId, styleName].some((name) => /^(?:Followed)?Hyperlink$/i.test(name ?? ''))) {
+    for (const [property, name] of [['color', 'textColor'], ['underline', 'underline']] as const) {
+      if (run.formatting?.[property] === undefined && runStyleFormatting?.[property] !== undefined) {
+        const mark = marks.find((mark) => mark.name === name);
+        if (mark) mark.attrs.inheritedHyperlink = true;
+      }
+    }
+  }
+  return marks;
 }
 
 function imagePayload(image: Image): Attrs {
@@ -609,6 +620,8 @@ function runContentToUnits(
       ];
     case 'drawing':
       return [embedUnit('image', imagePayload(content.image))];
+    case 'horizontalRule':
+      return [embedUnit('horizontalRule', { rule: content.rule }, marks, commentId)];
     case 'shape':
       return [embedUnit('shape', shapePayload(content.shape))];
     case 'chart':
@@ -841,6 +854,10 @@ function paragraphAttrs(
     attrs.alignment = formatting?.alignment ?? stylePpr?.alignment ?? null;
     attrs.spaceBefore = formatting?.spaceBefore ?? stylePpr?.spaceBefore ?? null;
     attrs.spaceAfter = formatting?.spaceAfter ?? stylePpr?.spaceAfter ?? null;
+    attrs.spaceBeforeLines = formatting?.spaceBeforeLines ?? stylePpr?.spaceBeforeLines ?? null;
+    attrs.spaceAfterLines = formatting?.spaceAfterLines ?? stylePpr?.spaceAfterLines ?? null;
+    attrs.beforeAutospacing = formatting?.beforeAutospacing ?? stylePpr?.beforeAutospacing ?? null;
+    attrs.afterAutospacing = formatting?.afterAutospacing ?? stylePpr?.afterAutospacing ?? null;
     attrs.lineSpacing = formatting?.lineSpacing ?? stylePpr?.lineSpacing ?? null;
     attrs.lineSpacingRule = formatting?.lineSpacingRule ?? stylePpr?.lineSpacingRule ?? null;
     attrs.spacingExplicit = formatting?.spacingExplicit || null;
@@ -889,6 +906,10 @@ function paragraphAttrs(
     attrs.alignment = formatting?.alignment ?? null;
     attrs.spaceBefore = formatting?.spaceBefore ?? null;
     attrs.spaceAfter = formatting?.spaceAfter ?? null;
+    attrs.spaceBeforeLines = formatting?.spaceBeforeLines ?? null;
+    attrs.spaceAfterLines = formatting?.spaceAfterLines ?? null;
+    attrs.beforeAutospacing = formatting?.beforeAutospacing ?? null;
+    attrs.afterAutospacing = formatting?.afterAutospacing ?? null;
     attrs.lineSpacing = formatting?.lineSpacing ?? null;
     attrs.lineSpacingRule = formatting?.lineSpacingRule ?? null;
     attrs.spacingExplicit = formatting?.spacingExplicit || null;

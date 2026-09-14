@@ -466,6 +466,10 @@ impl Run {
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphSpacing {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_lines: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_lines: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub before: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after: Option<f64>,
@@ -546,6 +550,8 @@ pub struct ListNumPr {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphAttrs {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub horizontal_rules: Vec<HorizontalRule>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alignment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -609,6 +615,33 @@ pub struct ParagraphAttrs {
     pub p_pr_ins: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p_pr_del: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HorizontalRule {
+    pub width: Option<f64>,
+    pub width_percent: Option<f64>,
+    pub height: f64,
+    pub alignment: String,
+    pub no_shade: bool,
+    pub color: String,
+    pub pm_start: f64,
+    pub pm_end: f64,
+}
+
+impl HorizontalRule {
+    pub(crate) fn rendered_width(&self, content_width: f64) -> f64 {
+        self.width_percent
+            .map(|percent| content_width * percent / 100.0)
+            .or(self.width)
+            .unwrap_or(content_width)
+            .clamp(0.0, content_width.max(0.0))
+    }
+
+    pub(crate) fn advance_width(&self, content_width: f64) -> f64 {
+        self.rendered_width(content_width) + 2.0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

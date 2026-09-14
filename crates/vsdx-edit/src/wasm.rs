@@ -94,6 +94,17 @@ struct ResizeShapeArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SetShapeBoundsArgs {
+    page_id: String,
+    shape_id: String,
+    x_formula: String,
+    y_formula: String,
+    width_formula: String,
+    height_formula: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ReorderShapeArgs {
     page_id: String,
     shape_id: String,
@@ -119,6 +130,15 @@ struct AddShapeArgs {
 struct DeleteShapeArgs {
     page_id: String,
     shape_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddConnectorArgs {
+    page_id: String,
+    draft: FormulaShapeDraft,
+    from: crate::ConnectorGlue,
+    to: crate::ConnectorGlue,
 }
 
 #[derive(Deserialize)]
@@ -320,6 +340,25 @@ impl VsdxDocument {
         self.resize_shape_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = setShapeBoundsJson)]
+    pub fn set_shape_bounds_json(&self, args: &str) -> Result<String, JsValue> {
+        self.set_shape_bounds_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = resizeLocPin)]
+    pub fn resize_loc_pin(
+        &self,
+        page_id: &str,
+        shape_id: &str,
+        width: f64,
+        height: f64,
+    ) -> Result<Vec<f64>, JsValue> {
+        self.session
+            .resize_loc_pin(page_id, shape_id, width, height)
+            .map(Vec::from)
+            .map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = reorderShapeJson)]
     pub fn reorder_shape_json(&self, args: &str) -> Result<String, JsValue> {
         self.reorder_shape_json_inner(args).map_err(js_error)
@@ -338,6 +377,11 @@ impl VsdxDocument {
     #[wasm_bindgen(js_name = deleteShapeJson)]
     pub fn delete_shape_json(&self, args: &str) -> Result<String, JsValue> {
         self.delete_shape_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = addConnectorJson)]
+    pub fn add_connector_json(&self, args: &str) -> Result<String, JsValue> {
+        self.add_connector_json_inner(args).map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = save)]
@@ -440,6 +484,24 @@ impl VsdxDocument {
             .and_then(json_inner)
     }
 
+    fn set_shape_bounds_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: SetShapeBoundsArgs = parse_args_inner(args)?;
+        self.session
+            .set_shape_bounds(
+                &local_context(),
+                &args.page_id,
+                &args.shape_id,
+                [
+                    args.x_formula,
+                    args.y_formula,
+                    args.width_formula,
+                    args.height_formula,
+                ],
+            )
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
     fn reorder_shape_json_inner(&self, args: &str) -> Result<String, String> {
         let args: ReorderShapeArgs = parse_args_inner(args)?;
         self.session
@@ -474,6 +536,21 @@ impl VsdxDocument {
         let args: DeleteShapeArgs = parse_args_inner(args)?;
         self.session
             .delete_shape(&local_context(), &args.page_id, &args.shape_id)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn add_connector_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddConnectorArgs = parse_args_inner(args)?;
+        let draft = args.draft.try_into().map_err(str::to_owned)?;
+        self.session
+            .add_connector(
+                &local_context(),
+                &args.page_id,
+                &draft,
+                &args.from,
+                &args.to,
+            )
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }
@@ -709,6 +786,34 @@ mod tests {
         let snapshot = document.snapshot_json().unwrap();
         assert!(snapshot.contains(r#""name":"Width","formula":"SETATREF(Target)""#));
         assert!(snapshot.contains(r#""name":"Target","formula":"2""#));
+    }
+
+    #[test]
+    fn wasm_shape_bounds_json_is_atomic() {
+        let document = document();
+        for name in ["PinX", "PinY", "Width", "Height"] {
+            add_cell(&document, name, name, "1");
+        }
+        let args = r#"{"pageId":"page:1","shapeId":"page:1:shape:1","xFormula":"2","yFormula":"3","widthFormula":"4","heightFormula":"5"}"#;
+        let receipts: serde_json::Value =
+            serde_json::from_str(&document.set_shape_bounds_json(args).unwrap()).unwrap();
+        assert_eq!(
+            receipts
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|receipt| receipt["after"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["2", "3", "4", "5"]
+        );
+        add_cell(&document, "LockMoveY", "LockMoveY", "1");
+        let before = document.snapshot_json().unwrap();
+        assert!(
+            document
+                .set_shape_bounds_json_inner(&args.replace("\"4\"", "\"8\""))
+                .is_err()
+        );
+        assert_eq!(document.snapshot_json().unwrap(), before);
     }
 
     #[test]

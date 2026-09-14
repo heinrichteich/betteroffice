@@ -13,10 +13,12 @@ use yrs::{
 };
 
 use crate::{
-    CellFormulaReceipt, CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx, EditError,
-    EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES, ShapeDraft, ShapeReceipt,
-    ShapeSnapshot,
+    CONNECTS, CellFormulaReceipt, CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx,
+    EditError, EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES, ShapeDraft,
+    ShapeReceipt, ShapeSnapshot,
 };
+
+mod connect;
 
 const SCHEMA_VERSION: f64 = 1.0;
 pub(crate) const MAX_SHAPE_NESTING: usize = 256;
@@ -53,6 +55,7 @@ pub(crate) fn seed_doc(
     let order = txn.get_or_insert_array(PAGE_ORDER);
     let pages = txn.get_or_insert_map(PAGES);
     let sheets = txn.get_or_insert_map(SHEETS);
+    txn.get_or_insert_map(CONNECTS);
     let stories = txn.get_or_insert_map(STORIES);
     for path in &package.page_part_paths {
         let Some(page_id) = package.page_part_ids.get(path) else {
@@ -97,7 +100,8 @@ pub(crate) fn seed_doc(
 pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage> {
     let mut package = original_package_from_doc(doc)?;
     let snapshot = snapshot_doc(doc)?;
-    materialize_snapshot(&mut package, &snapshot, &original_shape_ids(doc)?)?;
+    let glue = connect::glue_records(&doc.transact())?;
+    materialize_snapshot(&mut package, &snapshot, &original_shape_ids(doc)?, &glue)?;
     package.page_part_paths = page_part_paths_for_snapshot(&package, &snapshot)?;
     Ok(package)
 }
@@ -140,6 +144,7 @@ fn materialize_snapshot(
     package: &mut vsdx_parse::VsdxPackage,
     snapshot: &DiagramSnapshot,
     original_shape_ids: &HashSet<String>,
+    glue: &[connect::GlueRecord],
 ) -> EditResult<()> {
     for page in &snapshot.pages {
         let Some(sheet) = package.page_contents.get_mut(&page.source_part_path) else {
@@ -153,6 +158,7 @@ fn materialize_snapshot(
             .copied()
             .collect();
         vsdx_parse::remove_connects_referencing_shapes(sheet, &deleted);
+        connect::materialize_page_glue(sheet, page, glue);
     }
     Ok(())
 }
@@ -400,7 +406,7 @@ fn seed_shape(
     page_id: &str,
     parent_id: Option<&str>,
     page_path: &str,
-    page: &vsdx_parse::Sheet,
+    lookup: &vsdx_parse::Sheet,
     shape: &vsdx_parse::Shape,
     resolver: &Resolver<'_>,
     resolved: &vsdx_resolve::ResolvedShape,
@@ -477,7 +483,7 @@ fn seed_shape(
         }
     }
     let text = resolver
-        .resolve_text(shape, page)
+        .resolve_text_in_context(shape, lookup, resolved)
         .map_err(|error| EditError::InvalidState(error.to_string()))?;
     stories.insert(
         txn,
@@ -498,7 +504,7 @@ fn seed_shape(
             page_id,
             Some(id),
             page_path,
-            page,
+            lookup,
             child,
             resolver,
             &child_resolved,
@@ -627,12 +633,14 @@ impl DiagramSession {
         x_formula: impl Into<String>,
         y_formula: impl Into<String>,
     ) -> EditResult<[CellFormulaReceipt; 2]> {
-        self.set_cell_formula_pair(
+        self.set_cell_formulas(
             context,
             page_id,
             shape_id,
-            ("PinX", x_formula.into(), MutationGesture::MoveX),
-            ("PinY", y_formula.into(), MutationGesture::MoveY),
+            [
+                ("PinX", x_formula.into(), MutationGesture::MoveX),
+                ("PinY", y_formula.into(), MutationGesture::MoveY),
+            ],
         )
     }
 
@@ -644,17 +652,87 @@ impl DiagramSession {
         width_formula: impl Into<String>,
         height_formula: impl Into<String>,
     ) -> EditResult<[CellFormulaReceipt; 2]> {
-        self.set_cell_formula_pair(
+        self.set_cell_formulas(
             context,
             page_id,
             shape_id,
-            ("Width", width_formula.into(), MutationGesture::ResizeWidth),
-            (
-                "Height",
-                height_formula.into(),
-                MutationGesture::ResizeHeight,
-            ),
+            [
+                ("Width", width_formula.into(), MutationGesture::ResizeWidth),
+                (
+                    "Height",
+                    height_formula.into(),
+                    MutationGesture::ResizeHeight,
+                ),
+            ],
         )
+    }
+
+    pub fn set_shape_bounds(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        formulas: [String; 4],
+    ) -> EditResult<[CellFormulaReceipt; 4]> {
+        let [x, y, width, height] = formulas;
+        self.set_cell_formulas(
+            context,
+            page_id,
+            shape_id,
+            [
+                ("PinX", x, MutationGesture::MoveX),
+                ("PinY", y, MutationGesture::MoveY),
+                ("Width", width, MutationGesture::ResizeWidth),
+                ("Height", height, MutationGesture::ResizeHeight),
+            ],
+        )
+    }
+
+    pub fn resize_loc_pin(
+        &self,
+        page_id: &str,
+        shape_id: &str,
+        width: f64,
+        height: f64,
+    ) -> EditResult<[f64; 2]> {
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return Err(EditError::InvalidState(
+                "invalid resize dimensions".to_owned(),
+            ));
+        }
+        let txn = self.doc.transact();
+        let mut references = CrdtMutationContext::new(&txn, page_id, shape_id)?.references;
+        for (name, value) in [("Width", width), ("Height", height)] {
+            references.cells.insert(
+                name.to_owned(),
+                Lookup::Found(vsdx_resolve::ResolvedCell {
+                    cell: Cell {
+                        name: name.to_owned(),
+                        formula: Some(value.to_string()),
+                        value: None,
+                        unit: None,
+                        del: false,
+                        other_attrs: Vec::new(),
+                    },
+                    provenance: vsdx_resolve::Provenance::Local,
+                }),
+            );
+        }
+        let loc_pin = |name: &str, fallback: f64| -> EditResult<f64> {
+            if !references.cells.contains_key(name) {
+                return Ok(fallback);
+            }
+            evaluate_cached_formula(name, &references)
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    EditError::InvalidState(format!("cannot evaluate {name} for resize"))
+                })
+        };
+        Ok([
+            loc_pin("LocPinX", width / 2.0)?,
+            loc_pin("LocPinY", height / 2.0)?,
+        ])
     }
 
     pub fn reorder_shape(
@@ -683,57 +761,7 @@ impl DiagramSession {
     ) -> EditResult<ShapeReceipt> {
         validate_shape_draft(draft)?;
         let mut txn = self.transact_for(context);
-        let pages = txn
-            .get_map(PAGES)
-            .ok_or_else(|| EditError::InvalidState("missing pages map".to_owned()))?;
-        let page = map_ref(&pages, &txn, page_id)?;
-        let order = map_array(&page, &txn, "shapes")?;
-        let index = order.len(&txn);
-        let sheets = txn
-            .get_map(SHEETS)
-            .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
-        let id_prefix = format!("{page_id}:shape:added:{}:", self.client_id);
-        if sheets.len(&txn) as usize >= ParseLimits::default().max_shapes {
-            return Err(EditError::InvalidState(
-                "shape count exceeds maximum".to_owned(),
-            ));
-        }
-        let source_bound = map_u32(&page, &txn, "maxSourceId")?
-            .ok_or_else(|| EditError::InvalidState("missing page source ID bound".to_owned()))?;
-        let allocated = materialized_source_ids(&sheets, &txn, &order, source_bound)?;
-        let largest = allocated.values().copied().max().unwrap_or(source_bound);
-        largest.checked_add(1).ok_or_else(|| {
-            EditError::InvalidState("cannot allocate a materialized source ID".to_owned())
-        })?;
-        let sequence = txn.state_vector().get(&yrs::ClientID::new(self.client_id));
-        let id = format!("{id_prefix}{sequence}");
-        let shape = sheets.insert(&mut txn, id.as_str(), MapPrelim::default());
-        shape.insert(&mut txn, "id", id.as_str());
-        shape.insert(&mut txn, "pageId", page_id);
-        shape.insert(&mut txn, "sourceId", 0.0);
-        shape.insert(&mut txn, "origin", "added");
-        if let Some(name) = &draft.name {
-            shape.insert(&mut txn, "name", name.as_str());
-        }
-        let cells = shape.insert(&mut txn, "cells", MapPrelim::default());
-        shape.insert(&mut txn, "shapes", ArrayPrelim::default());
-        for cell in &draft.cells {
-            seed_cell(
-                &cells,
-                &mut txn,
-                &cell.locator,
-                cell.formula.as_deref(),
-                cell.value.as_deref(),
-                cell.row_type.as_deref(),
-            );
-        }
-        order.push_back(&mut txn, id.as_str());
-        Ok(ShapeReceipt {
-            page_id: page_id.to_owned(),
-            shape_id: id,
-            from_index: None,
-            to_index: Some(index),
-        })
+        insert_shape(&mut txn, self.client_id, page_id, draft)
     }
 
     pub fn delete_shape(
@@ -788,7 +816,7 @@ impl DiagramSession {
             .map(|entry| entry.id.clone())
             .collect::<Vec<_>>();
         order.remove_range(&mut txn, from, 1);
-        for id in removed {
+        for id in &removed {
             sheets.remove(&mut txn, id.as_str());
         }
         Ok(ShapeReceipt {
@@ -799,14 +827,13 @@ impl DiagramSession {
         })
     }
 
-    fn set_cell_formula_pair(
+    fn set_cell_formulas<const N: usize>(
         &self,
         context: &EditCtx,
         page_id: &str,
         shape_id: &str,
-        first: (&str, String, MutationGesture),
-        second: (&str, String, MutationGesture),
-    ) -> EditResult<[CellFormulaReceipt; 2]> {
+        cells: [(&str, String, MutationGesture); N],
+    ) -> EditResult<[CellFormulaReceipt; N]> {
         let mut txn = self.transact_for(context);
         let context_for_policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
         let decide =
@@ -829,31 +856,89 @@ impl DiagramSession {
                     Err(EditError::InvalidState(reason))
                 }
             };
-        let (first_target, first_formula) = decide(first)?;
-        let (second_target, second_formula) = decide(second)?;
-        let first_cell = cell_map(&mut txn, page_id, shape_id, &first_target)?;
-        let second_cell = cell_map(&mut txn, page_id, shape_id, &second_target)?;
-        let first_before = map_string(&first_cell, &txn, "formula");
-        let second_before = map_string(&second_cell, &txn, "formula");
-        first_cell.insert(&mut txn, "formula", first_formula.as_str());
-        second_cell.insert(&mut txn, "formula", second_formula.as_str());
-        Ok([
+        let targets = cells
+            .into_iter()
+            .map(decide)
+            .collect::<EditResult<Vec<_>>>()?;
+        let prepared = targets
+            .into_iter()
+            .map(|(target, formula)| {
+                let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
+                Ok((target, formula, cell))
+            })
+            .collect::<EditResult<Vec<_>>>()?;
+        Ok(std::array::from_fn(|index| {
+            let (target, formula, cell) = &prepared[index];
+            let before = map_string(cell, &txn, "formula");
+            cell.insert(&mut txn, "formula", formula.as_str());
             CellFormulaReceipt {
                 page_id: page_id.to_owned(),
                 shape_id: shape_id.to_owned(),
-                cell_name: first_target.cell_name,
-                before: first_before,
-                after: first_formula,
-            },
-            CellFormulaReceipt {
-                page_id: page_id.to_owned(),
-                shape_id: shape_id.to_owned(),
-                cell_name: second_target.cell_name,
-                before: second_before,
-                after: second_formula,
-            },
-        ])
+                cell_name: target.cell_name.clone(),
+                before,
+                after: formula.clone(),
+            }
+        }))
     }
+}
+
+fn insert_shape(
+    txn: &mut TransactionMut<'_>,
+    client_id: u64,
+    page_id: &str,
+    draft: &ShapeDraft,
+) -> EditResult<ShapeReceipt> {
+    let pages = txn
+        .get_map(PAGES)
+        .ok_or_else(|| EditError::InvalidState("missing pages map".to_owned()))?;
+    let page = map_ref(&pages, txn, page_id)?;
+    let order = map_array(&page, txn, "shapes")?;
+    let index = order.len(txn);
+    let sheets = txn
+        .get_map(SHEETS)
+        .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
+    let id_prefix = format!("{page_id}:shape:added:{}:", client_id);
+    if sheets.len(txn) as usize >= ParseLimits::default().max_shapes {
+        return Err(EditError::InvalidState(
+            "shape count exceeds maximum".to_owned(),
+        ));
+    }
+    let source_bound = map_u32(&page, txn, "maxSourceId")?
+        .ok_or_else(|| EditError::InvalidState("missing page source ID bound".to_owned()))?;
+    let allocated = materialized_source_ids(&sheets, txn, &order, source_bound)?;
+    let largest = allocated.values().copied().max().unwrap_or(source_bound);
+    largest.checked_add(1).ok_or_else(|| {
+        EditError::InvalidState("cannot allocate a materialized source ID".to_owned())
+    })?;
+    let sequence = txn.state_vector().get(&yrs::ClientID::new(client_id));
+    let id = format!("{id_prefix}{sequence}");
+    let shape = sheets.insert(txn, id.as_str(), MapPrelim::default());
+    shape.insert(txn, "id", id.as_str());
+    shape.insert(txn, "pageId", page_id);
+    shape.insert(txn, "sourceId", 0.0);
+    shape.insert(txn, "origin", "added");
+    if let Some(name) = &draft.name {
+        shape.insert(txn, "name", name.as_str());
+    }
+    let cells = shape.insert(txn, "cells", MapPrelim::default());
+    shape.insert(txn, "shapes", ArrayPrelim::default());
+    for cell in &draft.cells {
+        seed_cell(
+            &cells,
+            txn,
+            &cell.locator,
+            cell.formula.as_deref(),
+            cell.value.as_deref(),
+            cell.row_type.as_deref(),
+        );
+    }
+    order.push_back(txn, id.as_str());
+    Ok(ShapeReceipt {
+        page_id: page_id.to_owned(),
+        shape_id: id,
+        from_index: None,
+        to_index: Some(index),
+    })
 }
 
 fn validate_shape_draft(draft: &ShapeDraft) -> EditResult<()> {
@@ -1024,6 +1109,7 @@ fn validate_schema(doc: &Doc) -> EditResult<()> {
             "shape is not reachable from a page shape order".to_owned(),
         ));
     }
+    connect::glue_records(&txn)?;
     Ok(())
 }
 
@@ -1151,6 +1237,7 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
         }
     }
     validate_new_cells(before, staged, &before_identities)?;
+    connect::validate_remote_glue(before, staged)?;
     Ok(())
 }
 
@@ -2026,6 +2113,7 @@ fn structural_edits(
     let txn = doc.transact();
     let pages = required_map(&txn, PAGES)?;
     let sheets = required_map(&txn, SHEETS)?;
+    let glue = connect::glue_records(&txn)?;
     let mut edits = Vec::new();
     let desired_page_ids =
         page_part_paths_for_snapshot(package, snapshot)?
@@ -2137,6 +2225,15 @@ fn structural_edits(
                 })
                 .collect::<Vec<_>>();
             structural_container_edits(*page_id, original_order, &desired, &added, &mut edits)?;
+        }
+        for pending in connect::page_glue(page, &glue) {
+            edits.push(StructuralEdit::AddConnect {
+                page_id: *page_id,
+                from_sheet: pending.from_sheet,
+                from_cell: pending.from_cell.to_owned(),
+                to_sheet: pending.to_sheet,
+                to_cell: pending.to_cell,
+            });
         }
     }
     Ok(edits)
