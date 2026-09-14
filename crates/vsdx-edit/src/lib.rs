@@ -25,6 +25,7 @@ pub(crate) const META: &str = "vsdx:meta";
 pub(crate) const PAGE_ORDER: &str = "vsdx:page-order";
 pub(crate) const PAGES: &str = "vsdx:pages";
 pub(crate) const SHEETS: &str = "vsdx:sheets";
+pub(crate) const CONNECTS: &str = "vsdx:connects";
 pub(crate) const STORIES: &str = "vsdx:stories";
 pub(crate) const REMOTE_ORIGIN: &str = "vsdx:remote";
 pub(crate) const HYDRATE_ORIGIN: &str = "vsdx:hydrate";
@@ -217,7 +218,7 @@ fn hydrate_doc(doc: &Doc, bytes: &[u8]) -> EditResult<()> {
     txn.apply_update(update)
         .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
     txn.get_or_insert_array(PAGE_ORDER);
-    for root in [META, PAGES, SHEETS, STORIES] {
+    for root in [META, PAGES, SHEETS, CONNECTS, STORIES] {
         txn.get_or_insert_map(root);
     }
     Ok(())
@@ -304,6 +305,7 @@ mod tests {
         let sheets = txn.get_or_insert_map(SHEETS);
         let order = txn.get_or_insert_array(PAGE_ORDER);
         txn.get_or_insert_map(STORIES);
+        txn.get_or_insert_map(CONNECTS);
         for page_id in ["page:1", "page:2"] {
             order.push_back(&mut txn, page_id);
             let page = pages.insert(&mut txn, page_id, MapPrelim::default());

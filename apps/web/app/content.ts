@@ -107,12 +107,12 @@ export const PACKAGES = [
   {
     name: "@betteroffice/vsdx",
     sourceOnly: true,
-    desc: "VSDX core — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, saving, and collaboration on Visio drawings and templates.",
+    desc: "VSDX core — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, saving, and collaboration on Visio drawings and templates. addConnector adds a 1D connector glued to two shapes at their pins or existing connection points.",
   },
   {
     name: "@betteroffice/vsdx-react",
     sourceOnly: true,
-    desc: "The VSDX editor as a drop-in React component: a tabbed ribbon, a searchable standard-shape gallery, a page tab strip and a zoom status bar over move, resize with Shift-drag, add, delete, set fill or line colour, and save. No resize-handle or connector-drag UI.",
+    desc: "The VSDX editor as a drop-in React component: a tabbed ribbon, a searchable standard-shape gallery, a page tab strip and a zoom status bar over move, resize with Shift-drag, add, delete, set fill or line colour, and save. No resize-handle or connector UI.",
   },
 ];
 
