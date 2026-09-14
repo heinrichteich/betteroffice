@@ -2023,7 +2023,7 @@ fn style_references_supplied_by_a_master_are_consulted() {
 }
 
 #[test]
-fn geometry_control_diagnostics_follow_section_inheritance() {
+fn geometry_controls_follow_section_inheritance() {
     let geometry = |formula: &str| {
         let mut geometry = section("Geometry", Vec::new());
         geometry.index = Some(1);
@@ -2036,7 +2036,7 @@ fn geometry_control_diagnostics_follow_section_inheritance() {
             }));
         ShapeChild::Section(geometry)
     };
-    for (formula, unsupported) in [("Inh", true), ("0", false)] {
+    for (formula, active) in [("Inh", true), ("0", false)] {
         let mut package = package();
         let mut local = shape(10, vec![geometry(formula)]);
         local.master = Some(5);
@@ -2048,13 +2048,157 @@ fn geometry_control_diagnostics_follow_section_inheritance() {
             .values()
             .find(|section| section.index == Some(1))
             .unwrap();
+        assert!(section.unsupported_controls.is_empty());
+        assert_eq!(section.controls.no_show, active);
+        let realized = crate::realize_geometry(section, 1.0, 1.0);
+        assert_eq!(realized.controls.no_show, active);
+        assert!(realized.issues.is_empty());
+    }
+}
+
+#[test]
+fn geometry_unevaluable_control_reports_uncertainty_without_hiding() {
+    let mut geometry = section("Geometry", Vec::new());
+    geometry.index = Some(1);
+    geometry
+        .children
+        .push(SectionChild::Unknown(vsdx_parse::OpaqueXml {
+            name: "Cell".into(),
+            attributes: vec![
+                ("N".into(), "NoFill".into()),
+                ("F".into(), "Unknown(1)".into()),
+                ("V".into(), "0".into()),
+            ],
+            children: Vec::new(),
+        }));
+    let mut package = package();
+    add_page(&mut package, shape(10, vec![ShapeChild::Section(geometry)]));
+    let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+    let section = resolved
+        .sections
+        .values()
+        .find(|section| section.index == Some(1))
+        .unwrap();
+    assert!(!section.controls.no_fill);
+    assert_eq!(section.unsupported_controls, vec!["NoFill".to_owned()]);
+    let realized = crate::realize_geometry(section, 1.0, 1.0);
+    assert!(!realized.controls.no_fill);
+    assert_eq!(
+        realized.issues,
+        vec![crate::GeometryIssue::UnsupportedSectionControl(
+            "NoFill".into()
+        )]
+    );
+}
+
+#[test]
+fn geometry_controls_evaluate_formulas_before_cached_values() {
+    for control in ["NoFill", "NoLine", "NoShow"] {
+        for (formula, cached, active) in [
+            (Some("0"), "1", false),
+            (Some("FALSE"), "1", false),
+            (Some("TRUE"), "0", true),
+            (Some("-2"), "0", true),
+            (Some("1-1"), "1", false),
+            (None, "1", true),
+        ] {
+            let mut attributes = vec![("N".into(), control.into()), ("V".into(), cached.into())];
+            if let Some(formula) = formula {
+                attributes.push(("F".into(), formula.into()));
+            }
+            let mut geometry = section("Geometry", Vec::new());
+            geometry
+                .children
+                .push(SectionChild::Unknown(vsdx_parse::OpaqueXml {
+                    name: "Cell".into(),
+                    attributes,
+                    children: vec![],
+                }));
+            let mut package = package();
+            add_page(&mut package, shape(10, vec![ShapeChild::Section(geometry)]));
+            let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+            let section = resolved
+                .sections
+                .values()
+                .find(|section| section.name == "Geometry")
+                .unwrap();
+            assert!(section.unsupported_controls.is_empty());
+            assert_eq!(
+                [
+                    section.controls.no_fill,
+                    section.controls.no_line,
+                    section.controls.no_show
+                ],
+                [
+                    active && control == "NoFill",
+                    active && control == "NoLine",
+                    active && control == "NoShow"
+                ]
+            );
+        }
+    }
+}
+
+#[test]
+fn geometry_editing_cells_are_not_unsupported_controls() {
+    for control in ["NoSnap", "NoQuickDrag"] {
+        let mut geometry = section("Geometry", Vec::new());
+        geometry
+            .children
+            .push(SectionChild::Unknown(vsdx_parse::OpaqueXml {
+                name: "Cell".into(),
+                attributes: vec![("N".into(), control.into()), ("V".into(), "1".into())],
+                children: vec![],
+            }));
+        let mut package = package();
+        add_page(&mut package, shape(10, vec![ShapeChild::Section(geometry)]));
+        let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+        let section = resolved
+            .sections
+            .values()
+            .find(|section| section.name == "Geometry")
+            .unwrap();
+        assert!(section.unsupported_controls.is_empty(), "{control}");
         assert_eq!(
-            section.unsupported_controls.contains(&"NoShow".to_owned()),
-            unsupported
-        );
-        assert_eq!(
-            !crate::realize_geometry(section, 1.0, 1.0).issues.is_empty(),
-            unsupported
+            section.controls,
+            crate::GeometrySectionControls::default(),
+            "{control}"
         );
     }
+}
+
+#[test]
+fn geometry_unknown_controls_report_issues_after_inheritance() {
+    let mut geometry = section("Geometry", Vec::new());
+    geometry
+        .children
+        .push(SectionChild::Unknown(vsdx_parse::OpaqueXml {
+            name: "Cell".into(),
+            attributes: vec![
+                ("N".into(), "NoSuchControl".into()),
+                ("V".into(), "1".into()),
+            ],
+            children: vec![],
+        }));
+    let mut package = package();
+    let mut local = shape(10, vec![]);
+    local.master = Some(5);
+    add_page(&mut package, local);
+    add_master(
+        &mut package,
+        5,
+        shape(50, vec![ShapeChild::Section(geometry)]),
+    );
+    let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+    let section = resolved
+        .sections
+        .values()
+        .find(|section| section.name == "Geometry")
+        .unwrap();
+    assert_eq!(
+        crate::realize_geometry(section, 1.0, 1.0).issues,
+        vec![crate::GeometryIssue::UnsupportedSectionControl(
+            "NoSuchControl".into()
+        )]
+    );
 }

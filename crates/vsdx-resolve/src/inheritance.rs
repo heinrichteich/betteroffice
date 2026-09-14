@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use vsdx_parse::{
     Cell, Row, Section, Shape, ShapeChild, Sheet, SheetChild, TextToken, VsdxPackage,
@@ -11,6 +11,9 @@ use crate::{
 };
 
 const MAX_INHERITANCE_DEPTH: usize = 64;
+const GEOMETRY_SECTION_CONTROLS: [&str; 3] = ["NoFill", "NoLine", "NoShow"];
+/// Documented Geometry cells that steer editing gestures, not rendering.
+const GEOMETRY_SECTION_EDITING_CELLS: [&str; 2] = ["NoSnap", "NoQuickDrag"];
 
 pub struct Resolver<'a> {
     package: &'a VsdxPackage,
@@ -462,12 +465,14 @@ impl<'a> Resolver<'a> {
                 }
             }
         }
+        let (controls, unsupported_controls) = resolve_geometry_controls(name, &sources);
         let mut out = ResolvedSection {
             name: name.into(),
             index: sources
                 .iter()
                 .find_map(|(_, section)| section.and_then(|section| section.index)),
-            unsupported_controls: unsupported_geometry_controls(name, &sources),
+            unsupported_controls,
+            controls,
             ..Default::default()
         };
         for key in keys {
@@ -552,15 +557,31 @@ impl<'a> Resolver<'a> {
     }
 }
 
-fn unsupported_geometry_controls(
+fn resolve_geometry_controls(
     name: &str,
     sources: &[(Provenance, Option<&Section>)],
-) -> Vec<String> {
+) -> (crate::GeometrySectionControls, Vec<String>) {
     if name != "Geometry" {
-        return Vec::new();
+        return (crate::GeometrySectionControls::default(), Vec::new());
     }
+    let names = sources
+        .iter()
+        .filter_map(|(_, section)| *section)
+        .flat_map(|section| &section.children)
+        .filter_map(|child| match child {
+            vsdx_parse::SectionChild::Unknown(cell)
+                if cell.name.rsplit(':').next() == Some("Cell") =>
+            {
+                cell.attributes
+                    .iter()
+                    .find_map(|(name, value)| (name == "N").then_some(value.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut active = [false; GEOMETRY_SECTION_CONTROLS.len()];
     let mut unsupported = Vec::new();
-    for control in ["NoFill", "NoLine", "NoShow"] {
+    for control in names {
         for (_, section) in sources {
             let Some(section) = section else { continue };
             let Some(cell) = section.children.iter().find_map(|child| match child {
@@ -588,26 +609,50 @@ fn unsupported_geometry_controls(
             if attribute("Del") == Some("1") {
                 break;
             }
-            let formula = attribute("F").or_else(|| attribute("V"));
-            let zero = formula.is_some_and(|formula| {
-                formula.eq_ignore_ascii_case("FALSE")
-                    || vsdx_formula::evaluate_number(
-                        formula,
-                        vsdx_formula::Limits {
-                            max_depth: 256,
-                            max_nodes: 8192,
-                            max_tokens: 16384,
-                        },
-                        &mut |_| None,
-                    ) == Some(0.0)
-            });
-            if !zero {
+            if let Some(index) = GEOMETRY_SECTION_CONTROLS
+                .iter()
+                .position(|name| *name == control)
+            {
+                match evaluate_control(attribute("F").or_else(|| attribute("V"))) {
+                    Some(value) => active[index] = value,
+                    None => unsupported.push(control.to_owned()),
+                }
+            } else if !GEOMETRY_SECTION_EDITING_CELLS.contains(&control) {
                 unsupported.push(control.to_owned());
             }
             break;
         }
     }
-    unsupported
+    let [no_fill, no_line, no_show] = active;
+    (
+        crate::GeometrySectionControls {
+            no_fill,
+            no_line,
+            no_show,
+        },
+        unsupported,
+    )
+}
+
+/// Evaluates a section control to active/inactive, or `None` when unevaluable.
+fn evaluate_control(formula: Option<&str>) -> Option<bool> {
+    let formula = formula?;
+    if formula.eq_ignore_ascii_case("FALSE") {
+        return Some(false);
+    }
+    if formula.eq_ignore_ascii_case("TRUE") {
+        return Some(true);
+    }
+    vsdx_formula::evaluate_number(
+        formula,
+        vsdx_formula::Limits {
+            max_depth: 256,
+            max_nodes: 8192,
+            max_tokens: 16384,
+        },
+        &mut |_| None,
+    )
+    .map(|value| value != 0.0)
 }
 
 /// Documented transform defaults: https://learn.microsoft.com/en-us/office/client-developer/visio/cells-visio-shapesheet-reference
