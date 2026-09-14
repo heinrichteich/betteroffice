@@ -268,7 +268,20 @@ mod tests {
         assert!(receipt["shapeId"].as_str().unwrap().contains(":added:"));
         let mut renderer = VsdxRenderer::new();
         let live = renderer.layout_page_json(&document, 0).unwrap();
-        assert!(live.contains(r#""x":1.0,"y":1.0"#));
+        let display: serde_json::Value = serde_json::from_str(&live).unwrap();
+        let connector = display["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["id"] == "visio/pages/page1.xml:4")
+            .unwrap();
+        assert_eq!(
+            connector["path"],
+            serde_json::json!([
+                { "type": "move", "x": 1.0, "y": 1.0 },
+                { "type": "line", "x": 5.0, "y": 1.0 },
+            ])
+        );
         let saved = document.save().unwrap();
         let reparsed = vsdx_parse::parse_vsdx(&saved).unwrap();
         let part = reparsed.page_part_paths[0].clone();

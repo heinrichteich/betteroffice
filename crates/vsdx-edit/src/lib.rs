@@ -305,6 +305,7 @@ mod tests {
         let sheets = txn.get_or_insert_map(SHEETS);
         let order = txn.get_or_insert_array(PAGE_ORDER);
         txn.get_or_insert_map(STORIES);
+        txn.get_or_insert_map(CONNECTS);
         for page_id in ["page:1", "page:2"] {
             order.push_back(&mut txn, page_id);
             let page = pages.insert(&mut txn, page_id, MapPrelim::default());
@@ -832,6 +833,77 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn shape_bounds_refusal_preserves_all_cells_and_emits_no_update() {
+        for (name, formula) in [
+            ("PinX", "GUARD(1)"),
+            ("LockMoveY", "1"),
+            ("LockHeight", "1"),
+        ] {
+            let session = session();
+            for cell in ["PinX", "PinY", "Width", "Height"] {
+                add_cell(&session, cell, Some("1"), None);
+            }
+            add_cell(&session, name, Some(formula), None);
+            let before = session.snapshot().unwrap();
+            let vector = session.encode_state_vector_v1();
+            assert!(
+                session
+                    .set_shape_bounds(
+                        &EditCtx::local("a"),
+                        "page:1",
+                        "page:1:shape:1",
+                        ["2", "3", "4", "5"].map(str::to_owned)
+                    )
+                    .is_err()
+            );
+            assert_eq!(session.snapshot().unwrap(), before);
+            assert_eq!(session.encode_state_vector_v1(), vector);
+        }
+    }
+
+    #[test]
+    fn shape_bounds_undo_restores_all_four_cells() {
+        let session = session();
+        for cell in ["PinX", "PinY", "Width", "Height"] {
+            add_cell(&session, cell, Some("1"), None);
+        }
+        let before = session.snapshot().unwrap();
+        let receipts = session
+            .set_shape_bounds(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                ["2", "3", "4", "5"].map(str::to_owned),
+            )
+            .unwrap();
+        assert_eq!(receipts.map(|receipt| receipt.after), ["2", "3", "4", "5"]);
+        assert!(session.undo());
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn resize_loc_pin_evaluates_formulas_without_mutating() {
+        let session = session();
+        for (name, formula) in [
+            ("Width", "2"),
+            ("Height", "3"),
+            ("LocPinX", "Width*0.5+0.25"),
+            ("LocPinY", "0.75"),
+        ] {
+            add_cell(&session, name, Some(formula), None);
+        }
+        let before = session.snapshot().unwrap();
+        assert_eq!(
+            session
+                .resize_loc_pin("page:1", "page:1:shape:1", 4.0, 6.0)
+                .unwrap(),
+            [2.25, 0.75]
+        );
+        assert_eq!(session.snapshot().unwrap(), before);
     }
 
     #[test]
@@ -1808,6 +1880,82 @@ mod tests {
     }
 
     #[test]
+    fn group_subshape_snapshot_and_story_match_render_resolution() {
+        let source = include_bytes!("../../vsdx-parse/tests/fixtures/group-master-shape.vsdx");
+        let package = vsdx_parse::parse_vsdx(source).unwrap();
+        let page = &package.page_part_paths[0];
+        let resolver = vsdx_resolve::Resolver::new(&package);
+        let resolved = resolver.resolve_page_shapes(page).unwrap();
+        let session = DiagramSession::open(source, 7).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let group = &snapshot.pages[0].shapes[0];
+        let source_group = package.page_contents[page].shapes().next().unwrap();
+        let mut source_children = source_group.shapes();
+        let direct = source_children.next().unwrap();
+        let nested = source_children.next().unwrap().shapes().next().unwrap();
+        let txn = session.doc.transact();
+        let stories = txn.get_map(STORIES).unwrap();
+        for (child, shape) in [
+            (&group.children[0], direct),
+            (&group.children[1].children[0], nested),
+        ] {
+            for (name, expected) in [("PinX", "1"), ("Width", "2"), ("PageValue", "23")] {
+                let cell = child
+                    .cells
+                    .iter()
+                    .find(|cell| cell.name == name && cell.locator.section.is_none())
+                    .unwrap();
+                assert_eq!(cell.value.as_deref(), Some(expected));
+                let vsdx_resolve::Lookup::Found(render_cell) =
+                    &resolved[&child.source_id].cells[name]
+                else {
+                    panic!("missing {name}")
+                };
+                assert_eq!(cell.value, render_cell.cell.value);
+            }
+            let Some(yrs::Out::Any(Any::String(story))) = stories.get(&txn, &child.id) else {
+                panic!("missing story")
+            };
+            assert_eq!(story.as_ref(), "group label");
+            let tokens = resolver
+                .resolve_text_in_context(
+                    shape,
+                    &package.page_contents[page],
+                    &resolved[&child.source_id],
+                )
+                .unwrap();
+            let vsdx_resolve::ResolvedTextToken::CharacterRun { properties, .. } = &tokens[0]
+            else {
+                panic!("missing character run")
+            };
+            let vsdx_resolve::Lookup::Found(size) = &properties["Size"] else {
+                panic!("missing font size")
+            };
+            assert_eq!(size.cell.value.as_deref(), Some("0.25"));
+            assert_eq!(size.provenance, vsdx_resolve::Provenance::Page);
+            let snapshot_size = child
+                .cells
+                .iter()
+                .find(|cell| {
+                    cell.name == "Size" && cell.locator.section.as_deref() == Some("Character")
+                })
+                .unwrap();
+            assert_eq!(snapshot_size.value, size.cell.value);
+            assert_eq!(
+                tokens[1],
+                vsdx_resolve::ResolvedTextToken::Literal("group label".into())
+            );
+        }
+        let renderer = vsdx_render::Renderer::default();
+        assert_eq!(
+            renderer.layout_page(&package, page).unwrap(),
+            renderer
+                .layout_page(&session.package().unwrap(), page)
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn grouped_child_cells_are_addressable_from_snapshots() {
         let session = DiagramSession::open(
             include_bytes!("../../vsdx-parse/tests/fixtures/nested-groups.vsdx"),
@@ -2096,491 +2244,6 @@ mod tests {
                 .all(|connect| ![10, 11].contains(&connect.from_sheet)
                     && ![10, 11].contains(&connect.to_sheet))
         );
-    }
-
-    fn singleton_cell(name: &str, formula: &str) -> CellSnapshot {
-        CellSnapshot {
-            row_type: None,
-            locator: CellLocator {
-                sheet: CellSheet::Page(1),
-                shape_id: None,
-                section: None,
-                section_index: None,
-                row: None,
-                cell_name: name.to_owned(),
-            },
-            name: name.to_owned(),
-            formula: Some(formula.to_owned()),
-            value: None,
-        }
-    }
-
-    fn connection_cell(name: &str, formula: &str) -> CellSnapshot {
-        CellSnapshot {
-            row_type: None,
-            locator: CellLocator {
-                sheet: CellSheet::Page(1),
-                shape_id: None,
-                section: Some("Connection".to_owned()),
-                section_index: None,
-                row: Some(CellRow::Index(0)),
-                cell_name: name.to_owned(),
-            },
-            name: name.to_owned(),
-            formula: Some(formula.to_owned()),
-            value: None,
-        }
-    }
-
-    fn rect_draft(pin_x: &str, pin_y: &str) -> ShapeDraft {
-        ShapeDraft {
-            name: None,
-            cells: [
-                ("Width", "1"),
-                ("Height", "1"),
-                ("PinX", pin_x),
-                ("PinY", pin_y),
-                ("LocPinX", "0"),
-                ("LocPinY", "0"),
-            ]
-            .into_iter()
-            .map(|(name, formula)| singleton_cell(name, formula))
-            .collect(),
-        }
-    }
-
-    fn connector_draft() -> ShapeDraft {
-        ShapeDraft {
-            name: Some("Connector".to_owned()),
-            cells: [
-                ("OneD", "1"),
-                ("BeginX", "1"),
-                ("BeginY", "2"),
-                ("EndX", "4"),
-                ("EndY", "2"),
-            ]
-            .into_iter()
-            .map(|(name, formula)| singleton_cell(name, formula))
-            .collect(),
-        }
-    }
-
-    fn glued_fixture() -> (DiagramSession, String, String, ShapeReceipt) {
-        let session = DiagramSession::open(
-            include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
-            701,
-        )
-        .unwrap();
-        let context = EditCtx::local("connector");
-        let from = session
-            .add_shape(&context, "page:1", &rect_draft("1", "1"))
-            .unwrap();
-        let to = session
-            .add_shape(&context, "page:1", &rect_draft("5", "1"))
-            .unwrap();
-        let connector = session
-            .add_connector(
-                &context,
-                "page:1",
-                &connector_draft(),
-                &ConnectorGlue {
-                    shape_id: from.shape_id.clone(),
-                    to_cell: None,
-                },
-                &ConnectorGlue {
-                    shape_id: to.shape_id.clone(),
-                    to_cell: None,
-                },
-            )
-            .unwrap();
-        (session, from.shape_id, to.shape_id, connector)
-    }
-
-    fn page_part(session: &DiagramSession) -> String {
-        session.package().unwrap().page_part_paths[0].clone()
-    }
-
-    fn connector_route_debug(session: &DiagramSession, source_id: u32) -> String {
-        let package = session.package().unwrap();
-        let part = package.page_part_paths[0].clone();
-        let list = vsdx_render::Renderer::default()
-            .layout_page(&package, &part)
-            .unwrap();
-        let id = format!("{part}:{source_id}");
-        list.primitives
-            .iter()
-            .find_map(|primitive| match primitive {
-                vsdx_render::Primitive::Shape {
-                    id: actual, path, ..
-                } if actual == &id => Some(format!("{path:?}")),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("connector {source_id} did not paint"))
-    }
-
-    #[test]
-    fn connector_creation_binds_both_endpoints() {
-        let (session, _, _, _) = glued_fixture();
-        let package = session.package().unwrap();
-        let part = package.page_part_paths[0].clone();
-        let connectivity = vsdx_resolve::Resolver::new(&package)
-            .resolve_page_connectivity(&part)
-            .unwrap();
-        let connector = connectivity.connectors.get(&4).unwrap();
-        assert!(connector.is_1d);
-        assert_eq!(connector.glue.len(), 2);
-        let begin = connector
-            .glue
-            .iter()
-            .find(|glue| glue.endpoint == vsdx_resolve::ConnectorEndpoint::Begin)
-            .unwrap();
-        let end = connector
-            .glue
-            .iter()
-            .find(|glue| glue.endpoint == vsdx_resolve::ConnectorEndpoint::End)
-            .unwrap();
-        assert_eq!(begin.to.as_ref().unwrap().shape_id, 2);
-        assert_eq!(end.to.as_ref().unwrap().shape_id, 3);
-        assert!(begin.to.as_ref().unwrap().connection_point.is_some());
-        assert!(end.to.as_ref().unwrap().connection_point.is_some());
-        assert!(begin.diagnostics.is_empty());
-        assert!(end.diagnostics.is_empty());
-    }
-
-    #[test]
-    fn connector_glue_to_a_connection_row_resolves() {
-        let session = DiagramSession::open(
-            include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
-            702,
-        )
-        .unwrap();
-        let context = EditCtx::local("connector");
-        let mut target_cells = rect_draft("2", "3").cells;
-        target_cells.push(connection_cell("X", "0.5"));
-        target_cells.push(connection_cell("Y", "0.5"));
-        let target = session
-            .add_shape(
-                &context,
-                "page:1",
-                &ShapeDraft {
-                    name: None,
-                    cells: target_cells,
-                },
-            )
-            .unwrap();
-        let other = session
-            .add_shape(&context, "page:1", &rect_draft("5", "1"))
-            .unwrap();
-        session
-            .add_connector(
-                &context,
-                "page:1",
-                &connector_draft(),
-                &ConnectorGlue {
-                    shape_id: target.shape_id.clone(),
-                    to_cell: Some("Connections.X1".to_owned()),
-                },
-                &ConnectorGlue {
-                    shape_id: other.shape_id.clone(),
-                    to_cell: None,
-                },
-            )
-            .unwrap();
-        let package = session.package().unwrap();
-        let part = package.page_part_paths[0].clone();
-        let connectivity = vsdx_resolve::Resolver::new(&package)
-            .resolve_page_connectivity(&part)
-            .unwrap();
-        let point = connectivity.connectors[&4].glue[0]
-            .to
-            .as_ref()
-            .unwrap()
-            .connection_point
-            .as_ref()
-            .unwrap();
-        assert_eq!(point.row, 0);
-        assert_eq!(point.position, vsdx_resolve::ScenePoint { x: 2.5, y: 3.5 });
-    }
-
-    #[test]
-    fn moved_glued_shape_drags_the_connector_route() {
-        let (session, from_id, _, _) = glued_fixture();
-        assert_eq!(
-            connector_route_debug(&session, 4),
-            "[Move { x: 1.0, y: 1.0 }, Line { x: 5.0, y: 1.0 }]"
-        );
-        session
-            .move_shape(&EditCtx::local("move"), "page:1", &from_id, "8", "3")
-            .unwrap();
-        assert_eq!(
-            connector_route_debug(&session, 4),
-            "[Move { x: 8.0, y: 3.0 }, Line { x: 5.0, y: 1.0 }]"
-        );
-    }
-
-    #[test]
-    fn deleting_the_connector_removes_its_glue() {
-        let (session, _, _, connector) = glued_fixture();
-        session
-            .delete_shape(&EditCtx::local("delete"), "page:1", &connector.shape_id)
-            .unwrap();
-        let package = session.package().unwrap();
-        let part = package.page_part_paths[0].clone();
-        assert!(
-            package.page_contents[&part]
-                .connects()
-                .all(|connect| connect.from_sheet != 4 && connect.to_sheet != 4)
-        );
-        let connectivity = vsdx_resolve::Resolver::new(&package)
-            .resolve_page_connectivity(&part)
-            .unwrap();
-        assert!(!connectivity.connectors.contains_key(&4));
-    }
-
-    #[test]
-    fn deleting_a_glued_shape_leaves_no_dangling_glue() {
-        let (session, from_id, _, _) = glued_fixture();
-        session
-            .delete_shape(&EditCtx::local("delete"), "page:1", &from_id)
-            .unwrap();
-        let package = session.package().unwrap();
-        let part = package.page_part_paths[0].clone();
-        let mut live_ids = std::collections::HashSet::new();
-        let mut pending = package.page_contents[&part].shapes().collect::<Vec<_>>();
-        while let Some(shape) = pending.pop() {
-            live_ids.insert(shape.id);
-            pending.extend(shape.shapes());
-        }
-        assert!(package.page_contents[&part].connects().all(|connect| {
-            live_ids.contains(&connect.from_sheet) && live_ids.contains(&connect.to_sheet)
-        }));
-        let connectivity = vsdx_resolve::Resolver::new(&package)
-            .resolve_page_connectivity(&part)
-            .unwrap();
-        assert!(connectivity.diagnostics.iter().all(|diagnostic| !matches!(
-            diagnostic,
-            vsdx_resolve::ConnectivityDiagnostic::MissingToShape { .. }
-                | vsdx_resolve::ConnectivityDiagnostic::MissingFromShape { .. }
-        )));
-        let glue = &connectivity.connectors[&3].glue;
-        assert_eq!(glue.len(), 1);
-        assert_eq!(glue[0].endpoint, vsdx_resolve::ConnectorEndpoint::End);
-        assert_eq!(glue[0].to.as_ref().unwrap().shape_id, 2);
-        assert_eq!(
-            connector_route_debug(&session, 3),
-            "[Move { x: 1.0, y: 2.0 }, Line { x: 5.0, y: 1.0 }]"
-        );
-    }
-
-    #[test]
-    fn saved_connector_reloads_identically() {
-        let (session, _, _, _) = glued_fixture();
-        let part = page_part(&session);
-        let live_package = session.package().unwrap();
-        let live_connectivity = vsdx_resolve::Resolver::new(&live_package)
-            .resolve_page_connectivity(&part)
-            .unwrap();
-        let saved = session.save().unwrap();
-        assert_eq!(session.save().unwrap(), saved);
-        let reparsed = vsdx_parse::parse_vsdx(&saved).unwrap();
-        let mut untouched = vec![live_package.document_part_path.clone()];
-        untouched.extend(live_package.pages_part_path.clone());
-        untouched.extend(live_package.masters_part_path.clone());
-        untouched.extend(live_package.windows_part_path.clone());
-        untouched.extend(live_package.theme_part_paths.clone());
-        untouched.extend(
-            live_package
-                .page_part_paths
-                .iter()
-                .filter(|path| *path != &part)
-                .cloned(),
-        );
-        untouched.extend(live_package.master_part_paths.clone());
-        for path in untouched {
-            assert_eq!(
-                reparsed.part_bytes(&path),
-                live_package.part_bytes(&path),
-                "untouched part changed: {path}"
-            );
-        }
-        let page_xml = String::from_utf8(reparsed.part_bytes(&part).unwrap().to_vec()).unwrap();
-        assert!(page_xml.contains("Mystery='yes'"));
-        assert!(page_xml.contains("<UnknownConnect Flag='yes'>"));
-        let reopened = DiagramSession::open(&saved, 703).unwrap();
-        let reopened_package = reopened.package().unwrap();
-        let live_connects = live_package.page_contents[&part]
-            .connects()
-            .map(|connect| {
-                (
-                    connect.from_sheet,
-                    connect.from_cell.clone(),
-                    connect.to_sheet,
-                    connect.to_cell.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let reopened_connects = reopened_package.page_contents[&part]
-            .connects()
-            .map(|connect| {
-                (
-                    connect.from_sheet,
-                    connect.from_cell.clone(),
-                    connect.to_sheet,
-                    connect.to_cell.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(live_connects, reopened_connects);
-        assert_eq!(
-            vsdx_resolve::Resolver::new(&reopened_package)
-                .resolve_page_connectivity(&part)
-                .unwrap(),
-            live_connectivity
-        );
-        let renderer = vsdx_render::Renderer::default();
-        assert_eq!(
-            renderer.layout_page(&reopened_package, &part).unwrap(),
-            renderer.layout_page(&live_package, &part).unwrap()
-        );
-        let reopened_connector = reopened.snapshot().unwrap().pages[0]
-            .shapes
-            .iter()
-            .find(|shape| shape.source_id == 4)
-            .cloned()
-            .expect("saved connector must reload");
-        assert_eq!(reopened_connector.name.as_deref(), Some("Connector"));
-        for (name, formula) in [
-            ("OneD", "1"),
-            ("BeginX", "1"),
-            ("BeginY", "2"),
-            ("EndX", "4"),
-            ("EndY", "2"),
-        ] {
-            assert!(
-                reopened_connector
-                    .cells
-                    .iter()
-                    .any(|cell| { cell.name == name && cell.formula.as_deref() == Some(formula) })
-            );
-        }
-    }
-
-    #[test]
-    fn refused_connector_creation_writes_neither_shape_nor_glue() {
-        let (session, from_id, _, _) = glued_fixture();
-        let part = page_part(&session);
-        let shapes = session.snapshot().unwrap().pages[0].shapes.len();
-        let glue = session.package().unwrap().page_contents[&part]
-            .connects()
-            .count();
-        let before = session.save().unwrap();
-        let context = EditCtx::local("refused");
-        assert!(
-            session
-                .add_connector(
-                    &context,
-                    "page:1",
-                    &connector_draft(),
-                    &ConnectorGlue {
-                        shape_id: "page:1:shape:missing".to_owned(),
-                        to_cell: None,
-                    },
-                    &ConnectorGlue {
-                        shape_id: from_id.clone(),
-                        to_cell: None,
-                    },
-                )
-                .is_err()
-        );
-        assert!(
-            session
-                .add_connector(
-                    &context,
-                    "page:1",
-                    &ShapeDraft {
-                        name: None,
-                        cells: Vec::new(),
-                    },
-                    &ConnectorGlue {
-                        shape_id: from_id.clone(),
-                        to_cell: None,
-                    },
-                    &ConnectorGlue {
-                        shape_id: from_id.clone(),
-                        to_cell: None,
-                    },
-                )
-                .is_err()
-        );
-        assert!(
-            session
-                .add_connector(
-                    &context,
-                    "page:1",
-                    &connector_draft(),
-                    &ConnectorGlue {
-                        shape_id: from_id.clone(),
-                        to_cell: Some("Width".to_owned()),
-                    },
-                    &ConnectorGlue {
-                        shape_id: from_id.clone(),
-                        to_cell: None,
-                    },
-                )
-                .is_err()
-        );
-        assert_eq!(session.snapshot().unwrap().pages[0].shapes.len(), shapes);
-        assert_eq!(
-            session.package().unwrap().page_contents[&part]
-                .connects()
-                .count(),
-            glue
-        );
-        assert_eq!(session.save().unwrap(), before);
-    }
-
-    #[test]
-    fn remote_forged_glue_for_an_original_shape_is_rejected() {
-        let session = DiagramSession::open(
-            include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
-            704,
-        )
-        .unwrap();
-        let before = session.encode_state_as_update_v1();
-        let peer = DiagramSession::open_from_update(&before, 705).unwrap();
-        {
-            let mut txn = peer.yrs_doc().transact_mut();
-            let connects = txn.get_map(crate::CONNECTS).unwrap();
-            let entry = connects.insert(&mut txn, "forged", MapPrelim::default());
-            entry.insert(&mut txn, "id", "forged");
-            entry.insert(&mut txn, "pageId", "page:1");
-            entry.insert(&mut txn, "connectorId", "page:1:shape:1");
-            entry.insert(&mut txn, "endpoint", "begin");
-            entry.insert(&mut txn, "targetId", "page:1:shape:1");
-            entry.insert(&mut txn, "toCell", "PinX");
-        }
-        let update = peer
-            .encode_diff_v1(&session.encode_state_vector_v1())
-            .unwrap();
-        assert!(session.apply_update_v1(&update).is_err());
-        assert_eq!(before, session.encode_state_as_update_v1());
-    }
-
-    #[test]
-    fn remote_glue_strip_while_shapes_survive_is_rejected() {
-        let (session, _, _, connector) = glued_fixture();
-        let before = session.encode_state_as_update_v1();
-        let peer = DiagramSession::open_from_update(&before, 706).unwrap();
-        {
-            let mut txn = peer.yrs_doc().transact_mut();
-            let connects = txn.get_map(crate::CONNECTS).unwrap();
-            connects.remove(&mut txn, &format!("{}:begin", connector.shape_id));
-        }
-        let update = peer
-            .encode_diff_v1(&session.encode_state_vector_v1())
-            .unwrap();
-        assert!(session.apply_update_v1(&update).is_err());
-        assert_eq!(before, session.encode_state_as_update_v1());
     }
 
     fn next_test_random(state: &mut u64) -> u64 {

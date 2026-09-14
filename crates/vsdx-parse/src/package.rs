@@ -133,7 +133,7 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
     let source_parts = ooxml_opc::unzip_parts_with_limits(data, limits.max_expanded_bytes)
         .map_err(VsdxError::Container)?;
     match ooxml_opc::detect_package_kind(&source_parts) {
-        Ok(ooxml_opc::DocumentKind::Vsdx) => {}
+        Ok(ooxml_opc::DocumentKind::Vsdx) | Ok(ooxml_opc::DocumentKind::Vstx) => {}
         Ok(kind) => return Err(VsdxError::UnsupportedDocumentKind(kind)),
         Err(ooxml_opc::DocumentKindError::ConflictingMainDocumentRelationships(targets)) => {
             return Err(VsdxError::ConflictingMainDocumentRelationships(targets));
@@ -972,7 +972,8 @@ pub fn save_semantic_text_edits(
             })?;
         let text = part.spans.iter().find(|span| {
             local_name(&span.name) == "Text"
-                && nearest_parent(part, span.span, "Shape").is_some_and(|parent| parent.span == shape.span)
+                && nearest_parent(part, span.span, "Shape")
+                    .is_some_and(|parent| parent.span == shape.span)
         });
         let escaped = escape_text_content(&edit.text);
         match text {
@@ -1002,7 +1003,6 @@ pub fn save_semantic_text_edits(
                     });
                 }
             }
-            None if edit.text.is_empty() => {}
             None => {
                 let outer_end = shape.span.end().ok_or(VsdxError::InvalidSpan)?;
                 if outer_end >= 2 && part.bytes[outer_end - 2..outer_end] == *b"/>" {
@@ -1011,7 +1011,8 @@ pub fn save_semantic_text_edits(
                             offset: outer_end - 2,
                             length: 2,
                         },
-                        replacement: format!("><Text>{escaped}</Text></{}>", shape.name).into_bytes(),
+                        replacement: format!("><Text>{escaped}</Text></{}>", shape.name)
+                            .into_bytes(),
                     });
                 } else {
                     let closing = part.bytes[..outer_end]
@@ -1586,7 +1587,25 @@ fn add_connect(
             message: "Connect ToCell must be PinX, PinY, or Connections.XN".to_owned(),
         });
     }
-    let mut fragment = Vec::from(b"<Connect FromSheet=\"".as_slice());
+    let connects = direct_child(part, "Connects", None);
+    let contents = part
+        .spans
+        .iter()
+        .find(|span| local_name(&span.name) == "PageContents")
+        .ok_or_else(|| VsdxError::InvalidCellEdit {
+            part: part.path.clone(),
+            message: "page has no PageContents container".to_owned(),
+        })?;
+    let owner = connects.unwrap_or(contents);
+    let prefix = owner.name.rsplit_once(':').map_or("", |(prefix, _)| prefix);
+    let qualify = |name: &str| {
+        if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}:{name}")
+        }
+    };
+    let mut fragment = format!("<{} FromSheet=\"", qualify("Connect")).into_bytes();
     fragment.extend_from_slice(from_sheet.to_string().as_bytes());
     fragment.extend_from_slice(b"\" FromCell=\"");
     push_quoted_fragment(&mut fragment, from_cell)?;
@@ -1595,12 +1614,12 @@ fn add_connect(
     fragment.extend_from_slice(b"\" ToCell=\"");
     push_quoted_fragment(&mut fragment, to_cell)?;
     fragment.extend_from_slice(b"\"/>");
-    if let Some(connects) = direct_child(part, "Connects", None) {
+    if let Some(connects) = connects {
         let end = connects.span.end().ok_or(VsdxError::InvalidSpan)?;
         if end >= 2 && part.bytes[end - 2..end] == *b"/>" {
             let mut replacement = Vec::from(b">".as_slice());
             replacement.extend_from_slice(&fragment);
-            replacement.extend_from_slice(b"</Connects>");
+            replacement.extend_from_slice(format!("</{}>", connects.name).as_bytes());
             return Ok(vec![SpanEdit {
                 span: crate::SourceSpan {
                     offset: end - 2,
@@ -1621,35 +1640,15 @@ fn add_connect(
             replacement: fragment,
         }]);
     }
-    let contents = part
-        .spans
-        .iter()
-        .find(|span| local_name(&span.name) == "PageContents")
-        .ok_or_else(|| VsdxError::InvalidCellEdit {
-            part: part.path.clone(),
-            message: "page has no PageContents container".to_owned(),
-        })?;
     let end = contents.span.end().ok_or(VsdxError::InvalidSpan)?;
-    if end >= 2 && part.bytes[end - 2..end] == *b"/>" {
-        let mut replacement = Vec::from(b">".as_slice());
-        replacement.extend_from_slice(b"<Connects>");
-        replacement.extend_from_slice(&fragment);
-        replacement.extend_from_slice(b"</Connects></PageContents>");
-        return Ok(vec![SpanEdit {
-            span: crate::SourceSpan {
-                offset: end - 2,
-                length: 2,
-            },
-            replacement,
-        }]);
-    }
     let close = part.bytes[..end]
         .iter()
         .rposition(|byte| *byte == b'<')
         .ok_or(VsdxError::InvalidSpan)?;
-    let mut replacement = Vec::from(b"<Connects>".as_slice());
+    let container = qualify("Connects");
+    let mut replacement = format!("<{container}>").into_bytes();
     replacement.extend_from_slice(&fragment);
-    replacement.extend_from_slice(b"</Connects>");
+    replacement.extend_from_slice(format!("</{container}>").as_bytes());
     Ok(vec![SpanEdit {
         span: crate::SourceSpan {
             offset: close,
@@ -2864,6 +2863,33 @@ mod tests {
             b"<PageContents><Shapes><Shape ID='1'/><Shape ID='2'/></Shapes><Connects><Connect FromSheet=\"2\" FromCell=\"BeginX\" ToSheet=\"1\" ToCell=\"PinX\"/></Connects></PageContents>"
         );
         validate_structure(&reparsed).unwrap();
+    }
+
+    #[test]
+    fn add_connect_preserves_prefixed_containers() {
+        for container in ["<v:Connects/>", "<v:Connects></v:Connects>", ""] {
+            let source = format!(
+                "<v:PageContents xmlns:v='http://schemas.microsoft.com/office/visio/2012/main'><v:Shapes><v:Shape ID='1'/><v:Shape ID='2'/></v:Shapes>{container}</v:PageContents>"
+            );
+            let (package, path) = package_with_page_xml(source.as_bytes());
+            let saved = save_structural_edits(
+                &package,
+                &[StructuralEdit::AddConnect {
+                    page_id: package.page_part_ids[&path],
+                    from_sheet: 2,
+                    from_cell: "BeginX".to_owned(),
+                    to_sheet: 1,
+                    to_cell: "PinX".to_owned(),
+                }],
+            )
+            .unwrap();
+            let reparsed = parse_vsdx(&saved).unwrap();
+            let after = std::str::from_utf8(reparsed.part_bytes(&path).unwrap()).unwrap();
+            assert!(after.contains("<v:Connect "));
+            assert!(after.contains("</v:Connects>"));
+            assert_eq!(reparsed.page_contents[&path].connects().count(), 1);
+            validate_structure(&reparsed).unwrap();
+        }
     }
 
     #[test]
@@ -4274,7 +4300,7 @@ mod tests {
         for content_type in [
             "application/vnd.ms-visio.drawing.macroEnabled.main+xml",
             "application/vnd.ms-visio.stencil.main+xml",
-            "application/vnd.ms-visio.template.main+xml",
+            "application/vnd.ms-visio.template.macroEnabled.main+xml",
         ] {
             let package = rezip_parts(&[
                 ("_rels/.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec()),
@@ -4296,6 +4322,20 @@ mod tests {
             parse_vsdx(&package),
             Err(VsdxError::ConflictingMainDocumentRelationships(_))
         ));
+    }
+
+    #[test]
+    fn opens_template_packages_and_round_trips_byte_for_byte() {
+        let source = include_bytes!("../tests/fixtures/template.vstx");
+        let package = parse_vsdx(source).unwrap();
+        let content_types = package.part_bytes("[Content_Types].xml").unwrap();
+        assert!(
+            std::str::from_utf8(content_types)
+                .unwrap()
+                .contains("application/vnd.ms-visio.template.main+xml")
+        );
+        let written = write_vsdx(&package).unwrap();
+        assert_eq!(unzip_parts(&written).unwrap(), unzip_parts(source).unwrap());
     }
 
     #[test]

@@ -14,6 +14,8 @@ export interface DiagramHandle {
   mediaBytes(assetId: string): Uint8Array;
   setCellFormula(pageId: string, shapeId: string, locator: CellLocator, formula: string): CellFormulaReceipt;
   moveShape(pageId: string, shapeId: string, xFormula: string, yFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
+  setShapeBounds(pageId: string, shapeId: string, xFormula: string, yFormula: string, widthFormula: string, heightFormula: string): [CellFormulaReceipt, CellFormulaReceipt, CellFormulaReceipt, CellFormulaReceipt];
+  resizeLocPin(pageId: string, shapeId: string, width: number, height: number): { x: number; y: number };
   resizeShape(pageId: string, shapeId: string, widthFormula: string, heightFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
   reorderShape(pageId: string, shapeId: string, toIndex: number): ShapeReceipt;
   reorderPage(pageId: string, toIndex: number): ShapeReceipt;
@@ -126,6 +128,8 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     }, mediaBytes: assetId => wasm(() => doc.mediaBytes(assetId).slice()),
     setCellFormula: (pageId, shapeId, locator, formula) => json(() => doc.setCellFormulaJson(JSON.stringify({ pageId, shapeId, locator, formula })), true),
     moveShape: (pageId, shapeId, xFormula, yFormula) => json(() => doc.moveShapeJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula })), true),
+    setShapeBounds: (pageId, shapeId, xFormula, yFormula, widthFormula, heightFormula) => json(() => doc.setShapeBoundsJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula, widthFormula, heightFormula })), true),
+    resizeLocPin: (pageId, shapeId, width, height) => { const [x, y] = wasm(() => doc.resizeLocPin(pageId, shapeId, width, height)); return { x, y }; },
     resizeShape: (pageId, shapeId, widthFormula, heightFormula) => json(() => doc.resizeShapeJson(JSON.stringify({ pageId, shapeId, widthFormula, heightFormula })), true),
     reorderShape: (pageId, shapeId, toIndex) => json(() => doc.reorderShapeJson(JSON.stringify({ pageId, shapeId, toIndex })), true),
     reorderPage: (pageId, toIndex) => json(() => doc.reorderPageJson(JSON.stringify({ pageId, toIndex })), true),

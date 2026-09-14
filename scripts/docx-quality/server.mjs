@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 const packageRoot = process.env.QUALITY_PACKAGE_ROOT;
 const reactRoot = process.env.QUALITY_REACT_ROOT;
 const format = process.env.QUALITY_FORMAT ?? 'docx';
-if (!['docx', 'pptx', 'xlsx'].includes(format)) throw new Error('Invalid format');
+if (!['docx', 'pptx', 'xlsx', 'vsdx'].includes(format)) throw new Error('Invalid format');
 const aliases = [];
 for (const [name, override] of [
   [format, packageRoot],
@@ -71,6 +71,7 @@ const server = await createServer({
       '@betteroffice/docx-react',
       '@betteroffice/pptx',
       '@betteroffice/xlsx',
+      '@betteroffice/vsdx',
     ],
   },
   esbuild: { jsx: 'automatic' },
