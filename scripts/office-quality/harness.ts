@@ -13,12 +13,9 @@ async function fontsFor(bytes: Uint8Array) {
   for (const entry of Object.values(zip.files)) {
     if (!/^(?:ppt\/.*|xl\/styles|visio\/.*)\.xml$/.test(entry.name)) continue;
     const xml = new DOMParser().parseFromString(await entry.async('string'), 'text/xml');
-    for (const node of xml.querySelectorAll('latin, name')) {
-      const family = node.getAttribute('typeface') ?? node.getAttribute('val');
-      if (family && !family.startsWith('+')) families.add(family);
-    }
-    for (const node of xml.querySelectorAll('FaceName')) {
-      const family = node.getAttribute('Name');
+    for (const node of xml.querySelectorAll('latin, name, FaceName')) {
+      const family =
+        node.getAttribute('typeface') ?? node.getAttribute('val') ?? node.getAttribute('Name');
       if (family && !family.startsWith('+')) families.add(family);
     }
   }
