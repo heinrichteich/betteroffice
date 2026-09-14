@@ -40,10 +40,10 @@ function stubCanvasContext() {
 
 async function editor(cssScale = 1, file = foundation) {
   stubCanvasContext();
-  let ready: { handle: DiagramHandle } | undefined;
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
   const view = render(<VsdxEditor file={file} fonts={[]} onReady={(api) => { ready = api; }} />);
   await waitFor(() => expect(ready).toBeDefined());
-  await act(async () => { await new Promise((settle) => setTimeout(settle, 20)); });
+  await act(async () => { ready!.refresh(); });
   const main = view.container.querySelectorAll('canvas')[0] as HTMLCanvasElement;
   main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: PAGE_WIDTH * cssScale, height: PAGE_HEIGHT * cssScale, right: PAGE_WIDTH * cssScale, bottom: PAGE_HEIGHT * cssScale, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
   return { view, main, handle: ready!.handle, frame: main.parentElement as HTMLElement };
@@ -126,8 +126,7 @@ test('keeps a separate insert cascade for each page', async () => {
   const rectangle = view.getByRole('button', { name: 'Rectangle' });
   const visited = pins(handle, 1).length;
   const insertOn = async (pageName: string) => {
-    const tab = await view.findByRole('tab', { name: pageName });
-    await act(async () => { fireEvent.click(tab); });
+    await act(async () => { fireEvent.click(view.getByRole('tab', { name: pageName })); });
     await act(async () => { fireEvent.click(rectangle); });
   };
   await insertOn('Product map');
