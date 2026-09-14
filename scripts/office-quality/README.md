@@ -68,7 +68,7 @@ The scripts use local PDF export. For manual Word exports, choose **Best for pri
 
 ## Compare local captures
 
-Capture BetterOffice using the [DOCX instructions](../docx-quality/README.md). For PPTX/XLSX, set `QUALITY_FORMAT=pptx` or `xlsx` on the shared server and use the matching `?format=` in the capture URL. Document bytes stay local; external browser requests are limited to pinned font files.
+Capture BetterOffice using the [DOCX instructions](../docx-quality/README.md). For PPTX/XLSX/VSDX, set `QUALITY_FORMAT=pptx`, `xlsx`, or `vsdx` on the shared server and use the matching `?format=` in the capture URL. VSDX captures use the committed `apps/demo/public/betteroffice-demo.vsdx` fixture. Document bytes stay local; external browser requests are limited to pinned font files. No Visio reference exporter exists, so `compare.py` has no VSDX baseline to score against; only the capture half works for vsdx.
 
 DOCX references record each PDF page's physical and raster bounds. The capture profile permits a one-pixel canvas extent difference on each axis, adding white space or clipping at the right/bottom edge without moving or resampling rendered content. Larger differences fail; extra renderer pages retain their native bounds. Captures record the original and output dimensions for each page.
 
