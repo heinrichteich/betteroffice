@@ -53,7 +53,7 @@ export const polygonVertices: Readonly<Record<string, readonly Point[]>> = {
   chevron: [[0, 0.2], [0.38, 0.2], [0.62, 0], [1, 0.5], [0.62, 1], [0.38, 0.8], [0, 0.8], [0.35, 0.5]],
   parallelogram: [[0.2, 0], [1, 0], [0.8, 1], [0, 1]],
   trapezoid: [[0, 0], [1, 0], [0.8, 1], [0.2, 1]],
-  cube: [[0.5, 1], [1, 0.75], [1, 0.25], [0.5, 0], [0, 0.25], [0, 0.75]],
+  cube: [[0, 0], [0.75, 0], [1, 0.25], [1, 1], [0.25, 1], [0, 0.75]],
 };
 
 function regularPolygon(sides: number): readonly Point[] {
@@ -167,13 +167,13 @@ function draftFor(id: string, path: GeometryPath, square: boolean, aspectRatio =
   };
 }
 
-function polygonShape(id: keyof typeof polygonVertices, extraRows: readonly GeometryRow[] = [], square = false, preview?: string): StandardShape {
+function polygonShape(id: keyof typeof polygonVertices, extraRows: readonly GeometryRow[] = [], square = false, preview?: string, aspectRatio = 0): StandardShape {
   const path = polygonPath(polygonVertices[id], extraRows);
   return {
     id,
     nameKey: `shapesPanel.shape.${id}` as TranslationKey,
     preview: preview ?? path.preview,
-    draft: draftFor(id, path, square),
+    draft: draftFor(id, path, square, aspectRatio),
   };
 }
 
@@ -256,11 +256,11 @@ const invertedConePath = ellipticalPath([
 ], 'M 0.5 1 L 0 0.22 A 0.5 0.14 0 0 0 1 0.22 L 0.5 1 Z M 0 0.22 A 0.5 0.14 0 0 1 1 0.22');
 
 const cubeEdges: readonly GeometryRow[] = [
-  { type: 'MoveTo', end: [0.5, 1] },
-  { type: 'LineTo', end: [0.5, 0.5] },
-  { type: 'LineTo', end: [1, 0.25] },
-  { type: 'MoveTo', end: [0.5, 0.5] },
-  { type: 'LineTo', end: [0, 0.25] },
+  { type: 'MoveTo', end: [0, 0.75] },
+  { type: 'LineTo', end: [0.75, 0.75] },
+  { type: 'LineTo', end: [0.75, 0] },
+  { type: 'MoveTo', end: [0.75, 0.75] },
+  { type: 'LineTo', end: [1, 1] },
 ];
 
 const pyramidEdges: readonly GeometryRow[] = [
@@ -292,7 +292,7 @@ export const standardShapes: readonly StandardShape[] = [
   polygonShape('diamond'),
   polygonShape('cross'),
   polygonShape('chevron'),
-  polygonShape('cube', cubeEdges),
+  polygonShape('cube', cubeEdges, false, undefined, 4 / 3),
   { id: 'teardrop', nameKey: 'shapesPanel.shape.teardrop', preview: teardropPath.preview, draft: draftFor('teardrop', teardropPath, false) },
   { id: 'semicircle', nameKey: 'shapesPanel.shape.semicircle', preview: semicirclePath.preview, draft: draftFor('semicircle', semicirclePath, false) },
   { id: 'halfEllipse', nameKey: 'shapesPanel.shape.halfEllipse', preview: halfEllipsePath.preview, draft: draftFor('halfEllipse', halfEllipsePath, false) },
