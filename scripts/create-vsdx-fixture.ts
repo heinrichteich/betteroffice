@@ -31,6 +31,15 @@ async function writeTestFixtures(): Promise<void> {
   for (const [name, contents] of Object.entries(parts)) zip.file(name, contents, { date: zipDate, createFolders: false });
   fs.writeFileSync(output, await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', platform: 'DOS' }));
 
+  const templateOutput = path.join(root, 'crates/vsdx-parse/tests/fixtures/template.vstx');
+  const templateParts: Record<string, string> = {
+    ...parts,
+    '[Content_Types].xml': "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Default Extension='xml' ContentType='application/xml'/><Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.template.main+xml'/></Types>",
+  };
+  const templateZip = new JSZip();
+  for (const [name, contents] of Object.entries(templateParts)) templateZip.file(name, contents, { date: zipDate, createFolders: false });
+  fs.writeFileSync(templateOutput, await templateZip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', platform: 'DOS' }));
+
   const nestedOutput = path.join(root, 'crates/vsdx-parse/tests/fixtures/nested-groups.vsdx');
   const nestedParts: Record<string, string | Uint8Array> = {
     ...parts,
