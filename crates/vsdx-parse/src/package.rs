@@ -3705,6 +3705,7 @@ mod tests {
         for content_type in [
             "application/vnd.ms-visio.drawing.macroEnabled.main+xml",
             "application/vnd.ms-visio.stencil.main+xml",
+            "application/vnd.ms-visio.template.macroEnabled.main+xml",
         ] {
             let package = rezip_parts(&[
                 ("_rels/.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec()),
@@ -3732,17 +3733,14 @@ mod tests {
     fn opens_template_packages_and_round_trips_byte_for_byte() {
         let source = include_bytes!("../tests/fixtures/template.vstx");
         let package = parse_vsdx(source).unwrap();
+        let content_types = package.part_bytes("[Content_Types].xml").unwrap();
+        assert!(
+            std::str::from_utf8(content_types)
+                .unwrap()
+                .contains("application/vnd.ms-visio.template.main+xml")
+        );
         let written = write_vsdx(&package).unwrap();
         assert_eq!(unzip_parts(&written).unwrap(), unzip_parts(source).unwrap());
-        let content_types = package
-            .part_bytes("[Content_Types].xml")
-            .expect("template keeps its content types part");
-        assert!(
-            content_types
-                .windows(b"application/vnd.ms-visio.template.main+xml".len())
-                .any(|window| window == b"application/vnd.ms-visio.template.main+xml"),
-            "saving a template must not rewrite its content type into a drawing's"
-        );
     }
 
     #[test]

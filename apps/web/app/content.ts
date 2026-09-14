@@ -107,7 +107,7 @@ export const PACKAGES = [
   {
     name: "@betteroffice/vsdx",
     sourceOnly: true,
-    desc: "VSDX core — Rust and WebAssembly support for opening Visio drawings and templates, and for parsing, rendering, round-tripping, editing, saving, and collaboration.",
+    desc: "VSDX core — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, saving, and collaboration on Visio drawings and templates.",
   },
   {
     name: "@betteroffice/vsdx-react",
