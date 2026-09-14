@@ -16,6 +16,7 @@
   "ribbon": {
     "label": "Diagram ribbon",
     "tabsLabel": "Ribbon tabs",
+    "empty": "No commands here yet",
     "documentName": "Diagram",
     "saved": "Saved",
     "dirty": "Unsaved changes",
