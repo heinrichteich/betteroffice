@@ -29,3 +29,24 @@ test('collects defaulted paint diagnostics and tolerates shapes without them', (
     { category: 'fidelity', code: 'unresolvable-fill-colour', detail: 'unresolvable fill colour: missing colour cell FillForegnd' },
   ]);
 });
+
+function textBox(frame: PageDisplayList) {
+  const box = frame.primitives[0];
+  if (box.kind !== 'textBox') throw new Error('fixture must start with a text box');
+  return box;
+}
+
+function withoutDiagnostics(): PageDisplayList {
+  const { diagnostics: _omitted, ...run } = textBox(frame).paragraphs[0].runs[0];
+  return { ...frame, primitives: [{ ...textBox(frame), paragraphs: [{ runs: [run] }] }] };
+}
+
+test('tolerates text runs that omit diagnostics', () => {
+  expect(collectDiagnostics(withoutDiagnostics())).toEqual([]);
+});
+
+test('collects diagnostics alongside runs that omit them', () => {
+  const mixed = withoutDiagnostics();
+  textBox(mixed).paragraphs[0].runs.push({ ...textBox(frame).paragraphs[0].runs[0], diagnostics: [{ category: 'fidelity', code: 'font-substituted', detail: '' }] });
+  expect(collectDiagnostics(mixed)).toEqual([{ category: 'fidelity', code: 'font-substituted', detail: '' }]);
+});
