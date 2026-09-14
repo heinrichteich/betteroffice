@@ -829,25 +829,15 @@ impl Renderer {
                 command
             })
             .collect::<Vec<_>>();
-        let (fill, stroke) = match paint::paint(package, references, resolved, shape.id) {
-            Ok(paint) => paint,
-            Err(reason) => {
-                return self.placeholder_at(
-                    id,
-                    z_order,
-                    bounds,
-                    state,
-                    &format!("unresolvable colour: {reason}"),
-                );
-            }
-        };
+        let outcome = paint::paint(package, references, resolved, shape.id);
         state.primitives.push(Primitive::Shape {
             id: id.clone(),
             z_order,
             path,
-            fill,
-            stroke,
+            fill: outcome.fill,
+            stroke: outcome.stroke,
             transform: Affine::identity(),
+            diagnostics: outcome.diagnostics,
         });
         self.text(
             package,
@@ -933,17 +923,15 @@ impl Renderer {
                 "connector route cannot be computed: non-finite endpoint",
             );
         }
-        let (fill, stroke) = match paint::paint(package, references, resolved, shape.id) {
-            Ok(paint) => paint,
-            Err(reason) => return self.placeholder(page_part, shape, state, &reason),
-        };
+        let outcome = paint::paint(package, references, resolved, shape.id);
         state.primitives.push(Primitive::Shape {
             id,
             z_order,
             path: connector_route(begin, end, paint::number(resolved, "RoutStyle")),
-            fill,
-            stroke,
+            fill: outcome.fill,
+            stroke: outcome.stroke,
             transform: Affine::identity(),
+            diagnostics: outcome.diagnostics,
         });
         Ok(())
     }
@@ -3608,6 +3596,7 @@ mod tests {
                     }),
                     stroke: None,
                     transform: Affine::identity(),
+                    diagnostics: Vec::new(),
                 },
                 Primitive::Shape {
                     id: "top".into(),
@@ -3623,6 +3612,7 @@ mod tests {
                     }),
                     stroke: None,
                     transform: Affine::identity(),
+                    diagnostics: Vec::new(),
                 },
                 Primitive::Image {
                     id: "rotated-image".into(),
@@ -3668,6 +3658,7 @@ mod tests {
                     }),
                     stroke: None,
                     transform: Affine::identity(),
+                    diagnostics: Vec::new(),
                 },
                 Primitive::Shape {
                     id: "stroke".into(),
@@ -3683,6 +3674,7 @@ mod tests {
                         dashed: false,
                     }),
                     transform: Affine::identity(),
+                    diagnostics: Vec::new(),
                 },
             ],
         };
@@ -3854,7 +3846,7 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_foreign_data_and_colours_become_placeholders() {
+    fn unresolved_foreign_data_placeholders_while_colours_default_paint() {
         let mut image = shape(1, 1.0, 1.0);
         image.children.push(ShapeChild::ForeignData(ForeignData {
             foreign_type: None,
@@ -3870,13 +3862,36 @@ mod tests {
         assert!(
             matches!(&list.primitives[0], Primitive::Placeholder { reason, .. } if reason == "unsupported ForeignData image")
         );
+        let Primitive::Shape {
+            fill,
+            stroke,
+            diagnostics,
+            path,
+            ..
+        } = &list.primitives[1]
+        else {
+            panic!("unresolvable fill did not render");
+        };
+        assert!(!path.is_empty());
+        assert_eq!(
+            fill,
+            &Some(Paint::Solid {
+                color: "#000000".into()
+            })
+        );
+        assert_eq!(stroke.as_ref().unwrap().color, "#040506");
         assert!(
-            matches!(&list.primitives[1], Primitive::Placeholder { reason, .. } if reason.starts_with("unresolvable colour:"))
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "unresolvable-fill-colour"
+                    && diagnostic.detail
+                        == "unresolvable fill colour: missing colour cell FillForegnd"
+                    && diagnostic.category == DiagnosticCategory::Fidelity)
         );
     }
 
     #[test]
-    fn dangling_media_and_non_finite_stroke_width_become_placeholders() {
+    fn dangling_media_placeholders_while_non_finite_stroke_width_defaults() {
         let mut image = shape(1, 1.0, 1.0);
         image.children.push(ShapeChild::ForeignData(ForeignData {
             foreign_type: None,
@@ -3901,13 +3916,148 @@ mod tests {
         assert!(
             matches!(&list.primitives[0], Primitive::Placeholder { reason, .. } if reason.contains("dangling ForeignData image target"))
         );
+        let Primitive::Shape {
+            fill,
+            stroke,
+            diagnostics,
+            ..
+        } = &list.primitives[1]
+        else {
+            panic!("non-finite stroke width did not render");
+        };
+        assert_eq!(
+            fill,
+            &Some(Paint::Solid {
+                color: "#010203".into()
+            })
+        );
+        let stroke = stroke.as_ref().unwrap();
+        assert_eq!(stroke.color, "#040506");
+        assert_eq!(stroke.width, 0.01);
         assert!(
-            matches!(&list.primitives[1], Primitive::Placeholder { reason, .. } if reason.contains("non-finite stroke width"))
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "unresolvable-stroke-colour"
+                    && diagnostic.detail == "unresolvable stroke colour: non-finite stroke width")
         );
     }
 
     #[test]
-    fn unsupported_colour_reason_preserves_evaluator_detail() {
+    fn unresolvable_stroke_defaults_stroke_and_keeps_fill() {
+        let mut lined = shape(1, 1.0, 1.0);
+        lined.children.retain(
+            |child| !matches!(child, ShapeChild::Cell(Cell { name, .. }) if name == "LineColor"),
+        );
+        let list = render(vec![lined]);
+        let Primitive::Shape {
+            fill,
+            stroke,
+            diagnostics,
+            ..
+        } = &list.primitives[0]
+        else {
+            panic!("unresolvable stroke did not render");
+        };
+        assert_eq!(
+            fill,
+            &Some(Paint::Solid {
+                color: "#010203".into()
+            })
+        );
+        assert_eq!(
+            stroke,
+            &Some(Stroke {
+                color: "#000000".into(),
+                width: 0.02,
+                dashed: false,
+            })
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "unresolvable-stroke-colour");
+        assert_eq!(
+            diagnostics[0].detail,
+            "unresolvable stroke colour: missing colour cell LineColor"
+        );
+        assert_eq!(diagnostics[0].category, DiagnosticCategory::Fidelity);
+    }
+
+    #[test]
+    fn defaulted_paint_diagnostics_survive_the_display_list() {
+        let mut coloured = shape(1, 1.0, 1.0);
+        coloured.children.retain(
+            |child| !matches!(child, ShapeChild::Cell(Cell { name, .. }) if name == "FillForegnd"),
+        );
+        let list = render(vec![shape(2, 4.0, 1.0), coloured]);
+        let json = serde_json::to_value(&list).unwrap();
+        let shapes = json["primitives"].as_array().unwrap();
+        assert!(
+            shapes[0].get("diagnostics").is_none(),
+            "resolved paint must not grow the contract"
+        );
+        let diagnostics = shapes[1]["diagnostics"].as_array().unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0]["code"], "unresolvable-fill-colour");
+        assert_eq!(diagnostics[0]["category"], "fidelity");
+        assert_eq!(
+            diagnostics[0]["detail"],
+            "unresolvable fill colour: missing colour cell FillForegnd"
+        );
+        let round_tripped: VsdxDisplayList = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, list);
+    }
+
+    #[test]
+    fn unresolvable_connector_colour_keeps_route() {
+        let mut package = glued_connector_package("Connections.X1");
+        let SheetChild::Shapes(shapes) = package
+            .page_contents
+            .get_mut("page")
+            .unwrap()
+            .children
+            .iter_mut()
+            .find(|child| matches!(child, SheetChild::Shapes(_)))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        let connector = shapes
+            .iter_mut()
+            .find_map(|child| match child {
+                ShapesChild::Shape(shape) if shape.id == 1 => Some(shape),
+                _ => None,
+            })
+            .unwrap();
+        connector.children.retain(
+            |child| !matches!(child, ShapeChild::Cell(Cell { name, .. }) if name == "LineColor"),
+        );
+        connector
+            .children
+            .push(ShapeChild::Cell(formula("LineColor", "THEMEVAL(999)")));
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert!(!list.primitives.iter().any(
+            |primitive| matches!(primitive, Primitive::Placeholder { id, .. } if id == "page:1")
+        ));
+        let Primitive::Shape {
+            stroke,
+            diagnostics,
+            path,
+            ..
+        } = shape_primitive(&list, 1)
+        else {
+            unreachable!()
+        };
+        assert!(!path.is_empty());
+        assert_eq!(stroke.as_ref().unwrap().color, "#000000");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "unresolvable-stroke-colour"
+                    && diagnostic.detail.contains("THEMEVAL colour-scheme index"))
+        );
+    }
+
+    #[test]
+    fn unsupported_colour_reason_survives_as_a_paint_diagnostic() {
         let mut coloured = shape(1, 1.0, 1.0);
         coloured.children.retain(
             |child| !matches!(child, ShapeChild::Cell(Cell { name, .. }) if name == "FillForegnd"),
@@ -3916,8 +4066,22 @@ mod tests {
             .children
             .push(ShapeChild::Cell(formula("FillForegnd", "THEMEVAL(999)")));
         let list = render(vec![coloured]);
+        let Primitive::Shape {
+            fill, diagnostics, ..
+        } = &list.primitives[0]
+        else {
+            panic!("unsupported fill colour did not render");
+        };
+        assert_eq!(
+            fill,
+            &Some(Paint::Solid {
+                color: "#000000".into()
+            })
+        );
         assert!(
-            matches!(&list.primitives[0], Primitive::Placeholder { reason, .. } if reason.starts_with("unresolvable colour:") && reason.len() > "unresolvable colour:".len())
+            diagnostics.iter().any(|diagnostic| diagnostic.code == "unresolvable-fill-colour"
+                && diagnostic.detail
+                    == "unresolvable fill colour: THEMEVAL colour-scheme index must be 1 through 8")
         );
     }
 
