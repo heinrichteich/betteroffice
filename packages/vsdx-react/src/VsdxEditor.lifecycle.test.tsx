@@ -684,7 +684,8 @@ test('a resize from a handle moves the pin with moveShape and resizeShape', asyn
     fireEvent.pointerMove(main, { pointerId: 2, clientX: se.x + 48, clientY: se.y + 48 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
     expect(calls.some((entry) => entry === 'setLineDash:4,4')).toBe(true);
-    expect(calls.some((entry) => entry.startsWith('fillRect:'))).toBe(true);
+    expect(calls.some((entry) => entry.startsWith('arc:'))).toBe(true);
+    expect(calls.some((entry) => entry.startsWith('fillRect:'))).toBe(false);
     fireEvent.pointerUp(main, { pointerId: 2, clientX: se.x + 48, clientY: se.y + 48 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(moves).toHaveLength(1);
@@ -834,7 +835,8 @@ test('the overlay paints the selection frame at a zoom other than 1', async () =
     fireEvent.click(view.getByRole('button', { name: 'Zoom in' }));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
     expect(calls.some((entry) => entry.startsWith('setTransform:1.5,0,0,1.5,0,0'))).toBe(true);
-    expect(calls.some((entry) => entry.startsWith('fillRect:'))).toBe(true);
+    expect(calls.some((entry) => entry.startsWith('fillRect:'))).toBe(false);
+    expect(calls.some((entry) => entry.startsWith('strokeRect:'))).toBe(false);
     expect(calls.some((entry) => entry.startsWith('arc:'))).toBe(true);
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
