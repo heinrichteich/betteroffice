@@ -167,10 +167,23 @@ pub enum GeometryIssue {
     MissingCell { row_type: String, cell: String },
 }
 
+/// Per-section paint controls for a realized Geometry section.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeometrySectionControls {
+    #[serde(default)]
+    pub no_fill: bool,
+    #[serde(default)]
+    pub no_line: bool,
+    #[serde(default)]
+    pub no_show: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RealizedGeometry {
     pub commands: Vec<GeometryPathCommand>,
     pub issues: Vec<GeometryIssue>,
+    #[serde(default)]
+    pub controls: GeometrySectionControls,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

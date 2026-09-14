@@ -2052,9 +2052,8 @@ fn geometry_control_diagnostics_follow_section_inheritance() {
             section.unsupported_controls.contains(&"NoShow".to_owned()),
             unsupported
         );
-        assert_eq!(
-            !crate::realize_geometry(section, 1.0, 1.0).issues.is_empty(),
-            unsupported
-        );
+        let realized = crate::realize_geometry(section, 1.0, 1.0);
+        assert_eq!(realized.controls.no_show, unsupported);
+        assert!(realized.issues.is_empty());
     }
 }

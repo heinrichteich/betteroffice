@@ -5,14 +5,17 @@ use ooxml_drawingml::GeometryPathCommand;
 /// are fractions of `width` and `height`, giving absolute points in local space.
 pub fn realize_geometry(section: &ResolvedSection, width: f64, height: f64) -> RealizedGeometry {
     let mut out = RealizedGeometry::default();
-    if !section.unsupported_controls.is_empty() {
-        out.issues.extend(
-            section
-                .unsupported_controls
-                .iter()
-                .cloned()
-                .map(GeometryIssue::UnsupportedSectionControl),
-        );
+    for control in &section.unsupported_controls {
+        match control.as_str() {
+            "NoFill" => out.controls.no_fill = true,
+            "NoLine" => out.controls.no_line = true,
+            "NoShow" => out.controls.no_show = true,
+            _ => out
+                .issues
+                .push(GeometryIssue::UnsupportedSectionControl(control.clone())),
+        }
+    }
+    if out.controls.no_show && out.issues.is_empty() {
         return out;
     }
     let mut current = (0.0, 0.0);
@@ -1716,6 +1719,79 @@ mod tests {
             ]
         );
         assert!(line.issues.is_empty());
+    }
+
+    #[test]
+    fn geometry_section_controls_select_paint_without_issues() {
+        let rows = || {
+            BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row("LineTo", vec![cell("X", "1"), cell("Y", "0")]),
+                ),
+            ])
+        };
+        for (controls, no_fill, no_line, no_show) in [
+            (vec!["NoFill"], true, false, false),
+            (vec!["NoLine"], false, true, false),
+            (vec!["NoFill", "NoLine"], true, true, false),
+        ] {
+            let section = ResolvedSection {
+                index: None,
+                unsupported_controls: controls.into_iter().map(str::to_owned).collect(),
+                name: "Geometry".into(),
+                deleted: false,
+                row_order: vec![],
+                rows: rows(),
+            };
+            let geometry = realize_geometry(&section, 1.0, 1.0);
+            assert_eq!(geometry.controls.no_fill, no_fill);
+            assert_eq!(geometry.controls.no_line, no_line);
+            assert_eq!(geometry.controls.no_show, no_show);
+            assert!(geometry.issues.is_empty());
+            assert_eq!(geometry.commands.len(), 2);
+        }
+        let section = ResolvedSection {
+            index: None,
+            unsupported_controls: vec!["NoShow".into()],
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: rows(),
+        };
+        let geometry = realize_geometry(&section, 1.0, 1.0);
+        assert!(geometry.controls.no_show);
+        assert!(geometry.issues.is_empty());
+        assert!(geometry.commands.is_empty());
+    }
+
+    #[test]
+    fn geometry_section_unknown_controls_stay_unsupported() {
+        let section = ResolvedSection {
+            index: None,
+            unsupported_controls: vec!["NoSuchControl".into()],
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([(
+                "IX:0".into(),
+                resolved_row("MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+            )]),
+        };
+        let geometry = realize_geometry(&section, 1.0, 1.0);
+        assert!(!geometry.controls.no_fill);
+        assert!(!geometry.controls.no_line);
+        assert!(!geometry.controls.no_show);
+        assert_eq!(
+            geometry.issues,
+            vec![GeometryIssue::UnsupportedSectionControl(
+                "NoSuchControl".into()
+            )]
+        );
     }
 
     #[test]
