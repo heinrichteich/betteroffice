@@ -3,66 +3,65 @@ use vsdx_eval::{Evaluation, PageShapeReferences, Value, evaluate_cell_with_shape
 use vsdx_parse::{ParseLimits, VsdxPackage};
 use vsdx_resolve::{Lookup, ResolvedShape};
 
-/// Per-channel paint; a failed channel keeps the shape with the Visio default.
+/// Paint for the channels an emitting section uses; a channel that fails keeps the Visio default.
 pub struct PaintOutcome {
     pub fill: Option<Paint>,
     pub stroke: Option<Stroke>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
+const DEFAULT_STROKE_WIDTH: f64 = 0.01;
+
 pub fn paint(
     package: &VsdxPackage,
     references: Option<&PageShapeReferences>,
     shape: &ResolvedShape,
     shape_id: u32,
+    needs_fill: bool,
+    needs_stroke: bool,
 ) -> PaintOutcome {
     let mut diagnostics = Vec::new();
-    let fill = if value(shape, "FillPattern").is_some_and(|v| v != "0") {
-        match colour(package, references, shape, shape_id, "FillForegnd") {
-            Ok(color) => Some(Paint::Solid { color }),
+    let fill = if needs_fill && value(shape, "FillPattern").is_some_and(|v| v != "0") {
+        let color = match colour(package, references, shape, shape_id, "FillForegnd") {
+            Ok(color) => color,
             Err(reason) => {
                 diagnostics.push(Diagnostic::for_code(
                     "unresolvable-fill-colour",
                     format!("unresolvable fill colour: {reason}"),
                 ));
-                Some(Paint::Solid {
-                    color: default_colour(package),
-                })
+                default_colour(package)
             }
-        }
+        };
+        Some(Paint::Solid { color })
     } else {
         None
     };
-    let stroke = if value(shape, "LinePattern").is_some_and(|v| v != "0") {
-        let dashed = value(shape, "LinePattern").is_some_and(|v| v != "1");
-        let width = number(shape, "LineWeight").unwrap_or(0.01) as f32;
+    let stroke = if needs_stroke && value(shape, "LinePattern").is_some_and(|v| v != "0") {
+        let width = number(shape, "LineWeight").unwrap_or(DEFAULT_STROKE_WIDTH) as f32;
         let width = if width.is_finite() {
             width
         } else {
             diagnostics.push(Diagnostic::for_code(
-                "unresolvable-stroke-colour",
-                "unresolvable stroke colour: non-finite stroke width",
+                "unresolvable-stroke-width",
+                "unresolvable stroke width: non-finite LineWeight",
             ));
-            0.01
+            DEFAULT_STROKE_WIDTH as f32
         };
-        match colour(package, references, shape, shape_id, "LineColor") {
-            Ok(color) => Some(Stroke {
-                color,
-                width,
-                dashed,
-            }),
+        let color = match colour(package, references, shape, shape_id, "LineColor") {
+            Ok(color) => color,
             Err(reason) => {
                 diagnostics.push(Diagnostic::for_code(
                     "unresolvable-stroke-colour",
                     format!("unresolvable stroke colour: {reason}"),
                 ));
-                Some(Stroke {
-                    color: default_colour(package),
-                    width,
-                    dashed,
-                })
+                default_colour(package)
             }
-        }
+        };
+        Some(Stroke {
+            color,
+            width,
+            dashed: value(shape, "LinePattern").is_some_and(|v| v != "1"),
+        })
     } else {
         None
     };
@@ -84,7 +83,7 @@ fn value<'a>(shape: &'a ResolvedShape, name: &str) -> Option<&'a str> {
         Lookup::Deleted | Lookup::Absent => None,
     }
 }
-/// Visio foreground index 0 resolves file palettes; files without one keep black.
+/// Visio's unformatted foreground: palette index 0, black when the file has no palette.
 fn default_colour(package: &VsdxPackage) -> String {
     crate::palette_colour(package, 0.0).unwrap_or_else(|| "#000000".into())
 }

@@ -301,7 +301,8 @@ impl DiagnosticCategory {
             | "unresolvable-character-pos"
             | "unresolvable-character-case"
             | "unresolvable-fill-colour"
-            | "unresolvable-stroke-colour" => Self::Fidelity,
+            | "unresolvable-stroke-colour"
+            | "unresolvable-stroke-width" => Self::Fidelity,
             _ => Self::Integrity,
         }
     }
