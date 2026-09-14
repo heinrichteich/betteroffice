@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react';
 import type { TFunction } from '@betteroffice/vsdx-i18n';
+import { CommandMenu } from './CommandMenu';
 import { RibbonIcon } from './RibbonIcon';
 import { useRibbonCommands } from './commands';
 import type { RibbonCommandId } from './commands';
@@ -31,88 +32,33 @@ function RibbonRun({ label, children }: { label: string; children?: ReactNode })
 
 function Divider() { return <div role="separator" aria-orientation="vertical" style={styles.divider} />; }
 
-function SplitMenuItem({ id, icon, label, itemRef, onSelect }: { id: RibbonCommandId; icon: IconName; label: string; itemRef: (node: HTMLButtonElement | null) => void; onSelect: () => void }) {
-  const command = useRibbonCommands()[id];
-  const checkable = command.active !== undefined;
-  return <button ref={itemRef} type="button" role={checkable ? 'menuitemcheckbox' : 'menuitem'} aria-checked={checkable ? command.active : undefined} disabled={!command.enabled} aria-label={label} data-command-id={id} tabIndex={-1} onMouseDown={(event) => event.preventDefault()} onClick={() => { command.run(); onSelect(); }} onMouseOver={(event) => { if (command.enabled) event.currentTarget.style.backgroundColor = '#f5f5f5'; }} onMouseOut={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; }} style={{ ...styles.menuItem, color: command.enabled ? '#242424' : '#b4b4b4' }}><RibbonIcon name={icon} size={18} /><span>{label}</span></button>;
-}
-
 function RibbonSplitButton({ defaultId, defaultIcon, entries, label }: { defaultId: RibbonCommandId; defaultIcon: IconName; entries: ReadonlyArray<{ id: RibbonCommandId; icon: IconName }>; label: (id: RibbonCommandId) => string }) {
   const commands = useRibbonCommands();
   const [open, setOpen] = useState(false);
+  const [intent, setIntent] = useState<'first' | 'last'>('first');
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const focusIntent = useRef<'first' | 'last' | null>(null);
   const [pos, setPos] = useState({ top: 0, left: 0 });
   const fallback = entries[0] ?? { id: defaultId, icon: defaultIcon };
   const current = commands[fallback.id];
   const anyEnabled = entries.some((entry) => commands[entry.id].enabled);
   const close = useCallback(() => setOpen(false), []);
   const closeAndFocus = useCallback(() => { setOpen(false); triggerRef.current?.focus(); }, []);
-  const openMenu = useCallback((intent: 'first' | 'last') => { focusIntent.current = intent; setOpen(true); }, []);
-  const focusItem = useCallback((index: number) => { itemRefs.current[index]?.focus(); }, []);
-  const enabledIndices = entries.map((entry, index) => (commands[entry.id].enabled ? index : -1)).filter((index) => index >= 0);
-  const firstEnabled = enabledIndices[0] ?? -1;
-  const lastEnabled = enabledIndices[enabledIndices.length - 1] ?? -1;
-  const checkedEnabled = enabledIndices.find((index) => commands[entries[index].id].active === true) ?? -1;
-  const step = useCallback((from: number, delta: 1 | -1) => {
-    if (enabledIndices.length === 0) return -1;
-    const at = enabledIndices.indexOf(from);
-    if (at === -1) return delta === 1 ? (enabledIndices[0] ?? -1) : (enabledIndices[enabledIndices.length - 1] ?? -1);
-    return enabledIndices[(at + delta + enabledIndices.length) % enabledIndices.length] ?? -1;
-  }, [enabledIndices]);
+  const openMenu = useCallback((next: 'first' | 'last') => { setIntent(next); setOpen(true); }, []);
   useEffect(() => {
     if (!open || !triggerRef.current) return;
     const rect = triggerRef.current.getBoundingClientRect();
     setPos({ top: rect.bottom + 2, left: rect.left });
   }, [open]);
-  useEffect(() => {
-    if (!open) return;
-    const intent = focusIntent.current;
-    focusIntent.current = null;
-    const target = intent === 'last' ? lastEnabled : intent === 'first' ? (checkedEnabled >= 0 ? checkedEnabled : firstEnabled) : (checkedEnabled >= 0 ? checkedEnabled : firstEnabled);
-    if (target >= 0) focusItem(target);
-  }, [open, firstEnabled, lastEnabled, checkedEnabled, focusItem]);
-  useEffect(() => {
-    if (!open) return;
-    function onOutside(event: MouseEvent) {
-      const target = event.target as Node;
-      if (triggerRef.current && !triggerRef.current.contains(target) && menuRef.current && !menuRef.current.contains(target)) close();
-    }
-    function onEscape(event: globalThis.KeyboardEvent) { if (event.key === 'Escape') closeAndFocus(); }
-    function onScroll() { close(); }
-    document.addEventListener('mousedown', onOutside);
-    document.addEventListener('keydown', onEscape);
-    window.addEventListener('scroll', onScroll, true);
-    return () => {
-      document.removeEventListener('mousedown', onOutside);
-      document.removeEventListener('keydown', onEscape);
-      window.removeEventListener('scroll', onScroll, true);
-    };
-  }, [open, close, closeAndFocus]);
   function onTriggerKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
     if (event.key === 'ArrowDown') { event.preventDefault(); if (!open && anyEnabled) openMenu('first'); }
     else if (event.key === 'ArrowUp') { event.preventDefault(); if (!open && anyEnabled) openMenu('last'); }
-  }
-  function onMenuKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.key === 'Escape') { event.preventDefault(); closeAndFocus(); return; }
-    if (event.key === 'Tab') { close(); return; }
-    const active = document.activeElement;
-    const currentIndex = itemRefs.current.findIndex((node) => node === active);
-    if (event.key === 'ArrowDown') { event.preventDefault(); const next = step(currentIndex, 1); if (next >= 0) focusItem(next); }
-    else if (event.key === 'ArrowUp') { event.preventDefault(); const next = step(currentIndex, -1); if (next >= 0) focusItem(next); }
-    else if (event.key === 'Home') { event.preventDefault(); if (firstEnabled >= 0) focusItem(firstEnabled); }
-    else if (event.key === 'End') { event.preventDefault(); if (lastEnabled >= 0) focusItem(lastEnabled); }
   }
   return (
     <span style={styles.split}>
       <button type="button" disabled={!current.enabled} aria-label={label(fallback.id)} data-command-id={fallback.id} onMouseDown={(event) => event.preventDefault()} onClick={() => current.run()} className="vsdx-cmd-btn vsdx-split-main" style={{ ...styles.splitMain, color: current.enabled ? '#242424' : '#b4b4b4', cursor: current.enabled ? 'pointer' : 'default' }}><RibbonIcon name={fallback.icon} size={20} /></button>
       <button ref={triggerRef} type="button" disabled={!anyEnabled} aria-label={`${label(fallback.id)} options`} aria-haspopup="menu" aria-expanded={open} data-split-toggle={fallback.id} onMouseDown={(event) => event.preventDefault()} onClick={() => { if (!anyEnabled) return; if (open) close(); else openMenu('first'); }} onKeyDown={onTriggerKeyDown} className="vsdx-cmd-btn" style={{ ...styles.splitChevron, color: anyEnabled ? '#242424' : '#b4b4b4', background: open ? '#ebebeb' : 'transparent', cursor: anyEnabled ? 'pointer' : 'default' }}><svg width={10} height={10} viewBox="0 0 10 10" aria-hidden="true" focusable="false" style={{ display: 'block' }}><path d="m2 3.5 3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg></button>
       {open && (
-        <div ref={menuRef} role="menu" aria-label={`${label(fallback.id)} options`} onMouseDown={(event) => event.preventDefault()} onKeyDown={onMenuKeyDown} style={{ ...styles.menu, top: pos.top, left: pos.left }}>
-          {entries.map((entry, index) => <SplitMenuItem key={entry.id} id={entry.id} icon={entry.icon} label={label(entry.id)} itemRef={(node) => { itemRefs.current[index] = node; }} onSelect={closeAndFocus} />)}
-        </div>
+        <CommandMenu menuLabel={`${label(fallback.id)} options`} entries={entries} position={pos} anchorRef={triggerRef} initialFocus={intent} label={label} onClose={close} onCloseAndFocus={closeAndFocus} />
       )}
     </span>
   );
@@ -178,7 +124,5 @@ const styles: Record<string, CSSProperties> = {
   split: { display: 'inline-flex', alignItems: 'stretch' },
   splitMain: { appearance: 'none', display: 'inline-grid', placeItems: 'center', width: 28, height: 32, padding: 0, border: 0, borderRadius: '4px 0 0 4px', boxSizing: 'border-box' },
   splitChevron: { appearance: 'none', display: 'inline-grid', placeItems: 'center', width: 16, height: 32, padding: 0, border: 0, borderRadius: '0 4px 4px 0', boxSizing: 'border-box' },
-  menu: { position: 'fixed', minWidth: 200, padding: '4px 0', backgroundColor: '#ffffff', border: '1px solid #e0e0e0', borderRadius: 4, boxShadow: '0 4px 12px rgba(0,0,0,0.14)', zIndex: 10000 },
-  menuItem: { display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '6px 12px', border: 0, background: 'transparent', cursor: 'pointer', fontSize: 13, textAlign: 'left', whiteSpace: 'nowrap' },
   empty: { display: 'flex', alignItems: 'center', height: 32, padding: '0 8px', color: '#424242', fontSize: 12 },
 };
