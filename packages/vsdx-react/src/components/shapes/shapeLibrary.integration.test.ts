@@ -38,3 +38,18 @@ for (const shape of standardShapes) {
     } finally { diagram.dispose(); peer.dispose(); }
   });
 }
+
+test('inserts the whole gallery on one page and reopens the saved package', () => {
+  const diagram = openDiagram(fixture, { clientId: 601 });
+  try {
+    standardShapes.forEach((shape, index) => {
+      diagram.addShape('page:1', shape.draft(index % 8, Math.floor(index / 8), 1, 1));
+    });
+    const geometry = paths(diagram.layoutPage(0).primitives);
+    expect(geometry.length).toBeGreaterThanOrEqual(standardShapes.length);
+    const reopened = openDiagram(diagram.save(), { clientId: 602 });
+    try {
+      expect(paths(reopened.layoutPage(0).primitives)).toEqual(geometry);
+    } finally { reopened.dispose(); }
+  } finally { diagram.dispose(); }
+});
