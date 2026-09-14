@@ -1,10 +1,13 @@
-import { useMemo, useRef, useState } from 'react';
-import type { CSSProperties, KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, KeyboardEvent, ReactElement } from 'react';
 import type { TFunction } from '@betteroffice/vsdx-i18n';
-import type { StandardShape } from './shapeLibrary';
+import type { ShapeStencil, StandardShape } from './shapeLibrary';
 
 export interface ShapesPanelProps {
-  shapes: readonly StandardShape[];
+  shapes?: readonly StandardShape[];
+  stencils?: readonly ShapeStencil[];
+  activeStencilId?: string;
+  onSelectStencil?: (id: string) => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
   onInsert: (shape: StandardShape) => void;
@@ -16,6 +19,7 @@ const styles: Record<string, CSSProperties> = {
   root: { display: 'flex', minWidth: 0, height: '100%', background: '#fff', color: '#242424', font: '400 13px ui-sans-serif, system-ui, sans-serif', borderRight: '1px solid #e0e0e0', boxSizing: 'border-box' },
   rail: { display: 'flex', flexDirection: 'column', alignItems: 'center', width: 44, padding: '8px 6px', background: '#f7f7f7', borderRight: '1px solid #e5e5e5', boxSizing: 'border-box' },
   railButton: { appearance: 'none', display: 'grid', placeItems: 'center', width: 30, height: 30, padding: 0, border: 0, borderRadius: 4, background: '#dbeafe', color: '#0f6cbd', cursor: 'pointer' },
+  railButtonInactive: { appearance: 'none', display: 'grid', placeItems: 'center', width: 30, height: 30, padding: 0, border: 0, borderRadius: 4, background: 'transparent', color: '#424242', cursor: 'pointer' },
   content: { display: 'flex', flexDirection: 'column', minWidth: 220, width: 280, height: '100%' },
   header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: 44, padding: '0 10px 0 14px', borderBottom: '1px solid #e5e5e5', fontWeight: 600, fontSize: 14 },
   toggle: { appearance: 'none', display: 'grid', placeItems: 'center', width: 28, height: 28, padding: 0, border: 0, borderRadius: 4, background: 'transparent', color: '#424242', cursor: 'pointer' },
@@ -44,15 +48,36 @@ function nextFocusIndex(key: string, count: number, index: number): number {
   return index;
 }
 
-export function ShapesPanel({ shapes, collapsed, onToggleCollapsed, onInsert, t, className }: ShapesPanelProps) {
+function stencilIcon(id: string): ReactElement {
+  if (id === 'arrows') return <svg aria-hidden="true" width="18" height="18" viewBox="0 0 18 18"><path d="M 2 9 L 12 9" fill="none" stroke="currentColor" strokeWidth="1.5" /><path d="M 9 4.5 L 14 9 L 9 13.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+  return <svg aria-hidden="true" width="18" height="18" viewBox="0 0 18 18"><rect x="3" y="3" width="5" height="5" fill="none" stroke="currentColor" /><circle cx="13" cy="5.5" r="2.5" fill="none" stroke="currentColor" /><path d="M 3 14 L 6 10 L 9 14 Z" fill="none" stroke="currentColor" /></svg>;
+}
+
+export function ShapesPanel({ shapes, stencils, activeStencilId, onSelectStencil, collapsed, onToggleCollapsed, onInsert, t, className }: ShapesPanelProps) {
   const [query, setQuery] = useState('');
   const [focusIndex, setFocusIndex] = useState(0);
   const tileRefs = useRef(new Map<number, HTMLButtonElement>());
   const searchRef = useRef<HTMLInputElement>(null);
+  const resolvedStencils = useMemo<readonly ShapeStencil[]>(() => {
+    if (stencils && stencils.length > 0) return stencils;
+    return [{ id: 'standard', nameKey: 'shapesPanel.standardShapes', shapes: shapes ?? [] }];
+  }, [stencils, shapes]);
+  const activeStencil = resolvedStencils.find((stencil) => stencil.id === activeStencilId) ?? resolvedStencils[0];
+  const previousStencilId = useRef(activeStencil.id);
+  useEffect(() => {
+    if (previousStencilId.current === activeStencil.id) return;
+    previousStencilId.current = activeStencil.id;
+    setQuery('');
+    setFocusIndex(0);
+  }, [activeStencil.id]);
+  const selectStencil = (id: string) => {
+    if (id !== activeStencil.id) onSelectStencil?.(id);
+    if (collapsed) onToggleCollapsed();
+  };
   const filteredShapes = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
-    return normalized ? shapes.filter((shape) => t(shape.nameKey).toLocaleLowerCase().includes(normalized)) : shapes;
-  }, [query, shapes, t]);
+    return normalized ? activeStencil.shapes.filter((shape) => t(shape.nameKey).toLocaleLowerCase().includes(normalized)) : activeStencil.shapes;
+  }, [query, activeStencil, t]);
   const activeIndex = filteredShapes.length ? Math.min(focusIndex, filteredShapes.length - 1) : 0;
   const moveFocus = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     const next = nextFocusIndex(event.key, filteredShapes.length, index);
@@ -66,11 +91,16 @@ export function ShapesPanel({ shapes, collapsed, onToggleCollapsed, onInsert, t,
     <aside className={className} style={styles.root} aria-label={t('shapesPanel.title')}>
       <nav style={styles.rail} aria-label={t('shapesPanel.categoriesLabel')}>
         <ul style={{ display: 'contents', margin: 0, padding: 0, listStyle: 'none' }}>
-          <li>
-            <button type="button" aria-label={t('shapesPanel.standardShapes')} aria-current="true" title={t('shapesPanel.standardShapes')} onClick={() => { if (collapsed) onToggleCollapsed(); }} style={styles.railButton}>
-              <svg aria-hidden="true" width="18" height="18" viewBox="0 0 18 18"><rect x="3" y="3" width="5" height="5" fill="none" stroke="currentColor" /><circle cx="13" cy="5.5" r="2.5" fill="none" stroke="currentColor" /><path d="M 3 14 L 6 10 L 9 14 Z" fill="none" stroke="currentColor" /></svg>
-            </button>
-          </li>
+          {resolvedStencils.map((stencil) => {
+            const selected = stencil.id === activeStencil.id;
+            return (
+              <li key={stencil.id} style={stencil.id === resolvedStencils[0].id ? undefined : { marginTop: 4 }}>
+                <button type="button" aria-label={t(stencil.nameKey)} aria-current={selected} title={t(stencil.nameKey)} onClick={() => selectStencil(stencil.id)} style={selected ? styles.railButton : styles.railButtonInactive}>
+                  {stencilIcon(stencil.id)}
+                </button>
+              </li>
+            );
+          })}
           {collapsed && <li><button type="button" aria-label={t('shapesPanel.expand')} aria-expanded="false" title={t('shapesPanel.expand')} onClick={onToggleCollapsed} style={{ ...styles.toggle, marginTop: 8 }}><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path d="M 6 3 L 11 8 L 6 13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></li>}
         </ul>
       </nav>
@@ -86,9 +116,9 @@ export function ShapesPanel({ shapes, collapsed, onToggleCollapsed, onInsert, t,
               <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.5" /><path d="M 10.5 10.5 L 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
             </button>
           </div>
-          <h2 style={styles.heading}>{t('shapesPanel.standardShapes')}</h2>
+          <h2 style={styles.heading}>{t(activeStencil.nameKey)}</h2>
           {filteredShapes.length === 0 ? <p style={styles.empty}>{t('shapesPanel.empty')}</p> : (
-            <div role="grid" aria-label={t('shapesPanel.standardShapes')} style={styles.grid}>
+            <div role="grid" aria-label={t(activeStencil.nameKey)} style={styles.grid}>
               {rows.map((row, rowIndex) => (
                 <div key={rowIndex} role="row" style={styles.row}>
                   {row.map((shape, columnIndex) => {

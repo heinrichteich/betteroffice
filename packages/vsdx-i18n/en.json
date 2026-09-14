@@ -36,6 +36,7 @@
     "searchPlaceholder": "Search shapes",
     "categoriesLabel": "Shape categories",
     "standardShapes": "Standard Shapes",
+    "arrowShapes": "Arrows and Lines",
     "empty": "No shapes found",
     "shape": {
       "rectangle": "Rectangle",
@@ -57,7 +58,25 @@
       "cylinder": "Cylinder",
       "cube": "Cube",
       "arc": "Arc",
-      "teardrop": "Teardrop"
+      "teardrop": "Teardrop",
+      "arrowRight": "Right Arrow",
+      "arrowLeft": "Left Arrow",
+      "arrowUp": "Up Arrow",
+      "arrowDown": "Down Arrow",
+      "arrowDoubleHorizontal": "Double Arrow Horizontal",
+      "arrowDoubleVertical": "Double Arrow Vertical",
+      "curvedArrowRight": "Curved Right Arrow",
+      "curvedArrowLeft": "Curved Left Arrow",
+      "curvedArrowUp": "Curved Up Arrow",
+      "curvedArrowDown": "Curved Down Arrow",
+      "lineArrowRight": "Line Arrow Right",
+      "lineArrowLeft": "Line Arrow Left",
+      "lineArrowUp": "Line Arrow Up",
+      "lineArrowDown": "Line Arrow Down",
+      "lineHorizontal": "Horizontal Line",
+      "lineVertical": "Vertical Line",
+      "lineDiagonal": "Diagonal Line",
+      "lineElbow": "Elbow Line"
     }
   }
 }

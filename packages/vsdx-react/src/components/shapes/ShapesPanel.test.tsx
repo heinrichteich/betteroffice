@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { createT, en } from '@betteroffice/vsdx-i18n';
-import { standardShapes } from './shapeLibrary';
-import type { StandardShape } from './shapeLibrary';
+import { arrowShapes, shapeStencils, standardShapes } from './shapeLibrary';
+import type { ShapeStencil, StandardShape } from './shapeLibrary';
 import { ShapesPanel } from './ShapesPanel';
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
@@ -12,7 +12,7 @@ const t = createT(en);
 
 afterEach(() => cleanup());
 
-function panel(overrides: { collapsed?: boolean; shapes?: readonly StandardShape[] } = {}) {
+function panel(overrides: { collapsed?: boolean; shapes?: readonly StandardShape[]; stencils?: readonly ShapeStencil[]; activeStencilId?: string } = {}) {
   const inserted: string[] = [];
   const toggles: boolean[] = [];
   const view = render(<ShapesPanel shapes={standardShapes} collapsed={false} onToggleCollapsed={() => toggles.push(true)} onInsert={(shape) => inserted.push(shape.id)} t={t} {...overrides} />);
@@ -85,4 +85,46 @@ test('collapsing hides the gallery and exposes the collapsed state', () => {
   expect(expand.getAttribute('aria-expanded')).toBe('false');
   fireEvent.click(expand);
   expect(view.toggles).toEqual([true]);
+});
+
+test('marks only the active stencil as current', () => {
+  const view = panel({ stencils: shapeStencils, activeStencilId: 'standard' });
+  expect(view.getByRole('button', { name: t('shapesPanel.standardShapes') }).getAttribute('aria-current')).toBe('true');
+  expect(view.getByRole('button', { name: t('shapesPanel.arrowShapes') }).getAttribute('aria-current')).toBe('false');
+});
+
+test('selecting a stencil swaps the tiles and moves the current marker', () => {
+  const selected: string[] = [];
+  const toggles: boolean[] = [];
+  const view = render(<ShapesPanel stencils={shapeStencils} activeStencilId="standard" onSelectStencil={(id) => selected.push(id)} collapsed={false} onToggleCollapsed={() => toggles.push(true)} onInsert={() => {}} t={t} />);
+  try {
+    expect(view.getAllByRole('gridcell')).toHaveLength(standardShapes.length);
+    fireEvent.click(view.getByRole('button', { name: t('shapesPanel.arrowShapes') }));
+    expect(selected).toEqual(['arrows']);
+    expect(toggles).toEqual([]);
+  } finally {
+    view.unmount();
+  }
+  const arrows = render(<ShapesPanel stencils={shapeStencils} activeStencilId="arrows" collapsed={false} onToggleCollapsed={() => {}} onInsert={() => {}} t={t} />);
+  try {
+    expect(arrows.getAllByRole('gridcell')).toHaveLength(arrowShapes.length);
+    expect(arrows.getByRole('grid', { name: t('shapesPanel.arrowShapes') })).toBeDefined();
+    expect(arrows.getByRole('button', { name: t('shapesPanel.arrowShapes') }).getAttribute('aria-current')).toBe('true');
+    expect(arrows.getByRole('button', { name: t('shapesPanel.standardShapes') }).getAttribute('aria-current')).toBe('false');
+  } finally {
+    arrows.unmount();
+  }
+});
+
+test('selecting a stencil while collapsed expands the panel', () => {
+  const selected: string[] = [];
+  const toggles: boolean[] = [];
+  const view = render(<ShapesPanel stencils={shapeStencils} activeStencilId="standard" onSelectStencil={(id) => selected.push(id)} collapsed={true} onToggleCollapsed={() => toggles.push(true)} onInsert={() => {}} t={t} />);
+  try {
+    fireEvent.click(view.getByRole('button', { name: t('shapesPanel.arrowShapes') }));
+    expect(selected).toEqual(['arrows']);
+    expect(toggles).toEqual([true]);
+  } finally {
+    view.unmount();
+  }
 });

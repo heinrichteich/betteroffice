@@ -1,12 +1,12 @@
 import { expect, test } from 'bun:test';
-import { polygonVertices, previewPathForVertices, standardShapes } from './shapeLibrary';
+import { arrowShapes, arrowVertices, polygonVertices, previewPathForVertices, shapeStencils, standardShapes } from './shapeLibrary';
 
 function geometry(shapeId: string) {
   return standardShapes.find((shape) => shape.id === shapeId)!.draft(2, 3, 4, 5).cells.filter((cell) => !['Angle', 'FlipX', 'FlipY', 'FillPattern', 'FillForegnd', 'LinePattern', 'LineColor', 'LineWeight'].includes(cell.locator.cellName));
 }
 
 test('produces finite, complete formula-only drafts', () => {
-  for (const shape of standardShapes) {
+  for (const shape of [...standardShapes, ...arrowShapes]) {
     for (const cell of shape.draft(Number.NaN, Number.POSITIVE_INFINITY, Number.NaN, Number.NEGATIVE_INFINITY).cells) {
       expect(cell.formula).toBeTruthy();
       expect(cell.formula).not.toMatch(/(?:nan|infinity)/i);
@@ -58,4 +58,20 @@ test('derives every polygon preview and geometry from shared vertices', () => {
     expect(shape.preview.startsWith(previewPathForVertices(vertices))).toBe(true);
     expect(cells.map((cell) => cell.formula)).toEqual(vertices.flatMap(([x, y]) => [`Width*${x}`, `Height*${y}`]));
   }
+});
+
+test('derives every arrow polygon preview and geometry from shared vertices', () => {
+  for (const [id, vertices] of Object.entries(arrowVertices)) {
+    const shape = arrowShapes.find((candidate) => candidate.id === id)!;
+    const cells = shape.draft(0, 0, 1, 1).cells.filter((cell) => cell.name === 'X' || cell.name === 'Y').slice(0, vertices.length * 2);
+    expect(shape.preview.startsWith(previewPathForVertices(vertices))).toBe(true);
+    expect(cells.map((cell) => cell.formula)).toEqual(vertices.flatMap(([x, y]) => [`Width*${x}`, `Height*${y}`]));
+  }
+});
+
+test('exposes two stencils covering every shape', () => {
+  expect(shapeStencils.map((stencil) => stencil.id)).toEqual(['standard', 'arrows']);
+  expect(shapeStencils[0].shapes).toEqual(standardShapes);
+  expect(shapeStencils[1].shapes).toEqual(arrowShapes);
+  expect(arrowShapes).toHaveLength(18);
 });

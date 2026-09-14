@@ -30,6 +30,12 @@ export interface StandardShape {
   draft: (x: number, y: number, width: number, height: number) => FormulaShapeDraft;
 }
 
+export interface ShapeStencil {
+  id: string;
+  nameKey: TranslationKey;
+  shapes: readonly StandardShape[];
+}
+
 export const polygonVertices: Readonly<Record<string, readonly Point[]>> = {
   rectangle: [[0, 0], [1, 0], [1, 1], [0, 1]],
   square: [[0, 0], [1, 0], [1, 1], [0, 1]],
@@ -231,6 +237,142 @@ export const standardShapes: readonly StandardShape[] = [
   polygonShape('cube', cubeEdges),
   { id: 'arc', nameKey: 'shapesPanel.shape.arc', preview: arcPath.preview, draft: draftFor('arc', arcPath, false) },
   { id: 'teardrop', nameKey: 'shapesPanel.shape.teardrop', preview: teardropPath.preview, draft: draftFor('teardrop', teardropPath, false) },
+];
+
+export const arrowVertices: Readonly<Record<string, readonly Point[]>> = {
+  arrowRight: [[0, 0.35], [0.6, 0.35], [0.6, 0.15], [1, 0.5], [0.6, 0.85], [0.6, 0.65], [0, 0.65]],
+  arrowLeft: [[1, 0.35], [0.4, 0.35], [0.4, 0.15], [0, 0.5], [0.4, 0.85], [0.4, 0.65], [1, 0.65]],
+  arrowUp: [[0.35, 0], [0.35, 0.6], [0.15, 0.6], [0.5, 1], [0.85, 0.6], [0.65, 0.6], [0.65, 0]],
+  arrowDown: [[0.35, 1], [0.35, 0.4], [0.15, 0.4], [0.5, 0], [0.85, 0.4], [0.65, 0.4], [0.65, 1]],
+  arrowDoubleHorizontal: [[0, 0.5], [0.2, 0.15], [0.2, 0.35], [0.8, 0.35], [0.8, 0.15], [1, 0.5], [0.8, 0.85], [0.8, 0.65], [0.2, 0.65], [0.2, 0.85]],
+  arrowDoubleVertical: [[0.5, 0], [0.15, 0.2], [0.35, 0.2], [0.35, 0.8], [0.15, 0.8], [0.5, 1], [0.85, 0.8], [0.65, 0.8], [0.65, 0.2], [0.85, 0.2]],
+};
+
+function arrowPolygonShape(id: string, vertices: readonly Point[]): StandardShape {
+  const path = polygonPath(vertices);
+  return {
+    id,
+    nameKey: `shapesPanel.shape.${id}` as TranslationKey,
+    preview: path.preview,
+    draft: draftFor(id, path, false),
+  };
+}
+
+function openShape(id: string, rows: readonly GeometryRow[], preview: string): StandardShape {
+  const path = ellipticalPath(rows, preview);
+  return {
+    id,
+    nameKey: `shapesPanel.shape.${id}` as TranslationKey,
+    preview: path.preview,
+    draft: draftFor(id, path, false),
+  };
+}
+
+const curvedArrowRightPath = ellipticalPath([
+  { type: 'MoveTo', end: [0.05, 0.3] },
+  { type: 'EllipticalArcTo', end: [0.66, 0.3], through: [0.355, 0.72] },
+  { type: 'MoveTo', end: [0.9, 0.3] },
+  { type: 'LineTo', end: [0.66, 0.42] },
+  { type: 'LineTo', end: [0.66, 0.18] },
+  { type: 'Close' },
+], 'M 0.05 0.7 A 0.31 0.21 0 0 1 0.66 0.7 M 0.9 0.7 L 0.66 0.58 L 0.66 0.82 Z');
+
+const curvedArrowLeftPath = ellipticalPath([
+  { type: 'MoveTo', end: [0.95, 0.3] },
+  { type: 'EllipticalArcTo', end: [0.34, 0.3], through: [0.645, 0.72] },
+  { type: 'MoveTo', end: [0.1, 0.3] },
+  { type: 'LineTo', end: [0.34, 0.42] },
+  { type: 'LineTo', end: [0.34, 0.18] },
+  { type: 'Close' },
+], 'M 0.95 0.7 A 0.31 0.21 0 0 0 0.34 0.7 M 0.1 0.7 L 0.34 0.58 L 0.34 0.82 Z');
+
+const curvedArrowUpPath = ellipticalPath([
+  { type: 'MoveTo', end: [0.3, 0.05] },
+  { type: 'EllipticalArcTo', end: [0.3, 0.66], through: [0.72, 0.355] },
+  { type: 'MoveTo', end: [0.3, 0.9] },
+  { type: 'LineTo', end: [0.18, 0.66] },
+  { type: 'LineTo', end: [0.42, 0.66] },
+  { type: 'Close' },
+], 'M 0.3 0.95 A 0.21 0.31 0 0 1 0.3 0.34 M 0.3 0.1 L 0.18 0.34 L 0.42 0.34 Z');
+
+const curvedArrowDownPath = ellipticalPath([
+  { type: 'MoveTo', end: [0.3, 0.95] },
+  { type: 'EllipticalArcTo', end: [0.3, 0.34], through: [0.72, 0.645] },
+  { type: 'MoveTo', end: [0.3, 0.1] },
+  { type: 'LineTo', end: [0.18, 0.34] },
+  { type: 'LineTo', end: [0.42, 0.34] },
+  { type: 'Close' },
+], 'M 0.3 0.05 A 0.21 0.31 0 0 0 0.3 0.66 M 0.3 0.9 L 0.18 0.66 L 0.42 0.66 Z');
+
+export const arrowShapes: readonly StandardShape[] = [
+  arrowPolygonShape('arrowRight', arrowVertices.arrowRight),
+  arrowPolygonShape('arrowLeft', arrowVertices.arrowLeft),
+  arrowPolygonShape('arrowUp', arrowVertices.arrowUp),
+  arrowPolygonShape('arrowDown', arrowVertices.arrowDown),
+  arrowPolygonShape('arrowDoubleHorizontal', arrowVertices.arrowDoubleHorizontal),
+  arrowPolygonShape('arrowDoubleVertical', arrowVertices.arrowDoubleVertical),
+  { id: 'curvedArrowRight', nameKey: 'shapesPanel.shape.curvedArrowRight', preview: curvedArrowRightPath.preview, draft: draftFor('curvedArrowRight', curvedArrowRightPath, false) },
+  { id: 'curvedArrowLeft', nameKey: 'shapesPanel.shape.curvedArrowLeft', preview: curvedArrowLeftPath.preview, draft: draftFor('curvedArrowLeft', curvedArrowLeftPath, false) },
+  { id: 'curvedArrowUp', nameKey: 'shapesPanel.shape.curvedArrowUp', preview: curvedArrowUpPath.preview, draft: draftFor('curvedArrowUp', curvedArrowUpPath, false) },
+  { id: 'curvedArrowDown', nameKey: 'shapesPanel.shape.curvedArrowDown', preview: curvedArrowDownPath.preview, draft: draftFor('curvedArrowDown', curvedArrowDownPath, false) },
+  openShape('lineArrowRight', [
+    { type: 'MoveTo', end: [0, 0.5] },
+    { type: 'LineTo', end: [0.76, 0.5] },
+    { type: 'MoveTo', end: [1, 0.5] },
+    { type: 'LineTo', end: [0.76, 0.62] },
+    { type: 'LineTo', end: [0.76, 0.38] },
+    { type: 'Close' },
+  ], 'M 0 0.5 L 0.76 0.5 M 1 0.5 L 0.76 0.38 L 0.76 0.62 Z'),
+  openShape('lineArrowLeft', [
+    { type: 'MoveTo', end: [1, 0.5] },
+    { type: 'LineTo', end: [0.24, 0.5] },
+    { type: 'MoveTo', end: [0, 0.5] },
+    { type: 'LineTo', end: [0.24, 0.62] },
+    { type: 'LineTo', end: [0.24, 0.38] },
+    { type: 'Close' },
+  ], 'M 1 0.5 L 0.24 0.5 M 0 0.5 L 0.24 0.38 L 0.24 0.62 Z'),
+  openShape('lineArrowUp', [
+    { type: 'MoveTo', end: [0.5, 0] },
+    { type: 'LineTo', end: [0.5, 0.76] },
+    { type: 'MoveTo', end: [0.5, 1] },
+    { type: 'LineTo', end: [0.38, 0.76] },
+    { type: 'LineTo', end: [0.62, 0.76] },
+    { type: 'Close' },
+  ], 'M 0.5 1 L 0.5 0.24 M 0.5 0 L 0.38 0.24 L 0.62 0.24 Z'),
+  openShape('lineArrowDown', [
+    { type: 'MoveTo', end: [0.5, 1] },
+    { type: 'LineTo', end: [0.5, 0.24] },
+    { type: 'MoveTo', end: [0.5, 0] },
+    { type: 'LineTo', end: [0.38, 0.24] },
+    { type: 'LineTo', end: [0.62, 0.24] },
+    { type: 'Close' },
+  ], 'M 0.5 0 L 0.5 0.76 M 0.5 1 L 0.38 0.76 L 0.62 0.76 Z'),
+  openShape('lineHorizontal', [
+    { type: 'MoveTo', end: [0, 0.5] },
+    { type: 'LineTo', end: [1, 0.5] },
+  ], 'M 0 0.5 L 1 0.5'),
+  openShape('lineVertical', [
+    { type: 'MoveTo', end: [0.5, 0] },
+    { type: 'LineTo', end: [0.5, 1] },
+  ], 'M 0.5 1 L 0.5 0'),
+  openShape('lineDiagonal', [
+    { type: 'MoveTo', end: [0.05, 0.05] },
+    { type: 'LineTo', end: [0.95, 0.95] },
+  ], 'M 0.05 0.95 L 0.95 0.05'),
+  openShape('lineElbow', [
+    { type: 'MoveTo', end: [0.05, 0.7] },
+    { type: 'LineTo', end: [0.55, 0.7] },
+    { type: 'LineTo', end: [0.55, 0.3] },
+  ], 'M 0.05 0.3 L 0.55 0.3 L 0.55 0.7'),
+];
+
+export function arrowShapeById(id: string): StandardShape | undefined {
+  return arrowShapes.find((shape) => shape.id === id);
+}
+
+export const shapeStencils: readonly ShapeStencil[] = [
+  { id: 'standard', nameKey: 'shapesPanel.standardShapes', shapes: standardShapes },
+  { id: 'arrows', nameKey: 'shapesPanel.arrowShapes', shapes: arrowShapes },
 ];
 
 export function standardShapeById(id: string): StandardShape | undefined {
