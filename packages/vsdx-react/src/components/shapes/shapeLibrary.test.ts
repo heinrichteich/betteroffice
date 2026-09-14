@@ -31,7 +31,7 @@ test('encodes the rectangle geometry cell by cell', () => {
     { locator: { cellName: 'PinX' }, name: 'PinX', formula: '2' },
     { locator: { cellName: 'PinY' }, name: 'PinY', formula: '3' },
     { locator: { cellName: 'Width' }, name: 'Width', formula: '4' },
-    { locator: { cellName: 'Height' }, name: 'Height', formula: '5' },
+    { locator: { cellName: 'Height' }, name: 'Height', formula: 'Width/1.333333333333' },
     { locator: { cellName: 'LocPinX' }, name: 'LocPinX', formula: 'Width*0.5' },
     { locator: { cellName: 'LocPinY' }, name: 'LocPinY', formula: 'Height*0.5' },
     { locator: { section: 'Geometry', rowIndex: 0, rowType: 'MoveTo', cellName: 'X' }, name: 'X', formula: 'Width*0' },
@@ -73,7 +73,7 @@ test('derives every polygon preview and geometry from shared vertices', () => {
 });
 
 test('renders the rectangle preview wider than tall', () => {
-  expect(standardShapes.find((shape) => shape.id === 'rectangle')?.preview).toBe('M 0 0.3 L 1 0.3 L 1 0.7 L 0 0.7 Z');
+  expect(standardShapes.find((shape) => shape.id === 'rectangle')?.preview).toBe('M 0 0.875 L 1 0.875 L 1 0.125 L 0 0.125 Z');
 });
 
 test('gives every shape a distinct preview path', () => {

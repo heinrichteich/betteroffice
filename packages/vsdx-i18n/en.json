@@ -12,7 +12,7 @@
     "fidelity": { "font-substituted": "A font was substituted.", "unsupported-effect": "An effect was rendered differently.", "unsupported-geometry": "A shape was approximated." },
     "unknown": "{category} notice: {code}"
   },
-  "errors": { "decodePageImage": "Could not decode page image", "openDiagram": "Could not open diagram" },
+  "errors": { "decodePageImage": "Could not decode page image", "openDiagram": "Could not open diagram", "resizeLocked": "Shape is locked and cannot be resized with handles." },
   "ribbon": {
     "label": "Diagram ribbon",
     "tabsLabel": "Ribbon tabs",

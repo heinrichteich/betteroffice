@@ -629,11 +629,18 @@ test('concurrent pointers cannot commit or cancel each other', async () => {
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
-test('a resize from a handle moves the pin with moveShape and resizeShape', async () => {
+for (const formulaPins of [false, true]) test(`a handle resize with ${formulaPins ? 'formula' : 'literal'} LocPins commits one update matching its preview and undoes the whole gesture`, async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
   canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
-  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  if (formulaPins) {
+    const seed = originalOpenDiagram(fixture, { clientId: 7801 });
+    seed.setCellFormula('page:1', 'page:1:shape:20', { cellName: 'LocPinX' }, 'Width*0.5+0.25');
+    seed.setCellFormula('page:1', 'page:1:shape:20', { cellName: 'LocPinY' }, 'Height*0.5');
+    fixture = Buffer.from(seed.save());
+    seed.dispose();
+  }
   let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
   const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
   try {
@@ -648,6 +655,8 @@ test('a resize from a handle moves the pin with moveShape and resizeShape', asyn
     const resizes: string[][] = [];
     const originalResize = handle.resizeShape.bind(handle);
     handle.resizeShape = ((...args: [string, string, string, string]) => { resizes.push([...args]); return originalResize(...args); }) as DiagramHandle['resizeShape'];
+    const updates: ReturnType<typeof handle.snapshot>[] = [];
+    handle.onUpdate(() => updates.push(handle.snapshot()));
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
     const canvases = view.container.querySelectorAll('canvas');
@@ -672,8 +681,6 @@ test('a resize from a handle moves the pin with moveShape and resizeShape', asyn
     expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
     const page = handle.snapshot().pages[0];
     const shapeBefore = page.shapes.find((shape) => shape.id === 'page:1:shape:20');
-    const pinX = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinX')?.value);
-    const pinY = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinY')?.value);
     const width = Number(shapeBefore?.cells.find((cell) => cell.name === 'Width')?.value);
     const corners = selectionCorners(page, fakeFrame as never, { pageId: page.id, shapeId: 'page:1:shape:20', hit: { kind: 'shape', shapeId: 'page:1:shape:20' } });
     expect(corners).not.toBeNull();
@@ -685,13 +692,23 @@ test('a resize from a handle moves the pin with moveShape and resizeShape', asyn
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
     expect(calls.some((entry) => entry === 'setLineDash:4,4')).toBe(true);
     expect(calls.some((entry) => entry.startsWith('fillRect:'))).toBe(true);
+    const previewStart = calls.lastIndexOf('setLineDash:4,4');
+    const preview = calls.slice(previewStart).filter((entry) => entry.startsWith('moveTo:') || entry.startsWith('lineTo:')).slice(0, 4).map((entry) => entry.split(':')[1].split(',').map(Number));
     fireEvent.pointerUp(main, { pointerId: 2, clientX: se.x + 48, clientY: se.y + 48 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
-    expect(moves).toHaveLength(1);
-    expect(resizes).toHaveLength(1);
-    expect(Number(resizes[0][2])).toBeGreaterThan(width);
-    expect(Number(moves[0][2])).toBeCloseTo(pinX, 6);
-    expect(Number(moves[0][3])).not.toBeCloseTo(pinY, 6);
+    expect(moves).toHaveLength(0);
+    expect(resizes).toHaveLength(0);
+    expect(updates).toHaveLength(1);
+    const afterPage = handle.snapshot().pages[0];
+    const after = afterPage.shapes.find((shape) => shape.id === 'page:1:shape:20')!;
+    expect(Number(after.cells.find((cell) => cell.name === 'Width')?.value)).toBeCloseTo(width + 0.5);
+    const committed = selectionCorners(afterPage, fakeFrame as never, { pageId: page.id, shapeId: after.id, hit: { kind: 'shape', shapeId: after.id } })!;
+    committed.forEach((point, index) => { expect(point.x).toBeCloseTo(preview[index][0], 3); expect(point.y).toBeCloseTo(preview[index][1], 3); });
+    expect(committed[3].x).toBeCloseTo(corners![3].x, 3);
+    expect(committed[3].y).toBeCloseTo(corners![3].y, 3);
+    await act(async () => { handle.undo(); });
+    expect(handle.snapshot().pages[0].shapes.find((shape) => shape.id === after.id)).toEqual(shapeBefore);
+    expect(handle.canUndo()).toBe(false);
     expect(view.container.querySelector('output')).toBeNull();
     expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
@@ -839,7 +856,7 @@ test('the overlay paints the selection frame at a zoom other than 1', async () =
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
-test('a refused handle resize rolls the pin move back', async () => {
+test('a refused handle resize preserves the pin and size', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
   canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;

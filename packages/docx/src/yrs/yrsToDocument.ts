@@ -26,6 +26,7 @@ import type {
   ParagraphContent,
   Run,
   RunContent,
+  HorizontalRuleContent,
   TextFormatting,
   Hyperlink,
   TrackedChangeInfo,
@@ -303,7 +304,7 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   }
 
   const underline = asObject(attributes.underline);
-  if (underline) {
+  if (underline && underline.inheritedHyperlink !== true) {
     formatting.underline = {
       style: (asString(underline.style) || 'single') as NonNullable<
         TextFormatting['underline']
@@ -319,7 +320,7 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   }
 
   const textColor = asObject(attributes.textColor);
-  if (textColor) {
+  if (textColor && textColor.inheritedHyperlink !== true) {
     formatting.color = {
       rgb: (asString(textColor.rgb) ?? null) as string | undefined,
       themeColor: (textColor.themeColor ?? null) as NonNullable<
@@ -583,6 +584,33 @@ function mathFromPayload(payload: Attrs): MathEquation {
     display: (asString(payload.display) as 'inline' | 'block') || 'inline',
     ommlXml: asString(payload.ommlXml) || '',
     plainText: asString(payload.plainText) || undefined,
+  };
+}
+
+function horizontalRuleRun(payload: Attrs, attributes: Attrs): Run {
+  const value = asObject(payload.rule);
+  const height = asFiniteNumber(value?.height);
+  if (
+    !value || height === undefined ||
+    (value.width != null && asFiniteNumber(value.width) === undefined) ||
+    (value.widthPercent != null && asFiniteNumber(value.widthPercent) === undefined) ||
+    typeof value.alignment !== 'string' || typeof value.noShade !== 'boolean' ||
+    typeof value.color !== 'string' || typeof value.xml !== 'string'
+  ) throw new Error('Malformed horizontalRule embed payload');
+  const rule: HorizontalRuleContent['rule'] = {
+    width: asFiniteNumber(value.width) ?? null,
+    widthPercent: asFiniteNumber(value.widthPercent) ?? null,
+    height,
+    alignment: value.alignment,
+    noShade: value.noShade,
+    color: value.color,
+    xml: value.xml,
+  };
+  const formatting = attrsToTextFormatting(formattingAttrs(attributes));
+  return {
+    type: 'run',
+    content: [{ type: 'horizontalRule', rule }],
+    ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
   };
 }
 
@@ -880,6 +908,8 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
       return { type: 'run', content: [{ type: 'tab' }] };
     case 'image':
       return imageRunFromPayload(item.payload);
+    case 'horizontalRule':
+      return horizontalRuleRun(item.payload, item.attributes);
     case 'shape':
       return shapeRunFromPayload(item.payload);
     case 'chart':
@@ -912,6 +942,8 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
 function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): ParagraphContent {
   let run: Run;
   if (item.kind === 'embed' && item.embedKind === 'image') run = imageRunFromPayload(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
+    run = horizontalRuleRun(item.payload, item.attributes);
   else if (item.kind === 'embed' && item.embedKind === 'shape')
     run = shapeRunFromPayload(item.payload);
   else if (item.kind === 'embed' && item.embedKind === 'chart')
@@ -949,6 +981,8 @@ function addToHyperlink(hyperlink: Hyperlink, item: InlineItem): void {
     });
   } else if (item.embedKind === 'tab') {
     hyperlink.children.push({ type: 'run', content: [{ type: 'tab' }] });
+  } else if (item.embedKind === 'horizontalRule') {
+    hyperlink.children.push(horizontalRuleRun(item.payload, item.attributes));
   } else if (item.embedKind === 'field') {
     const child =
       commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes);
@@ -1217,7 +1251,8 @@ function runTextLength(run: Run): number {
       content.type === 'softHyphen' ||
       content.type === 'noBreakHyphen' ||
       content.type === 'footnoteRef' ||
-      content.type === 'endnoteRef'
+      content.type === 'endnoteRef' ||
+      content.type === 'horizontalRule'
     ) {
       return length + 1;
     }
