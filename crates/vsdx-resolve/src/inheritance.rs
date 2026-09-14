@@ -462,12 +462,14 @@ impl<'a> Resolver<'a> {
                 }
             }
         }
+        let (controls, unsupported_controls) = unsupported_geometry_controls(name, &sources);
         let mut out = ResolvedSection {
             name: name.into(),
             index: sources
                 .iter()
                 .find_map(|(_, section)| section.and_then(|section| section.index)),
-            unsupported_controls: unsupported_geometry_controls(name, &sources),
+            unsupported_controls,
+            controls,
             ..Default::default()
         };
         for key in keys {
@@ -555,9 +557,10 @@ impl<'a> Resolver<'a> {
 fn unsupported_geometry_controls(
     name: &str,
     sources: &[(Provenance, Option<&Section>)],
-) -> Vec<String> {
+) -> (crate::GeometrySectionControls, Vec<String>) {
+    let mut controls = crate::GeometrySectionControls::default();
     if name != "Geometry" {
-        return Vec::new();
+        return (controls, Vec::new());
     }
     let mut unsupported = Vec::new();
     for control in ["NoFill", "NoLine", "NoShow"] {
@@ -588,26 +591,40 @@ fn unsupported_geometry_controls(
             if attribute("Del") == Some("1") {
                 break;
             }
-            let formula = attribute("F").or_else(|| attribute("V"));
-            let zero = formula.is_some_and(|formula| {
-                formula.eq_ignore_ascii_case("FALSE")
-                    || vsdx_formula::evaluate_number(
-                        formula,
-                        vsdx_formula::Limits {
-                            max_depth: 256,
-                            max_nodes: 8192,
-                            max_tokens: 16384,
-                        },
-                        &mut |_| None,
-                    ) == Some(0.0)
-            });
-            if !zero {
-                unsupported.push(control.to_owned());
+            match evaluate_control(attribute("F").or_else(|| attribute("V"))) {
+                Some(true) => match control {
+                    "NoFill" => controls.no_fill = true,
+                    "NoLine" => controls.no_line = true,
+                    _ => controls.no_show = true,
+                },
+                Some(false) => {}
+                None => unsupported.push(control.to_owned()),
             }
             break;
         }
     }
-    unsupported
+    (controls, unsupported)
+}
+
+/// Evaluates a section control to active/inactive, or `None` when unevaluable.
+fn evaluate_control(formula: Option<&str>) -> Option<bool> {
+    let formula = formula?;
+    if formula.eq_ignore_ascii_case("FALSE") {
+        return Some(false);
+    }
+    if formula.eq_ignore_ascii_case("TRUE") {
+        return Some(true);
+    }
+    vsdx_formula::evaluate_number(
+        formula,
+        vsdx_formula::Limits {
+            max_depth: 256,
+            max_nodes: 8192,
+            max_tokens: 16384,
+        },
+        &mut |_| None,
+    )
+    .map(|value| value != 0.0)
 }
 
 /// Documented transform defaults: https://learn.microsoft.com/en-us/office/client-developer/visio/cells-visio-shapesheet-reference

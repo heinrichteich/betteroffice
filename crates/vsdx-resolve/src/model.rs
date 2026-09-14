@@ -49,6 +49,8 @@ pub struct ResolvedSection {
     pub index: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unsupported_controls: Vec<String>,
+    #[serde(default, skip_serializing_if = "GeometrySectionControls::is_empty")]
+    pub controls: GeometrySectionControls,
     pub deleted: bool,
     pub rows: BTreeMap<String, ResolvedRow>,
     pub row_order: Vec<String>,
@@ -176,6 +178,13 @@ pub struct GeometrySectionControls {
     pub no_line: bool,
     #[serde(default)]
     pub no_show: bool,
+}
+
+impl GeometrySectionControls {
+    /// Reports whether no control is active.
+    pub fn is_empty(&self) -> bool {
+        !self.no_fill && !self.no_line && !self.no_show
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
