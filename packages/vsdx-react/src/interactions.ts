@@ -6,7 +6,8 @@ export type RotateHandle = 'rotate';
 interface FrameBounds { x: number; y: number; width: number; height: number; }
 export interface DragStart { canvas: ModelPoint; model: ModelPoint; resize: boolean; handle?: ResizeHandle; rotate?: boolean; pin: ModelPoint; locPin?: ModelPoint; size: { width: number; height: number }; parentTransforms?: readonly Affine[]; angle?: number; flipX?: boolean; flipY?: boolean; pointerId?: number; startX?: number; startY?: number; thresholdPassed?: boolean; }
 const MIN_SHAPE_INCHES = 0.01;
-export const SELECTION_STROKE = '#0f6cbd';
+/** Fluent 2 colorNeutralStrokeAccessible. */
+export const SELECTION_STROKE = '#616161';
 export const SELECTION_HANDLE_FILL = '#ffffff';
 export const SELECTION_HANDLE_CSS = 7;
 export const SELECTION_ROTATE_RADIUS_CSS = 5;
@@ -217,7 +218,7 @@ export const rotationGripPosition = (corners: readonly ModelPoint[], zoom: numbe
 export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: readonly ModelPoint[], dpr: number, scale: number, resizeHandles: readonly ResizeHandle[] = RESIZE_HANDLES): void => {
   if (corners.length < 4) return;
   const zoom = Number.isFinite(scale) && scale > 0 ? scale : 1;
-  const handle = SELECTION_HANDLE_CSS / zoom;
+  const handleRadius = SELECTION_HANDLE_CSS / zoom / 2;
   const gripRadius = SELECTION_ROTATE_RADIUS_CSS / zoom;
   const grip = rotationGripPosition(corners, zoom);
   const { handles, topCenter } = selectionHandlePositions(corners);
@@ -238,9 +239,11 @@ export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: 
     context.stroke();
     for (const key of resizeHandles) {
       const anchor = handles[key];
+      context.beginPath();
+      context.arc(anchor.x, anchor.y, handleRadius, 0, Math.PI * 2);
       context.fillStyle = SELECTION_HANDLE_FILL;
-      context.fillRect(anchor.x - handle / 2, anchor.y - handle / 2, handle, handle);
-      context.strokeRect(anchor.x - handle / 2, anchor.y - handle / 2, handle, handle);
+      context.fill();
+      context.stroke();
     }
     context.beginPath();
     context.arc(grip.x, grip.y, gripRadius, 0, Math.PI * 2);

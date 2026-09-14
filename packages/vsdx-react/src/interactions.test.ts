@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { canvasPointToModel, modelPointToCanvas } from '@betteroffice/vsdx';
 import type { ModelPoint } from '@betteroffice/vsdx';
-import { RESIZE_HANDLES, canvasKeyboardIntent, hitTestSelection, isEditableKeyboardTarget, keyboardNudgeStep, paintSelectionFrame, paintDragPreview, passedDragThreshold, previewOutline, resizedBounds, resizeCursor, resolveDragGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions } from './interactions';
+import { RESIZE_HANDLES, SELECTION_STROKE, canvasKeyboardIntent, hitTestSelection, isEditableKeyboardTarget, keyboardNudgeStep, paintSelectionFrame, paintDragPreview, passedDragThreshold, previewOutline, resizedBounds, resizeCursor, resolveDragGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions } from './interactions';
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 };
 const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 test('passedDragThreshold needs four css pixels by default', () => {
@@ -148,14 +148,19 @@ test('the selection frame paints at a zoom other than 1', () => {
   }) as unknown as CanvasRenderingContext2D;
   const corners = [{ x: 10, y: 40 }, { x: 30, y: 40 }, { x: 30, y: 20 }, { x: 10, y: 20 }];
   paintSelectionFrame(context, corners, 2, 2);
+  expect(SELECTION_STROKE).not.toBe('#0f6cbd');
   expect(calls).toContain('setTransform:4,0,0,4,0,0');
-  expect(calls).toContain('strokeStyle=#0f6cbd');
+  expect(calls).toContain(`strokeStyle=${SELECTION_STROKE}`);
+  expect(calls.some((entry) => entry === 'strokeStyle=#0f6cbd')).toBe(false);
   expect(calls).toContain('lineWidth=0.5');
   expect(calls).toContain('moveTo:10,40');
-  expect(calls.some((entry) => entry.startsWith('fillRect:'))).toBe(true);
-  expect(calls.some((entry) => entry.startsWith('arc:'))).toBe(true);
+  expect(calls.some((entry) => entry.startsWith('fillRect:'))).toBe(false);
+  expect(calls.some((entry) => entry.startsWith('strokeRect:'))).toBe(false);
+  expect(calls.filter((entry) => entry.startsWith('arc:')).length).toBeGreaterThanOrEqual(9);
   const grip = rotationGripPosition(corners, 2);
   expect(grip.y).toBeLessThan(20);
+  expect(calls.some((entry) => entry === `lineTo:${grip.x},${grip.y}`)).toBe(true);
+  expect(calls.some((entry) => entry.startsWith(`arc:${grip.x},${grip.y},`) && entry.endsWith(',0,6.283185307179586'))).toBe(true);
   expect(hitTestSelection(grip, corners, 2)).toBe('rotate');
 });
 test('locPin governs the handle box instead of cancelling out', () => {
