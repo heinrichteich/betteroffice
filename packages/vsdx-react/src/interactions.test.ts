@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { canvasPointToModel, modelPointToCanvas } from '@betteroffice/vsdx';
 import type { ModelPoint } from '@betteroffice/vsdx';
-import { paintDragPreview, passedDragThreshold, previewOutline, resolveDragGeometry } from './interactions';
+import { RESIZE_HANDLES, hitTestSelection, paintSelectionFrame, paintDragPreview, passedDragThreshold, previewOutline, resizedBounds, resizeCursor, resolveDragGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions } from './interactions';
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 };
 const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 test('passedDragThreshold needs four css pixels by default', () => {
@@ -23,12 +23,13 @@ test('previewOutline rotates the box with the shape angle', () => {
   expect(corners[2].x).toBeCloseTo(-0.5, 10); expect(corners[2].y).toBeCloseTo(5, 10);
   expect(corners[3].x).toBeCloseTo(-0.5, 10); expect(corners[3].y).toBeCloseTo(1, 10);
 });
-test('previewOutline honours a horizontal flip in corner order', () => {
+test('previewOutline keeps a centred flip on the same visual frame', () => {
   const base = { canvas: { x: 0, y: 0 }, model: { x: 3, y: 3 }, resize: false, pin: { x: 5, y: 2 }, size: { width: 2, height: 1 } };
   const plain = previewOutline(base, { x: 3, y: 3 }, identity);
   expect(plain).toEqual([{ x: 4, y: 1.5 }, { x: 6, y: 1.5 }, { x: 6, y: 2.5 }, { x: 4, y: 2.5 }]);
   const flipped = previewOutline({ ...base, flipX: true }, { x: 3, y: 3 }, identity);
-  expect(flipped).toEqual([{ x: 6, y: 1.5 }, { x: 4, y: 1.5 }, { x: 4, y: 2.5 }, { x: 6, y: 2.5 }]);
+  expect(flipped).toEqual(plain);
+  expect(selectionHandlePositions(flipped).handles.e).toEqual({ x: 6, y: 2 });
 });
 test('previewOutline maps the box through the group transform forward', () => {
   const start = { canvas: { x: 0, y: 0 }, model: { x: 10, y: 20 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, parentTransforms: [{ a: 0, b: 2, c: -2, d: 0, e: 10, f: 20 }] };
@@ -88,4 +89,150 @@ test('paintDragPreview strokes a dashed brand outline and restores state', () =>
   expect(calls.some((entry) => entry.startsWith('setLineDash:'))).toBe(true);
   expect(calls.some((entry) => entry.startsWith('stroke:'))).toBe(true);
   expect(calls[calls.length - 1].startsWith('restore:')).toBe(true);
+});
+test('resize vocabulary maps handles to cursors and bounds', () => {
+  expect(RESIZE_HANDLES).toEqual(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']);
+  const bounds = { x: 100, y: 200, width: 300, height: 100 };
+  expect(resizeCursor('nw')).toBe('nwse-resize');
+  expect(resizeCursor('ne')).toBe('nesw-resize');
+  expect(resizeCursor('n')).toBe('ns-resize');
+  expect(resizeCursor('w')).toBe('ew-resize');
+  expect(resizedBounds(bounds, 'se', { x: 50, y: 20 }, 0)).toEqual({ x: 100, y: 200, width: 350, height: 120 });
+  expect(resizedBounds(bounds, 'nw', { x: 50, y: 20 }, 0)).toEqual({ x: 150, y: 220, width: 250, height: 80 });
+});
+test('handle anchors follow a rotated shape', () => {
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 10, y: 10 }, size: { width: 20, height: 10 }, angle: Math.PI / 2 };
+  const corners = previewOutline(start, { x: 0, y: 0 }, identity);
+  expect(corners[0].x).toBeCloseTo(15, 8); expect(corners[0].y).toBeCloseTo(0, 8);
+  expect(corners[1].x).toBeCloseTo(15, 8); expect(corners[1].y).toBeCloseTo(20, 8);
+  expect(corners[2].x).toBeCloseTo(5, 8); expect(corners[2].y).toBeCloseTo(20, 8);
+  expect(corners[3].x).toBeCloseTo(5, 8); expect(corners[3].y).toBeCloseTo(0, 8);
+  const positions = selectionHandlePositions(corners);
+  expect(positions.handles.n.x).toBeCloseTo(5, 8); expect(positions.handles.n.y).toBeCloseTo(10, 8);
+  expect(positions.handles.s.x).toBeCloseTo(15, 8); expect(positions.handles.s.y).toBeCloseTo(10, 8);
+  expect(positions.handles.e.x).toBeCloseTo(10, 8); expect(positions.handles.e.y).toBeCloseTo(20, 8);
+  expect(positions.handles.w.x).toBeCloseTo(10, 8); expect(positions.handles.w.y).toBeCloseTo(0, 8);
+  expect(hitTestSelection({ x: 5, y: 10 }, corners, 1)).toBe('n');
+  expect(hitTestSelection({ x: 15, y: 10 }, corners, 1)).toBe('s');
+  expect(hitTestSelection({ x: 10, y: 10 }, corners, 1, 2)).toBeNull();
+});
+test('a resize from nw keeps the se corner fixed', () => {
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'nw' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, size: { width: 2, height: 1 } };
+  const geometry = resolveDragGeometry(start, { x: -1, y: 1 });
+  expect(geometry.width).toBeCloseTo(3, 10);
+  expect(geometry.height).toBeCloseTo(2, 10);
+  expect(geometry.x).toBeCloseTo(4.5, 10);
+  expect(geometry.y).toBeCloseTo(2.5, 10);
+  expect(geometry.x + geometry.width / 2).toBeCloseTo(6, 10);
+  expect(geometry.y - geometry.height / 2).toBeCloseTo(1.5, 10);
+});
+test('the rotation grip produces the expected angle', () => {
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 1, y: 0 }, resize: false, rotate: true, pin: { x: 0, y: 0 }, size: { width: 2, height: 1 }, angle: 0 };
+  expect(resolveRotationAngle(start, { x: 0, y: 1 })).toBeCloseTo(Math.PI / 2, 10);
+  const tilted = { canvas: { x: 0, y: 0 }, model: { x: 1, y: 0 }, resize: false, rotate: true, pin: { x: 0, y: 0 }, size: { width: 2, height: 1 }, angle: 0 };
+  const seventeen = { x: Math.cos(17 * Math.PI / 180), y: Math.sin(17 * Math.PI / 180) };
+  expect(resolveRotationAngle(tilted, seventeen)).toBeCloseTo(17 * Math.PI / 180, 10);
+  expect(resolveRotationAngle(tilted, seventeen, true)).toBeCloseTo(15 * Math.PI / 180, 10);
+  const rotated = previewOutline(start, { x: 0, y: 1 }, identity);
+  expect(rotated[0].x).toBeCloseTo(0.5, 10);
+  expect(rotated[0].y).toBeCloseTo(-1, 10);
+});
+test('the selection frame paints at a zoom other than 1', () => {
+  const calls: string[] = [];
+  const context = new Proxy({ canvas: {} }, {
+    get(target, key) {
+      if (key in target) return Reflect.get(target, key);
+      return (...args: unknown[]) => { calls.push(`${String(key)}:${args.join(',')}`); };
+    },
+    set(target, key, value) { calls.push(`${String(key)}=${String(value)}`); Reflect.set(target, key, value); return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  const corners = [{ x: 10, y: 40 }, { x: 30, y: 40 }, { x: 30, y: 20 }, { x: 10, y: 20 }];
+  paintSelectionFrame(context, corners, 2, 2);
+  expect(calls).toContain('setTransform:4,0,0,4,0,0');
+  expect(calls).toContain('strokeStyle=#0f6cbd');
+  expect(calls).toContain('lineWidth=0.5');
+  expect(calls).toContain('moveTo:10,40');
+  expect(calls.some((entry) => entry.startsWith('fillRect:'))).toBe(true);
+  expect(calls.some((entry) => entry.startsWith('arc:'))).toBe(true);
+  const grip = rotationGripPosition(corners, 2);
+  expect(grip.y).toBeLessThan(20);
+  expect(hitTestSelection(grip, corners, 2)).toBe('rotate');
+});
+test('locPin governs the handle box instead of cancelling out', () => {
+  const centred = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, size: { width: 2, height: 1 } };
+  const edge = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 0, y: 0.5 }, size: { width: 2, height: 1 } };
+  const grownCentred = resolveDragGeometry(centred, { x: 1, y: 0 });
+  expect(grownCentred.width).toBeCloseTo(3, 10);
+  expect(grownCentred.x).toBeCloseTo(5.5, 10);
+  const grownEdge = resolveDragGeometry(edge, { x: 1, y: 0 });
+  expect(grownEdge.width).toBeCloseTo(3, 10);
+  expect(grownEdge.x).toBeCloseTo(5, 10);
+  expect(grownEdge.y).toBeCloseTo(2, 10);
+  const centredCorners = previewOutline(centred, { x: 1, y: 0 }, identity);
+  const edgeCorners = previewOutline(edge, { x: 1, y: 0 }, identity);
+  expect(Math.min(...centredCorners.map((corner) => corner.x))).toBeCloseTo(4, 10);
+  expect(Math.max(...centredCorners.map((corner) => corner.x))).toBeCloseTo(7, 10);
+  expect(Math.min(...edgeCorners.map((corner) => corner.x))).toBeCloseTo(5, 10);
+  expect(Math.max(...edgeCorners.map((corner) => corner.x))).toBeCloseTo(8, 10);
+  const lowPin = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'n' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0 }, size: { width: 2, height: 1 } };
+  const grownNorth = resolveDragGeometry(lowPin, { x: 0, y: 1 });
+  expect(grownNorth.height).toBeCloseTo(2, 10);
+  expect(grownNorth.y).toBeCloseTo(2, 10);
+  expect(grownNorth.x).toBeCloseTo(5, 10);
+  const northCorners = previewOutline(lowPin, { x: 0, y: 1 }, identity);
+  expect(Math.min(...northCorners.map((corner) => corner.y))).toBeCloseTo(2, 10);
+  expect(Math.max(...northCorners.map((corner) => corner.y))).toBeCloseTo(4, 10);
+});
+test('a flipped handle resize grows outward on both axes', () => {
+  const flipX = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 0, y: 0 }, size: { width: 20, height: 10 }, flipX: true };
+  const grownX = resolveDragGeometry(flipX, { x: 2, y: 0 });
+  expect(grownX.width).toBeCloseTo(22, 10);
+  expect(grownX.height).toBeCloseTo(10, 10);
+  const flipY = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'n' as const, pin: { x: 0, y: 0 }, size: { width: 20, height: 10 }, flipY: true };
+  const grownY = resolveDragGeometry(flipY, { x: 0, y: 2 });
+  expect(grownY.height).toBeCloseTo(12, 10);
+  expect(grownY.width).toBeCloseTo(20, 10);
+  const base = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 5, y: 2 }, size: { width: 2, height: 1 } };
+  const plain = previewOutline(base, { x: 0, y: 0 }, identity);
+  const flipped = previewOutline({ ...base, flipX: true }, { x: 0, y: 0 }, identity);
+  expect(flipped).toEqual(plain);
+  expect(selectionHandlePositions(flipped).handles.e).toEqual({ x: 6, y: 2 });
+  const flippedY = previewOutline({ ...base, flipY: true }, { x: 0, y: 0 }, identity);
+  expect(flippedY).toEqual(plain);
+  expect(selectionHandlePositions(flippedY).handles.n).toEqual({ x: 5, y: 2.5 });
+});
+test('hit testing returns the nearest handle and keeps tiny shapes draggable', () => {
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 1, y: 1 }, size: { width: 0.12, height: 0.12 } };
+  const corners = previewOutline(start, { x: 0, y: 0 }, pagePaintTransform);
+  const positions = selectionHandlePositions(corners);
+  const nearEast = { x: positions.handles.e.x, y: positions.handles.e.y - 2 };
+  expect(hitTestSelection(nearEast, corners, 1)).toBe('e');
+  const tinyStart = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 1, y: 1 }, size: { width: 0.05, height: 0.05 } };
+  const tiny = previewOutline(tinyStart, { x: 0, y: 0 }, pagePaintTransform);
+  const centre = { x: (tiny[0].x + tiny[2].x) / 2, y: (tiny[0].y + tiny[2].y) / 2 };
+  expect(hitTestSelection(centre, tiny, 1)).toBeNull();
+  expect(hitTestSelection(centre, tiny, 4)).toBeNull();
+});
+test('the rotation grip follows local north instead of the screen top', () => {
+  for (const degrees of [0, 90, 190]) {
+    const angle = degrees * Math.PI / 180;
+    const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 0, y: 0 }, size: { width: 4, height: 2 }, angle };
+    const corners = previewOutline(start, { x: 0, y: 0 }, identity);
+    const positions = selectionHandlePositions(corners);
+    const north = { x: (corners[2].x + corners[3].x) / 2, y: (corners[2].y + corners[3].y) / 2 };
+    expect(positions.topCenter.x).toBeCloseTo(north.x, 8);
+    expect(positions.topCenter.y).toBeCloseTo(north.y, 8);
+    const grip = rotationGripPosition(corners, 1);
+    const centre = { x: (corners[0].x + corners[2].x) / 2, y: (corners[0].y + corners[2].y) / 2 };
+    const direction = { x: grip.x - centre.x, y: grip.y - centre.y };
+    const length = Math.hypot(direction.x, direction.y);
+    const expected = { x: -Math.sin(angle), y: Math.cos(angle) };
+    expect((direction.x / length) * expected.x + (direction.y / length) * expected.y).toBeCloseTo(1, 6);
+  }
+  const lower = previewOutline({ canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 0, y: 0 }, size: { width: 4, height: 2 }, angle: 40 * Math.PI / 180 }, { x: 0, y: 0 }, identity);
+  const upper = previewOutline({ canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 0, y: 0 }, size: { width: 4, height: 2 }, angle: 50 * Math.PI / 180 }, { x: 0, y: 0 }, identity);
+  const lowerNorth = { x: (lower[2].x + lower[3].x) / 2, y: (lower[2].y + lower[3].y) / 2 };
+  const upperNorth = { x: (upper[2].x + upper[3].x) / 2, y: (upper[2].y + upper[3].y) / 2 };
+  expect(selectionHandlePositions(lower).topCenter.x).toBeCloseTo(lowerNorth.x, 8);
+  expect(selectionHandlePositions(upper).topCenter.x).toBeCloseTo(upperNorth.x, 8);
 });
