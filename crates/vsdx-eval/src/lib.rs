@@ -329,7 +329,7 @@ pub fn evaluate_cell(
     refs: &impl References,
     limits: &ParseLimits,
 ) -> Evaluation {
-    evaluate_cell_with_theme(name, input, refs, limits, None)
+    evaluate_cell_with_theme(name, input, refs, limits, None, true)
 }
 
 fn evaluate_cell_with_theme(
@@ -338,6 +338,7 @@ fn evaluate_cell_with_theme(
     refs: &impl References,
     limits: &ParseLimits,
     theme: Option<&Theme>,
+    slots: bool,
 ) -> Evaluation {
     if is_event_cell(name) {
         // Event/recalculation plumbing is outside the display evaluation profile.
@@ -351,7 +352,7 @@ fn evaluate_cell_with_theme(
             name,
             match refs.formula(name) {
                 Some(formula) if !formula.eq_ignore_ascii_case("Inh") => {
-                    evaluate_with_theme_at(formula, refs, limits, theme, Some(name))
+                    evaluate_with_theme_at(formula, refs, limits, theme, Some(name), slots)
                 }
                 _ => unsupported("Inh has no concrete inherited value"),
             },
@@ -359,7 +360,7 @@ fn evaluate_cell_with_theme(
     }
     normalize_host_cell_value(
         name,
-        evaluate_with_theme_at(input, refs, limits, theme, Some(name)),
+        evaluate_with_theme_at(input, refs, limits, theme, Some(name), slots),
     )
 }
 
@@ -400,7 +401,7 @@ pub fn evaluate_with_theme(
     limits: &ParseLimits,
     theme: Option<&Theme>,
 ) -> Evaluation {
-    evaluate_with_theme_at(input, refs, limits, theme, None)
+    evaluate_with_theme_at(input, refs, limits, theme, None, true)
 }
 fn evaluate_with_theme_at(
     input: &str,
@@ -408,12 +409,14 @@ fn evaluate_with_theme_at(
     limits: &ParseLimits,
     theme: Option<&Theme>,
     host: Option<&str>,
+    slots: bool,
 ) -> Evaluation {
     match parse(input, limits) {
         Ok(expr) => Engine {
             refs,
             limits,
             theme,
+            slots,
             active: HashSet::new(),
             memo: HashMap::new(),
             steps: 0,
@@ -433,11 +436,7 @@ pub fn evaluate_with_shape_themes(
     shape: &ResolvedShape,
     themes: &BTreeMap<u32, Theme>,
 ) -> Evaluation {
-    let theme = shape
-        .theme_index()
-        .or_else(|| shape.color_scheme_index())
-        .and_then(|index| themes.get(&index));
-    evaluate_with_theme(input, refs, limits, theme)
+    evaluate_with_theme(input, refs, limits, map_shape_theme(shape, themes))
 }
 
 /// Evaluates with one-based ThemeIndex, falling back to ColorSchemeIndex.
@@ -448,11 +447,14 @@ pub fn evaluate_with_shape_package_theme(
     shape: &ResolvedShape,
     package: &VsdxPackage,
 ) -> Evaluation {
-    let theme = shape
-        .theme_index()
-        .or_else(|| shape.color_scheme_index())
-        .and_then(|index| package.themes.get(&index));
-    evaluate_with_theme(input, refs, limits, theme)
+    evaluate_with_theme_at(
+        input,
+        refs,
+        limits,
+        shape_theme(shape, package),
+        None,
+        false,
+    )
 }
 
 /// Evaluates a host cell using the shape's selected package theme.
@@ -464,11 +466,14 @@ pub fn evaluate_cell_with_shape_package_theme(
     shape: &ResolvedShape,
     package: &VsdxPackage,
 ) -> Evaluation {
-    let theme = shape
-        .theme_index()
-        .or_else(|| shape.color_scheme_index())
-        .and_then(|index| package.themes.get(&index));
-    evaluate_cell_with_theme(name, input, refs, limits, theme)
+    evaluate_cell_with_theme(
+        name,
+        input,
+        refs,
+        limits,
+        shape_theme(shape, package),
+        false,
+    )
 }
 
 /// Evaluates a sheet cell with the package's default theme when one is available.
@@ -479,13 +484,44 @@ pub fn evaluate_cell_with_package_theme(
     limits: &ParseLimits,
     package: &VsdxPackage,
 ) -> Evaluation {
-    evaluate_cell_with_theme(name, input, refs, limits, package.themes.get(&1))
+    evaluate_cell_with_theme(name, input, refs, limits, package_theme(package), false)
+}
+
+/// Selects the shape theme, falling back to the package default.
+fn shape_theme<'a>(shape: &ResolvedShape, package: &'a VsdxPackage) -> Option<&'a Theme> {
+    map_shape_theme(shape, &package.themes)
+}
+
+/// Selects the shape theme from a theme map, falling back to the default.
+fn map_shape_theme<'a>(
+    shape: &ResolvedShape,
+    themes: &'a BTreeMap<u32, Theme>,
+) -> Option<&'a Theme> {
+    let indexed = shape.theme_index().or_else(|| shape.color_scheme_index());
+    match indexed {
+        Some(0) => None,
+        Some(index) => themes
+            .get(&index)
+            .or_else(|| themes.get(&1))
+            .or_else(|| themes.values().next()),
+        None => themes.get(&1).or_else(|| themes.values().next()),
+    }
+}
+
+/// Selects the package default theme when one is available.
+fn package_theme(package: &VsdxPackage) -> Option<&Theme> {
+    package
+        .themes
+        .get(&1)
+        .or_else(|| package.themes.values().next())
 }
 
 struct Engine<'a, R> {
     refs: &'a R,
     limits: &'a ParseLimits,
     theme: Option<&'a Theme>,
+    /// Whether named theme colours may resolve; package evaluation declines them.
+    slots: bool,
     active: HashSet<String>,
     memo: HashMap<String, Evaluation>,
     steps: usize,
@@ -884,12 +920,10 @@ impl<R: References> Engine<'_, R> {
         )
     }
     fn themeval(&mut self, args: &[Expr], d: usize) -> Evaluation {
-        let host = self
-            .host
-            .as_deref()
-            .and_then(|host| host.rsplit('.').next());
         let name = match args.first() {
-            Some(Expr::String(name)) => name.clone(),
+            Some(Expr::String(name)) => theme_index_name(name)
+                .map(str::to_owned)
+                .unwrap_or_else(|| name.clone()),
             Some(expr) => match numeric(self.expr(expr, d)) {
                 Ok((value, _)) if value.unit == Unit::Number && value.number.fract() == 0.0 => {
                     match value.number as i32 {
@@ -909,12 +943,11 @@ impl<R: References> Engine<'_, R> {
                 Ok(_) => return unsupported("THEMEVAL requires a string or integer theme value"),
                 Err(error) => return error,
             },
-            None => match host {
-                Some("FillForegnd") => "FillColor".to_owned(),
-                Some("FillBkgnd") => "FillColor2".to_owned(),
-                Some("LineColor") => "LineColor".to_owned(),
-                Some("Color") => "TextColor".to_owned(),
-                _ => return unsupported("THEMEVAL host-cell lookup requires theme-cell context"),
+            None => match self.host.as_deref().and_then(host_theme_value) {
+                Some(name) => name.to_owned(),
+                None => {
+                    return unsupported("THEMEVAL host-cell lookup requires theme-cell context");
+                }
             },
         };
         let Some(theme) = self.theme else {
@@ -924,31 +957,13 @@ impl<R: References> Engine<'_, R> {
             );
         };
         let name = name.as_str();
-        let slot = match name {
-            "BackgroundColor" => "lt1",
-            "Light" => "lt1",
-            "FillColor" => "accent1",
-            "FillColor2" => "accent2",
-            "LineColor" => "dk1",
-            "TextColor" => "dk1",
-            "AccentColor1" => "accent1",
-            "AccentColor2" => "accent2",
-            "AccentColor3" => "accent3",
-            "AccentColor4" => "accent4",
-            "AccentColor5" => "accent5",
-            "AccentColor6" => "accent6",
-            "VariantColor1" => "accent1",
-            "VariantColor2" => "accent2",
-            "VariantColor3" => "accent3",
-            "VariantColor4" => "accent4",
-            _ => {
-                return args.get(1).map_or_else(
-                    || unsupported("unresolvable THEMEVAL value"),
-                    |arg| self.expr(arg, d),
-                );
-            }
+        let slot = self.slots.then(|| theme_slot(name)).flatten();
+        let Some(slot) = slot else {
+            return args.get(1).map_or_else(
+                || unsupported("unresolvable THEMEVAL value"),
+                |arg| self.expr(arg, d),
+            );
         };
-        // Theme values use DrawingML colour slots; unknown named Visio theme values intentionally remain unsupported.
         let color = ColorValue {
             theme_color: Some(slot.to_ascii_lowercase()),
             ..ColorValue::default()
@@ -1054,6 +1069,133 @@ fn host_cell_unit(name: &str) -> Option<Unit> {
         "FillGradientEnabled" | "FlipX" | "FlipY" | "LineGradientEnabled" => Some(Unit::Bool),
         _ => None,
     }
+}
+
+/// Maps a host cell to its documented theme value.
+fn host_theme_value(host: &str) -> Option<&'static str> {
+    let host = host.rsplit('!').next().unwrap_or(host);
+    let (section, cell) = match host.split_once('.') {
+        Some((section, rest)) => (
+            section.rsplit('.').next().unwrap_or(section),
+            rest.rsplit('.').next().unwrap_or(rest),
+        ),
+        None => ("", host),
+    };
+    if cell.eq_ignore_ascii_case("GradientStopColor") {
+        if section.eq_ignore_ascii_case("LineGradient") {
+            return Some("LineStopColor");
+        }
+        return Some("FillStopColor");
+    }
+    if cell.eq_ignore_ascii_case("GradientStopColorTrans") {
+        if section.eq_ignore_ascii_case("LineGradient") {
+            return Some("LineStopTransparency");
+        }
+        return Some("FillStopTransparency");
+    }
+    if cell.eq_ignore_ascii_case("GradientStopPosition") {
+        if section.eq_ignore_ascii_case("LineGradient") {
+            return Some("LineStopPosition");
+        }
+        return Some("FillStopPosition");
+    }
+    Some(match cell.to_ascii_uppercase().as_str() {
+        "FILLFOREGND" => "FillColor",
+        "FILLBKGND" => "FillColor2",
+        "FILLFOREGNDTRANS" => "FillTransparency",
+        "FILLPATTERN" => "FillPattern",
+        "LINECOLOR" => "LineColor",
+        "LINEWEIGHT" => "LineWeight",
+        "LINEPATTERN" => "LinePattern",
+        "LINECAP" => "LineCap",
+        "LINECOLORTRANS" => "LineColorTrans",
+        "COMPOUNDTYPE" => "LineCompoundtype",
+        "BEGINARROW" => "LineBegin",
+        "ENDARROW" => "LineEnd",
+        "BEGINARROWSIZE" => "LineBeginSize",
+        "ENDARROWSIZE" => "LineEndSize",
+        "ROUNDING" => "LineRounding",
+        "LINEGRADIENTENABLED" => "LineGradientEnabled",
+        "LINEGRADIENTDIR" => "LineGradientDir",
+        "LINEGRADIENTANGLE" => "LineGradientAngle",
+        "FILLGRADIENTENABLED" => "FillGradientEnabled",
+        "FILLGRADIENTDIR" => "FillGradientDir",
+        "FILLGRADIENTANGLE" => "FillGradientAngle",
+        "ROTATEGRADIENTWITHSHAPE" => "RotateGradientWithShape",
+        "USEGROUPGRADIENT" => "UseGroupGradient",
+        "SHDWFOREGND" => "ShadowColor",
+        "SHDWFOREGNDTRANS" => "ShadowTransparency",
+        "SHDWPATTERN" => "ShadowPattern",
+        "SHAPESHDWTYPE" => "ShadowType",
+        "SHAPESHDWOFFSETX" => "ShadowXOffset",
+        "SHAPESHDWOFFSETY" => "ShadowYOffset",
+        "SHAPESHDWOBLIQUEANGLE" => "ShadowDirection",
+        "SHAPESHDWSCALEFACTOR" => "ShadowMagnification",
+        "SHAPESHDWBLUR" => "ShadowBlur",
+        "BEVELTOPTYPE" => "BevelTopType",
+        "BEVELTOPWIDTH" => "BevelTopWidth",
+        "BEVELTOPHEIGHT" => "BevelTopHeight",
+        "BEVELCONTOURCOLOR" => "BevelContourColor",
+        "BEVELCONTOURSIZE" => "BevelContourSize",
+        "BEVELMATERIALTYPE" => "BevelMaterial",
+        "BEVELLIGHTINGTYPE" => "BevelLighting",
+        "BEVELLIGHTINGANGLE" => "BevelLightingAngle",
+        "REFLECTIONBLUR" => "ReflectionBlur",
+        "REFLECTIONDIST" => "ReflectionDist",
+        "REFLECTIONSIZE" => "ReflectionSize",
+        "REFLECTIONTRANS" => "ReflectionTrans",
+        "GLOWCOLOR" => "GlowColor",
+        "GLOWCOLORTRANS" => "GlowTransparency",
+        "GLOWSIZE" => "GlowSize",
+        "SOFTEDGESSIZE" => "SoftEdgesSize",
+        "SKETCHENABLED" => "SketchEnabled",
+        "SKETCHAMOUNT" => "SketchAmount",
+        "SKETCHLINEWEIGHT" => "SketchLineWeight",
+        "SKETCHLINECHANGE" => "SketchLineChange",
+        "SKETCHFILLCHANGE" => "SketchFillChange",
+        "FONT" => "LatinFont",
+        "STYLE" => "TextStyle",
+        "ASIANFONT" => "AsianFont",
+        "COMPLEXSCRIPTFONT" => "ComplexFont",
+        "COLOR" => "TextColor",
+        _ => return None,
+    })
+}
+
+/// Maps a documented colour theme value to its scheme slot.
+fn theme_slot(name: &str) -> Option<&'static str> {
+    Some(match name.to_ascii_uppercase().as_str() {
+        "DARK" => "dk1",
+        "LIGHT" => "lt1",
+        "BACKGROUNDCOLOR" => "lt1",
+        "ACCENTCOLOR" => "accent1",
+        "ACCENTCOLOR1" => "accent1",
+        "ACCENTCOLOR2" => "accent2",
+        "ACCENTCOLOR3" => "accent3",
+        "ACCENTCOLOR4" => "accent4",
+        "ACCENTCOLOR5" => "accent5",
+        "ACCENTCOLOR6" => "accent6",
+        "FILLCOLOR" => "accent1",
+        "FILLCOLOR2" => "accent2",
+        "LINECOLOR" => "dk1",
+        "TEXTCOLOR" => "dk1",
+        _ => return None,
+    })
+}
+
+/// Maps documented numeric-string theme indices to colour names.
+fn theme_index_name(name: &str) -> Option<&'static str> {
+    Some(match name.trim() {
+        "1" => "Dark",
+        "2" => "Light",
+        "3" => "AccentColor1",
+        "4" => "AccentColor2",
+        "5" => "AccentColor3",
+        "6" => "AccentColor4",
+        "7" => "AccentColor5",
+        "8" => "AccentColor6",
+        _ => return None,
+    })
 }
 fn numeric_result(number: f64, unit: Unit, guarded: bool) -> Evaluation {
     if number.is_finite() {
@@ -1552,7 +1694,14 @@ mod tests {
         let refs = BTreeMap::from([("FillForegnd".into(), "THEMEVAL()".into())]);
         let theme = Theme::default();
         assert!(matches!(
-            evaluate_cell_with_theme("LineColor", "FillForegnd", &refs, &limits(), Some(&theme)),
+            evaluate_cell_with_theme(
+                "LineColor",
+                "FillForegnd",
+                &refs,
+                &limits(),
+                Some(&theme),
+                true
+            ),
             Evaluation::Evaluated(Evaluated {
                 value: Value::Color(Color {
                     red: 68,
