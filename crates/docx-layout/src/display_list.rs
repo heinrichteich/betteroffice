@@ -1799,6 +1799,8 @@ struct FieldRunIn {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ParaAttrsIn {
     #[serde(default)]
+    horizontal_rules: Vec<crate::types::HorizontalRule>,
+    #[serde(default)]
     alignment: Option<String>,
     /// Resolved paragraph spacing.
     #[serde(default)]
@@ -1928,36 +1930,7 @@ pub(crate) struct TableBlockIn {
     pub(crate) floating: Option<FloatingTablePositionIn>,
 }
 
-#[derive(Deserialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct FloatingTablePositionIn {
-    #[serde(default)]
-    pub(crate) horz_anchor: Option<String>,
-    #[serde(default)]
-    pub(crate) tblp_x: Option<f64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) tblp_x_spec: Option<String>,
-    #[serde(default)]
-    pub(crate) vert_anchor: Option<String>,
-    #[serde(default)]
-    pub(crate) tblp_y: Option<f64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) tblp_y_spec: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) top_from_text: Option<f64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) right_from_text: Option<f64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) bottom_from_text: Option<f64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) left_from_text: Option<f64>,
-}
+pub(crate) type FloatingTablePositionIn = crate::types::FloatingTablePosition;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -5849,7 +5822,20 @@ fn emit_line(
                     }
                 }
                 RunIn::Text(text) => {
-                    pool_estimate += fallback_text_width(&seg.text, &text.fmt, default_font_pt)
+                    if let Some(rule) = attrs.and_then(|attrs| {
+                        attrs
+                            .horizontal_rules
+                            .iter()
+                            .find(|rule| seg.pm_start == Some(rule.pm_start as i64))
+                    }) {
+                        if text.fmt.hidden != Some(true) {
+                            fixed_width += rule.advance_width(
+                                (geom.frag_width - geom.indent_left - geom.indent_right).max(0.0),
+                            );
+                        }
+                    } else {
+                        pool_estimate += fallback_text_width(&seg.text, &text.fmt, default_font_pt);
+                    }
                 }
                 RunIn::Field(f) => match ctx.field_width(seg.pm_start) {
                     Some((fallback, resolved)) => {
@@ -6020,10 +6006,29 @@ fn emit_line(
                 // editing view paints them dimmed rather than suppressing them, so
                 // the display list keeps their primitives for hit-testing too
                 RunIn::Text(t) => {
-                    let w = width_per_estimate
-                        * fallback_text_width(&seg.text, &t.fmt, default_font_pt)
-                        + word_space_extra
-                            * seg.text.chars().filter(|&ch| ch == ' ').count() as f64;
+                    let w = attrs
+                        .and_then(|attrs| {
+                            attrs
+                                .horizontal_rules
+                                .iter()
+                                .find(|rule| seg.pm_start == Some(rule.pm_start as i64))
+                        })
+                        .map(|rule| {
+                            if t.fmt.hidden == Some(true) {
+                                0.0
+                            } else {
+                                rule.advance_width(
+                                    (geom.frag_width - geom.indent_left - geom.indent_right)
+                                        .max(0.0),
+                                )
+                            }
+                        })
+                        .unwrap_or_else(|| {
+                            width_per_estimate
+                                * fallback_text_width(&seg.text, &t.fmt, default_font_pt)
+                                + word_space_extra
+                                    * seg.text.chars().filter(|&ch| ch == ' ').count() as f64
+                        });
                     push_bidi_text_items(
                         &mut logical_items,
                         &seg.text,
@@ -6111,19 +6116,50 @@ fn emit_line(
         };
         match item {
             LinePaintItem::Text(item) => {
-                let paint_width = item.width
-                    + if item.exact_advance && item.text == " " {
-                        word_space_extra
-                    } else {
-                        0.0
-                    };
+                let rule = attrs.and_then(|attrs| {
+                    attrs.horizontal_rules.iter().find(|rule| {
+                        item.pm_start == Some(rule.pm_start as i64)
+                            && item.pm_end == Some(rule.pm_end as i64)
+                    })
+                });
+                let mut text_x = pen_x;
+                if let Some(rule) = rule.filter(|_| item.fmt.hidden != Some(true)) {
+                    let standalone = segments.iter().all(|segment| {
+                        segment.pm_start == Some(rule.pm_start as i64)
+                            || matches!(segment.run, RunIn::Text(text) if text.fmt.hidden == Some(true)
+                                || segment.text.is_empty())
+                    });
+                    let available_width =
+                        (geom.frag_width - geom.indent_left - geom.indent_right).max(0.0);
+                    if standalone {
+                        let remaining = available_width - rule.rendered_width(available_width);
+                        text_x = geom.frag_x
+                            + geom.indent_left
+                            + match rule.alignment.as_str() {
+                                "left" => 0.0,
+                                "right" => remaining,
+                                _ => remaining / 2.0,
+                            };
+                    }
+                    emit_horizontal_rule(prims, rule, block_ref, text_x, baseline, available_width);
+                }
+                let paint_width = if rule.is_some() && item.fmt.hidden == Some(true) {
+                    0.0
+                } else {
+                    item.width
+                        + if item.exact_advance && item.text == " " {
+                            word_space_extra
+                        } else {
+                            0.0
+                        }
+                };
                 emit_text_segment(
                     prims,
                     &item.text,
                     item.fmt,
                     item.pm_start,
                     item.pm_end,
-                    pen_x,
+                    text_x,
                     baseline,
                     paint_width,
                     word_space_px.clone(),
@@ -6142,7 +6178,7 @@ fn emit_line(
                 if item.pm_start.is_some() {
                     emitted_positioned_text = true;
                 }
-                pen_x += paint_width;
+                pen_x = text_x + paint_width;
             }
             LinePaintItem::Tab {
                 run,
@@ -7230,6 +7266,51 @@ fn page_border_primitive(
         bottom: page_border_side(pb.bottom.as_ref()),
         left: page_border_side(pb.left.as_ref()),
     })
+}
+
+fn emit_horizontal_rule(
+    prims: &mut Vec<Primitive>,
+    rule: &crate::types::HorizontalRule,
+    block_ref: &BlockRef,
+    x: f64,
+    baseline: f64,
+    available_width: f64,
+) {
+    let width = rule.rendered_width(available_width);
+    let height = (rule.height - 8.0 / 15.0).max(0.0);
+    let x = x + if rule.no_shade { 0.0 } else { 1.0 };
+    let y = baseline - if rule.no_shade { height } else { rule.height };
+    let mut attrs = block_ref.attrs();
+    attrs.doc_start = Some(rule.pm_start as i64);
+    attrs.doc_end = Some(rule.pm_end as i64);
+    if rule.no_shade {
+        prims.push(Primitive::Rect(RectPrimitive {
+            x: px(x),
+            y: px(y),
+            w: px(width),
+            h: px(height),
+            fill: rule.color.clone(),
+            attrs,
+        }));
+    } else {
+        for (x1, y1, x2, y2) in [
+            (x, y, x + width, y),
+            (x, y + height, x + width, y + height),
+            (x, y, x, y + height),
+            (x + width, y, x + width, y + height),
+        ] {
+            prims.push(Primitive::Line(LinePrimitive {
+                x1: px(x1),
+                y1: px(y1),
+                x2: px(x2),
+                y2: px(y2),
+                stroke_width: px(1.0),
+                color: "#000000".to_owned(),
+                attrs: attrs.clone(),
+                ..LinePrimitive::contract_defaults()
+            }));
+        }
+    }
 }
 
 /// paragraph borders as line primitives (role 'border'): top only when the
@@ -8419,12 +8500,13 @@ pub(crate) fn table_total_width(measure: &TableExtentIn) -> f64 {
 }
 
 fn nested_table_x_offset(block: &TableBlockIn, measure: &TableExtentIn, content_width: f64) -> f64 {
-    let table_width = table_total_width(measure);
-    match block.justification.as_deref() {
-        Some("center") => ((content_width - table_width) / 2.0).max(0.0),
-        Some("right") => (content_width - table_width).max(0.0),
-        _ => block.indent.unwrap_or(0.0).max(0.0),
-    }
+    crate::cell_layout::nested_table_horizontal_offset(
+        block.floating.as_ref(),
+        block.justification.as_deref(),
+        block.indent,
+        table_total_width(measure),
+        content_width,
+    )
 }
 
 fn clip_number(value: &Option<Number>) -> f64 {
@@ -8667,6 +8749,11 @@ pub(crate) fn emit_table_fragment(
         let cell = &block.rows[p.g.row_index].cells[p.g.cell_index];
         let cx = frag.x + p.g.x;
         let cy = frag.y + p.cell_y;
+        let clip_top_y = if p.g.row_index < header_row_count {
+            clip_top_y
+        } else {
+            clip_top_y + header_height
+        };
         // The outer left border insets cell content by its width.
         let is_first_col = if bidi {
             p.g.column_index + p.g.col_span >= col_count
@@ -9052,6 +9139,7 @@ fn emit_cell_content(
     let mut block_tops: Vec<f64> = Vec::with_capacity(cell.blocks.len());
     let mut stack_cursor = 0.0_f64;
     let mut prev_after = 0.0_f64;
+    let mut float_bottom = 0.0_f64;
     for (i, blk) in cell.blocks.iter().enumerate() {
         match (blk, cell_measure.blocks.get(i)) {
             (BlockIn::Paragraph(pb), Some(MeasureIn::Paragraph(pm))) => {
@@ -9067,10 +9155,17 @@ fn emit_cell_content(
                     .sum::<f64>();
                 prev_after = after;
             }
-            (BlockIn::Table(_), Some(MeasureIn::Table(tm))) => {
+            (BlockIn::Table(table), Some(MeasureIn::Table(tm))) => {
                 stack_cursor += prev_after;
-                block_tops.push(stack_cursor);
-                stack_cursor += tm.total_height;
+                if let Some(offset) =
+                    crate::cell_layout::nested_table_float_offset(table.floating.as_ref())
+                {
+                    block_tops.push(stack_cursor + offset);
+                    float_bottom = float_bottom.max(stack_cursor + offset + tm.total_height);
+                } else {
+                    block_tops.push(stack_cursor);
+                    stack_cursor += tm.total_height;
+                }
                 prev_after = 0.0;
             }
             (BlockIn::Image(_), Some(MeasureIn::Image(image))) => {
@@ -9096,7 +9191,7 @@ fn emit_cell_content(
         }
     }
     // a trailing spacing.after becomes the content box's padding-bottom
-    let content_height = stack_cursor + prev_after;
+    let content_height = (stack_cursor + prev_after).max(float_bottom);
 
     // Content that fills or overflows the cell remains top-aligned.
     let v_offset = crate::cell_layout::cell_vertical_offset(

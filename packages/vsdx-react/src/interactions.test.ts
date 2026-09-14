@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { canvasPointToModel, modelPointToCanvas } from '@betteroffice/vsdx';
 import type { ModelPoint } from '@betteroffice/vsdx';
-import { RESIZE_HANDLES, SELECTION_STROKE, canvasKeyboardIntent, hitTestSelection, isEditableKeyboardTarget, keyboardNudgeStep, paintSelectionFrame, paintDragPreview, passedDragThreshold, previewOutline, resizedBounds, resizeCursor, resolveDragGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions } from './interactions';
+import { RESIZE_HANDLES, SELECTION_STROKE, canvasKeyboardIntent, hitTestSelection, isEditableKeyboardTarget, keyboardNudgeStep, paintSelectionFrame, paintDragPreview, passedDragThreshold, previewOutline, resizedBounds, resizeCursor, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions } from './interactions';
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 };
 const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 test('passedDragThreshold needs four css pixels by default', () => {
@@ -30,6 +30,10 @@ test('previewOutline keeps a centred flip on the same visual frame', () => {
   const flipped = previewOutline({ ...base, flipX: true }, { x: 3, y: 3 }, identity);
   expect(flipped).toEqual(plain);
   expect(selectionHandlePositions(flipped).handles.e).toEqual({ x: 6, y: 2 });
+});
+test('previewOutline skips the engine LocPin lookup for a shape with no height', () => {
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 0 }, locPinAtSize: () => { throw new Error('invalid resize dimensions'); } };
+  expect(previewOutline(start, { x: 1, y: 0 }, identity)).toEqual([{ x: 1, y: 3 }, { x: 5, y: 3 }, { x: 5, y: 3 }, { x: 1, y: 3 }]);
 });
 test('previewOutline maps the box through the group transform forward', () => {
   const start = { canvas: { x: 0, y: 0 }, model: { x: 10, y: 20 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, parentTransforms: [{ a: 0, b: 2, c: -2, d: 0, e: 10, f: 20 }] };
@@ -278,6 +282,10 @@ test('canvas keyboard maps history, delete and escape intents', () => {
   expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true, altKey: true }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'Delete', ctrlKey: true }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'Escape', ctrlKey: true }, 1)).toBeNull();
+});
+test('resolveNudgeGeometry turns a screen nudge into the parent-local pin delta', () => {
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, parentTransforms: [{ a: 0, b: 1, c: -1, d: 0, e: 0, f: 0 }] };
+  expect(resolveNudgeGeometry(start, 1, 0)).toEqual({ x: 2, y: 2, width: 4, height: 5 });
 });
 test('canvas keyboard nudges one screen pixel with Y up and ten with shift', () => {
   expect(keyboardNudgeStep(1)).toBeCloseTo(1 / 96, 10);

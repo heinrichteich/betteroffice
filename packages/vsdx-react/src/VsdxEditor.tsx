@@ -80,6 +80,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [contextMenu, setContextMenu] = useState<{ top: number; left: number } | null>(null);
   const pointerRef = useRef<DragStart | null>(null);
   const dragPreviewRef = useRef<ModelPoint | null>(null);
+  const dragSnapRef = useRef(false);
   const previewFrameRef = useRef<number | null>(null);
   const insertCascadeRef = useRef<Map<string, number>>(new Map());
   const zoomRef = useRef(zoom);
@@ -241,20 +242,6 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     }
   };
 
-  const dragStartForPlacement = (page: { shapes: readonly ShapeSnapshot[]; sourcePartPath: string }, shape: ShapeSnapshot, frame: PageDisplayList): Omit<DragStart, 'canvas' | 'model' | 'resize' | 'pointerId' | 'startX' | 'startY'> => {
-    const width = numericCellValue(shape, 'Width');
-    const height = numericCellValue(shape, 'Height');
-    return {
-      parentTransforms: shapeParentTransforms(frame.primitives, `${page.sourcePartPath}:${shape.sourceId}`) ?? [],
-      angle: numericCellValue(shape, 'Angle', 0),
-      flipX: numericCellValue(shape, 'FlipX', 0) === 1,
-      flipY: numericCellValue(shape, 'FlipY', 0) === 1,
-      pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
-      locPin: { x: numericCellValue(shape, 'LocPinX', width / 2), y: numericCellValue(shape, 'LocPinY', height / 2) },
-      size: { width, height },
-    };
-  };
-
   const onPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
     if (!handle || !frame || !page) return;
@@ -273,10 +260,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
               const placement = findShapePlacement(page.shapes, active.shapeId);
               if (placement) {
                 if (target !== 'rotate' && isHandleResizeBlocked(placement.shape)) {
-                  reportError(new Error('Shape is locked and cannot be resized with handles.'));
+                  reportError(new Error(t('errors.resizeLocked')));
                   return;
                 }
-                const base = dragStartForPlacement(page, placement.shape, frame);
+                const base = shapeDragStart(page, placement.shape, frame, handle);
                 pointerRef.current = {
                   ...point,
                   ...base,
@@ -296,11 +283,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       }
       handle.layoutPage(model.pageIndex);
       const hit = handle.hitTest(point.canvas.x, point.canvas.y);
-      setSelection(hit ? { pageId: page.id, shapeId: hit.shapeId, hit } : null);
-      const placement = hit ? findShapePlacement(page.shapes, hit.shapeId) : null;
-      pointerRef.current = hit && placement ? {
+      const next = hit ? selectionForHit(page, hit) : null;
+      setSelection(next);
+      const placement = next ? findShapePlacement(page.shapes, next.shapeId) : null;
+      pointerRef.current = next && placement ? {
         ...point,
-        ...dragStartForPlacement(page, placement.shape, frame),
+        ...shapeDragStart(page, placement.shape, frame, handle),
         pointerId: event.pointerId,
         startX: event.clientX,
         startY: event.clientY,
@@ -338,8 +326,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (!frame) return;
     try {
       const point = canvasPointerPosition(event, frame);
-      const snap = event.shiftKey;
       dragPreviewRef.current = point.model;
+      dragSnapRef.current = event.shiftKey;
       if (previewFrameRef.current !== null) return;
       previewFrameRef.current = requestAnimationFrame(() => {
         previewFrameRef.current = null;
@@ -347,7 +335,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         if (!liveFrame || !liveStart || !release || !overlay) return;
         const context = overlay.getContext('2d'); if (!context) return;
         try {
-          const corners = previewOutline(liveStart, release, liveFrame.paintTransform, snap);
+          const corners = previewOutline(liveStart, release, liveFrame.paintTransform, dragSnapRef.current);
           context.clearRect(0, 0, overlay.width, overlay.height);
           paintDragPreview(context, corners, window.devicePixelRatio || 1, zoomRef.current);
           paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current);
@@ -377,15 +365,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       if (pointer.handle) {
         const livePage = handle.snapshot().pages.find((page) => page.id === selected.pageId);
         const livePlacement = livePage ? findShapePlacement(livePage.shapes, selected.shapeId) : null;
-        if (livePlacement && isHandleResizeBlocked(livePlacement.shape)) throw new Error('Shape is locked and cannot be resized with handles.');
-        handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
-        try {
-          handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
-        } catch (moveError) {
-          try { if (handle.canUndo()) handle.undo(); } catch { void 0; }
-          try { refresh(undefined, false); } catch { void 0; }
-          throw moveError;
-        }
+        if (livePlacement && isHandleResizeBlocked(livePlacement.shape)) throw new Error(t('errors.resizeLocked'));
+        handle.setShapeBounds(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y), inchFormula(geometry.width), inchFormula(geometry.height));
       }
       else if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
       else handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
@@ -415,9 +396,14 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       const point = canvasPointerPosition(event, frame);
       handle.layoutPage(model.pageIndex);
       const hit = handle.hitTest(point.canvas.x, point.canvas.y);
-      if (!hit) return;
+      const next = hit ? selectionForHit(page, hit) : null;
+      if (!next) {
+        closeContextMenu();
+        setSelection(null);
+        return;
+      }
       const active = selectionRef.current;
-      if (!active || active.pageId !== page.id || active.shapeId !== hit.shapeId) setSelection({ pageId: page.id, shapeId: hit.shapeId, hit });
+      if (!active || active.pageId !== next.pageId || active.shapeId !== next.shapeId) setSelection(next);
       setContextMenu({ top: event.clientY, left: event.clientX });
     } catch (value) { reportError(value); }
   };
@@ -445,12 +431,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       const placement = findShapePlacement(page.shapes, selected.shapeId);
       if (!placement) return;
       const frame = modelRef.current.frame;
-      if (!frame) {
-        handle.moveShape(selected.pageId, selected.shapeId, inchFormula(numericCellValue(placement.shape, 'PinX') + dx), inchFormula(numericCellValue(placement.shape, 'PinY') + dy));
-        refresh(undefined, true);
-        return;
-      }
-      const base = dragStartForPlacement(page, placement.shape, frame);
+      if (!frame) return;
+      const base = shapeDragStart(page, placement.shape, frame);
       const geometry = resolveNudgeGeometry({ canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, ...base }, dx, dy);
       handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
       refresh(undefined, true);
@@ -489,20 +471,18 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   }, [insertShapeAt]);
   const onCanvasDragOver = (event: DragEvent<HTMLDivElement>) => {
     if (!handleRef.current || !modelRef.current.frame) return;
-    if (!event.dataTransfer.types.includes(STENCIL_DRAG_MIME) && !event.dataTransfer.types.includes('text/plain')) return;
+    if (!event.dataTransfer.types.includes(STENCIL_DRAG_MIME)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
   };
   const onCanvasDrop = (event: DragEvent<HTMLDivElement>) => {
-    const frame = modelRef.current.frame;
-    if (!frame) return;
-    const id = (event.dataTransfer.getData(STENCIL_DRAG_MIME) || event.dataTransfer.getData('text/plain')).trim();
-    const shape = id ? standardShapeById(id) : undefined;
+    const frame = modelRef.current.frame; const canvas = mainCanvasRef.current;
+    if (!frame || !canvas) return;
+    const shape = standardShapeById(event.dataTransfer.getData(STENCIL_DRAG_MIME).trim());
     if (!shape) return;
     event.preventDefault();
-    const canvas = mainCanvasRef.current;
-    const rect = canvas?.getBoundingClientRect() ?? event.currentTarget.getBoundingClientRect();
-    insertShapeAt(shape, dropClientToModel(frame, rect, event.clientX, event.clientY));
+    insertShapeAt(shape, clientPointToModel(frame, canvas.getBoundingClientRect(), event.clientX, event.clientY).model);
+    canvas.focus();
   };
   const reorderPage = useCallback((pageId: string, toIndex: number) => {
     const handle = handleRef.current;
@@ -552,28 +532,23 @@ export const CENTRE_INSERT_CASCADE = 8;
 
 /** Offset a page-centre insert so repeated clicks cascade instead of stacking. */
 export function centreInsertPoint(centre: ModelPoint, count: number): ModelPoint {
-  const step = (Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0) % CENTRE_INSERT_CASCADE;
+  const step = count % CENTRE_INSERT_CASCADE;
   return { x: centre.x + step * CENTRE_INSERT_STEP_IN, y: centre.y - step * CENTRE_INSERT_STEP_IN };
 }
 
 interface ClientRectLike { left: number; top: number; width: number; height: number; }
 
-/** Map a drop client point onto Y-up model inches, dividing out zoom once via the canvas rect. */
-export function dropClientToModel(frame: PageDisplayList, rect: ClientRectLike, clientX: number, clientY: number): ModelPoint {
+/** Map a client point onto canvas pixels and Y-up inches, dividing out zoom once through the rendered rect. */
+export function clientPointToModel(frame: PageDisplayList, rect: ClientRectLike, clientX: number, clientY: number): { canvas: ModelPoint; model: ModelPoint } {
   const canvas = {
     x: (clientX - rect.left) * frame.width / Math.max(rect.width, 1),
     y: (clientY - rect.top) * frame.height / Math.max(rect.height, 1),
   };
-  return canvasPointToModel(frame.paintTransform, canvas.x, canvas.y);
+  return { canvas, model: canvasPointToModel(frame.paintTransform, canvas.x, canvas.y) };
 }
 
 export function canvasPointerPosition(event: PointerEvent<HTMLCanvasElement> | MouseEvent<HTMLCanvasElement>, frame: PageDisplayList): { canvas: ModelPoint; model: ModelPoint } {
-  const rect = event.currentTarget.getBoundingClientRect();
-  const canvas = {
-    x: (event.clientX - rect.left) * frame.width / Math.max(rect.width, 1),
-    y: (event.clientY - rect.top) * frame.height / Math.max(rect.height, 1),
-  };
-  return { canvas, model: canvasPointToModel(frame.paintTransform, canvas.x, canvas.y) };
+  return clientPointToModel(frame, event.currentTarget.getBoundingClientRect(), event.clientX, event.clientY);
 }
 
 export function inchFormula(value: number): string {
@@ -594,34 +569,43 @@ export function shapeParentTransforms(primitives: readonly PagePrimitive[], id: 
   return null;
 }
 
+/** Visio selects the outermost shape a hit falls in; only a top-level shape carries page-space bounds. */
+function selectionForHit(page: PageSnapshot, hit: HitTestResult): VsdxShapeSelection | null {
+  const top = page.shapes.find((shape) => shape.id === hit.shapeId || findShapePlacement(shape.children, hit.shapeId) !== null);
+  return top ? { pageId: page.id, shapeId: top.id, hit } : null;
+}
+
 export function stillSelectable(snapshot: DiagramSnapshot, pageIndex: number, selection: VsdxShapeSelection): boolean {
   const page = snapshot.pages[pageIndex];
   return Boolean(page && page.id === selection.pageId && findShapePlacement(page.shapes, selection.shapeId));
 }
 
-/** Current selection corners in scale-1 canvas coordinates for overlay paint and hit tests. */
-export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, selection: VsdxShapeSelection): ModelPoint[] | null {
-  const placement = findShapePlacement(page.shapes, selection.shapeId);
-  if (!placement) return null;
-  const shape: ShapeSnapshot = placement.shape;
+function shapeDragStart(page: { id: string; shapes: readonly ShapeSnapshot[]; sourcePartPath: string }, shape: ShapeSnapshot, frame: PageDisplayList, handle?: DiagramHandle): Omit<DragStart, 'canvas' | 'model' | 'resize' | 'pointerId' | 'startX' | 'startY'> {
   const width = numericCellValue(shape, 'Width');
   const height = numericCellValue(shape, 'Height');
-  const start: DragStart = {
-    canvas: { x: 0, y: 0 },
-    model: { x: 0, y: 0 },
-    resize: false,
-    pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
-    locPin: { x: numericCellValue(shape, 'LocPinX', width / 2), y: numericCellValue(shape, 'LocPinY', height / 2) },
-    size: { width, height },
+  return {
     parentTransforms: shapeParentTransforms(frame.primitives, `${page.sourcePartPath}:${shape.sourceId}`) ?? [],
     angle: numericCellValue(shape, 'Angle', 0),
     flipX: numericCellValue(shape, 'FlipX', 0) === 1,
     flipY: numericCellValue(shape, 'FlipY', 0) === 1,
+    pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
+    locPin: { x: numericCellValue(shape, 'LocPinX', width / 2), y: numericCellValue(shape, 'LocPinY', height / 2) },
+    locPinAtSize: handle ? (nextWidth, nextHeight) => handle.resizeLocPin(page.id, shape.id, nextWidth, nextHeight) : undefined,
+    size: { width, height },
+  };
+}
+
+export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, selection: VsdxShapeSelection): ModelPoint[] | null {
+  const placement = findShapePlacement(page.shapes, selection.shapeId);
+  if (!placement) return null;
+  const start: DragStart = {
+    canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false,
+    ...shapeDragStart(page, placement.shape, frame),
   };
   return previewOutline(start, { x: 0, y: 0 }, frame.paintTransform);
 }
 
-export function collectDiagnostics(frame: PageDisplayList): TextDiagnostic[] { const result: TextDiagnostic[] = []; const work = frame.primitives.map((primitive) => ({ primitive, depth: 0 })); while (work.length) { const current = work.pop(); if (!current || current.depth >= 256) continue; if (current.primitive.kind === 'textBox') for (const paragraph of current.primitive.paragraphs) for (const run of paragraph.runs) result.push(...run.diagnostics); if (current.primitive.kind === 'group') for (const primitive of current.primitive.primitives) work.push({ primitive, depth: current.depth + 1 }); } return result; }
+export function collectDiagnostics(frame: PageDisplayList): TextDiagnostic[] { const result: TextDiagnostic[] = []; const work = frame.primitives.map((primitive) => ({ primitive, depth: 0 })); while (work.length) { const current = work.pop(); if (!current || current.depth >= 256) continue; if (current.primitive.kind === 'shape') result.push(...(current.primitive.diagnostics ?? [])); if (current.primitive.kind === 'textBox') for (const paragraph of current.primitive.paragraphs) for (const run of paragraph.runs) result.push(...(run.diagnostics ?? [])); if (current.primitive.kind === 'group') for (const primitive of current.primitive.primitives) work.push({ primitive, depth: current.depth + 1 }); } return result; }
 /** Latest ribbon commands for the canvas keyboard layer, which lives outside the provider. */
 function RibbonCommandsBridge({ target }: { target: { current: RibbonCommands | null } }) {
   const commands = useRibbonCommands();

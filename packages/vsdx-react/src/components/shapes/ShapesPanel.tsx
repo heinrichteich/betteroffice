@@ -104,7 +104,7 @@ export function ShapesPanel({ shapes, collapsed, onToggleCollapsed, onInsert, t,
                           tabIndex={index === activeIndex ? 0 : -1}
                           aria-label={t(shape.nameKey)}
                           draggable
-                          onDragStart={(event: DragEvent<HTMLButtonElement>) => { event.dataTransfer.setData(STENCIL_DRAG_MIME, shape.id); event.dataTransfer.setData('text/plain', shape.id); event.dataTransfer.effectAllowed = 'copy'; }}
+                          onDragStart={(event: DragEvent<HTMLButtonElement>) => { event.dataTransfer.setData(STENCIL_DRAG_MIME, shape.id); event.dataTransfer.effectAllowed = 'copy'; }}
                           onFocus={() => setFocusIndex(index)}
                           onClick={() => onInsert(shape)}
                           onKeyDown={(event) => moveFocus(event, index)}
