@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
 import { canvasPointerPosition, inchFormula, resolveDragGeometry, stillSelectable } from './VsdxEditor';
+import { previewOutline } from './interactions';
 
 const frame: PageDisplayList = {
   contractVersion: 4,
@@ -80,4 +81,29 @@ test('resizes along the rotated shape axes', () => {
   const geometry = resolveDragGeometry({ canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: true, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, angle: Math.PI / 2 }, { x: -2, y: 3 });
   expect(geometry.width).toBeCloseTo(7);
   expect(geometry.height).toBeCloseTo(7);
+});
+
+test('preview outline and commit geometry agree for the same pointer position', () => {
+  const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 3, y: 3 }, resize: false, pin: { x: 5, y: 2 }, size: { width: 2, height: 1 } };
+  const release = { x: 4, y: 4 };
+  const geometry = resolveDragGeometry(start, release);
+  const corners = previewOutline(start, release, identity);
+  expect(corners).toEqual([{ x: 5, y: 2.5 }, { x: 7, y: 2.5 }, { x: 7, y: 3.5 }, { x: 5, y: 3.5 }]);
+  const centre = { x: (corners[0].x + corners[2].x) / 2, y: (corners[0].y + corners[2].y) / 2 };
+  expect(centre.x).toBeCloseTo(geometry.x, 10); expect(centre.y).toBeCloseTo(geometry.y, 10);
+  expect(Math.abs(corners[1].x - corners[0].x)).toBeCloseTo(geometry.width, 10);
+  expect(Math.abs(corners[2].y - corners[1].y)).toBeCloseTo(geometry.height, 10);
+  const rotated = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, angle: Math.PI / 2 };
+  const rotatedGeometry = resolveDragGeometry(rotated, { x: 0, y: 0 });
+  const rotatedCorners = previewOutline(rotated, { x: 0, y: 0 }, identity);
+  const rotatedCentre = { x: (rotatedCorners[0].x + rotatedCorners[2].x) / 2, y: (rotatedCorners[0].y + rotatedCorners[2].y) / 2 };
+  expect(rotatedCentre.x).toBeCloseTo(rotatedGeometry.x, 10); expect(rotatedCentre.y).toBeCloseTo(rotatedGeometry.y, 10);
+  const grouped = { canvas: { x: 0, y: 0 }, model: { x: 10, y: 20 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, parentTransforms: [{ a: 0, b: 2, c: -2, d: 0, e: 10, f: 20 }] };
+  const groupedGeometry = resolveDragGeometry(grouped, { x: 8, y: 24 });
+  const groupedCorners = previewOutline(grouped, { x: 8, y: 24 }, identity);
+  const groupedCentre = { x: (groupedCorners[0].x + groupedCorners[2].x) / 2, y: (groupedCorners[0].y + groupedCorners[2].y) / 2 };
+  const forward = (point: { x: number; y: number }) => ({ x: 0 * point.x + -2 * point.y + 10, y: 2 * point.x + 0 * point.y + 20 });
+  const expectedCentre = forward({ x: groupedGeometry.x, y: groupedGeometry.y });
+  expect(groupedCentre.x).toBeCloseTo(expectedCentre.x, 10); expect(groupedCentre.y).toBeCloseTo(expectedCentre.y, 10);
 });

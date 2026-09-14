@@ -10,6 +10,10 @@ import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
 import { StatusBar, clampZoom } from './components/statusbar';
+import { paintDragPreview, passedDragThreshold, previewOutline, resolveDragGeometry } from './interactions';
+import type { DragStart } from './interactions';
+export { resolveDragGeometry };
+export type { DragStart };
 
 export interface VsdxShapeSelection { pageId: string; shapeId: string; hit: HitTestResult; }
 export interface VsdxEditorApi { handle: DiagramHandle; refresh: () => void; }
@@ -70,6 +74,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
   const pointerRef = useRef<DragStart | null>(null);
+  const dragPreviewRef = useRef<ModelPoint | null>(null);
+  const previewFrameRef = useRef<number | null>(null);
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
   const [loading, setLoading] = useState(Boolean(file));
   onReadyRef.current = onReady;
   onChangeRef.current = onChange;
@@ -186,12 +194,25 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (!canvas || !frame) return;
     const context = canvas.getContext('2d'); if (!context) return;
     const dpr = window.devicePixelRatio || 1; sizeCanvasForPage(canvas, frame, dpr, zoom); context.clearRect(0, 0, canvas.width, canvas.height);
+    const start = pointerRef.current; const release = dragPreviewRef.current;
+    if (start && release) {
+      try { paintDragPreview(context, previewOutline(start, release, frame.paintTransform), dpr, zoom); } catch { void 0; }
+    }
   }, [model.frame, selection, zoom]);
+
+  useEffect(() => () => { if (previewFrameRef.current !== null) cancelAnimationFrame(previewFrameRef.current); }, []);
+
+  const clearDragPreview = () => {
+    if (previewFrameRef.current !== null) { cancelAnimationFrame(previewFrameRef.current); previewFrameRef.current = null; }
+    dragPreviewRef.current = null;
+    const overlay = overlayCanvasRef.current;
+    if (overlay) { const context = overlay.getContext('2d'); if (context) context.clearRect(0, 0, overlay.width, overlay.height); }
+  };
 
   const onPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
     if (!handle || !frame || !page) return;
-    pointerRef.current = null;
+    pointerRef.current = null; dragPreviewRef.current = null;
     try {
       const point = canvasPointerPosition(event, frame);
       handle.layoutPage(model.pageIndex);
@@ -200,6 +221,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       const placement = hit ? findShapePlacement(page.shapes, hit.shapeId) : null;
       pointerRef.current = hit && placement ? {
         ...point,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
         parentTransforms: shapeParentTransforms(frame.primitives, `${page.sourcePartPath}:${placement.shape.sourceId}`) ?? [],
         angle: numericCellValue(placement.shape, 'Angle', 0),
         flipX: numericCellValue(placement.shape, 'FlipX', 0) === 1,
@@ -211,19 +235,47 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch (value) { reportError(value); }
   };
+  const onPointerMove = (event: PointerEvent<HTMLCanvasElement>) => {
+    const start = pointerRef.current;
+    if (!start) return;
+    if (start.pointerId !== undefined && start.pointerId !== event.pointerId) return;
+    if (start.startX !== undefined && start.startY !== undefined && !passedDragThreshold(start.startX, start.startY, event.clientX, event.clientY)) return;
+    const frame = modelRef.current.frame;
+    if (!frame) return;
+    try {
+      const point = canvasPointerPosition(event, frame);
+      dragPreviewRef.current = point.model;
+      if (previewFrameRef.current !== null) return;
+      previewFrameRef.current = requestAnimationFrame(() => {
+        previewFrameRef.current = null;
+        const liveFrame = modelRef.current.frame; const liveStart = pointerRef.current; const release = dragPreviewRef.current; const overlay = overlayCanvasRef.current;
+        if (!liveFrame || !liveStart || !release || !overlay) return;
+        const context = overlay.getContext('2d'); if (!context) return;
+        try {
+          context.clearRect(0, 0, overlay.width, overlay.height);
+          paintDragPreview(context, previewOutline(liveStart, release, liveFrame.paintTransform), window.devicePixelRatio || 1, zoomRef.current);
+        } catch (value) { reportError(value); }
+      });
+    } catch (value) { reportError(value); }
+  };
   const onPointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
     const pointer = pointerRef.current; pointerRef.current = null;
+    const hadPreview = dragPreviewRef.current !== null;
+    clearDragPreview();
     const handle = handleRef.current; const selected = selection; const frame = model.frame;
     if (!pointer || !handle || !selected || !frame) return;
     try {
       const point = canvasPointerPosition(event, frame);
-      if (Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) return;
+      if (!hadPreview && pointer.startX !== undefined && pointer.startY !== undefined && !passedDragThreshold(pointer.startX, pointer.startY, event.clientX, event.clientY)) return;
+      if (!hadPreview && Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) return;
       const geometry = resolveDragGeometry(pointer, point.model);
       if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
       else handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
       refresh(undefined, true);
     } catch (value) { reportError(value); }
   };
+  const onPointerCancel = () => { pointerRef.current = null; clearDragPreview(); };
+  const onLostPointerCapture = () => { pointerRef.current = null; clearDragPreview(); };
   const insertShape = useCallback((shape: StandardShape) => {
     const handle = handleRef.current; const current = modelRef.current; const frame = current.frame;
     const page = current.snapshot?.pages[current.pageIndex];
@@ -258,7 +310,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
       <div style={styles.canvasFrame}>
-        <canvas ref={mainCanvasRef} onPointerDown={onPointerDown} onPointerUp={onPointerUp} onPointerCancel={() => { pointerRef.current = null; }} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
+        <canvas ref={mainCanvasRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
         <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
         {selection && <output style={styles.selection}>{t('shapes.selected', { name: selection.shapeId })}</output>}
       </div>
@@ -272,7 +324,6 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   </div>;
 }
 
-const MIN_SHAPE_INCHES = 0.01;
 const WORKSPACE_MARGIN = 32;
 
 export function canvasPointerPosition(event: PointerEvent<HTMLCanvasElement>, frame: PageDisplayList): { canvas: ModelPoint; model: ModelPoint } {
@@ -288,23 +339,6 @@ export function inchFormula(value: number): string {
   if (!Number.isFinite(value)) throw new Error('Shape geometry must be finite.');
   const rounded = Number(value.toFixed(6));
   return String(Object.is(rounded, -0) ? 0 : rounded);
-}
-
-export interface DragStart { canvas: ModelPoint; model: ModelPoint; resize: boolean; pin: ModelPoint; size: { width: number; height: number }; parentTransforms?: readonly Affine[]; angle?: number; flipX?: boolean; flipY?: boolean; }
-
-export function resolveDragGeometry(start: DragStart, release: ModelPoint): { x: number; y: number; width: number; height: number } {
-  const toParent = (point: ModelPoint) => (start.parentTransforms ?? []).reduce((local, transform) => canvasPointToModel(transform, local.x, local.y), point);
-  const origin = toParent(start.model);
-  const end = toParent(release);
-  const deltaX = end.x - origin.x;
-  const deltaY = end.y - origin.y;
-  if (start.resize) {
-    const cos = Math.cos(start.angle ?? 0), sin = Math.sin(start.angle ?? 0);
-    const widthDelta = (cos * deltaX + sin * deltaY) * (start.flipX ? -1 : 1);
-    const heightDelta = (-sin * deltaX + cos * deltaY) * (start.flipY ? -1 : 1);
-    return { x: start.pin.x, y: start.pin.y, width: Math.max(MIN_SHAPE_INCHES, start.size.width + widthDelta), height: Math.max(MIN_SHAPE_INCHES, start.size.height + heightDelta) };
-  }
-  return { x: start.pin.x + deltaX, y: start.pin.y + deltaY, width: start.size.width, height: start.size.height };
 }
 
 export function shapeParentTransforms(primitives: readonly PagePrimitive[], id: string, depth = 0): Affine[] | null {
