@@ -12,6 +12,8 @@ use crate::{
 
 const MAX_INHERITANCE_DEPTH: usize = 64;
 const GEOMETRY_SECTION_CONTROLS: [&str; 3] = ["NoFill", "NoLine", "NoShow"];
+/// Documented Geometry cells that steer editing gestures, not rendering.
+const GEOMETRY_SECTION_EDITING_CELLS: [&str; 2] = ["NoSnap", "NoQuickDrag"];
 
 pub struct Resolver<'a> {
     package: &'a VsdxPackage,
@@ -615,7 +617,7 @@ fn resolve_geometry_controls(
                     Some(value) => active[index] = value,
                     None => unsupported.push(control.to_owned()),
                 }
-            } else {
+            } else if !GEOMETRY_SECTION_EDITING_CELLS.contains(&control) {
                 unsupported.push(control.to_owned());
             }
             break;

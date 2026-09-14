@@ -370,6 +370,27 @@ fn unsupported_geometry_emits_one_placeholder_without_partial_paths() {
 }
 
 #[test]
+fn geometry_editing_cells_do_not_suppress_drawing() {
+    for control in ["NoSnap", "NoQuickDrag"] {
+        let list = render(vec![paint_control_shape(
+            1,
+            vec![geometry_section(None, Some((control, "1")))],
+        )]);
+        assert!(
+            matches!(
+                list.primitives.as_slice(),
+                [Primitive::Shape {
+                    fill: Some(_),
+                    stroke: Some(_),
+                    ..
+                }]
+            ),
+            "{control}"
+        );
+    }
+}
+
+#[test]
 fn geometry_unknown_control_reaches_the_placeholder() {
     let list = render(vec![paint_control_shape(
         1,

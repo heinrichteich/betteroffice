@@ -2140,6 +2140,34 @@ fn geometry_controls_evaluate_formulas_before_cached_values() {
 }
 
 #[test]
+fn geometry_editing_cells_are_not_unsupported_controls() {
+    for control in ["NoSnap", "NoQuickDrag"] {
+        let mut geometry = section("Geometry", Vec::new());
+        geometry
+            .children
+            .push(SectionChild::Unknown(vsdx_parse::OpaqueXml {
+                name: "Cell".into(),
+                attributes: vec![("N".into(), control.into()), ("V".into(), "1".into())],
+                children: vec![],
+            }));
+        let mut package = package();
+        add_page(&mut package, shape(10, vec![ShapeChild::Section(geometry)]));
+        let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+        let section = resolved
+            .sections
+            .values()
+            .find(|section| section.name == "Geometry")
+            .unwrap();
+        assert!(section.unsupported_controls.is_empty(), "{control}");
+        assert_eq!(
+            section.controls,
+            crate::GeometrySectionControls::default(),
+            "{control}"
+        );
+    }
+}
+
+#[test]
 fn geometry_unknown_controls_report_issues_after_inheritance() {
     let mut geometry = section("Geometry", Vec::new());
     geometry
