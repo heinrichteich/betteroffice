@@ -81,7 +81,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const pointerRef = useRef<DragStart | null>(null);
   const dragPreviewRef = useRef<ModelPoint | null>(null);
   const previewFrameRef = useRef<number | null>(null);
-  const insertCascadeRef = useRef<{ pageId: string; count: number }>({ pageId: '', count: 0 });
+  const insertCascadeRef = useRef<Map<string, number>>(new Map());
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
   const [loading, setLoading] = useState(Boolean(file));
@@ -483,8 +483,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const current = modelRef.current; const frame = current.frame;
     const page = current.snapshot?.pages[current.pageIndex];
     if (!frame || !page) return;
-    const cascade = insertCascadeRef.current.pageId === page.id ? insertCascadeRef.current.count : 0;
-    insertCascadeRef.current = { pageId: page.id, count: cascade + 1 };
+    const cascade = insertCascadeRef.current.get(page.id) ?? 0;
+    insertCascadeRef.current.set(page.id, cascade + 1);
     insertShapeAt(shape, centreInsertPoint(canvasPointToModel(frame.paintTransform, frame.width / 2, frame.height / 2), cascade));
   }, [insertShapeAt]);
   const onCanvasDragOver = (event: DragEvent<HTMLDivElement>) => {
