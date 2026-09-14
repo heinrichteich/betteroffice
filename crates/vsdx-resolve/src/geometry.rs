@@ -65,6 +65,10 @@ pub fn realize_geometry(section: &ResolvedSection, width: f64, height: f64) -> R
             }
             (values.len() == names.len()).then_some(values)
         };
+        if ty == "Close" {
+            push_checked(&mut out, GeometryPathCommand::Close, ty);
+            continue;
+        }
         let xy = match (value("X"), value("Y")) {
             (Some(x), Some(y)) => (x, y),
             _ => {
@@ -727,6 +731,46 @@ fn cubic_arc_segment(
 
 #[cfg(test)]
 mod tests {
+    /// A `Close` row is standard Visio geometry and every shape the editor inserts ends with one.
+    /// Without an arm it fell through to `UnsupportedRowType`, so the path never closed: the stroke
+    /// pass left it open and the shape rendered a side short.
+    #[test]
+    fn close_row_emits_a_close_command_and_is_not_an_issue() {
+        let keyed = |key: &str, ty: &str, cells: Vec<Cell>| {
+            (
+                key.to_owned(),
+                ResolvedRow {
+                    key: key.into(),
+                    ..resolved_row(ty, cells)
+                },
+            )
+        };
+        let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                keyed("IX:1", "MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                keyed("IX:2", "LineTo", vec![cell("X", "1"), cell("Y", "0")]),
+                keyed("IX:3", "LineTo", vec![cell("X", "1"), cell("Y", "1")]),
+                keyed("IX:4", "Close", vec![cell("NoShow", "0")]),
+            ]),
+        };
+        let realized = realize_geometry(&section, 1.0, 1.0);
+        assert!(
+            realized.issues.is_empty(),
+            "a Close row must not be reported unsupported: {:?}",
+            realized.issues
+        );
+        assert_eq!(
+            realized.commands.last(),
+            Some(&GeometryPathCommand::Close),
+            "expected the path to close"
+        );
+    }
+
     #[test]
     fn geometry_realizes_two_digit_rows_in_numeric_order() {
         let keyed = |key: &str, ty: &str, cells: Vec<Cell>| {
