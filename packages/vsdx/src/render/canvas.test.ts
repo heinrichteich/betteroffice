@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { canvasPointToModel, modelPointToCanvas, paintPage } from './canvas';
+import { canvasPointToModel, effectiveDprForSurface, modelPointToCanvas, paintPage, sizeCanvasForSurface } from './canvas';
 import type { PageDisplayList } from '../types';
 
 function context(log: string[]): CanvasRenderingContext2D {
@@ -60,6 +60,37 @@ test('replays positioned text runs at their line caret positions', async () => {
 
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 768 };
 
+test('surface sizing covers the scrollable area and clamps the backing store', () => {
+  const canvas = { width: 0, height: 0, style: { width: '', height: '' } };
+  const effective = sizeCanvasForSurface(canvas, 4816, 5056, 1);
+  expect(effective).toBe(1);
+  expect(canvas.style.width).toBe('4816px');
+  expect(canvas.style.height).toBe('5056px');
+  expect(canvas.width).toBe(4816);
+  expect(canvas.height).toBe(5056);
+  expect(effectiveDprForSurface(4816, 5056, 2)).toBeLessThan(2);
+  const clamped = { width: 0, height: 0, style: { width: '', height: '' } };
+  const clampedDpr = sizeCanvasForSurface(clamped, 4816, 5056, 2);
+  expect(clamped.width).toBeLessThanOrEqual(8192);
+  expect(clamped.height).toBeLessThanOrEqual(8192);
+  expect(clamped.width * clamped.height).toBeLessThanOrEqual(33554432 + 1);
+  expect(clamped.style.width).toBe('4816px');
+  expect(clampedDpr).toBeLessThan(2);
+});
+
+test('surface paint translates page content by the pad origin', async () => {
+  const log: string[] = [];
+  const list: PageDisplayList = {
+    contractVersion: 4, width: 100, height: 100, paintTransform: transform,
+    primitives: [
+      { kind: 'shape', id: 'early', zOrder: 1, path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 1, y: 1 }], fill: { kind: 'solid', color: '#000' } },
+    ],
+  };
+  await paintPage(context(log), list, 1, 1, { origin: { x: 2000, y: 2000 }, surface: { width: 4100, height: 4100 } });
+  expect(log).toContain('setTransform:1,0,0,1,0,0');
+  expect(log).toContain('clearRect:0,0,4100,4100');
+  expect(log).toContain('setTransform:1,0,0,1,2000,2000');
+});
 test('canvasPointToModel inverts the page paint transform onto Y-up inches', () => {
   expect(canvasPointToModel(pagePaintTransform, 0, 768)).toEqual({ x: 0, y: 0 });
   expect(canvasPointToModel(pagePaintTransform, 0, 0)).toEqual({ x: 0, y: 8 });

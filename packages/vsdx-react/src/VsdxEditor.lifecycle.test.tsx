@@ -834,7 +834,7 @@ test('the overlay paints the selection frame at a zoom other than 1', async () =
     calls.length = 0;
     fireEvent.click(view.getByRole('button', { name: 'Zoom in' }));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
-    expect(calls.some((entry) => entry.startsWith('setTransform:1.5,0,0,1.5,0,0'))).toBe(true);
+    expect(calls.some((entry) => entry.startsWith('setTransform:1.5,0,0,1.5,2000,2000'))).toBe(true);
     expect(calls.some((entry) => entry.startsWith('fillRect:'))).toBe(false);
     expect(calls.some((entry) => entry.startsWith('strokeRect:'))).toBe(false);
     expect(calls.some((entry) => entry.startsWith('arc:'))).toBe(true);

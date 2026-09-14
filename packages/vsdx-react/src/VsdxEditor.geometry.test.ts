@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { anchoredZoomScroll, canvasPointerPosition, centredPageScroll, inchFormula, resolveDragGeometry, selectionCorners, stillSelectable, surfaceSize, zoomForWheelDelta } from './VsdxEditor';
+import { anchoredZoomScroll, canvasPointerPosition, centredPageScroll, inchFormula, pageBreakLines, resolveDragGeometry, selectionCorners, stillSelectable, surfaceDpr, surfaceSize, zoomForWheelDelta } from './VsdxEditor';
 import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
 
 const frame: PageDisplayList = {
@@ -12,11 +12,11 @@ const frame: PageDisplayList = {
   primitives: [],
 };
 
-function pointerAt(clientX: number, clientY: number, cssScale = 1): PointerEvent<HTMLCanvasElement> {
+function pointerAt(clientX: number, clientY: number, zoom = 1, pad = 0): PointerEvent<HTMLCanvasElement> {
   return {
     clientX,
     clientY,
-    currentTarget: { getBoundingClientRect: () => ({ left: 0, top: 0, width: frame.width * cssScale, height: frame.height * cssScale }) },
+    currentTarget: { getBoundingClientRect: () => ({ left: 0, top: 0, width: frame.width * zoom + pad * 2, height: frame.height * zoom + pad * 2 }) },
   } as unknown as PointerEvent<HTMLCanvasElement>;
 }
 
@@ -31,8 +31,21 @@ test('maps a canvas pointer onto Y-up inches for the save projection', () => {
 });
 
 test('keeps the pointer mapping stable while the canvas is zoomed', () => {
-  const zoomed = canvasPointerPosition(pointerAt(384, 1728, 2), frame);
+  const zoomed = canvasPointerPosition(pointerAt(384, 1728, 2), frame, 2);
   expect(zoomed.model).toEqual({ x: 2, y: 2 });
+});
+
+test('measures the surface pad from the canvas element so the page origin sits inside the drawable surface', () => {
+  const pad = 2000;
+  const pageOrigin = canvasPointerPosition(pointerAt(pad, pad, 1, pad), frame, 1);
+  expect(pageOrigin.canvas).toEqual({ x: 0, y: 0 });
+  const outside = canvasPointerPosition(pointerAt(pad - 192, pad - 192, 1, pad), frame, 1);
+  expect(outside.canvas).toEqual({ x: -192, y: -192 });
+  expect(outside.model.x).toBeCloseTo(-2, 8);
+  const zoomedOutside = canvasPointerPosition(pointerAt(pad - 96, pad - 96, 0.5, pad), frame, 0.5);
+  expect(zoomedOutside.canvas).toEqual({ x: -192, y: -192 });
+  const explicit = canvasPointerPosition(pointerAt(pad, pad, 1, pad), frame, 1, pad);
+  expect(explicit.canvas).toEqual({ x: 0, y: 0 });
 });
 
 test('formats inch formulas without exponent noise or negative zero', () => {
@@ -205,6 +218,48 @@ test('a pointer-anchored zoom keeps the canvas point under the cursor', () => {
     expect((cssX / oldZoom) * newZoom - (target.left - 2000)).toBeCloseTo(cssX, 8);
     expect((cssY / oldZoom) * newZoom - (target.top - 2000)).toBeCloseTo(cssY, 8);
   }
+});
+
+test('a pointer-anchored zoom on the surface keeps the page point under the cursor', () => {
+  const pad = 2000;
+  for (const [oldZoom, newZoom] of [[1, 1.5], [1.5, 1], [1, 0.5], [0.5, 1]] as const) {
+    const cssX = pad + 192 * oldZoom;
+    const cssY = pad + 192 * oldZoom;
+    const target = anchoredZoomScroll(2000, 2000, cssX, cssY, oldZoom, newZoom, pad);
+    expect(((cssX - pad) / oldZoom) * newZoom + pad - (target.left - 2000)).toBeCloseTo(cssX, 8);
+    expect(((cssY - pad) / oldZoom) * newZoom + pad - (target.top - 2000)).toBeCloseTo(cssY, 8);
+  }
+});
+
+test('page breaks tile the surface in page-sized cells aligned to the page origin', () => {
+  const pad = 2000;
+  const zoom = 1;
+  const surface = surfaceSize(frame.width, frame.height, zoom, pad);
+  const lines = pageBreakLines(frame.width, frame.height, zoom, pad, surface.width, surface.height);
+  expect(lines.vertical).toContain(pad);
+  expect(lines.horizontal).toContain(pad);
+  expect(lines.vertical).toContain(pad + frame.width);
+  expect(lines.horizontal).toContain(pad + frame.height);
+  for (let i = 1; i < lines.vertical.length; i += 1) expect(lines.vertical[i] - lines.vertical[i - 1]).toBeCloseTo(frame.width, 8);
+  for (let i = 1; i < lines.horizontal.length; i += 1) expect(lines.horizontal[i] - lines.horizontal[i - 1]).toBeCloseTo(frame.height, 8);
+  expect(lines.vertical[0]).toBeLessThan(pad);
+  expect(lines.vertical[lines.vertical.length - 1]).toBeGreaterThan(pad);
+  expect(lines.horizontal[0]).toBeLessThan(pad);
+  expect(lines.horizontal[lines.horizontal.length - 1]).toBeGreaterThan(pad);
+  const zoomed = pageBreakLines(frame.width, frame.height, 1.5, pad, surface.width, surface.height);
+  expect(zoomed.vertical).toContain(pad);
+  expect(zoomed.horizontal).toContain(pad);
+});
+
+test('the surface DPR clamps large backing stores instead of exceeding browser limits', () => {
+  expect(surfaceDpr(frame, 1, 1)).toBe(1);
+  const clamped = surfaceDpr(frame, 1, 2);
+  expect(clamped).toBeLessThan(2);
+  expect(clamped).toBeGreaterThanOrEqual(1 / 4);
+  const surface = surfaceSize(frame.width, frame.height, 1);
+  expect(surface.width * clamped).toBeLessThanOrEqual(8192 + 1);
+  expect(surface.height * clamped).toBeLessThanOrEqual(8192 + 1);
+  expect(surface.width * surface.height * clamped * clamped).toBeLessThanOrEqual(33554432 + 1);
 });
 
 test('ctrl+wheel steps the zoom multiplicatively in both directions', () => {

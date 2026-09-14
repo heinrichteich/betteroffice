@@ -180,11 +180,11 @@ export const previewOutline = (start: DragStart, release: ModelPoint, paintTrans
     return modelPointToCanvas(paintTransform, page.x, page.y);
   });
 };
-export const paintDragPreview = (context: CanvasRenderingContext2D, corners: readonly ModelPoint[], dpr: number, scale: number): void => {
+export const paintDragPreview = (context: CanvasRenderingContext2D, corners: readonly ModelPoint[], dpr: number, scale: number, origin?: ModelPoint): void => {
   if (!corners.length) return;
   context.save();
   try {
-    context.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
+    context.setTransform(dpr * scale, 0, 0, dpr * scale, (origin?.x ?? 0) * dpr, (origin?.y ?? 0) * dpr);
     context.strokeStyle = '#0f6cbd';
     context.lineWidth = 1;
     context.setLineDash([4, 4]);
@@ -215,7 +215,7 @@ export const rotationGripPosition = (corners: readonly ModelPoint[], zoom: numbe
   const offset = SELECTION_ROTATE_OFFSET_CSS / Math.max(zoom, 1e-6);
   return { x: topCenter.x + (outX / length) * offset, y: topCenter.y + (outY / length) * offset };
 };
-export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: readonly ModelPoint[], dpr: number, scale: number, resizeHandles: readonly ResizeHandle[] = RESIZE_HANDLES): void => {
+export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: readonly ModelPoint[], dpr: number, scale: number, resizeHandles: readonly ResizeHandle[] = RESIZE_HANDLES, origin?: ModelPoint): void => {
   if (corners.length < 4) return;
   const zoom = Number.isFinite(scale) && scale > 0 ? scale : 1;
   const handleRadius = SELECTION_HANDLE_CSS / zoom / 2;
@@ -224,7 +224,7 @@ export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: 
   const { handles, topCenter } = selectionHandlePositions(corners);
   context.save();
   try {
-    context.setTransform(dpr * zoom, 0, 0, dpr * zoom, 0, 0);
+    context.setTransform(dpr * zoom, 0, 0, dpr * zoom, (origin?.x ?? 0) * dpr, (origin?.y ?? 0) * dpr);
     context.strokeStyle = SELECTION_STROKE;
     context.lineWidth = 1 / zoom;
     context.setLineDash([]);

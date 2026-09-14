@@ -90,6 +90,21 @@ test('paintDragPreview strokes a dashed brand outline and restores state', () =>
   expect(calls.some((entry) => entry.startsWith('stroke:'))).toBe(true);
   expect(calls[calls.length - 1].startsWith('restore:')).toBe(true);
 });
+test('overlay paint translates page corners by the surface origin', () => {
+  const calls: string[] = [];
+  const context = new Proxy({ canvas: {} }, {
+    get(target, key) {
+      if (key in target) return Reflect.get(target, key);
+      return (...args: unknown[]) => { calls.push(`${String(key)}:${args.join(',')}`); };
+    },
+    set(target, key, value) { calls.push(`${String(key)}=${String(value)}`); Reflect.set(target, key, value); return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  paintDragPreview(context, [{ x: 1, y: 2 }, { x: 3, y: 2 }, { x: 3, y: 4 }, { x: 1, y: 4 }], 1, 1, { x: 2000, y: 2000 });
+  expect(calls).toContain('setTransform:1,0,0,1,2000,2000');
+  calls.length = 0;
+  paintSelectionFrame(context, [{ x: 10, y: 40 }, { x: 30, y: 40 }, { x: 30, y: 20 }, { x: 10, y: 20 }], 1, 1, RESIZE_HANDLES, { x: 2000, y: 2000 });
+  expect(calls).toContain('setTransform:1,0,0,1,2000,2000');
+});
 test('resize vocabulary maps handles to cursors and bounds', () => {
   expect(RESIZE_HANDLES).toEqual(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']);
   const bounds = { x: 100, y: 200, width: 300, height: 100 };

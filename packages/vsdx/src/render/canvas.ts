@@ -1,11 +1,33 @@
 import type { Affine, PageDisplayList, PagePrimitive, Paint, PlaceholderPrimitive, ShapePrimitive, Stroke, TextBoxPrimitive, TextRun } from '../types';
 
 export type CanvasImageResolver = (assetId: string) => CanvasImageSource | Promise<CanvasImageSource | null> | null;
-export interface PaintPageOptions { resolveImage?: CanvasImageResolver; signal?: AbortSignal; }
+export interface PaintPageOptions { resolveImage?: CanvasImageResolver; signal?: AbortSignal; origin?: ModelPoint; surface?: { width: number; height: number }; }
 export interface PageCanvasLike { width: number; height: number; style: { width: string; height: string }; }
 export function sizeCanvasForPage(canvas: PageCanvasLike, list: Pick<PageDisplayList, 'width' | 'height'>, dpr: number, scale = 1): void {
   canvas.width = Math.round(list.width * scale * dpr); canvas.height = Math.round(list.height * scale * dpr);
   canvas.style.width = `${list.width * scale}px`; canvas.style.height = `${list.height * scale}px`;
+}
+/** Largest permitted canvas side in backing pixels. */
+export const MAX_CANVAS_DIMENSION = 8192;
+/** Largest permitted canvas area in backing pixels. */
+export const MAX_CANVAS_AREA = 33554432;
+/** Clamped device pixel ratio keeping a CSS surface within browser canvas limits. */
+export function effectiveDprForSurface(cssWidth: number, cssHeight: number, dpr: number): number {
+  const requested = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  if (!(cssWidth > 0) || !(cssHeight > 0)) return Math.min(requested, 1);
+  const byWidth = MAX_CANVAS_DIMENSION / cssWidth;
+  const byHeight = MAX_CANVAS_DIMENSION / cssHeight;
+  const byArea = Math.sqrt(MAX_CANVAS_AREA / (cssWidth * cssHeight));
+  return Math.max(1 / 4, Math.min(requested, byWidth, byHeight, byArea));
+}
+/** Size a canvas to a CSS surface, clamping its backing store. Returns the effective DPR. */
+export function sizeCanvasForSurface(canvas: PageCanvasLike, surfaceWidth: number, surfaceHeight: number, dpr: number): number {
+  const effective = effectiveDprForSurface(surfaceWidth, surfaceHeight, dpr);
+  canvas.width = Math.max(1, Math.round(surfaceWidth * effective));
+  canvas.height = Math.max(1, Math.round(surfaceHeight * effective));
+  canvas.style.width = `${surfaceWidth}px`;
+  canvas.style.height = `${surfaceHeight}px`;
+  return effective;
 }
 export interface ModelPoint { x: number; y: number; }
 export function canvasPointToModel(paintTransform: Affine, x: number, y: number, scale = 1): ModelPoint {
@@ -38,8 +60,18 @@ export async function paintPage(ctx: CanvasRenderingContext2D, list: PageDisplay
   collect(list.primitives, 0);
   await Promise.all(pending.values());
   if (options.signal?.aborted || paintRequests.get(ctx) !== request) return;
+  const originX = options.origin?.x ?? 0;
+  const originY = options.origin?.y ?? 0;
+  const surface = options.surface;
   ctx.save();
-  try { ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0); ctx.clearRect(0, 0, list.width, list.height); for (const primitive of [...list.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, primitive, list.paintTransform, images); }
+  try {
+    if (surface && (originX !== 0 || originY !== 0)) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, surface.width * dpr, surface.height * dpr);
+      ctx.setTransform(dpr * scale, 0, 0, dpr * scale, originX * dpr, originY * dpr);
+    } else { ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0); ctx.clearRect(0, 0, list.width, list.height); }
+    for (const primitive of [...list.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, primitive, list.paintTransform, images);
+  }
   finally { ctx.restore(); }
 }
 function paintPrimitive(ctx: CanvasRenderingContext2D, primitive: PagePrimitive, paintTransform: Affine, images: Map<string, CanvasImageSource | null>): void {
