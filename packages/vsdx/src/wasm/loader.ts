@@ -5,6 +5,7 @@ import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, Diagra
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; initialUpdate?: Uint8Array; }
 export interface CollaborationResync { update: Uint8Array; }
+export interface ShapeMove { pageId: string; shapeId: string; xFormula: string; yFormula: string; }
 export interface DiagramHandle {
   readonly clientId: number;
   snapshot(): DiagramSnapshot;
@@ -14,7 +15,9 @@ export interface DiagramHandle {
   mediaBytes(assetId: string): Uint8Array;
   setCellFormula(pageId: string, shapeId: string, locator: CellLocator, formula: string): CellFormulaReceipt;
   moveShape(pageId: string, shapeId: string, xFormula: string, yFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
+  moveShapes(moves: ReadonlyArray<ShapeMove>): Array<[CellFormulaReceipt, CellFormulaReceipt]>;
   resizeShape(pageId: string, shapeId: string, widthFormula: string, heightFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
+  placeShape(pageId: string, shapeId: string, widthFormula: string, heightFormula: string, xFormula: string, yFormula: string): [CellFormulaReceipt, CellFormulaReceipt, CellFormulaReceipt, CellFormulaReceipt];
   locPinAtSize(pageId: string, shapeId: string, width: number, height: number): { x: number; y: number };
   reorderShape(pageId: string, shapeId: string, toIndex: number): ShapeReceipt;
   reorderPage(pageId: string, toIndex: number): ShapeReceipt;
@@ -124,7 +127,9 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     }, mediaBytes: assetId => wasm(() => doc.mediaBytes(assetId).slice()),
     setCellFormula: (pageId, shapeId, locator, formula) => json(() => doc.setCellFormulaJson(JSON.stringify({ pageId, shapeId, locator, formula })), true),
     moveShape: (pageId, shapeId, xFormula, yFormula) => json(() => doc.moveShapeJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula })), true),
+    moveShapes: (moves) => json(() => doc.moveShapesJson(JSON.stringify({ moves: [...moves] })), true),
     resizeShape: (pageId, shapeId, widthFormula, heightFormula) => json(() => doc.resizeShapeJson(JSON.stringify({ pageId, shapeId, widthFormula, heightFormula })), true),
+    placeShape: (pageId, shapeId, widthFormula, heightFormula, xFormula, yFormula) => json(() => doc.placeShapeJson(JSON.stringify({ pageId, shapeId, widthFormula, heightFormula, xFormula, yFormula })), true),
     locPinAtSize: (pageId, shapeId, width, height) => json(() => doc.locPinAtSizeJson(JSON.stringify({ pageId, shapeId, width, height })) as string),
     reorderShape: (pageId, shapeId, toIndex) => json(() => doc.reorderShapeJson(JSON.stringify({ pageId, shapeId, toIndex })), true),
     reorderPage: (pageId, toIndex) => json(() => doc.reorderPageJson(JSON.stringify({ pageId, toIndex })), true),

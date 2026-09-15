@@ -94,6 +94,32 @@ struct ResizeShapeArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PlaceShapeArgs {
+    page_id: String,
+    shape_id: String,
+    width_formula: String,
+    height_formula: String,
+    x_formula: String,
+    y_formula: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShapeMoveArgs {
+    page_id: String,
+    shape_id: String,
+    x_formula: String,
+    y_formula: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveShapesArgs {
+    moves: Vec<ShapeMoveArgs>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LocPinAtSizeArgs {
     page_id: String,
     shape_id: String,
@@ -329,6 +355,16 @@ impl VsdxDocument {
         self.resize_shape_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = placeShapeJson)]
+    pub fn place_shape_json(&self, args: &str) -> Result<String, JsValue> {
+        self.place_shape_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = moveShapesJson)]
+    pub fn move_shapes_json(&self, args: &str) -> Result<String, JsValue> {
+        self.move_shapes_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = locPinAtSizeJson)]
     pub fn loc_pin_at_size_json(&self, args: &str) -> Result<String, JsValue> {
         self.loc_pin_at_size_json_inner(args).map_err(js_error)
@@ -512,6 +548,56 @@ impl VsdxDocument {
     fn resize_shape_json_inner(&self, args: &str) -> Result<String, String> {
         let args = parse_args_inner(args)?;
         self.resize_shape(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn place_shape(
+        &self,
+        args: PlaceShapeArgs,
+    ) -> crate::EditResult<[crate::CellFormulaReceipt; 4]> {
+        self.session.place_shape(
+            &local_context(),
+            &args.page_id,
+            &args.shape_id,
+            crate::PlaceShapeFormulas {
+                width: args.width_formula,
+                height: args.height_formula,
+                x: args.x_formula,
+                y: args.y_formula,
+            },
+        )
+    }
+
+    fn place_shape_json_inner(&self, args: &str) -> Result<String, String> {
+        let args = parse_args_inner(args)?;
+        self.place_shape(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn move_shapes(
+        &self,
+        args: MoveShapesArgs,
+    ) -> crate::EditResult<Vec<[crate::CellFormulaReceipt; 2]>> {
+        self.session.move_shapes(
+            &local_context(),
+            &args
+                .moves
+                .into_iter()
+                .map(|shape_move| crate::ShapeMove {
+                    page_id: shape_move.page_id,
+                    shape_id: shape_move.shape_id,
+                    x: shape_move.x_formula,
+                    y: shape_move.y_formula,
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn move_shapes_json_inner(&self, args: &str) -> Result<String, String> {
+        let args = parse_args_inner(args)?;
+        self.move_shapes(args)
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }
@@ -763,6 +849,59 @@ mod tests {
                 .unwrap(),
             r#"[{"pageId":"page:1","shapeId":"page:1:shape:1","cellName":"PinX","before":"1","after":"2"},{"pageId":"page:1","shapeId":"page:1:shape:1","cellName":"PinY","before":"1","after":"3"}]"#
         );
+    }
+
+    #[test]
+    fn place_shape_json_inner_places_size_and_pin() {
+        let document = document();
+        for name in ["Width", "Height", "PinX", "PinY"] {
+            add_cell(&document, name, name, "1");
+        }
+        let receipts = document
+            .place_shape_json_inner(
+                r#"{"pageId":"page:1","shapeId":"page:1:shape:1","widthFormula":"2","heightFormula":"3","xFormula":"4","yFormula":"5"}"#,
+            )
+            .unwrap();
+        assert!(receipts.contains(r#""cellName":"Width","before":"1","after":"2""#));
+        assert!(receipts.contains(r#""cellName":"PinY","before":"1","after":"5""#));
+        let snapshot = document.snapshot_json().unwrap();
+        assert!(snapshot.contains(r#""name":"Width","formula":"2""#));
+        assert!(snapshot.contains(r#""name":"PinY","formula":"5""#));
+    }
+
+    #[test]
+    fn move_shapes_json_inner_moves_every_shape_or_none() {
+        let document = document();
+        add_cell(&document, "PinX", "PinX", "1");
+        add_cell(&document, "PinY", "PinY", "1");
+        let added = document
+            .add_shape_json_inner(
+                r#"{"pageId":"page:1","draft":{"cells":[{"locator":{"cellName":"PinX"},"formula":"1"},{"locator":{"cellName":"PinY"},"formula":"1"}]}}"#,
+            )
+            .unwrap();
+        let shape_id = serde_json::from_str::<serde_json::Value>(&added).unwrap()["shapeId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let moves = format!(
+            r#"{{"moves":[{{"pageId":"page:1","shapeId":"page:1:shape:1","xFormula":"2","yFormula":"3"}},{{"pageId":"page:1","shapeId":"{shape_id}","xFormula":"4","yFormula":"5"}}]}}"#
+        );
+        document.move_shapes_json_inner(&moves).unwrap();
+        let snapshot = document.snapshot_json().unwrap();
+        assert!(snapshot.contains(r#""name":"PinY","formula":"3""#));
+        add_cell(&document, "LockMoveX", "LockMoveX", "1");
+        let retry = format!(
+            r#"{{"moves":[{{"pageId":"page:1","shapeId":"page:1:shape:1","xFormula":"6","yFormula":"7"}},{{"pageId":"page:1","shapeId":"{shape_id}","xFormula":"8","yFormula":"9"}}]}}"#
+        );
+        assert!(
+            document
+                .move_shapes_json_inner(&retry)
+                .unwrap_err()
+                .contains("LockMoveX protects this move gesture")
+        );
+        let snapshot = document.snapshot_json().unwrap();
+        assert!(snapshot.contains(r#""name":"PinX","formula":"4""#));
+        assert!(!snapshot.contains(r#""name":"PinX","formula":"8""#));
     }
 
     #[test]

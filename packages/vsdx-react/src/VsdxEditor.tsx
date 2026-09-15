@@ -1,7 +1,7 @@
 import { createT, deepMerge, diagnosticMessage, en } from '@betteroffice/vsdx-i18n';
 import type { TFunction, Translations } from '@betteroffice/vsdx-i18n';
 import { canvasPointToModel, initWasm, openDiagram, paintPage, sizeCanvasForPage } from '@betteroffice/vsdx';
-import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
+import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeMove, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
@@ -395,14 +395,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         const livePage = handle.snapshot().pages.find((page) => page.id === selected.pageId);
         const livePlacement = livePage ? findShapePlacement(livePage.shapes, selected.shapeId) : null;
         if (livePlacement && isHandleResizeBlocked(livePlacement.shape)) throw new Error('Shape is locked and cannot be resized with handles.');
-        handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
-        try {
-          handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
-        } catch (moveError) {
-          try { if (handle.canUndo()) handle.undo(); } catch { void 0; }
-          try { refresh(undefined, false); } catch { void 0; }
-          throw moveError;
-        }
+        handle.placeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height), inchFormula(geometry.x), inchFormula(geometry.y));
       }
       else if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
       else handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
@@ -462,21 +455,26 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     try {
       const snapshot = handle.snapshot();
       const frame = modelRef.current.frame;
+      const moves: ShapeMove[] = [];
       for (const item of selected) {
         const page = snapshot.pages.find((entry) => entry.id === item.pageId);
         if (!page) continue;
         const placement = findShapePlacement(page.shapes, item.shapeId);
         if (!placement) continue;
         if (!frame) {
-          handle.moveShape(item.pageId, item.shapeId, inchFormula(numericCellValue(placement.shape, 'PinX') + dx), inchFormula(numericCellValue(placement.shape, 'PinY') + dy));
+          moves.push({ pageId: item.pageId, shapeId: item.shapeId, xFormula: inchFormula(numericCellValue(placement.shape, 'PinX') + dx), yFormula: inchFormula(numericCellValue(placement.shape, 'PinY') + dy) });
           continue;
         }
         const base = dragStartForPlacement(page, placement.shape, frame);
         const geometry = resolveNudgeGeometry({ canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, ...base }, dx, dy);
-        handle.moveShape(item.pageId, item.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
+        moves.push({ pageId: item.pageId, shapeId: item.shapeId, xFormula: inchFormula(geometry.x), yFormula: inchFormula(geometry.y) });
       }
+      if (moves.length > 0) handle.moveShapes(moves);
       refresh(undefined, true);
-    } catch (value) { reportError(value); }
+    } catch (value) {
+      try { refresh(undefined, false); } catch { void 0; }
+      reportError(value);
+    }
   };
   const selectAllShapes = () => {
     const current = modelRef.current;
