@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { canvasPointToModel, modelPointToCanvas } from '@betteroffice/vsdx';
 import type { ModelPoint } from '@betteroffice/vsdx';
-import { RESIZE_HANDLES, SELECTION_STROKE, canvasKeyboardIntent, hitTestSelection, isEditableKeyboardTarget, keyboardNudgeStep, paintSelectionFrame, paintDragPreview, passedDragThreshold, previewOutline, resizedBounds, resizeCursor, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions } from './interactions';
+import { RESIZE_HANDLES, SELECTION_STROKE, canvasKeyboardIntent, controlHandleCanvasPositions, controlHandleHidden, controlHandleLockedX, controlHandleLockedY, controlHandlesForShape, hitTestControlHandles, hitTestSelection, isEditableKeyboardTarget, keyboardNudgeStep, paintControlHandles, paintSelectionFrame, paintDragPreview, pageToShapeLocal, passedDragThreshold, previewOutline, resolveControlDrag, resizedBounds, resizeCursor, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions, shapeLocalToPage } from './interactions';
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 };
 const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 test('passedDragThreshold needs four css pixels by default', () => {
@@ -314,4 +314,78 @@ test('canvas keyboard produces no intent from editable targets', () => {
   expect(canvasKeyboardIntent({ key: 'ArrowUp', target: input }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true, target: textarea }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'Escape', target: editable }, 1)).toBeNull();
+});
+const controlShape = (cells: Array<{ section?: string; row?: string; cell: string; value: string }>) => ({
+  id: 'shape',
+  sourceId: 1,
+  name: null,
+  children: [],
+  cells: cells.map((entry) => ({
+    locator: { sheet: { page: 0 }, shapeId: null, section: entry.section ?? null, sectionIndex: null, row: entry.row ? { name: entry.row } : null, cellName: entry.cell },
+    name: entry.cell,
+    formula: entry.value,
+    value: entry.value,
+  })),
+});
+test('control handles resolve named rows and honour hidden and locked variants', () => {
+  expect(controlHandleHidden({ xCon: 0, yCon: 0 })).toBe(false);
+  expect(controlHandleHidden({ xCon: 5, yCon: 0 })).toBe(true);
+  expect(controlHandleHidden({ xCon: 0, yCon: 6 })).toBe(true);
+  expect(controlHandleLockedX({ xCon: 1 })).toBe(true);
+  expect(controlHandleLockedX({ xCon: 6 })).toBe(true);
+  expect(controlHandleLockedX({ xCon: 0 })).toBe(false);
+  expect(controlHandleLockedY({ yCon: 1 })).toBe(true);
+  expect(controlHandleLockedY({ yCon: 0 })).toBe(false);
+  const shape = controlShape([
+    { section: 'Control', row: 'Row_1', cell: 'X', value: '0.5' },
+    { section: 'Control', row: 'Row_1', cell: 'Y', value: '0.5' },
+    { section: 'Control', row: 'Row_1', cell: 'XCon', value: '1' },
+    { section: 'Control', row: 'Row_2', cell: 'X', value: '0.2' },
+    { section: 'Control', row: 'TextPosition', cell: 'X', value: '0' },
+    { section: 'Control', row: 'TextPosition', cell: 'Y', value: '-1' },
+    { section: 'Control', row: 'TextPosition', cell: 'XCon', value: '5' },
+  ]);
+  expect(controlHandlesForShape(shape as never).map((handle) => handle.row)).toEqual(['Row_1', 'TextPosition']);
+  const [first] = controlHandlesForShape(shape as never);
+  expect(first.x).toBe(0.5);
+  expect(controlHandleLockedX(first)).toBe(true);
+  expect(controlHandleLockedY(first)).toBe(false);
+});
+test('control handles map between shape-local and page coordinates', () => {
+  const base = { pin: { x: 3, y: 3 }, locPin: { x: 1, y: 0.5 }, size: { width: 2, height: 1 } };
+  expect(shapeLocalToPage(base, { x: 0.5, y: 0.5 })).toEqual({ x: 2.5, y: 3 });
+  expect(pageToShapeLocal(base, { x: 2.5, y: 3 })).toEqual({ x: 0.5, y: 0.5 });
+  expect(resolveControlDrag(base, { x: 0.5, y: 0.5 }, { x: 3.5, y: 3 }, true, false)).toEqual({ x: 0.5, y: 0.5 });
+  expect(resolveControlDrag(base, { x: 0.5, y: 0.5 }, { x: 3.5, y: 2 }, false, false)).toEqual({ x: 1.5, y: -0.5 });
+  const rotated = { ...base, angle: Math.PI / 2 };
+  const page = shapeLocalToPage(rotated, { x: 0.5, y: 0.5 });
+  const back = pageToShapeLocal(rotated, page);
+  expect(back!.x).toBeCloseTo(0.5, 10);
+  expect(back!.y).toBeCloseTo(0.5, 10);
+});
+test('control handles paint yellow diamonds on the overlay and hit test by row', () => {
+  const shape = controlShape([
+    { section: 'Control', row: 'Row_1', cell: 'X', value: '0.5' },
+    { section: 'Control', row: 'Row_1', cell: 'Y', value: '0.5' },
+    { section: 'Control', row: 'Row_2', cell: 'X', value: '0.2' },
+    { section: 'Control', row: 'Row_2', cell: 'Y', value: '0.3' },
+    { section: 'Control', row: 'Row_2', cell: 'XCon', value: '5' },
+  ]);
+  const base = { pin: { x: 3, y: 3 }, locPin: { x: 1, y: 0.5 }, size: { width: 2, height: 1 } };
+  const positions = controlHandleCanvasPositions(shape as never, base, identity);
+  expect(positions.map((position) => position.row)).toEqual(['Row_1']);
+  expect(positions[0].canvas).toEqual({ x: 2.5, y: 3 });
+  const calls: string[] = [];
+  const context = new Proxy({ canvas: {} }, {
+    get(target, key) {
+      if (key in target) return Reflect.get(target, key);
+      return (...args: unknown[]) => { calls.push(`${String(key)}:${args.join(',')}`); };
+    },
+    set(target, key, value) { calls.push(`${String(key)}=${String(value)}`); Reflect.set(target, key, value); return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  paintControlHandles(context, positions, 1, 1);
+  expect(calls).toContain('fillStyle=#ffeb00');
+  expect(calls.some((entry) => entry.startsWith('moveTo:'))).toBe(true);
+  expect(hitTestControlHandles({ x: 2.5, y: 3 }, positions, 1)).toBe('Row_1');
+  expect(hitTestControlHandles({ x: 10, y: 10 }, positions, 1)).toBeNull();
 });

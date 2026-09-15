@@ -2351,6 +2351,222 @@ mod tests {
         );
     }
 
+    struct MasterShapeReferences<'a> {
+        shape: &'a ResolvedShape,
+        page: &'a ResolvedShape,
+        document: Option<&'a ResolvedShape>,
+    }
+
+    impl<'a> MasterShapeReferences<'a> {
+        fn new(
+            shape: &'a ResolvedShape,
+            page: &'a ResolvedShape,
+            document: Option<&'a ResolvedShape>,
+        ) -> Self {
+            Self {
+                shape,
+                page,
+                document,
+            }
+        }
+
+        fn scoped(&self, name: &str) -> Option<&ResolvedShape> {
+            match name.split_once('!') {
+                Some(("ThePage", _)) => Some(self.page),
+                Some(("TheDoc", _)) => self.document,
+                _ => Some(self.shape),
+            }
+        }
+
+        fn cell<'b>(&self, name: &'b str) -> &'b str {
+            name.split_once('!').map_or(name, |(_, name)| name)
+        }
+    }
+
+    impl References for MasterShapeReferences<'_> {
+        fn formula(&self, name: &str) -> Option<&str> {
+            self.formula_in(None, name)
+        }
+
+        fn value(&self, name: &str) -> Option<(&str, Option<&str>)> {
+            self.value_in(None, name)
+        }
+
+        fn formula_in(&self, _sheet: Option<u32>, name: &str) -> Option<&str> {
+            self.scoped(name)?.formula(self.cell(name))
+        }
+
+        fn value_in(&self, _sheet: Option<u32>, name: &str) -> Option<(&str, Option<&str>)> {
+            self.scoped(name)?.value(self.cell(name))
+        }
+    }
+
+    #[test]
+    fn corpus_control_handle_moves_master_geometry_chain() {
+        let Some(directory) = std::env::var_os("VSDX_CORPUS_DIR") else {
+            eprintln!("SKIPPED CORPUS CONTROL TEST: VSDX_CORPUS_DIR is unset");
+            return;
+        };
+        let path = std::path::Path::new(&directory).join("lichtsysteme.vsdx");
+        let package =
+            parse_vsdx(&fs::read(&path).expect("read corpus file")).expect("parse corpus package");
+        let (part, id) = package
+            .master_contents
+            .iter()
+            .flat_map(|(part, sheet)| {
+                shapes(sheet)
+                    .into_iter()
+                    .map(move |shape| (part.clone(), shape))
+            })
+            .find(|(_, shape)| {
+                let names = shape_formulas(shape)
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .collect::<std::collections::BTreeSet<_>>();
+                names.contains("Control.Row_1.Y") && names.contains("Control.Row_2.X")
+            })
+            .map(|(part, shape)| (part, shape.id))
+            .expect("corpus shape with a Control section");
+        let resolve = |package: &VsdxPackage| {
+            let resolver = Resolver::new(package);
+            let sheet = package
+                .master_contents
+                .get(&part)
+                .expect("corpus master sheet");
+            let shape = shapes(sheet)
+                .into_iter()
+                .find(|shape| shape.id == id)
+                .expect("corpus master shape");
+            let resolved = resolver
+                .resolve_shape_in_sheet(shape, sheet)
+                .expect("resolve corpus master shape");
+            let page_part = package.page_part_paths.first().expect("corpus page part");
+            let page_sheet = package
+                .page_part_ids
+                .get(page_part)
+                .and_then(|id| package.page_sheets.get(id))
+                .expect("corpus page sheet");
+            let page = resolver
+                .resolve_sheet(page_sheet)
+                .expect("resolve corpus page sheet");
+            let document = package
+                .document_sheet
+                .as_ref()
+                .map(|sheet| resolver.resolve_sheet(sheet))
+                .transpose()
+                .expect("resolve corpus document sheet");
+            (page, document, resolved)
+        };
+        let cached = |resolved: &ResolvedShape, input: &str| match resolved.cell(input) {
+            Some(Lookup::Found(cell)) => cell
+                .cell
+                .value
+                .as_deref()
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite()),
+            _ => None,
+        };
+        let number = |package: &VsdxPackage,
+                      page: &ResolvedShape,
+                      document: Option<&ResolvedShape>,
+                      resolved: &ResolvedShape,
+                      input: &str| {
+            let refs = MasterShapeReferences::new(resolved, page, document);
+            match evaluate_with_shape_package_theme(input, &refs, &limits(), resolved, package) {
+                Evaluation::Evaluated(Evaluated {
+                    value: Value::Number(number),
+                    ..
+                }) if number.number.is_finite() => number.number,
+                _ => cached(resolved, input)
+                    .unwrap_or_else(|| panic!("{input} neither evaluated nor cached")),
+            }
+        };
+        let (page, document, resolved) = resolve(&package);
+        let before = [
+            "Controls.Row_2",
+            "Controls.Row_1.Y",
+            "User.ControlX2",
+            "Scratch.X1",
+        ]
+        .map(|input| number(&package, &page, document.as_ref(), &resolved, input));
+        let handles = vsdx_resolve::control_handles(&resolved, |name| {
+            let refs = MasterShapeReferences::new(&resolved, &page, document.as_ref());
+            match evaluate_with_shape_package_theme(name, &refs, &limits(), &resolved, &package) {
+                Evaluation::Evaluated(Evaluated {
+                    value: Value::Number(number),
+                    ..
+                }) if number.number.is_finite() => Some(number.number),
+                _ => cached(&resolved, name),
+            }
+        });
+        assert!(
+            handles.iter().any(|handle| handle.row == "Row_2"
+                && (handle.x - before[0]).abs() < 1e-9
+                && !handle.hidden()),
+            "expected a visible Row_2 handle, found {handles:?}"
+        );
+        let mut moved = package.clone();
+        let sheet = moved
+            .master_contents
+            .get_mut(&part)
+            .expect("corpus master sheet");
+        let mut replaced = false;
+        for child in &mut sheet.children {
+            let vsdx_parse::SheetChild::Shapes(shapes) = child else {
+                continue;
+            };
+            for child in shapes.iter_mut() {
+                let vsdx_parse::ShapesChild::Shape(shape) = child else {
+                    continue;
+                };
+                if shape.id != id {
+                    continue;
+                }
+                for child in &mut shape.children {
+                    let vsdx_parse::ShapeChild::Section(section) = child else {
+                        continue;
+                    };
+                    if section.name != "Control" {
+                        continue;
+                    }
+                    for child in &mut section.children {
+                        let vsdx_parse::SectionChild::Row(row) = child else {
+                            continue;
+                        };
+                        if row.name.as_deref() != Some("Row_2") {
+                            continue;
+                        }
+                        for child in &mut row.children {
+                            let vsdx_parse::RowChild::Cell(cell) = child else {
+                                continue;
+                            };
+                            if cell.name == "X" {
+                                cell.formula = Some("0 in".to_owned());
+                                replaced = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(replaced, "Control.Row_2.X formula was not replaced");
+        let (page, document, resolved) = resolve(&moved);
+        let after = [
+            "Controls.Row_2",
+            "Controls.Row_1.Y",
+            "User.ControlX2",
+            "Scratch.X1",
+        ]
+        .map(|input| number(&moved, &page, document.as_ref(), &resolved, input));
+        assert_eq!(after[0], 0.0);
+        assert!(
+            (after[1] - before[1]).abs() > 1e-9,
+            "Controls.Row_1.Y did not move with the handle: {} -> {}",
+            before[1],
+            after[1]
+        );
+    }
+
     #[derive(Default)]
     struct CorpusPolicyCounts {
         guarded: usize,

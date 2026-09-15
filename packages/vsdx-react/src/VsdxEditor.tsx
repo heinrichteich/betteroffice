@@ -1,6 +1,6 @@
 import { createT, deepMerge, diagnosticMessage, en } from '@betteroffice/vsdx-i18n';
 import type { Translations } from '@betteroffice/vsdx-i18n';
-import { canvasPointToModel, initWasm, openDiagram, paintPage, sizeCanvasForPage } from '@betteroffice/vsdx';
+import { canvasPointToModel, modelPointToCanvas, initWasm, openDiagram, paintPage, sizeCanvasForPage } from '@betteroffice/vsdx';
 import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
@@ -12,8 +12,8 @@ import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
 import { StatusBar, clampZoom } from './components/statusbar';
-import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent } from './interactions';
-import type { DragStart, ResizeHandle } from './interactions';
+import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, hitTestControlHandles, controlHandleCanvasPositions, controlHandlesForShape, paintControlHandles, resolveControlDrag, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent, shapeLocalToPage } from './interactions';
+import type { ControlDrag, DragStart, ResizeHandle } from './interactions';
 export { resolveDragGeometry };
 export type { DragStart };
 
@@ -208,6 +208,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         const placement = findShapePlacement(page.shapes, selection.shapeId);
         const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
         if (corners) paintSelectionFrame(context, corners, dpr, zoom, blocked ? [] : undefined);
+        if (placement) paintControlHandles(context, controlHandleCanvasPositions(placement.shape, shapeDragStart(page, placement.shape, frame), frame.paintTransform), dpr, zoom);
       } catch { void 0; }
     }
     const start = pointerRef.current; const release = dragPreviewRef.current;
@@ -237,6 +238,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         const placement = findShapePlacement(page.shapes, currentSelection.shapeId);
         const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
         if (corners) paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current, blocked ? [] : undefined);
+        if (placement) paintControlHandles(context, controlHandleCanvasPositions(placement.shape, shapeDragStart(page, placement.shape, frame), frame.paintTransform), window.devicePixelRatio || 1, zoomRef.current);
       } catch { void 0; }
     }
   };
@@ -251,6 +253,29 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       const point = canvasPointerPosition(event, frame);
       const active = selectionRef.current;
       if (active && active.pageId === page.id) {
+        try {
+          const placement = findShapePlacement(page.shapes, active.shapeId);
+          if (placement) {
+            const base = shapeDragStart(page, placement.shape, frame, handle);
+            const controls = controlHandleCanvasPositions(placement.shape, base, frame.paintTransform);
+            const row = hitTestControlHandles(point.canvas, controls, zoomRef.current);
+            const hit = row ? controls.find((entry) => entry.row === row) : undefined;
+            const drag = hit && row ? controlDragStart(placement.shape, row, hit) : null;
+            if (hit && drag && !(hit.lockedX && hit.lockedY)) {
+              pointerRef.current = {
+                ...point,
+                ...base,
+                pointerId: event.pointerId,
+                startX: event.clientX,
+                startY: event.clientY,
+                resize: false,
+                control: drag,
+              };
+              event.currentTarget.setPointerCapture(event.pointerId);
+              return;
+            }
+          }
+        } catch { void 0; }
         try {
           const corners = selectionCorners(page, frame, active);
           if (corners) {
@@ -304,9 +329,16 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         const page = current.snapshot?.pages[current.pageIndex];
         const active = selectionRef.current;
         if (!frame || !page || !active || active.pageId !== page.id) { event.currentTarget.style.cursor = ''; return; }
+        const point = canvasPointerPosition(event, frame);
+        const placement = findShapePlacement(page.shapes, active.shapeId);
+        if (placement) {
+          try {
+            const controls = controlHandleCanvasPositions(placement.shape, shapeDragStart(page, placement.shape, frame), frame.paintTransform);
+            if (hitTestControlHandles(point.canvas, controls, zoomRef.current)) { event.currentTarget.style.cursor = 'move'; return; }
+          } catch { void 0; }
+        }
         const corners = selectionCorners(page, frame, active);
         if (!corners) { event.currentTarget.style.cursor = ''; return; }
-        const point = canvasPointerPosition(event, frame);
         const target = hitTestSelection(point.canvas, corners, zoomRef.current);
         if (target !== 'rotate' && target) {
           const placement = findShapePlacement(page.shapes, active.shapeId);
@@ -334,6 +366,24 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         if (!liveFrame || !liveStart || !release || !overlay) return;
         const context = overlay.getContext('2d'); if (!context) return;
         try {
+          if (liveStart.control) {
+            const livePage = modelRef.current.snapshot?.pages[modelRef.current.pageIndex];
+            const liveSelection = selectionRef.current;
+            const livePlacement = livePage && liveSelection ? findShapePlacement(livePage.shapes, liveSelection.shapeId) : null;
+            const corners = selectionCorners(livePage!, liveFrame, liveSelection!);
+            context.clearRect(0, 0, overlay.width, overlay.height);
+            if (corners) paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current);
+            if (livePlacement) {
+              const positions = controlHandleCanvasPositions(livePlacement.shape, liveStart, liveFrame.paintTransform).map((position) => {
+                if (position.row !== liveStart.control!.row) return position;
+                const next = resolveControlDrag(liveStart, liveStart.control!.startLocal, release, liveStart.control!.lockedX, liveStart.control!.lockedY);
+                const page = shapeLocalToPage(liveStart, next);
+                return { ...position, canvas: modelPointToCanvas(liveFrame.paintTransform, page.x, page.y) };
+              });
+              paintControlHandles(context, positions, window.devicePixelRatio || 1, zoomRef.current);
+            }
+            return;
+          }
           const corners = previewOutline(liveStart, release, liveFrame.paintTransform, dragSnapRef.current);
           context.clearRect(0, 0, overlay.width, overlay.height);
           paintDragPreview(context, corners, window.devicePixelRatio || 1, zoomRef.current);
@@ -355,6 +405,13 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       const point = canvasPointerPosition(event, frame);
       if (!pointer.thresholdPassed && !hadPreview && pointer.startX !== undefined && pointer.startY !== undefined && !passedDragThreshold(pointer.startX, pointer.startY, event.clientX, event.clientY)) return;
       if (!pointer.thresholdPassed && !hadPreview && Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) return;
+      if (pointer.control) {
+        const next = resolveControlDrag(pointer, pointer.control.startLocal, point.model, pointer.control.lockedX, pointer.control.lockedY);
+        if (!pointer.control.lockedX) handle.setCellFormula(selected.pageId, selected.shapeId, { section: 'Control', rowName: pointer.control.row, cellName: 'X' }, inchFormula(next.x));
+        if (!pointer.control.lockedY) handle.setCellFormula(selected.pageId, selected.shapeId, { section: 'Control', rowName: pointer.control.row, cellName: 'Y' }, inchFormula(next.y));
+        refresh(undefined, true);
+        return;
+      }
       if (pointer.rotate) {
         handle.setCellFormula(selected.pageId, selected.shapeId, { cellName: 'Angle' }, String(resolveRotationAngle(pointer, point.model, event.shiftKey)));
         refresh(undefined, true);
@@ -561,6 +618,12 @@ export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, sel
     ...shapeDragStart(page, placement.shape, frame),
   };
   return previewOutline(start, { x: 0, y: 0 }, frame.paintTransform);
+}
+
+export function controlDragStart(shape: ShapeSnapshot, row: string, hit: { lockedX: boolean; lockedY: boolean }): ControlDrag | null {
+  const handle = controlHandlesForShape(shape).find((entry) => entry.row === row);
+  if (!handle) return null;
+  return { row, startLocal: { x: handle.x, y: handle.y }, lockedX: hit.lockedX, lockedY: hit.lockedY };
 }
 
 export function collectDiagnostics(frame: PageDisplayList): TextDiagnostic[] { const result: TextDiagnostic[] = []; const work = frame.primitives.map((primitive) => ({ primitive, depth: 0 })); while (work.length) { const current = work.pop(); if (!current || current.depth >= 256) continue; if (current.primitive.kind === 'shape') result.push(...(current.primitive.diagnostics ?? [])); if (current.primitive.kind === 'textBox') for (const paragraph of current.primitive.paragraphs) for (const run of paragraph.runs) result.push(...(run.diagnostics ?? [])); if (current.primitive.kind === 'group') for (const primitive of current.primitive.primitives) work.push({ primitive, depth: current.depth + 1 }); } return result; }
