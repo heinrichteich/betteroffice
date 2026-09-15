@@ -708,13 +708,13 @@ export function surfaceDpr(frame: Pick<PageDisplayList, 'width' | 'height'>, zoo
   return effectiveDprForSurface(frame.width * zoom + pad * 2, frame.height * zoom + pad * 2, dpr);
 }
 
-/** Printable paper tile behind the page-break grid; absent on frames predating the print fields. */
+/** Printable page dimensions. */
 export interface PageBreakFrame { width: number; height: number; printWidth?: number; printHeight?: number; }
 
 /** Upper bound on page-break grid lines per axis; denser tiles are suppressed. */
 export const MAX_PAGE_BREAK_LINES = 1000;
 
-/** One axis of page-break grid lines, empty when the tile is degenerate or too dense to render. */
+/** Page-break lines for one axis. */
 function pageBreakAxis(step: number, pad: number, surfaceSize: number): number[] {
   if (!Number.isFinite(step) || step <= 0) return [];
   const lines: number[] = [];
@@ -733,7 +733,7 @@ export function pageBreakLines(frameWidth: number, frameHeight: number, zoom: nu
   };
 }
 
-/** Tiled printer-paper guides covering the scrollable surface. */
+/** Page-break grid. */
 export function PageBreakGrid({ frame, zoom, surfaceWidth, surfaceHeight, pad = SURFACE_PAD }: { frame: PageBreakFrame; zoom: number; surfaceWidth: number; surfaceHeight: number; pad?: number }) {
   const lines = pageBreakLines(frame.width, frame.height, zoom, pad, surfaceWidth, surfaceHeight, frame.printWidth ?? frame.width, frame.printHeight ?? frame.height);
   return <div data-testid="vsdx-page-breaks" aria-hidden="true" style={{ ...styles.pageBreaks, width: surfaceWidth, height: surfaceHeight }}>
