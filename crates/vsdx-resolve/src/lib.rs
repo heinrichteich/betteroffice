@@ -4,6 +4,7 @@ mod connectivity;
 mod geometry;
 mod inheritance;
 mod model;
+mod shape_data;
 mod text;
 
 #[cfg(test)]
@@ -13,3 +14,4 @@ pub use connectivity::*;
 pub use geometry::*;
 pub use inheritance::*;
 pub use model::*;
+pub use shape_data::*;
