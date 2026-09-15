@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 import type { DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
-import { cellIsGuarded, createRibbonCommands, dragStartMatchesShape, findShapePlacement, locPinAxisFractional, numericCellValue } from './commands';
+import { cellIsGuarded, createRibbonCommands, dragStartMatchesShape, findShapePlacement, isHandleResizeBlocked, locPinAxisFractional, locPinAxisUnmanaged, numericCellValue } from './commands';
 
 function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
   return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ['one', 'two', 'three'].map((id) => ({ id, sourceId: 1, name: id, children: [], cells: Object.entries(cells).map(([name, value]) => ({ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: value, value })) })) }] };
@@ -98,6 +98,30 @@ test('a formula-derived LocPin tracks the size while a literal one stays put', (
   expect(locPinAxisFractional(literal, 'LocPinX')).toBe(false);
   expect(locPinAxisFractional(literal, 'LocPinY')).toBe(false);
   expect(locPinAxisFractional(snapshot().pages[0].shapes[1], 'LocPinX')).toBe(true);
+});
+
+test('a non-proportional LocPin formula blocks handle resize instead of skewing the pin', () => {
+  for (const formula of ['Width-1', 'Width*0.5+1', 'User.X', 'Height*0.5', 'MIN(Width*0.5,1)']) {
+    const shape = snapshot({ LocPinX: formula }).pages[0].shapes[1];
+    expect(locPinAxisFractional(shape, 'LocPinX')).toBe(false);
+    expect(locPinAxisUnmanaged(shape, 'LocPinX')).toBe(true);
+    expect(isHandleResizeBlocked(shape)).toBe(true);
+  }
+  for (const formula of ['Height-1', 'Height*0.5+1', 'Width*0.5']) {
+    const shape = snapshot({ LocPinY: formula }).pages[0].shapes[1];
+    expect(locPinAxisFractional(shape, 'LocPinY')).toBe(false);
+    expect(locPinAxisUnmanaged(shape, 'LocPinY')).toBe(true);
+    expect(isHandleResizeBlocked(shape)).toBe(true);
+  }
+  for (const formula of ['Width*0.5', '=0.5*Width', 'Width / 2', '=WIDTH*0.25']) {
+    const shape = snapshot({ LocPinX: formula }).pages[0].shapes[1];
+    expect(locPinAxisFractional(shape, 'LocPinX')).toBe(true);
+    expect(locPinAxisUnmanaged(shape, 'LocPinX')).toBe(false);
+    expect(isHandleResizeBlocked(shape)).toBe(false);
+  }
+  const heightScaled = snapshot({ LocPinY: 'Height*0.5' }).pages[0].shapes[1];
+  expect(locPinAxisFractional(heightScaled, 'LocPinY')).toBe(true);
+  expect(isHandleResizeBlocked(heightScaled)).toBe(false);
 });
 
 test('a drag start matches its shape until a peer moves it', () => {

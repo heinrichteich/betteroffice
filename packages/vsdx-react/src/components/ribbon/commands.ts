@@ -171,6 +171,7 @@ export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'Lock
 export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   if (HANDLE_RESIZE_LOCKS.some((lock) => lockCellEnabled(shape, lock))) return true;
+  if (locPinAxisUnmanaged(shape, 'LocPinX') || locPinAxisUnmanaged(shape, 'LocPinY')) return true;
   return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => cellIsGuarded(shape, cell));
 }
 
@@ -205,9 +206,31 @@ export function locPinAxisFractional(shape: ShapeSnapshot | null, name: string):
   const cell = findCell(shape, name);
   if (!cell) return true;
   const formula = (cell.formula ?? '').replace(/^=+/, '').trim();
-  if (formula !== '') return !Number.isFinite(Number(formula));
-  const value = (cell.value ?? '').trim();
-  return value === '' || !Number.isFinite(Number(value));
+  if (formula === '') {
+    const value = (cell.value ?? '').trim();
+    return value === '' || !Number.isFinite(Number(value));
+  }
+  if (Number.isFinite(Number(formula))) return false;
+  return isProportionalLocPin(formula, locPinSizeCell(name));
+}
+
+export function locPinAxisUnmanaged(shape: ShapeSnapshot | null, name: string): boolean {
+  const cell = findCell(shape, name);
+  if (!cell) return false;
+  const formula = (cell.formula ?? '').replace(/^=+/, '').trim();
+  if (formula === '' || Number.isFinite(Number(formula))) return false;
+  return !isProportionalLocPin(formula, locPinSizeCell(name));
+}
+
+function locPinSizeCell(name: string): string {
+  return name === 'LocPinY' ? 'Height' : 'Width';
+}
+
+function isProportionalLocPin(formula: string, sizeCell: string): boolean {
+  const text = formula.replace(/^=+/, '').trim().toUpperCase();
+  const number = '(?:\\d+(?:\\.\\d+)?|\\.\\d+)(?:[eE][+-]?\\d+)?';
+  const cell = sizeCell.toUpperCase();
+  return new RegExp(`^(?:${cell}\\s*\\*\\s*${number}|${number}\\s*\\*\\s*${cell}|${cell}\\s*/\\s*${number})$`).test(text);
 }
 
 export function createRibbonCommands(
