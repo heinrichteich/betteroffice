@@ -5,11 +5,13 @@ import type { Affine, CellLocator, PagePrimitive, CollaborationReplica, DiagramH
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
+import type { ViewToggleKey } from './components/ribbon/Ribbon';
 import { CanvasContextMenu } from './components/ribbon/CanvasContextMenu';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
 import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
+import { RulerLeft, RulerTop, RULER_SIZE } from './components/ruler/Rulers';
 import { ShapeDataPanel } from './components/shapeData/ShapeDataPanel';
 import { LayersPanel } from './components/layers/LayersPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
@@ -17,6 +19,8 @@ import type { StandardShape } from './components/shapes/shapeLibrary';
 import { StatusBar, clampZoom } from './components/statusbar';
 import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, isPrintableEntryKey, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent, textEditOverlay, withoutTextBox, hitTestControlHandles, controlHandleCanvasPositions, controlHandlesForShape, paintControlHandles, resolveControlDrag, shapeLocalToPage } from './interactions';
 import type { DragStart, ResizeHandle, ControlDrag } from './interactions';
+import { collectSnapTargets, paintGrid, paintSmartGuides, snapRelease, GRID_SPACING_IN } from './snap';
+import type { SnapTargets } from './snap';
 export { resolveDragGeometry };
 export type { DragStart };
 
@@ -87,6 +91,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const sessionClientId = sessionSwitchBlocked ? sessionRef.current.clientId : requestedClientId;
   const initialUpdate = sessionSwitchBlocked ? sessionRef.current.initialUpdate : requestedInitialUpdate;
   const [zoom, setZoom] = useState(1);
+  const [showGrid, setShowGrid] = useState(true);
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const [showRulers, setShowRulers] = useState(true);
+  const [rulerMark, setRulerMark] = useState<ModelPoint | null>(null);
   const [shapesCollapsed, setShapesCollapsed] = useState(false);
   const [layersCollapsed, setLayersCollapsed] = useState(false);
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
@@ -95,9 +103,16 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const pointerRef = useRef<DragStart | null>(null);
   const dragPreviewRef = useRef<ModelPoint | null>(null);
   const dragSnapRef = useRef(false);
+  const guidesRef = useRef<SnapTargets>({ x: [], y: [] });
   const previewFrameRef = useRef<number | null>(null);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
+  const showGridRef = useRef(showGrid);
+  showGridRef.current = showGrid;
+  const snapEnabledRef = useRef(snapEnabled);
+  snapEnabledRef.current = snapEnabled;
+  const showRulersRef = useRef(showRulers);
+  showRulersRef.current = showRulers;
   const [loading, setLoading] = useState(Boolean(file));
   onReadyRef.current = onReady;
   onChangeRef.current = onChange;
@@ -266,6 +281,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (!canvas || !frame) return;
     const context = canvas.getContext('2d'); if (!context) return;
     const dpr = window.devicePixelRatio || 1; sizeCanvasForPage(canvas, frame, dpr, zoom); context.clearRect(0, 0, canvas.width, canvas.height);
+    if (showGrid) {
+      try { paintGrid(context, frame, dpr, zoom); } catch { void 0; }
+    }
     const snapshot = model.snapshot;
     const page = snapshot?.pages[model.pageIndex];
     if (selection && page && !selectionHiddenByLayers(page, model.layers, selection)) {
@@ -281,7 +299,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (start && release) {
       try { paintDragPreview(context, previewOutline(start, release, frame.paintTransform), dpr, zoom); } catch { void 0; }
     }
-  }, [model.frame, model.snapshot, model.pageIndex, selection, zoom]);
+    try { paintSmartGuides(context, frame, dpr, zoom, guidesRef.current); } catch { void 0; }
+  }, [model.frame, model.snapshot, model.pageIndex, selection, zoom, showGrid]);
 
   useEffect(() => {
     if (!editing) return;
@@ -318,6 +337,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const clearDragPreview = () => {
     if (previewFrameRef.current !== null) { cancelAnimationFrame(previewFrameRef.current); previewFrameRef.current = null; }
     dragPreviewRef.current = null;
+    guidesRef.current = { x: [], y: [] };
     repaintOverlaySelection();
   };
 
@@ -327,7 +347,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const context = overlay.getContext('2d'); if (!context) return;
     const currentSelection = selectionRef.current;
     const page = current.snapshot?.pages[current.pageIndex];
+    const dpr = window.devicePixelRatio || 1;
+    const zoom = zoomRef.current;
     context.clearRect(0, 0, overlay.width, overlay.height);
+    if (showGridRef.current) {
+      try { paintGrid(context, frame, dpr, zoom); } catch { void 0; }
+    }
     if (currentSelection && page && !selectionHiddenByLayers(page, current.layers, currentSelection)) {
       try {
         const corners = selectionCorners(page, frame, currentSelection);
@@ -337,6 +362,23 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         if (placement) paintControlHandles(context, controlHandleCanvasPositions(placement.shape, shapeDragStart(page, placement.shape, frame), frame.paintTransform), window.devicePixelRatio || 1, zoomRef.current);
       } catch { void 0; }
     }
+    try { paintSmartGuides(context, frame, dpr, zoom, guidesRef.current); } catch { void 0; }
+  };
+
+  /** Snaps a drag release the same way for preview and commit; Alt suppresses. */
+  const snapDragPoint = (start: DragStart, raw: ModelPoint, suppressed: boolean): { point: ModelPoint; guides: SnapTargets } => {
+    const current = modelRef.current;
+    const page = current.snapshot?.pages[current.pageIndex];
+    const selected = selectionRef.current;
+    const targets = page && selected ? collectSnapTargets(page.shapes, selected.shapeId) : { x: [], y: [] };
+    return snapRelease(start, raw, {
+      zoom: zoomRef.current,
+      gridSpacing: GRID_SPACING_IN,
+      snapEnabled: snapEnabledRef.current,
+      suppressed,
+      isRotate: Boolean(start.rotate),
+      targets,
+    });
   };
 
   const onPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
@@ -420,6 +462,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const onPointerMove = (event: PointerEvent<HTMLCanvasElement>) => {
     const start = pointerRef.current;
     if (!start) {
+      if (showRulersRef.current) {
+        try {
+          const hoverFrame = modelRef.current.frame;
+          if (hoverFrame) setRulerMark(canvasPointerPosition(event, hoverFrame).canvas);
+        } catch { void 0; }
+      }
       try {
         const current = modelRef.current; const frame = current.frame;
         const page = current.snapshot?.pages[current.pageIndex];
@@ -453,7 +501,15 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (!frame) return;
     try {
       const point = canvasPointerPosition(event, frame);
-      dragPreviewRef.current = point.model;
+      if (showRulersRef.current) setRulerMark(point.canvas);
+      if (!start.rotate && !start.control) {
+        const snapped = snapDragPoint(start, point.model, event.altKey);
+        dragPreviewRef.current = snapped.point;
+        guidesRef.current = snapped.guides;
+      } else {
+        dragPreviewRef.current = point.model;
+        guidesRef.current = { x: [], y: [] };
+      }
       dragSnapRef.current = event.shiftKey;
       if (previewFrameRef.current !== null) return;
       previewFrameRef.current = requestAnimationFrame(() => {
@@ -468,6 +524,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
             const livePlacement = livePage && liveSelection ? findShapePlacement(livePage.shapes, liveSelection.shapeId) : null;
             const corners = selectionCorners(livePage!, liveFrame, liveSelection!);
             context.clearRect(0, 0, overlay.width, overlay.height);
+            if (showGridRef.current) {
+              try { paintGrid(context, liveFrame, window.devicePixelRatio || 1, zoomRef.current); } catch { void 0; }
+            }
             if (corners) paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current);
             if (livePlacement) {
               const positions = controlHandleCanvasPositions(livePlacement.shape, liveStart, liveFrame.paintTransform).map((position) => {
@@ -482,8 +541,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           }
           const corners = previewOutline(liveStart, release, liveFrame.paintTransform, dragSnapRef.current);
           context.clearRect(0, 0, overlay.width, overlay.height);
+          if (showGridRef.current) {
+            try { paintGrid(context, liveFrame, window.devicePixelRatio || 1, zoomRef.current); } catch { void 0; }
+          }
           paintDragPreview(context, corners, window.devicePixelRatio || 1, zoomRef.current);
           paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current);
+          try { paintSmartGuides(context, liveFrame, window.devicePixelRatio || 1, zoomRef.current, guidesRef.current); } catch { void 0; }
         } catch (value) { reportError(value); }
       });
     } catch (value) { reportError(value); }
@@ -513,7 +576,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         refresh(undefined, true);
         return;
       }
-      const geometry = resolveDragGeometry(pointer, point.model);
+      const release = (!pointer.rotate && !pointer.control ? snapDragPoint(pointer, point.model, event.altKey).point : point.model);
+      const geometry = resolveDragGeometry(pointer, release);
       if (pointer.handle) {
         const livePage = handle.snapshot().pages.find((page) => page.id === selected.pageId);
         const livePlacement = livePage ? findShapePlacement(livePage.shapes, selected.shapeId) : null;
@@ -622,6 +686,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   };
   const onCanvasFocus = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = '2px solid #0f6cbd'; event.currentTarget.style.outlineOffset = '2px'; };
   const onCanvasBlur = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = ''; event.currentTarget.style.outlineOffset = ''; };
+  const onCanvasPointerLeave = () => { setRulerMark(null); };
+  const toggleView = useCallback((key: ViewToggleKey) => {
+    if (key === 'grid') setShowGrid((value) => !value);
+    else if (key === 'snap') setSnapEnabled((value) => !value);
+    else setShowRulers((value) => !value);
+  }, []);
   const insertShape = useCallback((shape: StandardShape) => {
     const handle = handleRef.current; const current = modelRef.current; const frame = current.frame;
     const page = current.snapshot?.pages[current.pageIndex];
@@ -675,7 +745,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     <header style={styles.titleBar}><strong>{t('ribbon.documentName')}</strong><span style={{ color: dirty ? '#a16207' : '#526273' }}>{dirty ? t('ribbon.dirty') : t('ribbon.saved')}</span></header>
     <RibbonCommandsProvider handle={handleRef.current} snapshot={model.snapshot} pageId={model.snapshot?.pages[model.pageIndex]?.id} selection={selection} onMutation={() => refresh(undefined, true)} onError={reportError} onDownload={download}>
     <RibbonCommandsBridge target={commandsRef} />
-    <Ribbon t={t} hasSelection={selection !== null} />
+    <Ribbon t={t} hasSelection={selection !== null} view={{ grid: showGrid, snap: snapEnabled, rulers: showRulers }} onToggleView={toggleView} />
     <div style={styles.contentRow}>
     {leftPanel === undefined ? (
       <div style={styles.leftColumn}>
@@ -688,30 +758,64 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     <main ref={workspaceRef} style={styles.workspace}>
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
-      <div style={styles.canvasFrame}>
-        <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onDoubleClick={onCanvasDoubleClick} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
-        <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
-        {editing && editOverlay && (
-          <div ref={editWrapRef} style={{ ...styles.textEditWrap, width: editOverlay.width, height: editOverlay.height, transform: `matrix(${editOverlay.matrix.a}, ${editOverlay.matrix.b}, ${editOverlay.matrix.c}, ${editOverlay.matrix.d}, ${editOverlay.matrix.e}, ${editOverlay.matrix.f})` }}>
-            <textarea
-              ref={editBoxRef}
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancelTextEdit(); mainCanvasRef.current?.focus(); } else event.stopPropagation(); }}
-              aria-label={t('shapes.editingText', { name: editing.shapeId })}
-              rows={1}
-              style={{
-                ...styles.textEditBox,
-                fontFamily: `"${editOverlay.font.family}", sans-serif`,
-                fontSize: editOverlay.font.sizePx,
-                fontWeight: editOverlay.font.bold ? 700 : 400,
-                fontStyle: editOverlay.font.italic ? 'italic' : 'normal',
-                color: editOverlay.font.color,
-              }}
-            />
+      {!loading && model.frame && (showRulers ? (
+        <div style={styles.sheet}>
+          <div style={styles.corner} />
+          <div style={styles.rulerTop}><RulerTop frame={model.frame} zoom={zoom} marker={rulerMark} /></div>
+          <div style={styles.rulerLeft}><RulerLeft frame={model.frame} zoom={zoom} marker={rulerMark} /></div>
+          <div style={styles.canvasFrame}>
+            <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onPointerLeave={onCanvasPointerLeave} onDoubleClick={onCanvasDoubleClick} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
+            <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
+            {editing && editOverlay && (
+              <div ref={editWrapRef} style={{ ...styles.textEditWrap, width: editOverlay.width, height: editOverlay.height, transform: `matrix(${editOverlay.matrix.a}, ${editOverlay.matrix.b}, ${editOverlay.matrix.c}, ${editOverlay.matrix.d}, ${editOverlay.matrix.e}, ${editOverlay.matrix.f})` }}>
+                <textarea
+                  ref={editBoxRef}
+                  value={draft}
+                  onChange={(event) => setDraft(event.target.value)}
+                  onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancelTextEdit(); mainCanvasRef.current?.focus(); } else event.stopPropagation(); }}
+                  aria-label={t('shapes.editingText', { name: editing.shapeId })}
+                  rows={1}
+                  style={{
+                    ...styles.textEditBox,
+                    fontFamily: `"${editOverlay.font.family}", sans-serif`,
+                    fontSize: editOverlay.font.sizePx,
+                    fontWeight: editOverlay.font.bold ? 700 : 400,
+                    fontStyle: editOverlay.font.italic ? 'italic' : 'normal',
+                    color: editOverlay.font.color,
+                  }}
+                />
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </div>
+      ) : (
+        <div style={styles.sheetPlain}>
+          <div style={styles.canvasFrame}>
+            <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onPointerLeave={onCanvasPointerLeave} onDoubleClick={onCanvasDoubleClick} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
+            <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
+            {editing && editOverlay && (
+              <div ref={editWrapRef} style={{ ...styles.textEditWrap, width: editOverlay.width, height: editOverlay.height, transform: `matrix(${editOverlay.matrix.a}, ${editOverlay.matrix.b}, ${editOverlay.matrix.c}, ${editOverlay.matrix.d}, ${editOverlay.matrix.e}, ${editOverlay.matrix.f})` }}>
+                <textarea
+                  ref={editBoxRef}
+                  value={draft}
+                  onChange={(event) => setDraft(event.target.value)}
+                  onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancelTextEdit(); mainCanvasRef.current?.focus(); } else event.stopPropagation(); }}
+                  aria-label={t('shapes.editingText', { name: editing.shapeId })}
+                  rows={1}
+                  style={{
+                    ...styles.textEditBox,
+                    fontFamily: `"${editOverlay.font.family}", sans-serif`,
+                    fontSize: editOverlay.font.sizePx,
+                    fontWeight: editOverlay.font.bold ? 700 : 400,
+                    fontStyle: editOverlay.font.italic ? 'italic' : 'normal',
+                    color: editOverlay.font.color,
+                  }}
+                />
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
       {contextMenu?.kind === 'shape' && selection && <ShapeContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
       {contextMenu?.kind === 'canvas' && <CanvasContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
       {integrity.length > 0 && <section role="alert" style={styles.integrity}><strong>{t('diagnostics.integrityHeading')}</strong>{integrity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</section>}
@@ -872,4 +976,4 @@ function fontFaceEqual(left: VsdxFontFace, right: VsdxFontFace): boolean { retur
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean { return left === right || (left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index])); }
 function resolveImage(assetId: string, handle: DiagramHandle | null, cache: { current: Map<string, Promise<CanvasImageSource | null>> }, message: string): Promise<CanvasImageSource | null> { const existing = cache.current.get(assetId); if (existing) return existing; const pending = decodeImage(handle?.mediaBytes(assetId), message); cache.current.set(assetId, pending); return pending; }
 async function decodeImage(bytes: Uint8Array | undefined, message: string): Promise<CanvasImageSource | null> { if (!bytes) return null; const blob = new Blob([bytes.slice()]); if (typeof createImageBitmap === 'function') return createImageBitmap(blob); const url = URL.createObjectURL(blob); try { return await new Promise<HTMLImageElement>((resolve, reject) => { const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(new Error(message)); image.src = url; }); } finally { URL.revokeObjectURL(url); } }
-const styles: Record<string, CSSProperties> = { root: { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 480, color: '#172033', background: '#f3f5f8', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }, titleBar: { display: 'flex', alignItems: 'center', gap: 12, minHeight: 32, padding: '0 14px', background: '#f8fafc', borderBottom: '1px solid #d8dee9', fontSize: 13 }, contentRow: { display: 'flex', flex: 1, minHeight: 0 }, workspace: { position: 'relative', display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', overflow: 'auto' }, canvasFrame: { position: 'relative', flex: '0 0 auto' }, canvas: { display: 'block', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' }, overlay: { position: 'absolute', inset: 0, pointerEvents: 'none' }, textEditWrap: { position: 'absolute', left: 0, top: 0, transformOrigin: '0 0', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'visible', background: 'transparent', border: '1px dotted #1d4ed8', zIndex: 2 }, textEditBox: { width: '100%', background: 'transparent', border: 'none', outline: 'none', resize: 'none', overflow: 'visible', textAlign: 'center', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', wordBreak: 'break-word', lineHeight: 1.2, padding: 0, margin: 0 }, leftColumn: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }, shapesWrap: { display: 'flex', flex: '1 1 auto', minHeight: 0 }, integrity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 12, color: '#7f1d1d', background: '#fef2f2', border: '1px solid #fca5a5' }, fidelity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 8, color: '#475569', background: '#fff', fontSize: 12 }, error: { position: 'absolute', left: 14, right: 14, bottom: 14, padding: 10, color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0' } };
+const styles: Record<string, CSSProperties> = { root: { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 480, color: '#172033', background: '#f3f5f8', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }, titleBar: { display: 'flex', alignItems: 'center', gap: 12, minHeight: 32, padding: '0 14px', background: '#f8fafc', borderBottom: '1px solid #d8dee9', fontSize: 13 }, contentRow: { display: 'flex', flex: 1, minHeight: 0 }, workspace: { position: 'relative', display: 'block', flex: 1, minWidth: 0, overflow: 'auto' }, sheet: { display: 'grid', gridTemplateColumns: 'auto auto', gridTemplateRows: 'auto auto', width: 'max-content', margin: '24px auto' }, corner: { position: 'sticky', left: 0, top: 0, zIndex: 6, width: RULER_SIZE, height: RULER_SIZE, background: '#f3f5f8' }, rulerTop: { position: 'sticky', top: 0, zIndex: 5, alignSelf: 'start', background: '#f3f5f8' }, rulerLeft: { position: 'sticky', left: 0, zIndex: 5, justifySelf: 'start', background: '#f3f5f8' }, sheetPlain: { display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100%', padding: 24, boxSizing: 'border-box' }, canvasFrame: { position: 'relative', flex: '0 0 auto' }, canvas: { display: 'block', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' }, overlay: { position: 'absolute', inset: 0, pointerEvents: 'none' }, textEditWrap: { position: 'absolute', left: 0, top: 0, transformOrigin: '0 0', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'visible', background: 'transparent', border: '1px dotted #1d4ed8', zIndex: 2 }, textEditBox: { width: '100%', background: 'transparent', border: 'none', outline: 'none', resize: 'none', overflow: 'visible', textAlign: 'center', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', wordBreak: 'break-word', lineHeight: 1.2, padding: 0, margin: 0 }, leftColumn: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }, shapesWrap: { display: 'flex', flex: '1 1 auto', minHeight: 0 }, integrity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 12, color: '#7f1d1d', background: '#fef2f2', border: '1px solid #fca5a5' }, fidelity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 8, color: '#475569', background: '#fff', fontSize: 12 }, error: { position: 'absolute', left: 14, right: 14, bottom: 14, padding: 10, color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0' } };
