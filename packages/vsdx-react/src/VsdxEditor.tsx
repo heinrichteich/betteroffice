@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
 import { CanvasContextMenu } from './components/ribbon/CanvasContextMenu';
+import { PageTabContextMenu } from './components/ribbon/PageTabContextMenu';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
 import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
@@ -78,7 +79,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [shapesCollapsed, setShapesCollapsed] = useState(false);
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [contextMenu, setContextMenu] = useState<{ top: number; left: number; kind: 'shape' | 'canvas' } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ top: number; left: number; kind: 'shape' | 'canvas' | 'pageTab' } | null>(null);
   const pointerRef = useRef<DragStart | null>(null);
   const dragPreviewRef = useRef<ModelPoint | null>(null);
   const dragSnapRef = useRef(false);
@@ -407,6 +408,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       setContextMenu({ top: event.clientY, left: event.clientX, kind: 'shape' });
     } catch (value) { reportError(value); }
   };
+  const onPageTabContextMenu = (index: number, position: { top: number; left: number }) => {
+    refresh(index);
+    setContextMenu({ ...position, kind: 'pageTab' });
+  };
   const commandsRef = useRef<RibbonCommands | null>(null);
   const cancelActiveDrag = () => {
     const pointer = pointerRef.current;
@@ -491,12 +496,13 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       </div>
       {contextMenu?.kind === 'shape' && selection && <ShapeContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
       {contextMenu?.kind === 'canvas' && <CanvasContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
+      {contextMenu?.kind === 'pageTab' && <PageTabContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
       {integrity.length > 0 && <section role="alert" style={styles.integrity}><strong>{t('diagnostics.integrityHeading')}</strong>{integrity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</section>}
       {fidelity.length > 0 && <details style={styles.fidelity}><summary>{t('diagnostics.fidelityHeading')}</summary>{fidelity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</details>}
       {error && <div role="alert" style={styles.error}>{error}</div>}
     </main>
     </div>
-    {statusBar === undefined ? <StatusBar pages={model.snapshot?.pages ?? []} activeIndex={model.pageIndex} onSelectPage={(index) => refresh(index)} onReorderPage={reorderPage} zoom={zoom} onZoomChange={setZoom} onFitToWindow={fitToWindow} t={t} /> : statusBar}
+    {statusBar === undefined ? <StatusBar pages={model.snapshot?.pages ?? []} activeIndex={model.pageIndex} onSelectPage={(index) => refresh(index)} onReorderPage={reorderPage} onPageContextMenu={onPageTabContextMenu} zoom={zoom} onZoomChange={setZoom} onFitToWindow={fitToWindow} t={t} /> : statusBar}
     </RibbonCommandsProvider>
   </div>;
 }

@@ -153,3 +153,18 @@ test('ignores a drop whose dragged page a peer removed', () => {
   expect(reorders).toEqual([]);
   cleanup();
 });
+
+test('reports a tab right-click with its index and cursor position', () => {
+  const reported: Array<[number, { top: number; left: number }]> = [];
+  const view = renderStatusBar({ onPageContextMenu: (index, position) => reported.push([index, position]) });
+  const tabs = view.getAllByRole('tab');
+  expect(fireEvent.contextMenu(tabs[2], { clientX: 200, clientY: 700, button: 2 }) === false).toBe(true);
+  expect(reported).toEqual([[2, { top: 700, left: 200 }]]);
+  cleanup();
+});
+
+test('leaves a tab right-click alone without a page-tab menu handler', () => {
+  const view = renderStatusBar();
+  expect(fireEvent.contextMenu(view.getAllByRole('tab')[0], { clientX: 120, clientY: 700, button: 2 }) === false).toBe(false);
+  cleanup();
+});

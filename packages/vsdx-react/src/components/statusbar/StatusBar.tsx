@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { CSSProperties, DragEvent, KeyboardEvent, SVGProps } from 'react';
+import type { CSSProperties, DragEvent, KeyboardEvent, MouseEvent, SVGProps } from 'react';
 import type { TFunction } from '@betteroffice/vsdx-i18n';
 
 export interface StatusBarPage {
@@ -13,6 +13,7 @@ export interface StatusBarProps {
   onSelectPage: (index: number) => void;
   onReorderPage?: (pageId: string, toIndex: number) => void;
   onAddPage?: () => void;
+  onPageContextMenu?: (index: number, position: { top: number; left: number }) => void;
   zoom: number;
   onZoomChange: (zoom: number) => void;
   onFitToWindow: () => void;
@@ -49,6 +50,7 @@ export function StatusBar({
   onSelectPage,
   onReorderPage,
   onAddPage,
+  onPageContextMenu,
   zoom,
   onZoomChange,
   onFitToWindow,
@@ -101,6 +103,11 @@ export function StatusBar({
   const closeMenu = () => {
     setMenuOpen(false);
     menuTriggerRef.current?.focus();
+  };
+  const onTabContextMenu = (event: MouseEvent<HTMLButtonElement>, index: number) => {
+    if (!onPageContextMenu) return;
+    event.preventDefault();
+    onPageContextMenu(index, { top: event.clientY, left: event.clientX });
   };
   const onDropPage = (event: DragEvent<HTMLButtonElement>, index: number) => {
     event.preventDefault();
@@ -183,6 +190,7 @@ export function StatusBar({
               draggable={Boolean(onReorderPage)}
               onClick={() => selectPage(index)}
               onKeyDown={(event) => moveTabFocus(event, index)}
+              onContextMenu={(event) => onTabContextMenu(event, index)}
               onDragStart={() => { draggedPageIdRef.current = page.id; }}
               onDragOver={(event) => { if (onReorderPage) event.preventDefault(); }}
               onDrop={(event) => onDropPage(event, index)}
