@@ -91,17 +91,14 @@ export function numericCellValue(shape: ShapeSnapshot, name: string, fallback?: 
   return parsed;
 }
 
-/** True when a ShapeSheet lock cell evaluates to the enabled value 1. */
 export function lockCellEnabled(shape: ShapeSnapshot | null, name: string): boolean {
   return Number(cellValue(shape, name)) === 1;
 }
 
-/** True when the stored formula for a cell carries a GUARD interception. */
 export function cellIsGuarded(shape: ShapeSnapshot | null, name: string): boolean {
   return (cellFormula(shape, name) ?? '').toUpperCase().includes('GUARD');
 }
 
-/** True when a delete would be refused by LockDelete or a GUARD on it. */
 export function isDeleteBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   return lockCellEnabled(shape, 'LockDelete') || cellIsGuarded(shape, 'LockDelete');
@@ -109,23 +106,26 @@ export function isDeleteBlocked(shape: ShapeSnapshot | null): boolean {
 
 export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'LockHeight', 'LockAspect'] as const;
 
-/** True when a handle resize would be refused by a lock or a GUARD on its pin or size. */
 export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   if (HANDLE_RESIZE_LOCKS.some((lock) => lockCellEnabled(shape, lock))) return true;
   return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => cellIsGuarded(shape, cell));
 }
 
-/** True when a single-cell write would be refused by a GUARD on that cell. */
 export function isCellWriteBlocked(shape: ShapeSnapshot | null, cellName: string): boolean {
   if (!shape) return false;
   return cellIsGuarded(shape, cellName);
 }
 
-/** True when a rotation would be refused by LockRotate or a GUARD on Angle. */
 export function isRotateBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   return lockCellEnabled(shape, 'LockRotate') || cellIsGuarded(shape, 'Angle');
+}
+
+export function isMoveBlocked(shape: ShapeSnapshot | null): boolean {
+  if (!shape) return false;
+  if (lockCellEnabled(shape, 'LockMoveX') || lockCellEnabled(shape, 'LockMoveY')) return true;
+  return cellIsGuarded(shape, 'PinX') || cellIsGuarded(shape, 'PinY');
 }
 
 export function createRibbonCommands(
@@ -148,9 +148,28 @@ export function createRibbonCommands(
   const selected = placements.length > 0;
   const topIndex = single ? single.placement.siblings.length - 1 : 0;
   const livePlacements = (currentHandle: DiagramHandle) => placementsIn(currentHandle.snapshot().pages, selection);
+  const rollback = (currentHandle: DiagramHandle, applied: number) => {
+    for (let index = 0; index < applied; index += 1) {
+      try { currentHandle.undo(); } catch { break; }
+    }
+  };
+  const preflightCellWrite = (live: ReturnType<typeof livePlacements>, cellName: string) => {
+    for (const { placement } of live) {
+      if (isCellWriteBlocked(placement.shape, cellName)) throw new Error('GUARD protects the requested cell');
+    }
+  };
   const formula = (cellName: string, value: string) => execute((currentHandle) => {
-    for (const { selection: item } of livePlacements(currentHandle)) {
-      currentHandle.setCellFormula(item.pageId, item.shapeId, { cellName }, value);
+    const live = livePlacements(currentHandle);
+    preflightCellWrite(live, cellName);
+    let applied = 0;
+    try {
+      for (const { selection: item } of live) {
+        currentHandle.setCellFormula(item.pageId, item.shapeId, { cellName }, value);
+        applied += 1;
+      }
+    } catch (error) {
+      rollback(currentHandle, applied);
+      throw error;
     }
   }, true);
   const reorderTo = (target: (placement: ShapePlacement) => number, allowed: (placement: ShapePlacement) => boolean) => execute((currentHandle) => {
@@ -159,29 +178,54 @@ export function createRibbonCommands(
     const { selection: item, placement } = live[0];
     if (allowed(placement)) currentHandle.reorderShape(item.pageId, item.shapeId, target(placement));
   }, true);
-  const setNumeric = (cellName: string, next: (value: number) => string) => execute((currentHandle) => {
-    for (const { selection: item, placement } of livePlacements(currentHandle)) {
-      currentHandle.setCellFormula(item.pageId, item.shapeId, { cellName }, next(numericCellValue(placement.shape, cellName, 0)));
+  const setNumeric = (cellName: string, next: (value: number) => string, lock?: { name: string; reason: string }) => execute((currentHandle) => {
+    const live = livePlacements(currentHandle);
+    const writes = live.map(({ selection: item, placement }) => {
+      if (isCellWriteBlocked(placement.shape, cellName)) throw new Error('GUARD protects the requested cell');
+      if (lock && lockCellEnabled(placement.shape, lock.name)) throw new Error(lock.reason);
+      return { item, formula: next(numericCellValue(placement.shape, cellName, 0)) };
+    });
+    let applied = 0;
+    try {
+      for (const { item, formula: formulaValue } of writes) {
+        currentHandle.setCellFormula(item.pageId, item.shapeId, { cellName }, formulaValue);
+        applied += 1;
+      }
+    } catch (error) {
+      rollback(currentHandle, applied);
+      throw error;
     }
   }, true);
   const commands = {
     undo: { id: 'undo', enabled: Boolean(handle?.canUndo()), run: execute((currentHandle) => { currentHandle.undo(); }) },
     redo: { id: 'redo', enabled: Boolean(handle?.canRedo()), run: execute((currentHandle) => { currentHandle.redo(); }) },
     delete: { id: 'delete', enabled: selected && placements.every((entry) => !isDeleteBlocked(entry.placement.shape)), run: execute((currentHandle) => {
-      for (const { selection: item } of livePlacements(currentHandle)) {
-        currentHandle.deleteShape(item.pageId, item.shapeId);
+      const live = livePlacements(currentHandle);
+      for (const { placement } of live) {
+        if (lockCellEnabled(placement.shape, 'LockDelete')) throw new Error('LockDelete protects this delete gesture');
+        if (cellIsGuarded(placement.shape, 'LockDelete')) throw new Error('GUARD protects the requested cell');
+      }
+      let applied = 0;
+      try {
+        for (const { selection: item } of live) {
+          currentHandle.deleteShape(item.pageId, item.shapeId);
+          applied += 1;
+        }
+      } catch (error) {
+        rollback(currentHandle, applied);
+        throw error;
       }
     }, true) },
-    fillColor: { id: 'fillColor', enabled: selected, value: color(cellValue(shape, 'FillForegnd'), '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
-    lineColor: { id: 'lineColor', enabled: selected, value: color(cellValue(shape, 'LineColor'), '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },
-    lineWeight: { id: 'lineWeight', enabled: selected, value: cellFormula(shape, 'LineWeight'), run: (value?: string) => { if (value) formula('LineWeight', value)(); } },
-    linePattern: { id: 'linePattern', enabled: selected, value: cellFormula(shape, 'LinePattern'), run: (value?: string) => { if (value) formula('LinePattern', value)(); } },
+    fillColor: { id: 'fillColor', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'FillForegnd')), value: color(cellValue(shape, 'FillForegnd'), '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
+    lineColor: { id: 'lineColor', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'LineColor')), value: color(cellValue(shape, 'LineColor'), '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },
+    lineWeight: { id: 'lineWeight', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'LineWeight')), value: cellFormula(shape, 'LineWeight'), run: (value?: string) => { if (value) formula('LineWeight', value)(); } },
+    linePattern: { id: 'linePattern', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'LinePattern')), value: cellFormula(shape, 'LinePattern'), run: (value?: string) => { if (value) formula('LinePattern', value)(); } },
     bringToFront: { id: 'bringToFront', enabled: single !== null && single.placement.index < topIndex, run: reorderTo((placement) => placement.siblings.length - 1, (placement) => placement.index < placement.siblings.length - 1) },
     bringForward: { id: 'bringForward', enabled: single !== null && single.placement.index < topIndex, run: reorderTo((placement) => placement.index + 1, (placement) => placement.index < placement.siblings.length - 1) },
     sendBackward: { id: 'sendBackward', enabled: single !== null && single.placement.index > 0, run: reorderTo((placement) => placement.index - 1, (placement) => placement.index > 0) },
     sendToBack: { id: 'sendToBack', enabled: single !== null && single.placement.index > 0, run: reorderTo(() => 0, (placement) => placement.index > 0) },
-    rotateLeft: { id: 'rotateLeft', enabled: selected && placements.every((entry) => !isRotateBlocked(entry.placement.shape)), run: setNumeric('Angle', (value) => String(value - Math.PI / 2)) },
-    rotateRight: { id: 'rotateRight', enabled: selected && placements.every((entry) => !isRotateBlocked(entry.placement.shape)), run: setNumeric('Angle', (value) => String(value + Math.PI / 2)) },
+    rotateLeft: { id: 'rotateLeft', enabled: selected && placements.every((entry) => !isRotateBlocked(entry.placement.shape)), run: setNumeric('Angle', (value) => String(value - Math.PI / 2), { name: 'LockRotate', reason: 'LockRotate protects this rotate gesture' }) },
+    rotateRight: { id: 'rotateRight', enabled: selected && placements.every((entry) => !isRotateBlocked(entry.placement.shape)), run: setNumeric('Angle', (value) => String(value + Math.PI / 2), { name: 'LockRotate', reason: 'LockRotate protects this rotate gesture' }) },
     flipHorizontal: { id: 'flipHorizontal', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'FlipX')), active: numberValue(cellValue(shape, 'FlipX')) !== 0, run: setNumeric('FlipX', (value) => value === 0 ? '1' : '0') },
     flipVertical: { id: 'flipVertical', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'FlipY')), active: numberValue(cellValue(shape, 'FlipY')) !== 0, run: setNumeric('FlipY', (value) => value === 0 ? '1' : '0') },
     addShape: {

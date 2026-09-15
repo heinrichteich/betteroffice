@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
-import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, isRotateBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
+import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, isMoveBlocked, isRotateBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
@@ -541,18 +541,32 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     try {
       const snapshot = handle.snapshot();
       const frame = modelRef.current.frame;
+      const targets: Array<{ pageId: string; shapeId: string; x: string; y: string }> = [];
       for (const item of selected) {
         const page = snapshot.pages.find((entry) => entry.id === item.pageId);
         if (!page) continue;
         const placement = findShapePlacement(page.shapes, item.shapeId);
         if (!placement) continue;
+        if (isMoveBlocked(placement.shape)) throw new Error('Shape is locked and cannot be moved with arrow keys.');
         if (!frame) {
-          handle.moveShape(item.pageId, item.shapeId, inchFormula(numericCellValue(placement.shape, 'PinX') + dx), inchFormula(numericCellValue(placement.shape, 'PinY') + dy));
+          targets.push({ pageId: item.pageId, shapeId: item.shapeId, x: inchFormula(numericCellValue(placement.shape, 'PinX') + dx), y: inchFormula(numericCellValue(placement.shape, 'PinY') + dy) });
           continue;
         }
         const base = dragStartForPlacement(page, placement.shape, frame);
         const geometry = resolveNudgeGeometry({ canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, ...base }, dx, dy);
-        handle.moveShape(item.pageId, item.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
+        targets.push({ pageId: item.pageId, shapeId: item.shapeId, x: inchFormula(geometry.x), y: inchFormula(geometry.y) });
+      }
+      let applied = 0;
+      try {
+        for (const target of targets) {
+          handle.moveShape(target.pageId, target.shapeId, target.x, target.y);
+          applied += 1;
+        }
+      } catch (error) {
+        for (let index = 0; index < applied; index += 1) {
+          try { handle.undo(); } catch { break; }
+        }
+        throw error;
       }
       refresh(undefined, true);
     } catch (value) { reportError(value); }

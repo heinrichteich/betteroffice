@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 import type { DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
-import { createRibbonCommands, findShapePlacement, isRotateBlocked, numericCellValue } from './commands';
+import { createRibbonCommands, findShapePlacement, isMoveBlocked, isRotateBlocked, numericCellValue } from './commands';
 
 function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
   return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ['one', 'two', 'three'].map((id) => ({ id, sourceId: 1, name: id, children: [], cells: Object.entries(cells).map(([name, value]) => ({ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: value, value })) })) }] };
@@ -62,7 +62,7 @@ test('does not reorder forward past the topmost shape', () => {
   expect(commands.bringForward.enabled).toBe(false); commands.bringForward.run(); expect(diagram.reorderShape).not.toHaveBeenCalled();
 });
 
-function cellsOf(pairs: Record<string, { formula?: string; value?: string }>) {
+function cellsOf(pairs: Record<string, { formula?: string | null; value?: string | null }>) {
   return Object.entries(pairs).map(([name, entry]) => ({ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: entry.formula ?? null, value: entry.value ?? null }));
 }
 
@@ -185,4 +185,93 @@ test('a rotation lock disables the rotate commands without touching the others',
   expect(commands.delete.enabled).toBe(true);
   expect(isRotateBlocked(state.pages[0].shapes[1])).toBe(true);
   expect(isRotateBlocked(snapshot({ Angle: '0' }).pages[0].shapes[1])).toBe(false);
+});
+
+function mixedFillSnapshot(): DiagramSnapshot {
+  return {
+    pages: [{
+      id: 'page', sourcePartPath: 'page', name: 'Page', shapes: [
+        { id: 'one', sourceId: 1, name: 'one', children: [], cells: cellsOf({ FillForegnd: { formula: '"#010203"', value: '#010203' } }) },
+        { id: 'two', sourceId: 1, name: 'two', children: [], cells: cellsOf({ FillForegnd: { formula: 'GUARD(RGB(0,0,0))', value: '#000000' } }) },
+      ],
+    }],
+  };
+}
+
+const oneSelected = { ...selected, shapeId: 'one', hit: { kind: 'shape' as const, shapeId: 'one' } };
+const twoSelected = { ...selected, shapeId: 'two', hit: { kind: 'shape' as const, shapeId: 'two' } };
+
+test('a guarded member disables format controls and refuses the run before writing', () => {
+  const diagram = handle(mixedFillSnapshot());
+  const errors: unknown[] = [];
+  const refresh = mock(() => {});
+  const commands = createRibbonCommands(diagram, [oneSelected, twoSelected], 'page', refresh, (error) => errors.push(error), () => {});
+  expect(commands.fillColor.enabled).toBe(false);
+  commands.fillColor.run('#abcdef');
+  expect(diagram.setCellFormula).not.toHaveBeenCalled();
+  expect(refresh).not.toHaveBeenCalled();
+  expect(errors).toHaveLength(1);
+});
+
+test('unguarded members keep format controls enabled', () => {
+  const diagram = handle(snapshot({ FillForegnd: '#010203', LineColor: '#445566', LineWeight: '0.01 in', LinePattern: '4' }));
+  const commands = createRibbonCommands(diagram, [oneSelected, twoSelected], 'page', () => {}, () => {}, () => {});
+  expect(commands.fillColor.enabled).toBe(true);
+  expect(commands.lineColor.enabled).toBe(true);
+  expect(commands.lineWeight.enabled).toBe(true);
+  expect(commands.linePattern.enabled).toBe(true);
+});
+
+test('rolls back earlier format writes when a later shape refuses them', () => {
+  const diagram = handle(snapshot({ FillForegnd: '#010203' }));
+  const through = diagram.setCellFormula as unknown as (pageId: string, shapeId: string, locator: { cellName: string }, formula: string) => Record<string, unknown>;
+  diagram.setCellFormula = mock((pageId: string, shapeId: string, locator: { cellName: string }, formula: string) => {
+    if (shapeId === 'two') throw new Error('GUARD protects the requested cell');
+    return through(pageId, shapeId, locator, formula);
+  }) as unknown as typeof diagram.setCellFormula;
+  const errors: unknown[] = [];
+  const refresh = mock(() => {});
+  const commands = createRibbonCommands(diagram, [oneSelected, twoSelected], 'page', refresh, (error) => errors.push(error), () => {});
+  expect(commands.fillColor.enabled).toBe(true);
+  commands.fillColor.run('#abcdef');
+  expect(diagram.setCellFormula).toHaveBeenCalledTimes(2);
+  expect(diagram.undo).toHaveBeenCalledTimes(1);
+  expect(refresh).not.toHaveBeenCalled();
+  expect(errors).toHaveLength(1);
+});
+
+test('computes every numeric target before writing any of them', () => {
+  const state: DiagramSnapshot = {
+    pages: [{
+      id: 'page', sourcePartPath: 'page', name: 'Page', shapes: [
+        { id: 'one', sourceId: 1, name: 'one', children: [], cells: cellsOf({ Angle: { formula: '0', value: '0' } }) },
+        { id: 'two', sourceId: 1, name: 'two', children: [], cells: cellsOf({ Angle: { formula: '2*ThePage!Angle', value: null } }) },
+      ],
+    }],
+  };
+  const diagram = handle(state);
+  const errors: unknown[] = [];
+  const commands = createRibbonCommands(diagram, [oneSelected, twoSelected], 'page', () => {}, (error) => errors.push(error), () => {});
+  commands.rotateRight.run();
+  expect(diagram.setCellFormula).not.toHaveBeenCalled();
+  expect(errors).toHaveLength(1);
+});
+
+test('refuses a delete touching a locked member before deleting anything', () => {
+  const diagram = handle(snapshot({ LockDelete: '1' }));
+  const errors: unknown[] = [];
+  const commands = createRibbonCommands(diagram, [oneSelected, twoSelected], 'page', () => {}, (error) => errors.push(error), () => {});
+  expect(commands.delete.enabled).toBe(false);
+  commands.delete.run();
+  expect(diagram.deleteShape).not.toHaveBeenCalled();
+  expect(errors).toHaveLength(1);
+});
+
+test('reports the locks and guards that refuse a move', () => {
+  expect(isMoveBlocked(snapshot({ PinX: '1', PinY: '2' }).pages[0].shapes[1])).toBe(false);
+  expect(isMoveBlocked(snapshot({ LockMoveX: '1' }).pages[0].shapes[1])).toBe(true);
+  expect(isMoveBlocked(snapshot({ LockMoveY: '1' }).pages[0].shapes[1])).toBe(true);
+  expect(isMoveBlocked(snapshot({ PinX: 'GUARD(1)' }).pages[0].shapes[1])).toBe(true);
+  expect(isMoveBlocked(snapshot({ PinY: 'GUARD(1)' }).pages[0].shapes[1])).toBe(true);
+  expect(isMoveBlocked(null)).toBe(false);
 });
