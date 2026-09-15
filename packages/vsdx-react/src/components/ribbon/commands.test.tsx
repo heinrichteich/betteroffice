@@ -189,6 +189,21 @@ test('a non-proportional LocPin formula blocks handle resize instead of skewing 
   expect(isHandleResizeBlocked(heightScaled)).toBe(false);
 });
 
+test('a parenthesized proportional LocPin formula still allows handle resize', () => {
+  for (const formula of ['Width*(0.5)', '(Width*0.5)', '(0.5*Width)', '((Width*0.5))']) {
+    const shape = snapshot({ LocPinX: formula }).pages[0].shapes[1];
+    expect(locPinAxisFractional(shape, 'LocPinX')).toBe(true);
+    expect(locPinAxisUnmanaged(shape, 'LocPinX')).toBe(false);
+    expect(isHandleResizeBlocked(shape)).toBe(false);
+  }
+  for (const formula of ['Height*(0.5)', '(Height*0.5)']) {
+    const shape = snapshot({ LocPinY: formula }).pages[0].shapes[1];
+    expect(locPinAxisFractional(shape, 'LocPinY')).toBe(true);
+    expect(locPinAxisUnmanaged(shape, 'LocPinY')).toBe(false);
+    expect(isHandleResizeBlocked(shape)).toBe(false);
+  }
+});
+
 test('a guarded proportional LocPin allows handle resize and holds the anchored edge', () => {
   const proportional = snapshot({ LocPinX: 'GUARD(Width*0.5)' }).pages[0].shapes[1];
   expect(locPinAxisFractional(proportional, 'LocPinX')).toBe(true);

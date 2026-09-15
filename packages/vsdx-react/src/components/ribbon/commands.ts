@@ -183,11 +183,30 @@ function locPinSizeCell(name: string): string {
   return name === 'LocPinY' ? 'Height' : 'Width';
 }
 
+function stripWrappingParens(text: string): string {
+  for (;;) {
+    if (!text.startsWith('(') || !text.endsWith(')')) return text;
+    let depth = 0;
+    let wraps = true;
+    for (let index = 0; index < text.length; index += 1) {
+      if (text[index] === '(') depth += 1;
+      else if (text[index] === ')') {
+        depth -= 1;
+        if (depth === 0 && index < text.length - 1) { wraps = false; break; }
+      }
+    }
+    if (!wraps || depth !== 0) return text;
+    text = text.slice(1, -1).trim();
+  }
+}
+
 function isProportionalLocPin(formula: string, sizeCell: string): boolean {
-  const text = formula.replace(/^=+/, '').trim().toUpperCase();
+  const text = stripWrappingParens(formula.replace(/^=+/, '').trim().toUpperCase());
   const number = '(?:\\d+(?:\\.\\d+)?|\\.\\d+)(?:[eE][+-]?\\d+)?';
+  const factor = `(?:${number}|\\(\\s*${number}\\s*\\))`;
   const cell = sizeCell.toUpperCase();
-  return new RegExp(`^(?:${cell}\\s*\\*\\s*${number}|${number}\\s*\\*\\s*${cell}|${cell}\\s*/\\s*${number})$`).test(text);
+  const sized = `(?:${cell}|\\(\\s*${cell}\\s*\\))`;
+  return new RegExp(`^(?:${sized}\\s*\\*\\s*${factor}|${factor}\\s*\\*\\s*${sized}|${sized}\\s*/\\s*${factor})$`).test(text);
 }
 
 /** Per-axis flags for LocPin cells that track their size proportionally on resize. */
