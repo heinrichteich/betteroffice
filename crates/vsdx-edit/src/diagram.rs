@@ -876,9 +876,13 @@ impl DiagramSession {
             pending.push(entry?);
         }
         let mut receipts = Vec::with_capacity(N);
+        let mut resolved = Vec::with_capacity(N);
         for (target, formula) in pending {
             let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
             let before = map_string(&cell, &txn, "formula");
+            resolved.push((cell, target, formula, before));
+        }
+        for (cell, target, formula, before) in resolved {
             cell.insert(&mut txn, "formula", formula.as_str());
             receipts.push(CellFormulaReceipt {
                 page_id: page_id.to_owned(),
