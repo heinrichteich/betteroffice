@@ -166,6 +166,19 @@ fn stop(
     if !position.is_finite() {
         return None;
     }
+    if let Some(cell) = row_cell(row, "GradientStopColorTrans") {
+        let transparent = stop_number(
+            package,
+            references,
+            shape,
+            shape_id,
+            "GradientStopColorTrans",
+            cell,
+        );
+        if !transparent.is_some_and(|value| value == 0.0) {
+            return None;
+        }
+    }
     Some(GradientStop {
         position: position.clamp(0.0, 1.0) as f32,
         color,

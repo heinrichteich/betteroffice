@@ -13,6 +13,15 @@ fn stop_cell(name: &str, formula: Option<&str>, value: Option<&str>) -> Cell {
 }
 
 fn stop_row(index: u32, color: (&str, &str), position: &str) -> SectionChild {
+    stop_row_with_trans(index, color, position, "0")
+}
+
+fn stop_row_with_trans(
+    index: u32,
+    color: (&str, &str),
+    position: &str,
+    trans: &str,
+) -> SectionChild {
     SectionChild::Row(Row {
         index: Some(index),
         name: None,
@@ -21,7 +30,7 @@ fn stop_row(index: u32, color: (&str, &str), position: &str) -> SectionChild {
         del: false,
         children: vec![
             RowChild::Cell(stop_cell("GradientStopColor", Some(color.0), Some(color.1))),
-            RowChild::Cell(stop_cell("GradientStopColorTrans", None, Some("0"))),
+            RowChild::Cell(stop_cell("GradientStopColorTrans", None, Some(trans))),
             RowChild::Cell(stop_cell("GradientStopPosition", None, Some(position))),
         ],
         other_attrs: vec![],
@@ -175,6 +184,29 @@ fn gradient_with_fewer_than_two_stops_reports_and_falls_back_to_solid() {
         1,
         "0",
         vec![stop_row(0, ("GUARD(RGB(1,2,3))", "#010203"), "0")],
+    )]);
+    assert!(matches!(shape_fill(&list), Some(Paint::Solid { .. })));
+    assert!(
+        list.primitives
+            .iter()
+            .flat_map(|primitive| match primitive {
+                Primitive::Shape { diagnostics, .. } => diagnostics.as_slice(),
+                _ => &[],
+            })
+            .any(|diagnostic| diagnostic.code == "unresolvable-fill-gradient"
+                && diagnostic.category == DiagnosticCategory::Fidelity)
+    );
+}
+
+#[test]
+fn gradient_stop_with_transparency_falls_back_to_solid() {
+    let list = render(vec![gradient_shape(
+        1,
+        "0",
+        vec![
+            stop_row_with_trans(0, ("GUARD(RGB(255,0,0))", "#FF0000"), "0", "0"),
+            stop_row_with_trans(1, ("GUARD(RGB(0,0,255))", "#0000FF"), "1", "50"),
+        ],
     )]);
     assert!(matches!(shape_fill(&list), Some(Paint::Solid { .. })));
     assert!(
