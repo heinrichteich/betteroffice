@@ -2,11 +2,13 @@
 
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CollaborationProvider, type CollaborationUser, type VsdxFontFace } from "@betteroffice/vsdx";
+import type { VsdxEditorApi } from "@betteroffice/vsdx-react";
 import { loadBundledFontBytes, resolveLastResortFace, resolveMetricCompatFace } from "@betteroffice/fonts";
 import { Logo } from "../components/Logo";
 import { CollaborationControls, COLLAB_RELAY_ORIGIN, useCollabRoom, useDemoRoom, type CollaborationReplica, type CollaborationTransport } from "../collab";
+import { clearVsdxApi, exposeVsdxApi, shouldExposeVsdxApi } from "./vsdxApiExposure";
 
 const VsdxEditor = dynamic(
   () => import("@betteroffice/vsdx-react").then((module) => module.VsdxEditor),
@@ -24,6 +26,16 @@ export function VsdxDemoClient() {
   const room = useDemoRoom();
   const createProvider = useCallback((replica: CollaborationReplica, transport: CollaborationTransport) => new CollaborationProvider(replica, transport, { user: { name: presenceName() } }), []);
   const collab = useCollabRoom(COLLAB_RELAY_ORIGIN, room, createProvider);
+  const readyApiRef = useRef<VsdxEditorApi | null>(null);
+  const handleReady = useCallback((api: VsdxEditorApi) => {
+    readyApiRef.current = api;
+    if (shouldExposeVsdxApi(window.location.search)) exposeVsdxApi(window, api);
+  }, []);
+  useEffect(() => () => {
+    const api = readyApiRef.current;
+    readyApiRef.current = null;
+    if (api) clearVsdxApi(window, api);
+  }, [room]);
 
   useEffect(() => {
     let cancelled = false;
@@ -58,7 +70,7 @@ export function VsdxDemoClient() {
         </div>
       </header>
       <main className="flex min-h-0 flex-1 flex-col *:min-h-0 *:flex-1" data-testid="vsdx-demo-stage">
-        {error ? <p className="m-auto text-mute" role="alert">Failed to load the demo diagram: {error}</p> : assets && collaboration ? <VsdxEditor key={room} file={assets.file} fonts={assets.fonts} collaboration={collaboration} onReady={(api) => { (window as unknown as { __vsdxApi?: unknown }).__vsdxApi = api; }} /> : <p className="m-auto text-mute">Loading diagram…</p>}
+        {error ? <p className="m-auto text-mute" role="alert">Failed to load the demo diagram: {error}</p> : assets && collaboration ? <VsdxEditor key={room} file={assets.file} fonts={assets.fonts} collaboration={collaboration} onReady={handleReady} /> : <p className="m-auto text-mute">Loading diagram…</p>}
       </main>
     </div>
   );
