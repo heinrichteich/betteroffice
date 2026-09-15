@@ -273,6 +273,21 @@ test('a locked shape disables its refused operation and focuses the first allowe
   }
 });
 
+test('a click on a hover-opened submenu trigger keeps the submenu open', () => {
+  const { view } = renderMenu();
+  try {
+    const trigger = parentMenu().querySelector('[data-submenu-id="bringToFront"]') as HTMLElement;
+    expect(trigger).not.toBeNull();
+    fireEvent.mouseOver(trigger);
+    expect(document.querySelector('[data-submenu="bringToFront"]')).not.toBeNull();
+    fireEvent.click(trigger);
+    expect(document.querySelector('[data-submenu="bringToFront"]')).not.toBeNull();
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
 test('a submenu with no enabled child stays closed to keyboard and pointer', () => {
   const { view } = renderMenu({ shapeId: 'five' });
   try {

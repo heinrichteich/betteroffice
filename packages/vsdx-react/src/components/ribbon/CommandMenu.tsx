@@ -32,6 +32,11 @@ export function CommandMenuItem({ id, icon, label, shortcut, itemRef, onSelect }
   return <button ref={itemRef} type="button" role={checkable ? 'menuitemcheckbox' : 'menuitem'} aria-checked={checkable ? command.active : undefined} aria-keyshortcuts={shortcut} disabled={!command.enabled} aria-label={shortcut ? `${label} ${shortcut}` : label} data-command-id={id} tabIndex={-1} onMouseDown={(event) => event.preventDefault()} onClick={() => { command.run(); onSelect(); }} onMouseOver={(event) => { if (command.enabled) event.currentTarget.style.backgroundColor = '#f5f5f5'; }} onMouseOut={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; }} style={{ ...styles.menuItem, color: command.enabled ? '#242424' : '#b4b4b4' }}><RibbonIcon name={icon} size={18} /><span>{label}</span>{shortcut && <span aria-hidden="true" style={styles.shortcut}>{shortcut}</span>}</button>;
 }
 
+/** Side a submenu opens on so it stays inside the viewport. */
+export function submenuSide(parentRight: number, submenuWidth: number, viewportWidth: number, margin = 4): 'left' | 'right' {
+  return parentRight + submenuWidth > viewportWidth - margin ? 'left' : 'right';
+}
+
 /** Shared keyboard-navigable command menu behind the ribbon split buttons and the canvas context menu. */
 export function CommandMenu({ menuLabel, entries, position, dividerAfter, anchorRef, initialFocus = 'first', label, onClose, onCloseAndFocus }: CommandMenuProps) {
   const commands = useRibbonCommands();
@@ -97,7 +102,7 @@ export function CommandMenu({ menuLabel, entries, position, dividerAfter, anchor
     if (!submenu || !anchor) return;
     const bounds = submenu.getBoundingClientRect();
     const parent = anchor.getBoundingClientRect();
-    const left = parent.right + bounds.width <= window.innerWidth - MENU_MARGIN ? parent.right : parent.left - bounds.width;
+    const left = submenuSide(parent.right, bounds.width, window.innerWidth) === 'right' ? parent.right : parent.left - bounds.width;
     setSubmenuPosition({
       left: Math.max(MENU_MARGIN, Math.min(left, window.innerWidth - bounds.width - MENU_MARGIN)),
       top: Math.max(MENU_MARGIN, Math.min(parent.top, window.innerHeight - bounds.height - MENU_MARGIN)),
@@ -167,7 +172,7 @@ export function CommandMenu({ menuLabel, entries, position, dividerAfter, anchor
         return (
           <span key={entry.id} style={styles.entryWrap}>
             {submenu ? (
-              <button ref={(node) => { itemRefs.current[index] = node; }} type="button" role="menuitem" aria-haspopup="menu" aria-expanded={open} disabled={!enabled} aria-label={label(entry.id)} data-submenu-id={entry.id} tabIndex={-1} onMouseDown={(event) => event.preventDefault()} onClick={() => { if (!enabled) return; if (open) closeSubmenu(true); else openSubmenuAt(index); }} onMouseEnter={() => { if (enabled && !open) openSubmenuAt(index); }} onMouseOver={(event) => { if (enabled) event.currentTarget.style.backgroundColor = '#f5f5f5'; }} onMouseOut={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; }} style={{ ...styles.menuItem, color: enabled ? '#242424' : '#b4b4b4' }}><RibbonIcon name={entry.icon} size={18} /><span>{label(entry.id)}</span><span aria-hidden="true" style={styles.chevron}>▸</span></button>
+              <button ref={(node) => { itemRefs.current[index] = node; }} type="button" role="menuitem" aria-haspopup="menu" aria-expanded={open} disabled={!enabled} aria-label={label(entry.id)} data-submenu-id={entry.id} tabIndex={-1} onMouseDown={(event) => event.preventDefault()} onClick={() => { if (!enabled || open) return; openSubmenuAt(index); }} onMouseEnter={() => { if (enabled && !open) openSubmenuAt(index); }} onMouseOver={(event) => { if (enabled) event.currentTarget.style.backgroundColor = '#f5f5f5'; }} onMouseOut={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; }} style={{ ...styles.menuItem, color: enabled ? '#242424' : '#b4b4b4' }}><RibbonIcon name={entry.icon} size={18} /><span>{label(entry.id)}</span><span aria-hidden="true" style={styles.chevron}>▸</span></button>
             ) : (
               <CommandMenuItem id={entry.id} icon={entry.icon} label={label(entry.id)} shortcut={entry.shortcut} itemRef={(node) => { itemRefs.current[index] = node; }} onSelect={onCloseAndFocus} />
             )}

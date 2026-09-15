@@ -74,6 +74,9 @@ function colorFormula(value = '#000000'): string {
   return `RGB(${[0, 2, 4].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16)).join(',')})`;
 }
 
+/** Matches a GUARD function call without matching reference names containing guard. */
+const GUARD_CALL = /(^|[^A-Z0-9_.])GUARD\s*\(/i;
+
 export function numberValue(value: string | undefined): number {
   const result = Number(value ?? '0');
   return Number.isFinite(result) ? result : 0;
@@ -94,7 +97,7 @@ export function lockCellEnabled(shape: ShapeSnapshot | null, name: string): bool
 
 /** True when the stored formula for a cell carries a GUARD interception. */
 export function cellIsGuarded(shape: ShapeSnapshot | null, name: string): boolean {
-  return (cellFormula(shape, name) ?? '').toUpperCase().includes('GUARD');
+  return GUARD_CALL.test(cellFormula(shape, name) ?? '');
 }
 
 /** True when a delete would be refused by LockDelete or a GUARD on it. */
