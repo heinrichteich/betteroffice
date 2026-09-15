@@ -258,14 +258,24 @@ export function quickShapePlacement(source: ShapeSnapshot, side: AutoConnectSide
   const dir = orientDirection(shapeOrientation(source), AUTO_CONNECT_DIRS[side]);
   const facing: AutoConnectSide = Math.abs(dir.x) >= Math.abs(dir.y) ? (dir.x > 0 ? 'west' : 'east') : (dir.y > 0 ? 'south' : 'north');
   const toCell = `Connections.X${AUTO_CONNECT_SIDES.indexOf(facing) + 1}`;
-  const half = Math.abs(dir.x) >= Math.abs(dir.y) ? width / 2 : height / 2;
+  const length = Math.hypot(dir.x, dir.y) || 1;
+  const ux = dir.x / length;
+  const uy = dir.y / length;
+  const hx = width / 2;
+  const hy = height / 2;
+  const ax = Math.abs(ux);
+  const ay = Math.abs(uy);
+  const extent = ax < 1e-12 ? hy / Math.max(ay, 1e-12) : ay < 1e-12 ? hx / Math.max(ax, 1e-12) : Math.min(hx / ax, hy / ay);
+  const x = from.x + ux * (gap + extent);
+  const y = from.y + uy * (gap + extent);
+  const edge = facing === 'west' ? { x: x - hx, y } : facing === 'east' ? { x: x + hx, y } : facing === 'south' ? { x, y: y - hy } : { x, y: y + hy };
   return {
-    x: from.x + dir.x * (gap + half),
-    y: from.y + dir.y * (gap + half),
+    x,
+    y,
     width,
     height,
     from,
-    to: { side: facing, x: from.x + dir.x * gap, y: from.y + dir.y * gap, toCell },
+    to: { side: facing, x: edge.x, y: edge.y, toCell },
   };
 }
 

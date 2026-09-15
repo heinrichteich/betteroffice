@@ -484,6 +484,18 @@ test('places quick shapes along the rotated edge normal with opposing glue', () 
   expect(placed.to.y).toBeCloseTo(3.5, 10);
 });
 
+test('lands a diagonal quick shape on its facing edge with full gap clearance', () => {
+  const target = connectedShape({ PinX: '2', PinY: '2', Width: '2', Height: '2', Angle: String(Math.PI / 4) });
+  const placed = quickShapePlacement(target, 'east', 2, 2)!;
+  expect(placed.to.side).toBe('west');
+  expect(placed.to.toCell).toBe('Connections.X4');
+  expect(placed.to.x).toBeCloseTo(placed.x - 1, 10);
+  expect(placed.to.y).toBeCloseTo(placed.y, 10);
+  const dx = Math.max(placed.x - 1 - placed.from.x, 0, placed.from.x - (placed.x + 1));
+  const dy = Math.max(placed.y - 1 - placed.from.y, 0, placed.from.y - (placed.y + 1));
+  expect(Math.hypot(dx, dy)).toBeGreaterThanOrEqual(0.5 - 1e-9);
+});
+
 test('holds the hover halo over the rotated bounds', () => {
   const target = connectedShape({ PinX: '2', PinY: '2', Width: '4', Height: '2', Angle: String(Math.PI / 2) });
   expect(autoConnectHaloHit(target, frame, 1, { x: 192, y: 672 })).toBe(true);
