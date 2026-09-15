@@ -94,6 +94,17 @@ struct ResizeShapeArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PlaceShapeArgs {
+    page_id: String,
+    shape_id: String,
+    width_formula: String,
+    height_formula: String,
+    x_formula: String,
+    y_formula: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ReorderShapeArgs {
     page_id: String,
     shape_id: String,
@@ -320,6 +331,11 @@ impl VsdxDocument {
         self.resize_shape_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = placeShapeJson)]
+    pub fn place_shape_json(&self, args: &str) -> Result<String, JsValue> {
+        self.place_shape_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = reorderShapeJson)]
     pub fn reorder_shape_json(&self, args: &str) -> Result<String, JsValue> {
         self.reorder_shape_json_inner(args).map_err(js_error)
@@ -498,6 +514,30 @@ impl VsdxDocument {
     fn resize_shape_json_inner(&self, args: &str) -> Result<String, String> {
         let args = parse_args_inner(args)?;
         self.resize_shape(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn place_shape(
+        &self,
+        args: PlaceShapeArgs,
+    ) -> crate::EditResult<[crate::CellFormulaReceipt; 4]> {
+        self.session.place_shape(
+            &local_context(),
+            &args.page_id,
+            &args.shape_id,
+            crate::PlaceShapeFormulas {
+                width: args.width_formula,
+                height: args.height_formula,
+                x: args.x_formula,
+                y: args.y_formula,
+            },
+        )
+    }
+
+    fn place_shape_json_inner(&self, args: &str) -> Result<String, String> {
+        let args = parse_args_inner(args)?;
+        self.place_shape(args)
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }
