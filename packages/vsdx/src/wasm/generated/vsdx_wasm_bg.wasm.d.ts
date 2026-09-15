@@ -20,6 +20,7 @@ export const vsdxdocument_drainUpdateEvent: (a: number) => [number, number];
 export const vsdxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_encodeStateAsUpdate: (a: number) => [number, number];
 export const vsdxdocument_encodeStateVector: (a: number) => [number, number];
+export const vsdxdocument_locPinAtSizeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_moveShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];

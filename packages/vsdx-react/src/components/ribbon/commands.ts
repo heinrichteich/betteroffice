@@ -105,95 +105,11 @@ export function isDeleteBlocked(shape: ShapeSnapshot | null): boolean {
 
 export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'LockHeight', 'LockAspect'] as const;
 
-/** True when a handle resize would be refused by a lock, a GUARD, or a non-proportional LocPin. */
+/** True when a handle resize would be refused by a lock or a GUARD. */
 export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   if (HANDLE_RESIZE_LOCKS.some((lock) => lockCellEnabled(shape, lock))) return true;
-  if (locPinAxisUnmanaged(shape, 'LocPinX') || locPinAxisUnmanaged(shape, 'LocPinY')) return true;
   return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => cellIsGuarded(shape, cell));
-}
-
-/** True when a stored formula is a relative reference rather than a fixed literal. */
-export function isFormulaDerived(formula: string | null | undefined): boolean {
-  if (formula === null || formula === undefined) return false;
-  const text = unwrapGuardCall(formula);
-  if (!text) return false;
-  return !/^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(text);
-}
-
-function unwrapGuardCall(formula: string): string {
-  let text = formula.replace(/^=+/, '').trim();
-  for (;;) {
-    const head = /^GUARD\s*\(/i.exec(text);
-    if (!head) return text;
-    let depth = 0;
-    let quoted = false;
-    let end = -1;
-    for (let index = head[0].length - 1; index < text.length; index += 1) {
-      const char = text[index];
-      if (quoted) {
-        if (char === '"') {
-          if (text[index + 1] === '"') index += 1;
-          else quoted = false;
-        }
-        continue;
-      }
-      if (char === '"') {
-        quoted = true;
-        continue;
-      }
-      if (char === '(') depth += 1;
-      else if (char === ')') {
-        depth -= 1;
-        if (depth === 0) {
-          end = index;
-          break;
-        }
-      }
-    }
-    if (end < 0 || quoted) return text;
-    if (text.slice(end + 1).trim() !== '') return text;
-    text = text.slice(head[0].length, end).trim().replace(/^=+/, '').trim();
-  }
-}
-
-/** True when a LocPin formula scales proportionally with its own size cell. */
-export function locPinAxisFractional(shape: ShapeSnapshot | null, name: string): boolean {
-  const cell = findCell(shape, name);
-  if (!cell) return true;
-  const formula = unwrapGuardCall((cell.formula ?? '').replace(/^=+/, '').trim());
-  if (formula === '') {
-    const value = (cell.value ?? '').trim();
-    return value === '' || !Number.isFinite(Number(value));
-  }
-  if (Number.isFinite(Number(formula))) return false;
-  return isProportionalLocPin(formula, locPinSizeCell(name));
-}
-
-/** True when a LocPin formula is neither a literal nor proportional to its size cell. */
-export function locPinAxisUnmanaged(shape: ShapeSnapshot | null, name: string): boolean {
-  const cell = findCell(shape, name);
-  if (!cell) return false;
-  const formula = unwrapGuardCall((cell.formula ?? '').replace(/^=+/, '').trim());
-  if (formula === '' || Number.isFinite(Number(formula))) return false;
-  return !isProportionalLocPin(formula, locPinSizeCell(name));
-}
-
-function locPinSizeCell(name: string): string {
-  return name === 'LocPinY' ? 'Height' : 'Width';
-}
-
-function isProportionalLocPin(formula: string, sizeCell: string): boolean {
-  const text = formula.replace(/^=+/, '').trim().toUpperCase();
-  const number = '(?:\\d+(?:\\.\\d+)?|\\.\\d+)(?:[eE][+-]?\\d+)?';
-  const cell = sizeCell.toUpperCase();
-  return new RegExp(`^(?:${cell}\\s*\\*\\s*${number}|${number}\\s*\\*\\s*${cell}|${cell}\\s*/\\s*${number})$`).test(text);
-}
-
-/** Per-axis flags for LocPin cells that track their size proportionally on resize. */
-export function locPinSizeDriven(shape: ShapeSnapshot | null): { x: boolean; y: boolean } {
-  if (!shape) return { x: false, y: false };
-  return { x: locPinAxisFractional(shape, 'LocPinX'), y: locPinAxisFractional(shape, 'LocPinY') };
 }
 
 /** True when a single-cell write would be refused by a GUARD on that cell. */

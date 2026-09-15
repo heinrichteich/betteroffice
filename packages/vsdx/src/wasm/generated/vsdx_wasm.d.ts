@@ -18,6 +18,7 @@ export class VsdxDocument {
     encodeDiff(remote_state_vector: Uint8Array): Uint8Array;
     encodeStateAsUpdate(): Uint8Array;
     encodeStateVector(): Uint8Array;
+    locPinAtSizeJson(args: string): string;
     mediaBytes(part_path: string): Uint8Array;
     moveShapeJson(args: string): string;
     static openCollaborative(bytes: Uint8Array, client_id: number): VsdxDocument;
@@ -72,6 +73,7 @@ export interface InitOutput {
     readonly vsdxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_encodeStateAsUpdate: (a: number) => [number, number];
     readonly vsdxdocument_encodeStateVector: (a: number) => [number, number];
+    readonly vsdxdocument_locPinAtSizeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_moveShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];

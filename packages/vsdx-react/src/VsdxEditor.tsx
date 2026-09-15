@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
-import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, locPinSizeDriven, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
+import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
@@ -338,7 +338,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     }
   };
 
-  const dragStartForPlacement = (page: { shapes: readonly ShapeSnapshot[]; sourcePartPath: string }, shape: ShapeSnapshot, frame: PageDisplayList): Omit<DragStart, 'canvas' | 'model' | 'resize' | 'pointerId' | 'startX' | 'startY'> => {
+  const dragStartForPlacement = (page: { id: string; shapes: readonly ShapeSnapshot[]; sourcePartPath: string }, shape: ShapeSnapshot, frame: PageDisplayList, locPinAtSize?: (width: number, height: number) => { x: number; y: number }): Omit<DragStart, 'canvas' | 'model' | 'resize' | 'pointerId' | 'startX' | 'startY'> => {
     const width = numericCellValue(shape, 'Width');
     const height = numericCellValue(shape, 'Height');
     return {
@@ -348,7 +348,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       flipY: numericCellValue(shape, 'FlipY', 0) === 1,
       pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
       locPin: { x: numericCellValue(shape, 'LocPinX', width / 2), y: numericCellValue(shape, 'LocPinY', height / 2) },
-      locPinFormula: locPinSizeDriven(shape),
+      locPinAtSize,
       size: { width, height },
     };
   };
@@ -383,7 +383,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
                   reportError(new Error('Shape is locked and cannot be resized with handles.'));
                   return;
                 }
-                const base = dragStartForPlacement(page, placement.shape, frame);
+                const base = dragStartForPlacement(page, placement.shape, frame, (width, height) => handle.locPinAtSize(page.id, placement.shape.id, width, height));
                 pointerRef.current = {
                   ...point,
                   ...base,
@@ -808,7 +808,6 @@ export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, sel
     resize: false,
     pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
     locPin: { x: numericCellValue(shape, 'LocPinX', width / 2), y: numericCellValue(shape, 'LocPinY', height / 2) },
-    locPinFormula: locPinSizeDriven(shape),
     size: { width, height },
     parentTransforms: shapeParentTransforms(frame.primitives, `${page.sourcePartPath}:${shape.sourceId}`) ?? [],
     angle: numericCellValue(shape, 'Angle', 0),
