@@ -76,7 +76,26 @@
       "lineHorizontal": "Horizontal Line",
       "lineVertical": "Vertical Line",
       "lineDiagonal": "Diagonal Line",
-      "lineElbow": "Elbow Line"
+      "lineElbow": "Elbow Line",
+      "simpleArrow": "Simple Arrow",
+      "simple": "Simple",
+      "modern": "Modern",
+      "flexibleArrow": "Flexible Arrow",
+      "bentArrow": "Bent Arrow",
+      "uTurnArrow": "U-Turn Arrow",
+      "sharpBent": "Sharp Bent",
+      "multiLine": "Multi-Line",
+      "multiArrow": "Multi-Arrow",
+      "twoDMultiLine": "2D Multi-Line",
+      "stripedArrow": "Striped Arrow",
+      "notched": "Notched",
+      "blockArrow": "Block Arrow",
+      "circularArrow": "Circular Arrow",
+      "quadArrow": "Quad Arrow",
+      "leftRightUp": "Left-Right-Up",
+      "lineDouble": "Line Double",
+      "dottedLine": "Dotted Line",
+      "arcedLine": "Arced Line"
     }
   }
 }

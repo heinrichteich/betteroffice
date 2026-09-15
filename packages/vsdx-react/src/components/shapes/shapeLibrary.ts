@@ -107,6 +107,7 @@ function svgRows(rows: readonly GeometryRow[]): string {
       current = row.end;
       return ` L ${numberFormula(current[0])} ${numberFormula(1 - current[1])}`;
     }
+    if (row.type === 'Close') return ' Z';
     return '';
   }).join('');
 }
@@ -137,7 +138,7 @@ function geometryCells(path: GeometryPath): FormulaShapeDraft['cells'] {
   });
 }
 
-function draftFor(id: string, path: GeometryPath, square: boolean) {
+function draftFor(id: string, path: GeometryPath, square: boolean, linePattern = '1') {
   return (x: number, y: number, width: number, height: number): FormulaShapeDraft => {
     const safeWidth = dimension(width, 1);
     const safeHeight = square ? safeWidth : dimension(height, 1);
@@ -151,7 +152,7 @@ function draftFor(id: string, path: GeometryPath, square: boolean) {
         { locator: { cellName: 'LocPinX' }, name: 'LocPinX', formula: 'Width*0.5' },
         { locator: { cellName: 'LocPinY' }, name: 'LocPinY', formula: 'Height*0.5' },
         ...geometryCells(path),
-        ...Object.entries({ Angle: '0', FlipX: '0', FlipY: '0', FillPattern: '1', FillForegnd: 'RGB(255,255,255)', LinePattern: '1', LineColor: 'RGB(23,32,51)', LineWeight: '0.01' }).map(([name, formula]) => ({ locator: { cellName: name }, name, formula })),
+        ...Object.entries({ Angle: '0', FlipX: '0', FlipY: '0', FillPattern: '1', FillForegnd: 'RGB(255,255,255)', LinePattern: linePattern, LineColor: 'RGB(23,32,51)', LineWeight: '0.01' }).map(([name, formula]) => ({ locator: { cellName: name }, name, formula })),
       ],
     };
   };
@@ -246,10 +247,20 @@ export const arrowVertices: Readonly<Record<string, readonly Point[]>> = {
   arrowDown: [[0.35, 1], [0.35, 0.4], [0.15, 0.4], [0.5, 0], [0.85, 0.4], [0.65, 0.4], [0.65, 1]],
   arrowDoubleHorizontal: [[0, 0.5], [0.2, 0.15], [0.2, 0.35], [0.8, 0.35], [0.8, 0.15], [1, 0.5], [0.8, 0.85], [0.8, 0.65], [0.2, 0.65], [0.2, 0.85]],
   arrowDoubleVertical: [[0.5, 0], [0.15, 0.2], [0.35, 0.2], [0.35, 0.8], [0.15, 0.8], [0.5, 1], [0.85, 0.8], [0.65, 0.8], [0.65, 0.2], [0.85, 0.2]],
+  simpleArrow: [[0, 0.42], [0.62, 0.42], [0.62, 0.28], [1, 0.5], [0.62, 0.72], [0.62, 0.58], [0, 0.58]],
+  simple: [[0, 0.45], [0.7, 0.45], [0.7, 0.3], [1, 0.5], [0.7, 0.7], [0.7, 0.55], [0, 0.55]],
+  modern: [[0, 0.3], [0.6, 0.44], [0.6, 0.3], [1, 0.5], [0.6, 0.7], [0.6, 0.56], [0, 0.7]],
+  stripedArrow: [[0.45, 0.15], [1, 0.5], [0.45, 0.85]],
+  notched: [[0.25, 0.35], [0.6, 0.35], [0.6, 0.15], [1, 0.5], [0.6, 0.85], [0.6, 0.65], [0.25, 0.65], [0.4, 0.5]],
+  blockArrow: [[0, 0.3], [0.55, 0.3], [0.55, 0.1], [1, 0.5], [0.55, 0.9], [0.55, 0.7], [0, 0.7]],
+  quadArrow: [[0.5, 1], [0.7, 0.76], [0.6, 0.76], [0.6, 0.6], [0.76, 0.6], [0.76, 0.7], [1, 0.5], [0.76, 0.3], [0.76, 0.4], [0.6, 0.4], [0.6, 0.24], [0.7, 0.24], [0.5, 0], [0.3, 0.24], [0.4, 0.24], [0.4, 0.4], [0.24, 0.4], [0.24, 0.3], [0, 0.5], [0.24, 0.7], [0.24, 0.6], [0.4, 0.6], [0.4, 0.76], [0.3, 0.76]],
+  leftRightUp: [[0.38, 0], [0.38, 0.38], [0.12, 0.38], [0, 0.5], [0.12, 0.62], [0.38, 0.62], [0.38, 0.7], [0.35, 0.7], [0.5, 1], [0.65, 0.7], [0.62, 0.7], [0.62, 0.62], [0.88, 0.62], [1, 0.5], [0.88, 0.38], [0.62, 0.38], [0.62, 0]],
+  sharpBent: [[0, 0.25], [0.7, 0.25], [0.7, 0.62], [0.85, 0.62], [0.6, 1], [0.35, 0.62], [0.5, 0.62], [0.5, 0.45], [0, 0.45]],
+  twoDMultiLine: [[0.05, 0.3], [0.95, 0.3], [0.95, 0.45], [0.05, 0.45]],
 };
 
-function arrowPolygonShape(id: string, vertices: readonly Point[]): StandardShape {
-  const path = polygonPath(vertices);
+function arrowPolygonShape(id: string, vertices: readonly Point[], extraRows: readonly GeometryRow[] = []): StandardShape {
+  const path = polygonPath(vertices, extraRows);
   return {
     id,
     nameKey: `shapesPanel.shape.${id}` as TranslationKey,
@@ -258,13 +269,13 @@ function arrowPolygonShape(id: string, vertices: readonly Point[]): StandardShap
   };
 }
 
-function openShape(id: string, rows: readonly GeometryRow[], preview: string): StandardShape {
+function openShape(id: string, rows: readonly GeometryRow[], preview: string, linePattern = '1'): StandardShape {
   const path = ellipticalPath(rows, preview);
   return {
     id,
     nameKey: `shapesPanel.shape.${id}` as TranslationKey,
     preview: path.preview,
-    draft: draftFor(id, path, false),
+    draft: draftFor(id, path, false, linePattern),
   };
 }
 
@@ -303,6 +314,67 @@ const curvedArrowDownPath = ellipticalPath([
   { type: 'LineTo', end: [0.42, 0.34] },
   { type: 'Close' },
 ], 'M 0.3 0.05 A 0.21 0.31 0 0 0 0.3 0.66 M 0.3 0.9 L 0.18 0.66 L 0.42 0.66 Z');
+
+const bentArrowPath = ellipticalPath([
+  { type: 'MoveTo', end: [0, 0.25] },
+  { type: 'LineTo', end: [0.5, 0.25] },
+  { type: 'EllipticalArcTo', end: [0.7, 0.45], through: [0.641421356237, 0.308578643763] },
+  { type: 'LineTo', end: [0.7, 0.62] },
+  { type: 'LineTo', end: [0.85, 0.62] },
+  { type: 'LineTo', end: [0.6, 1] },
+  { type: 'LineTo', end: [0.35, 0.62] },
+  { type: 'LineTo', end: [0.5, 0.62] },
+  { type: 'LineTo', end: [0.5, 0.45] },
+  { type: 'LineTo', end: [0, 0.45] },
+  { type: 'Close' },
+], 'M 0 0.75 L 0.5 0.75 A 0.2 0.2 0 0 0 0.7 0.55 L 0.7 0.38 L 0.85 0.38 L 0.6 0 L 0.35 0.38 L 0.5 0.38 L 0.5 0.55 L 0 0.55 Z');
+
+const uTurnArrowPath = ellipticalPath([
+  { type: 'MoveTo', end: [0, 0.1] },
+  { type: 'LineTo', end: [0.6, 0.1] },
+  { type: 'EllipticalArcTo', end: [1, 0.5], through: [0.882842712475, 0.217157287525] },
+  { type: 'EllipticalArcTo', end: [0.6, 0.9], through: [0.882842712475, 0.782842712475] },
+  { type: 'LineTo', end: [0.3, 0.9] },
+  { type: 'LineTo', end: [0.3, 0.98] },
+  { type: 'LineTo', end: [0, 0.8] },
+  { type: 'LineTo', end: [0.3, 0.62] },
+  { type: 'LineTo', end: [0.3, 0.7] },
+  { type: 'LineTo', end: [0.6, 0.7] },
+  { type: 'EllipticalArcTo', end: [0.8, 0.5], through: [0.741421356237, 0.641421356237] },
+  { type: 'EllipticalArcTo', end: [0.6, 0.3], through: [0.741421356237, 0.358578643763] },
+  { type: 'LineTo', end: [0, 0.3] },
+  { type: 'Close' },
+], 'M 0 0.9 L 0.6 0.9 A 0.4 0.4 0 0 0 1 0.5 A 0.4 0.4 0 0 0 0.6 0.1 L 0.3 0.1 L 0.3 0.02 L 0 0.2 L 0.3 0.38 L 0.3 0.3 L 0.6 0.3 A 0.2 0.2 0 0 1 0.8 0.5 A 0.2 0.2 0 0 1 0.6 0.7 L 0 0.7 Z');
+
+const circularArrowPath = ellipticalPath([
+  { type: 'MoveTo', end: [0.72, 0.138948822335] },
+  { type: 'EllipticalArcTo', end: [0.837059554972, 0.802826548262], through: [0.933315411325, 0.443594801827] },
+  { type: 'EllipticalArcTo', end: [0.162940445028, 0.802826548262], through: [0.5, 0.96] },
+  { type: 'EllipticalArcTo', end: [0.28, 0.138948822335], through: [0.066684588675, 0.443594801827] },
+  { type: 'LineTo', end: [0.409903810568, 0.063948822335] },
+  { type: 'LineTo', end: [0.38, 0.312153903092] },
+  { type: 'EllipticalArcTo', end: [0.316149333651, 0.674269026325], through: [0.263646139277, 0.47832443736] },
+  { type: 'EllipticalArcTo', end: [0.683850666349, 0.674269026325], through: [0.5, 0.76] },
+  { type: 'EllipticalArcTo', end: [0.62, 0.312153903092], through: [0.736353860723, 0.47832443736] },
+  { type: 'Close' },
+], 'M 0.72 0.861051177665 A 0.44 0.44 0 0 0 0.837059554972 0.197173451738 A 0.44 0.44 0 0 0 0.162940445028 0.197173451738 A 0.44 0.44 0 0 0 0.28 0.861051177665 L 0.409903810568 0.936051177665 L 0.38 0.687846096908 A 0.24 0.24 0 0 1 0.316149333651 0.325730973675 A 0.24 0.24 0 0 1 0.683850666349 0.325730973675 A 0.24 0.24 0 0 1 0.62 0.687846096908 Z');
+
+const stripedArrowStripes: readonly GeometryRow[] = [
+  { type: 'MoveTo', end: [0, 0.32] },
+  { type: 'LineTo', end: [0.42, 0.32] },
+  { type: 'MoveTo', end: [0, 0.5] },
+  { type: 'LineTo', end: [0.42, 0.5] },
+  { type: 'MoveTo', end: [0, 0.68] },
+  { type: 'LineTo', end: [0.42, 0.68] },
+];
+
+const secondBar: readonly GeometryRow[] = [
+  { type: 'MoveTo', end: [0.05, 0.55] },
+  { type: 'LineTo', end: [0.95, 0.55] },
+  { type: 'LineTo', end: [0.95, 0.7] },
+  { type: 'LineTo', end: [0.05, 0.7] },
+  { type: 'Close' },
+];
 
 export const arrowShapes: readonly StandardShape[] = [
   arrowPolygonShape('arrowRight', arrowVertices.arrowRight),
@@ -364,6 +436,74 @@ export const arrowShapes: readonly StandardShape[] = [
     { type: 'LineTo', end: [0.55, 0.7] },
     { type: 'LineTo', end: [0.55, 0.3] },
   ], 'M 0.05 0.3 L 0.55 0.3 L 0.55 0.7'),
+  arrowPolygonShape('simpleArrow', arrowVertices.simpleArrow),
+  arrowPolygonShape('simple', arrowVertices.simple),
+  arrowPolygonShape('modern', arrowVertices.modern),
+  openShape('flexibleArrow', [
+    { type: 'MoveTo', end: [0.05, 0.4] },
+    { type: 'EllipticalArcTo', end: [0.3, 0.65], through: [0.123223304703, 0.576776695297] },
+    { type: 'EllipticalArcTo', end: [0.55, 0.9], through: [0.476776695297, 0.723223304703] },
+    { type: 'MoveTo', end: [0.55, 1] },
+    { type: 'LineTo', end: [0.47, 0.87] },
+    { type: 'LineTo', end: [0.63, 0.87] },
+    { type: 'Close' },
+  ], 'M 0.05 0.6 A 0.25 0.25 0 0 1 0.3 0.35 A 0.25 0.25 0 0 0 0.55 0.1 M 0.55 0 L 0.47 0.13 L 0.63 0.13 Z'),
+  { id: 'bentArrow', nameKey: 'shapesPanel.shape.bentArrow', preview: bentArrowPath.preview, draft: draftFor('bentArrow', bentArrowPath, false) },
+  { id: 'uTurnArrow', nameKey: 'shapesPanel.shape.uTurnArrow', preview: uTurnArrowPath.preview, draft: draftFor('uTurnArrow', uTurnArrowPath, false) },
+  arrowPolygonShape('sharpBent', arrowVertices.sharpBent),
+  openShape('multiLine', [
+    { type: 'MoveTo', end: [0.05, 0.3] },
+    { type: 'LineTo', end: [0.95, 0.3] },
+    { type: 'MoveTo', end: [0.05, 0.5] },
+    { type: 'LineTo', end: [0.95, 0.5] },
+    { type: 'MoveTo', end: [0.05, 0.7] },
+    { type: 'LineTo', end: [0.95, 0.7] },
+  ], 'M 0.05 0.7 L 0.95 0.7 M 0.05 0.5 L 0.95 0.5 M 0.05 0.3 L 0.95 0.3'),
+  openShape('multiArrow', [
+    { type: 'MoveTo', end: [0.05, 0.25] },
+    { type: 'LineTo', end: [0.72, 0.25] },
+    { type: 'MoveTo', end: [0.95, 0.25] },
+    { type: 'LineTo', end: [0.72, 0.16] },
+    { type: 'LineTo', end: [0.72, 0.34] },
+    { type: 'Close' },
+    { type: 'MoveTo', end: [0.05, 0.5] },
+    { type: 'LineTo', end: [0.72, 0.5] },
+    { type: 'MoveTo', end: [0.95, 0.5] },
+    { type: 'LineTo', end: [0.72, 0.41] },
+    { type: 'LineTo', end: [0.72, 0.59] },
+    { type: 'Close' },
+    { type: 'MoveTo', end: [0.05, 0.75] },
+    { type: 'LineTo', end: [0.72, 0.75] },
+    { type: 'MoveTo', end: [0.95, 0.75] },
+    { type: 'LineTo', end: [0.72, 0.66] },
+    { type: 'LineTo', end: [0.72, 0.84] },
+    { type: 'Close' },
+  ], 'M 0.05 0.75 L 0.72 0.75 M 0.95 0.75 L 0.72 0.84 L 0.72 0.66 Z M 0.05 0.5 L 0.72 0.5 M 0.95 0.5 L 0.72 0.59 L 0.72 0.41 Z M 0.05 0.25 L 0.72 0.25 M 0.95 0.25 L 0.72 0.34 L 0.72 0.16 Z'),
+  arrowPolygonShape('twoDMultiLine', arrowVertices.twoDMultiLine, secondBar),
+  arrowPolygonShape('stripedArrow', arrowVertices.stripedArrow, stripedArrowStripes),
+  arrowPolygonShape('notched', arrowVertices.notched),
+  arrowPolygonShape('blockArrow', arrowVertices.blockArrow),
+  { id: 'circularArrow', nameKey: 'shapesPanel.shape.circularArrow', preview: circularArrowPath.preview, draft: draftFor('circularArrow', circularArrowPath, false) },
+  arrowPolygonShape('quadArrow', arrowVertices.quadArrow),
+  arrowPolygonShape('leftRightUp', arrowVertices.leftRightUp),
+  openShape('lineDouble', [
+    { type: 'MoveTo', end: [0, 0.4] },
+    { type: 'LineTo', end: [1, 0.4] },
+    { type: 'MoveTo', end: [0, 0.6] },
+    { type: 'LineTo', end: [1, 0.6] },
+  ], 'M 0 0.6 L 1 0.6 M 0 0.4 L 1 0.4'),
+  openShape('dottedLine', [
+    { type: 'MoveTo', end: [0, 0.5] },
+    { type: 'LineTo', end: [1, 0.5] },
+  ], 'M 0 0.5 L 1 0.5', '2'),
+  openShape('arcedLine', [
+    { type: 'MoveTo', end: [0.2, 0.9] },
+    { type: 'EllipticalArcTo', end: [0.8, 0.3], through: [0.624264068712, 0.724264068712] },
+    { type: 'MoveTo', end: [0.8, 0.16] },
+    { type: 'LineTo', end: [0.72, 0.3] },
+    { type: 'LineTo', end: [0.88, 0.3] },
+    { type: 'Close' },
+  ], 'M 0.2 0.1 A 0.6 0.6 0 0 1 0.8 0.7 M 0.8 0.84 L 0.72 0.7 L 0.88 0.7 Z'),
 ];
 
 export function arrowShapeById(id: string): StandardShape | undefined {

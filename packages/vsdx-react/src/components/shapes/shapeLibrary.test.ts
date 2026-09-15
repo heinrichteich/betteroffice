@@ -73,5 +73,80 @@ test('exposes two stencils covering every shape', () => {
   expect(shapeStencils.map((stencil) => stencil.id)).toEqual(['standard', 'arrows']);
   expect(shapeStencils[0].shapes).toEqual(standardShapes);
   expect(shapeStencils[1].shapes).toEqual(arrowShapes);
-  expect(arrowShapes).toHaveLength(18);
+  expect(arrowShapes).toHaveLength(37);
+});
+
+test('draws every arrow preview from its draft geometry', () => {
+  for (const shape of arrowShapes) {
+    const rows = new Map<number, { type: string; x?: number; y?: number }>();
+    for (const cell of shape.draft(0, 0, 1, 1).cells) {
+      const locator = cell.locator as { section?: string; rowIndex?: number; rowType?: string };
+      if (locator.section !== 'Geometry' || locator.rowIndex === undefined) continue;
+      const entry = rows.get(locator.rowIndex) ?? { type: locator.rowType ?? '' };
+      if (cell.name !== 'X' && cell.name !== 'Y') { rows.set(locator.rowIndex, entry); continue; }
+      const value = Number((cell.formula ?? '').replace(/^Width\*/, '').replace(/^Height\*/, ''));
+      if (cell.name === 'X') entry.x = value; else entry.y = value;
+      rows.set(locator.rowIndex, entry);
+    }
+    const ordered = [...rows.entries()].sort(([left], [right]) => left - right).map(([, row]) => row);
+    const tokens = shape.preview.split(' ').filter(Boolean);
+    const points: Array<[number, number]> = [];
+    let closes = 0;
+    for (let index = 0; index < tokens.length;) {
+      const command = tokens[index++];
+      if (command === 'Z') { closes += 1; continue; }
+      if (command === 'M' || command === 'L') { points.push([Number(tokens[index++]), Number(tokens[index++])]); continue; }
+      if (command === 'A') { index += 5; points.push([Number(tokens[index++]), Number(tokens[index++])]); continue; }
+      throw new Error(`unexpected preview command ${command} in ${shape.id}`);
+    }
+    const ends = ordered.filter((row) => row.x !== undefined && row.y !== undefined).map((row) => [row.x as number, Number((1 - (row.y as number)).toFixed(12))] as [number, number]);
+    expect({ shape: shape.id, points }).toEqual({ shape: shape.id, points: ends });
+    expect(closes).toBe(ordered.filter((row) => row.type === 'Close').length);
+  }
+});
+
+test('keeps every arrow arc off its chord so the engine never flattens it', () => {
+  for (const shape of arrowShapes) {
+    const cells = shape.draft(0, 0, 1, 1).cells;
+    const number = (prefix: string, name: string, rowIndex: number): number | undefined => {
+      const cell = cells.find((candidate) => {
+        const locator = candidate.locator as { section?: string; rowIndex?: number };
+        return locator.section === 'Geometry' && locator.rowIndex === rowIndex && candidate.name === name;
+      });
+      const raw = cell?.formula?.replace(new RegExp(`^${prefix}\\*`), '');
+      const value = raw === undefined ? Number.NaN : Number(raw);
+      return Number.isFinite(value) ? value : undefined;
+    };
+    let previous: [number, number] | undefined;
+    let index = 0;
+    for (;;) {
+      const row = cells.find((candidate) => {
+        const locator = candidate.locator as { section?: string; rowIndex?: number; rowType?: string };
+        return locator.section === 'Geometry' && locator.rowIndex === index;
+      });
+      const rowType = (row?.locator as { rowType?: string } | undefined)?.rowType;
+      if (rowType === undefined) break;
+      const end: [number, number] | undefined = (() => {
+        const x = number('Width', 'X', index);
+        const y = number('Height', 'Y', index);
+        return x === undefined || y === undefined ? undefined : [x, y];
+      })();
+      if (rowType === 'EllipticalArcTo') {
+        const ax = number('Width', 'A', index);
+        const ay = number('Height', 'B', index);
+        expect(ax).toBeDefined();
+        expect(ay).toBeDefined();
+        const [sx, sy] = previous!;
+        const [ex, ey] = end!;
+        const area = Math.abs((ex - sx) * (ay! - sy) - (ey - sy) * (ax! - sx));
+        expect(area).toBeGreaterThan(1e-6);
+      }
+      if (end) previous = end;
+      index += 1;
+    }
+    const arcs = (shape.preview.match(/ A /g) ?? []).length;
+    const flags = [...shape.preview.matchAll(/A [0-9.]+ [0-9.]+ 0 (\d) (\d)/g)].map((match) => [match[1], match[2]]);
+    expect(flags).toHaveLength(arcs);
+    for (const [large] of flags) expect(large).toBe('0');
+  }
 });
