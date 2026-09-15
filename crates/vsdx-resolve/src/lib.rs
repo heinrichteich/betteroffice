@@ -3,6 +3,7 @@
 mod connectivity;
 mod geometry;
 mod inheritance;
+mod layers;
 mod model;
 mod text;
 
@@ -12,4 +13,5 @@ mod tests;
 pub use connectivity::*;
 pub use geometry::*;
 pub use inheritance::*;
+pub use layers::*;
 pub use model::*;
