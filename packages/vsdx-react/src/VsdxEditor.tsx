@@ -12,7 +12,7 @@ import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
 import { StatusBar, clampZoom } from './components/statusbar';
-import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent } from './interactions';
+import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, isPrintableEntryKey, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent, textEditOverlay, withoutTextBox } from './interactions';
 import type { DragStart, ResizeHandle } from './interactions';
 export { resolveDragGeometry };
 export type { DragStart };
@@ -68,6 +68,15 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [selection, setSelection] = useState<VsdxShapeSelection | null>(null);
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
+  const [editing, setEditing] = useState<{ pageId: string; shapeId: string; selectAll: boolean } | null>(null);
+  const [draft, setDraft] = useState('');
+  const editingRef = useRef(editing);
+  const draftRef = useRef(draft);
+  const committedTextRef = useRef('');
+  const editWrapRef = useRef<HTMLDivElement>(null);
+  const editBoxRef = useRef<HTMLTextAreaElement>(null);
+  editingRef.current = editing;
+  draftRef.current = draft;
   const [dirty, setDirty] = useState(false);
   const sessionSwitchBlocked = dirty && sessionRef.current.file === file &&
     (sessionRef.current.clientId !== requestedClientId || sessionRef.current.initialUpdate !== requestedInitialUpdate);
@@ -91,6 +100,20 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   collaborationRef.current = collaboration;
 
   const reportError = useCallback((value: unknown) => { const next = value instanceof Error ? value : new Error(String(value)); setError(next.message); onErrorRef.current?.(next); }, []);
+  const enterTextEdit = useCallback((pageId: string, shapeId: string, override?: string) => {
+    const handle = handleRef.current;
+    if (!handle) return;
+    let committed = '';
+    try { committed = handle.shapeText(pageId, shapeId); }
+    catch { committed = ''; }
+    const value = override ?? committed;
+    committedTextRef.current = committed;
+    setDraft(value);
+    draftRef.current = value;
+    const next = { pageId, shapeId, selectAll: override === undefined };
+    setEditing(next);
+    editingRef.current = next;
+  }, []);
   const refresh = useCallback((requestedPage?: number, notify = false) => {
     const handle = handleRef.current;
     if (!handle) return;
@@ -107,8 +130,35 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       setModel(modelRef.current);
       setDiagnostics(frame ? collectDiagnostics(frame) : []);
       setSelection((existing) => existing && stillSelectable(current, pageIndex, existing) ? existing : null);
+      const open = editingRef.current;
+      if (open) {
+        const committed = handle.shapeText(open.pageId, open.shapeId);
+        if (committed !== committedTextRef.current) {
+          if (draftRef.current === committedTextRef.current) { setDraft(committed); draftRef.current = committed; }
+          committedTextRef.current = committed;
+        }
+      }
     } catch (value) { reportError(value); }
   }, [reportError]);
+  const commitTextEdit = useCallback(() => {
+    const current = editingRef.current;
+    const handle = handleRef.current;
+    if (!current || !handle) return;
+    const text = draftRef.current;
+    setEditing(null);
+    editingRef.current = null;
+    if (text === committedTextRef.current) return;
+    try { handle.setShapeText(current.pageId, current.shapeId, text); }
+    catch (value) { reportError(value); return; }
+    refresh(undefined, true);
+  }, [refresh, reportError]);
+  const cancelTextEdit = useCallback(() => {
+    if (!editingRef.current) return;
+    setEditing(null);
+    editingRef.current = null;
+    setDraft(committedTextRef.current);
+    draftRef.current = committedTextRef.current;
+  }, []);
 
   useEffect(() => {
     sessionRef.current = { file, clientId: sessionClientId, initialUpdate };
@@ -116,7 +166,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     let handle: DiagramHandle | null = null;
     let stopUpdates = () => {};
     let stopResync = () => {};
-    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection(null); modelRef.current = { snapshot: null, pageIndex: 0, frame: null }; setModel(modelRef.current); setError(null); setDirty(false);
+    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection(null); setEditing(null); setDraft(''); modelRef.current = { snapshot: null, pageIndex: 0, frame: null }; setModel(modelRef.current); setError(null); setDirty(false);
     if (!file) { setLoading(false); return; }
     setLoading(true);
     const openingFonts = fontsRef.current;
@@ -177,8 +227,14 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     return () => { disposed = true; };
   }, [stableFonts, hasDocument, refresh, reportError]);
 
+  const editedTextId = editing && model.snapshot ? textPrimitiveId(model.snapshot, model.pageIndex, editing.pageId, editing.shapeId) : null;
+  const paintFrame = useMemo(
+    () => (model.frame && editedTextId ? { ...model.frame, primitives: withoutTextBox(model.frame.primitives, editedTextId) } : model.frame),
+    [model.frame, editedTextId],
+  );
+
   useEffect(() => {
-    const canvas = mainCanvasRef.current; const frame = model.frame;
+    const canvas = mainCanvasRef.current; const frame = paintFrame;
     if (!canvas || !frame) return;
     const context = canvas.getContext('2d'); if (!context) return;
     const controller = new AbortController();
@@ -193,7 +249,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       },
     }).catch((value) => { if (!controller.signal.aborted) reportError(value); });
     return () => controller.abort();
-  }, [model.frame, reportError, t, zoom]);
+  }, [paintFrame, reportError, t, zoom]);
 
   useEffect(() => {
     const canvas = overlayCanvasRef.current; const frame = model.frame;
@@ -215,6 +271,36 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       try { paintDragPreview(context, previewOutline(start, release, frame.paintTransform), dpr, zoom); } catch { void 0; }
     }
   }, [model.frame, model.snapshot, model.pageIndex, selection, zoom]);
+
+  useEffect(() => {
+    if (!editing) return;
+    if (!selection || selection.pageId !== editing.pageId || selection.shapeId !== editing.shapeId) setEditing(null);
+  }, [editing, selection]);
+
+  useEffect(() => {
+    const box = editBoxRef.current;
+    if (!editing || !box) return;
+    box.focus();
+    if (editing.selectAll) box.select();
+    else box.setSelectionRange(box.value.length, box.value.length);
+  }, [editing]);
+
+  useEffect(() => {
+    const box = editBoxRef.current;
+    if (!editing || !box) return;
+    box.style.height = 'auto';
+    box.style.height = `${box.scrollHeight}px`;
+  }, [editing, draft, zoom, model.frame]);
+
+  useEffect(() => {
+    if (!editing) return;
+    const onDown = (event: globalThis.PointerEvent) => {
+      if (editWrapRef.current?.contains(event.target as Node)) return;
+      commitTextEdit();
+    };
+    document.addEventListener('pointerdown', onDown, true);
+    return () => document.removeEventListener('pointerdown', onDown, true);
+  }, [editing, commitTextEdit]);
 
   useEffect(() => () => { if (previewFrameRef.current !== null) cancelAnimationFrame(previewFrameRef.current); }, []);
 
@@ -386,6 +472,20 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   };
   const closeContextMenu = () => setContextMenu(null);
   const closeContextMenuAndFocus = () => { setContextMenu(null); mainCanvasRef.current?.focus(); };
+  const onCanvasDoubleClick = (event: MouseEvent<HTMLCanvasElement>) => {
+    if (editingRef.current) return;
+    const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
+    if (!handle || !frame || !page) return;
+    try {
+      const point = canvasPointerPosition(event, frame);
+      handle.layoutPage(model.pageIndex);
+      const hit = handle.hitTest(point.canvas.x, point.canvas.y);
+      const next = hit ? selectionForHit(page, hit) : null;
+      if (!next) return;
+      setSelection(next);
+      enterTextEdit(next.pageId, next.shapeId);
+    } catch (value) { reportError(value); }
+  };
   const onCanvasContextMenu = (event: MouseEvent<HTMLCanvasElement>) => {
     event.preventDefault();
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
@@ -437,6 +537,11 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     } catch (value) { reportError(value); }
   };
   const onCanvasKeyDown = (event: KeyboardEvent<HTMLCanvasElement>) => {
+    const selected = selectionRef.current;
+    if (selected && !editingRef.current) {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); enterTextEdit(selected.pageId, selected.shapeId); return; }
+      if (isPrintableEntryKey(event)) { event.preventDefault(); enterTextEdit(selected.pageId, selected.shapeId, event.key); return; }
+    }
     const intent = canvasKeyboardIntent(event, zoomRef.current);
     if (!intent) return;
     event.preventDefault();
@@ -471,6 +576,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     setZoom(clampZoom(Math.min((rect.width - WORKSPACE_MARGIN) / frame.width, (rect.height - WORKSPACE_MARGIN) / frame.height)));
   }, []);
   const download = useCallback((bytes: Uint8Array) => { const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer; const url = URL.createObjectURL(new Blob([buffer], { type: 'application/vnd.visio' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'diagram.vsdx'; anchor.click(); URL.revokeObjectURL(url); setDirty(false); }, []);
+  const editOverlay = editing && model.frame && editedTextId ? textEditOverlay(model.frame, editedTextId, zoom) : null;
   const integrity = diagnostics.filter((diagnostic) => diagnostic.category === 'integrity');
   const fidelity = diagnostics.filter((diagnostic) => diagnostic.category === 'fidelity');
   return <div className={className} style={styles.root} aria-label={t('editor.appLabel')}>
@@ -484,8 +590,28 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
       <div style={styles.canvasFrame}>
-        <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
+        <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onDoubleClick={onCanvasDoubleClick} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
         <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
+        {editing && editOverlay && (
+          <div ref={editWrapRef} style={{ ...styles.textEditWrap, width: editOverlay.width, height: editOverlay.height, transform: `matrix(${editOverlay.matrix.a}, ${editOverlay.matrix.b}, ${editOverlay.matrix.c}, ${editOverlay.matrix.d}, ${editOverlay.matrix.e}, ${editOverlay.matrix.f})` }}>
+            <textarea
+              ref={editBoxRef}
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancelTextEdit(); mainCanvasRef.current?.focus(); } else event.stopPropagation(); }}
+              aria-label={t('shapes.editingText', { name: editing.shapeId })}
+              rows={1}
+              style={{
+                ...styles.textEditBox,
+                fontFamily: `"${editOverlay.font.family}", sans-serif`,
+                fontSize: editOverlay.font.sizePx,
+                fontWeight: editOverlay.font.bold ? 700 : 400,
+                fontStyle: editOverlay.font.italic ? 'italic' : 'normal',
+                color: editOverlay.font.color,
+              }}
+            />
+          </div>
+        )}
       </div>
       {contextMenu && selection && <ShapeContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
       {integrity.length > 0 && <section role="alert" style={styles.integrity}><strong>{t('diagnostics.integrityHeading')}</strong>{integrity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</section>}
@@ -531,6 +657,13 @@ export function shapeParentTransforms(primitives: readonly PagePrimitive[], id: 
 function selectionForHit(page: PageSnapshot, hit: HitTestResult): VsdxShapeSelection | null {
   const top = page.shapes.find((shape) => shape.id === hit.shapeId || findShapePlacement(shape.children, hit.shapeId) !== null);
   return top ? { pageId: page.id, shapeId: top.id, hit } : null;
+}
+
+function textPrimitiveId(snapshot: DiagramSnapshot, pageIndex: number, pageId: string, shapeId: string): string | null {
+  const page = snapshot.pages[pageIndex];
+  if (!page || page.id !== pageId) return null;
+  const placement = findShapePlacement(page.shapes, shapeId);
+  return placement ? `${page.sourcePartPath}:${placement.shape.sourceId}` : null;
 }
 
 export function stillSelectable(snapshot: DiagramSnapshot, pageIndex: number, selection: VsdxShapeSelection): boolean {
@@ -596,4 +729,4 @@ function fontFaceEqual(left: VsdxFontFace, right: VsdxFontFace): boolean { retur
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean { return left === right || (left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index])); }
 function resolveImage(assetId: string, handle: DiagramHandle | null, cache: { current: Map<string, Promise<CanvasImageSource | null>> }, message: string): Promise<CanvasImageSource | null> { const existing = cache.current.get(assetId); if (existing) return existing; const pending = decodeImage(handle?.mediaBytes(assetId), message); cache.current.set(assetId, pending); return pending; }
 async function decodeImage(bytes: Uint8Array | undefined, message: string): Promise<CanvasImageSource | null> { if (!bytes) return null; const blob = new Blob([bytes.slice()]); if (typeof createImageBitmap === 'function') return createImageBitmap(blob); const url = URL.createObjectURL(blob); try { return await new Promise<HTMLImageElement>((resolve, reject) => { const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(new Error(message)); image.src = url; }); } finally { URL.revokeObjectURL(url); } }
-const styles: Record<string, CSSProperties> = { root: { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 480, color: '#172033', background: '#f3f5f8', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }, titleBar: { display: 'flex', alignItems: 'center', gap: 12, minHeight: 32, padding: '0 14px', background: '#f8fafc', borderBottom: '1px solid #d8dee9', fontSize: 13 }, contentRow: { display: 'flex', flex: 1, minHeight: 0 }, workspace: { position: 'relative', display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', overflow: 'auto' }, canvasFrame: { position: 'relative', flex: '0 0 auto' }, canvas: { display: 'block', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' }, overlay: { position: 'absolute', inset: 0, pointerEvents: 'none' }, integrity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 12, color: '#7f1d1d', background: '#fef2f2', border: '1px solid #fca5a5' }, fidelity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 8, color: '#475569', background: '#fff', fontSize: 12 }, error: { position: 'absolute', left: 14, right: 14, bottom: 14, padding: 10, color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0' } };
+const styles: Record<string, CSSProperties> = { root: { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 480, color: '#172033', background: '#f3f5f8', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }, titleBar: { display: 'flex', alignItems: 'center', gap: 12, minHeight: 32, padding: '0 14px', background: '#f8fafc', borderBottom: '1px solid #d8dee9', fontSize: 13 }, contentRow: { display: 'flex', flex: 1, minHeight: 0 }, workspace: { position: 'relative', display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', overflow: 'auto' }, canvasFrame: { position: 'relative', flex: '0 0 auto' }, canvas: { display: 'block', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' }, overlay: { position: 'absolute', inset: 0, pointerEvents: 'none' }, textEditWrap: { position: 'absolute', left: 0, top: 0, transformOrigin: '0 0', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'visible', background: 'transparent', border: '1px dotted #1d4ed8', zIndex: 2 }, textEditBox: { width: '100%', background: 'transparent', border: 'none', outline: 'none', resize: 'none', overflow: 'visible', textAlign: 'center', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', wordBreak: 'break-word', lineHeight: 1.2, padding: 0, margin: 0 }, integrity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 12, color: '#7f1d1d', background: '#fef2f2', border: '1px solid #fca5a5' }, fidelity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 8, color: '#475569', background: '#fff', fontSize: 12 }, error: { position: 'absolute', left: 14, right: 14, bottom: 14, padding: 10, color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0' } };

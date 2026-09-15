@@ -1,6 +1,6 @@
 import initWasmModule, { VsdxDocument, VsdxRenderer, rendererVersion } from './generated/vsdx_wasm.js';
 import type { InitInput } from './generated/vsdx_wasm.js';
-import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectorGlue, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, VsdxFontFace } from '../types';
+import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectorGlue, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, TextReceipt, VsdxFontFace } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; initialUpdate?: Uint8Array; }
@@ -22,6 +22,8 @@ export interface DiagramHandle {
   addShape(pageId: string, draft: FormulaShapeDraft): ShapeReceipt;
   addConnector(pageId: string, draft: FormulaShapeDraft, from: ConnectorGlue, to: ConnectorGlue): ShapeReceipt;
   deleteShape(pageId: string, shapeId: string): ShapeReceipt;
+  shapeText(pageId: string, shapeId: string): string;
+  setShapeText(pageId: string, shapeId: string, text: string): TextReceipt;
   save(): Uint8Array;
   canUndo(): boolean; canRedo(): boolean; undo(): HistoryResult; redo(): HistoryResult;
   encodeStateVector(): Uint8Array; encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array; encodeDiff(vector: Uint8Array): Uint8Array;
@@ -134,6 +136,8 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     addShape: (pageId, draft) => json(() => doc.addShapeJson(JSON.stringify({ pageId, draft })), true),
     addConnector: (pageId, draft, from, to) => json(() => doc.addConnectorJson(JSON.stringify({ pageId, draft, from, to })), true),
     deleteShape: (pageId, shapeId) => json(() => doc.deleteShapeJson(JSON.stringify({ pageId, shapeId })), true),
+    shapeText: (pageId, shapeId) => json(() => doc.shapeTextJson(JSON.stringify({ pageId, shapeId }))),
+    setShapeText: (pageId, shapeId, text) => json(() => doc.setShapeTextJson(JSON.stringify({ pageId, shapeId, text })), true),
     save: () => wasm(() => doc.save().slice()),
     canUndo: () => wasm(() => doc.canUndo()), canRedo: () => wasm(() => doc.canRedo()), undo: () => json(() => doc.undoJson(), true), redo: () => json(() => doc.redoJson(), true),
     encodeStateVector: () => wasm(() => doc.encodeStateVector().slice()), encodeStateAsUpdate: vector => wasm(() => (vector === undefined ? doc.encodeStateAsUpdate() : doc.encodeDiff(vector.slice())).slice()), encodeDiff: vector => wasm(() => doc.encodeDiff(vector.slice()).slice()), applyUpdate: update => json(() => doc.applyUpdateJson(update.slice()), true),

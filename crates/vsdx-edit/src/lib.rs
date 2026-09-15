@@ -1916,8 +1916,14 @@ mod tests {
             let Some(yrs::Out::Any(Any::String(story))) = stories.get(&txn, &child.id) else {
                 panic!("missing story")
             };
-            let tokens: Vec<vsdx_resolve::ResolvedTextToken> =
-                serde_json::from_str(&story).unwrap();
+            assert_eq!(story.as_ref(), "group label");
+            let tokens = resolver
+                .resolve_text_in_context(
+                    shape,
+                    &package.page_contents[page],
+                    &resolved[&child.source_id],
+                )
+                .unwrap();
             let vsdx_resolve::ResolvedTextToken::CharacterRun { properties, .. } = &tokens[0]
             else {
                 panic!("missing character run")
@@ -1935,16 +1941,6 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(snapshot_size.value, size.cell.value);
-            assert_eq!(
-                tokens,
-                resolver
-                    .resolve_text_in_context(
-                        shape,
-                        &package.page_contents[page],
-                        &resolved[&child.source_id]
-                    )
-                    .unwrap()
-            );
             assert_eq!(
                 tokens[1],
                 vsdx_resolve::ResolvedTextToken::Literal("group label".into())

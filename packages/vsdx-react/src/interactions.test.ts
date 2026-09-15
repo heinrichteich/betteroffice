@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { canvasPointToModel, modelPointToCanvas } from '@betteroffice/vsdx';
-import type { ModelPoint } from '@betteroffice/vsdx';
-import { RESIZE_HANDLES, SELECTION_STROKE, canvasKeyboardIntent, hitTestSelection, isEditableKeyboardTarget, keyboardNudgeStep, paintSelectionFrame, paintDragPreview, passedDragThreshold, previewOutline, resizedBounds, resizeCursor, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions } from './interactions';
+import type { Affine, ModelPoint, PageDisplayList, TextBoxPrimitive } from '@betteroffice/vsdx';
+import { RESIZE_HANDLES, SELECTION_STROKE, canvasKeyboardIntent, hitTestSelection, isEditableKeyboardTarget, isPrintableEntryKey, keyboardNudgeStep, paintSelectionFrame, paintDragPreview, passedDragThreshold, previewOutline, resizedBounds, resizeCursor, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions, textEditOverlay, withoutTextBox } from './interactions';
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 };
 const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 test('passedDragThreshold needs four css pixels by default', () => {
@@ -314,4 +314,75 @@ test('canvas keyboard produces no intent from editable targets', () => {
   expect(canvasKeyboardIntent({ key: 'ArrowUp', target: input }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true, target: textarea }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'Escape', target: editable }, 1)).toBeNull();
+});
+
+const textFrame: PageDisplayList = { contractVersion: 4, width: 816, height: 1056, paintTransform: pagePaintTransform, primitives: [] };
+
+function textBox(transform?: Affine): TextBoxPrimitive {
+  return {
+    kind: 'textBox', id: 'visio/pages/page1.xml:1', zOrder: 0, x: 1, y: 2, width: 3, height: 0.5, transform,
+    paragraphs: [{ runs: [{ text: 'label', family: 'Segoe UI', sizeIn: 0.25, bold: true, italic: false, underline: false, smallCaps: false, superscript: false, subscript: false, letterSpacing: 0, color: '#112233', diagnostics: [] }] }],
+    lines: [],
+  };
+}
+
+function cssCorner(sceneX: number, sceneY: number, chain: Affine[], zoom: number): ModelPoint {
+  let point = { x: sceneX, y: sceneY };
+  for (const transform of [...chain, pagePaintTransform]) point = { x: transform.a * point.x + transform.c * point.y + transform.e, y: transform.b * point.x + transform.d * point.y + transform.f };
+  return { x: point.x * zoom, y: point.y * zoom };
+}
+
+function overlayCorner(overlay: { matrix: Affine }, cx: number, cy: number): ModelPoint {
+  return { x: overlay.matrix.a * cx + overlay.matrix.c * cy + overlay.matrix.e, y: overlay.matrix.b * cx + overlay.matrix.d * cy + overlay.matrix.f };
+}
+
+test('places the text editor over an unrotated text box and scales it with the zoom', () => {
+  const overlay = textEditOverlay({ ...textFrame, primitives: [textBox()] }, 'visio/pages/page1.xml:1', 1.5);
+  if (!overlay) throw new Error('no overlay');
+  expect(overlay.width).toBeCloseTo(3 * 96 * 1.5, 5);
+  expect(overlay.height).toBeCloseTo(0.5 * 96 * 1.5, 5);
+  expect(overlay.font).toEqual({ family: 'Segoe UI', sizePx: 0.25 * 96 * 1.5, bold: true, italic: false, color: '#112233' });
+  expect(overlayCorner(overlay, 0, 0)).toEqual(cssCorner(1, 2.5, [], 1.5));
+  expect(overlayCorner(overlay, overlay.width, overlay.height)).toEqual(cssCorner(4, 2, [], 1.5));
+});
+
+test('rotates the text editor with the text box instead of using its bounding box', () => {
+  const rotation: Affine = { a: Math.cos(0.4), b: Math.sin(0.4), c: -Math.sin(0.4), d: Math.cos(0.4), e: 2, f: 1 };
+  const overlay = textEditOverlay({ ...textFrame, primitives: [textBox(rotation)] }, 'visio/pages/page1.xml:1', 1);
+  if (!overlay) throw new Error('no overlay');
+  expect(overlay.matrix.b).not.toBeCloseTo(0, 3);
+  for (const [cx, cy, sceneX, sceneY] of [[0, 0, 1, 2.5], [overlay.width, 0, 4, 2.5], [0, overlay.height, 1, 2], [overlay.width, overlay.height, 4, 2]] as const) {
+    const placed = overlayCorner(overlay, cx, cy);
+    const expected = cssCorner(sceneX, sceneY, [rotation], 1);
+    expect(placed.x).toBeCloseTo(expected.x, 5);
+    expect(placed.y).toBeCloseTo(expected.y, 5);
+  }
+});
+
+test('carries the transforms of enclosing groups into the text editor position', () => {
+  const group: Affine = { a: 2, b: 0, c: 0, d: 2, e: 1, f: 3 };
+  const primitives = [{ kind: 'group' as const, id: 'visio/pages/page1.xml:9', zOrder: 0, transform: group, primitives: [textBox()] }];
+  const overlay = textEditOverlay({ ...textFrame, primitives }, 'visio/pages/page1.xml:1', 1);
+  if (!overlay) throw new Error('no overlay');
+  expect(overlay.width).toBeCloseTo(3 * 2 * 96, 5);
+  const placed = overlayCorner(overlay, 0, 0);
+  const expected = cssCorner(1, 2.5, [group], 1);
+  expect(placed.x).toBeCloseTo(expected.x, 5);
+  expect(placed.y).toBeCloseTo(expected.y, 5);
+});
+
+test('hides only the edited shape text from the painted page', () => {
+  const other: TextBoxPrimitive = { ...textBox(), id: 'visio/pages/page1.xml:2' };
+  const nested = { kind: 'group' as const, id: 'visio/pages/page1.xml:9', zOrder: 0, primitives: [textBox(), other] };
+  const kept = withoutTextBox([nested, textBox()], 'visio/pages/page1.xml:1');
+  expect(kept).toHaveLength(1);
+  expect((kept[0] as typeof nested).primitives).toEqual([other]);
+});
+
+test('enters text edit on a printable key but not on a shortcut or an editable target', () => {
+  expect(isPrintableEntryKey({ key: 'a' })).toBe(true);
+  expect(isPrintableEntryKey({ key: 'Enter' })).toBe(false);
+  expect(isPrintableEntryKey({ key: 'a', metaKey: true })).toBe(false);
+  expect(isPrintableEntryKey({ key: 'a', ctrlKey: true })).toBe(false);
+  expect(isPrintableEntryKey({ key: 'a', target: { tagName: 'TEXTAREA' } })).toBe(false);
 });
