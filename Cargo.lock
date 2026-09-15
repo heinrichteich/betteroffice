@@ -298,6 +298,7 @@ name = "betteroffice-vsdx-edit"
 version = "0.1.0"
 dependencies = [
  "betteroffice-vsdx-eval",
+ "betteroffice-vsdx-formula",
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-render",
  "betteroffice-vsdx-resolve",
