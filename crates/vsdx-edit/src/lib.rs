@@ -1075,6 +1075,41 @@ mod tests {
     }
 
     #[test]
+    fn place_shape_missing_cell_leaves_leading_cells_unchanged() {
+        let session = session();
+        for name in ["Width", "Height", "PinX"] {
+            add_cell(&session, name, Some("1"), None);
+        }
+        assert!(
+            session
+                .place_shape(
+                    &EditCtx::local("a"),
+                    "page:1",
+                    "page:1:shape:1",
+                    PlaceShapeFormulas {
+                        width: "2".to_owned(),
+                        height: "3".to_owned(),
+                        x: "4".to_owned(),
+                        y: "5".to_owned(),
+                    },
+                )
+                .is_err()
+        );
+        let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+        for name in ["Width", "Height", "PinX"] {
+            assert_eq!(
+                cells
+                    .iter()
+                    .find(|cell| cell.name == name)
+                    .unwrap()
+                    .formula
+                    .as_deref(),
+                Some("1")
+            );
+        }
+    }
+
+    #[test]
     fn guarded_section_row_cell_refuses_edits() {
         let session = session();
         let locator = CellLocator {
