@@ -266,6 +266,26 @@ test('a literal off-centre LocPin previews exactly what the commit renders', () 
   expect(Math.min(...northCorners.map((corner) => corner.y))).toBeCloseTo(stretched.y - locPin.y, 10);
   expect(Math.max(...northCorners.map((corner) => corner.y))).toBeCloseTo(stretched.y - locPin.y + stretched.height, 10);
 });
+test('a formula LocPin keeps its fraction so the fixed edge survives the commit', () => {
+  const frame = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+  const east = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, locPinFraction: { x: true, y: true }, size: { width: 2, height: 1 } };
+  const grown = resolveDragGeometry(east, { x: 1, y: 0 });
+  expect(grown.width).toBeCloseTo(3, 10);
+  expect(grown.x - grown.width * 0.5).toBeCloseTo(4, 10);
+  const eastCorners = previewOutline(east, { x: 1, y: 0 }, frame);
+  expect(Math.min(...eastCorners.map((corner) => corner.x))).toBeCloseTo(4, 10);
+  expect(Math.max(...eastCorners.map((corner) => corner.x))).toBeCloseTo(7, 10);
+  const quarter = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 0.5, y: 0.5 }, locPinFraction: { x: true, y: true }, size: { width: 2, height: 1 } };
+  const stretched = resolveDragGeometry(quarter, { x: 2, y: 0 });
+  expect(stretched.width).toBeCloseTo(4, 10);
+  expect(stretched.x - stretched.width * 0.25).toBeCloseTo(4.5, 10);
+  const mixed = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'se' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, locPinFraction: { x: true }, size: { width: 2, height: 1 } };
+  const both = resolveDragGeometry(mixed, { x: 1, y: -1 });
+  expect(both.width).toBeCloseTo(3, 10);
+  expect(both.height).toBeCloseTo(2, 10);
+  expect(both.x - both.width * 0.5).toBeCloseTo(4, 10);
+  expect(both.y - 0.5 + both.height).toBeCloseTo(2.5, 10);
+});
 test('canvas keyboard maps history, delete and escape intents', () => {
   expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true }, 1)).toEqual({ kind: 'undo' });
   expect(canvasKeyboardIntent({ key: 'Z', metaKey: true, shiftKey: true }, 1)).toEqual({ kind: 'redo' });

@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
-import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
+import { RibbonCommandsProvider, findShapePlacement, dragStartMatchesShape, isHandleResizeBlocked, locPinAxisFractional, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
@@ -89,6 +89,18 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   onErrorRef.current = onError;
   collaborationRef.current = collaboration;
 
+  const cancelStaleDrag = (snapshot: DiagramSnapshot) => {
+    const drag = pointerRef.current;
+    if (!drag) return;
+    const active = selectionRef.current;
+    const page = active ? snapshot.pages.find((entry) => entry.id === active.pageId) : undefined;
+    const placement = page && active ? findShapePlacement(page.shapes, active.shapeId) : null;
+    if (placement && dragStartMatchesShape(placement.shape, drag)) return;
+    pointerRef.current = null;
+    if (previewFrameRef.current !== null) { cancelAnimationFrame(previewFrameRef.current); previewFrameRef.current = null; }
+    dragPreviewRef.current = null;
+  };
+
   const reportError = useCallback((value: unknown) => { const next = value instanceof Error ? value : new Error(String(value)); setError(next.message); onErrorRef.current?.(next); }, []);
   const refresh = useCallback((requestedPage?: number, notify = false) => {
     const handle = handleRef.current;
@@ -106,6 +118,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       setModel(modelRef.current);
       setDiagnostics(frame ? collectDiagnostics(frame) : []);
       setSelection((existing) => existing && stillSelectable(current, pageIndex, existing) ? existing : null);
+      cancelStaleDrag(current);
     } catch (value) { reportError(value); }
   }, [reportError]);
 
@@ -250,6 +263,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       flipY: numericCellValue(shape, 'FlipY', 0) === 1,
       pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
       locPin: { x: numericCellValue(shape, 'LocPinX', width / 2), y: numericCellValue(shape, 'LocPinY', height / 2) },
+      locPinFraction: { x: locPinAxisFractional(shape, 'LocPinX'), y: locPinAxisFractional(shape, 'LocPinY') },
       size: { width, height },
     };
   };
@@ -361,12 +375,15 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     pointerRef.current = null;
     const hadPreview = dragPreviewRef.current !== null;
     clearDragPreview();
-    const handle = handleRef.current; const selected = selection; const frame = model.frame;
+    const handle = handleRef.current; const selected = selectionRef.current; const frame = modelRef.current.frame;
     if (!handle || !selected || !frame) return;
     try {
       const point = canvasPointerPosition(event, frame);
       if (!pointer.thresholdPassed && !hadPreview && pointer.startX !== undefined && pointer.startY !== undefined && !passedDragThreshold(pointer.startX, pointer.startY, event.clientX, event.clientY)) return;
       if (!pointer.thresholdPassed && !hadPreview && Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) return;
+      const livePage = handle.snapshot().pages.find((page) => page.id === selected.pageId);
+      const livePlacement = livePage ? findShapePlacement(livePage.shapes, selected.shapeId) : null;
+      if (!livePlacement || !dragStartMatchesShape(livePlacement.shape, pointer)) return;
       if (pointer.rotate) {
         handle.setCellFormula(selected.pageId, selected.shapeId, { cellName: 'Angle' }, String(resolveRotationAngle(pointer, point.model, event.shiftKey)));
         refresh(undefined, true);
@@ -374,9 +391,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       }
       const geometry = resolveDragGeometry(pointer, point.model);
       if (pointer.handle) {
-        const livePage = handle.snapshot().pages.find((page) => page.id === selected.pageId);
-        const livePlacement = livePage ? findShapePlacement(livePage.shapes, selected.shapeId) : null;
-        if (livePlacement && isHandleResizeBlocked(livePlacement.shape)) throw new Error('Shape is locked and cannot be resized with handles.');
+        if (isHandleResizeBlocked(livePlacement.shape)) throw new Error('Shape is locked and cannot be resized with handles.');
         handle.transformShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y), inchFormula(geometry.width), inchFormula(geometry.height));
       }
       else if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
@@ -557,6 +572,7 @@ export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, sel
     resize: false,
     pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
     locPin: { x: numericCellValue(shape, 'LocPinX', width / 2), y: numericCellValue(shape, 'LocPinY', height / 2) },
+    locPinFraction: { x: locPinAxisFractional(shape, 'LocPinX'), y: locPinAxisFractional(shape, 'LocPinY') },
     size: { width, height },
     parentTransforms: shapeParentTransforms(frame.primitives, `${page.sourcePartPath}:${shape.sourceId}`) ?? [],
     angle: numericCellValue(shape, 'Angle', 0),

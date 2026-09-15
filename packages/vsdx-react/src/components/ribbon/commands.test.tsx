@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 import type { DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
-import { createRibbonCommands, findShapePlacement, numericCellValue } from './commands';
+import { cellIsGuarded, createRibbonCommands, dragStartMatchesShape, findShapePlacement, locPinAxisFractional, numericCellValue } from './commands';
 
 function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
   return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ['one', 'two', 'three'].map((id) => ({ id, sourceId: 1, name: id, children: [], cells: Object.entries(cells).map(([name, value]) => ({ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: value, value })) })) }] };
@@ -55,6 +55,62 @@ test('locks and guards disable the operations the mutation policy would refuse',
   expect(commands.flipVertical.enabled).toBe(true);
   expect(commands.bringForward.enabled).toBe(true);
   expect(commands.sendBackward.enabled).toBe(true);
+});
+
+test('guard detection parses calls instead of matching raw text', () => {
+  for (const formula of ['"GUARD"', 'GUARDIAN(1)', 'MYGUARD(1)', 'THEMEGUARD(RGB(1,2,3))']) {
+    const state = snapshot({ Angle: formula });
+    const diagram = handle(state);
+    const commands = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {});
+    expect(commands.rotateRight.enabled).toBe(true);
+  }
+  for (const formula of ['GUARD(0)', '=guard(0)', 'IF(1,GUARD(0),0)']) {
+    const state = snapshot({ Angle: formula });
+    const diagram = handle(state);
+    const commands = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {});
+    expect(commands.rotateRight.enabled).toBe(false);
+  }
+});
+
+test('guard detection follows a SETATREF redirect to its target', () => {
+  const guarded = snapshot({ Angle: 'SETATREF(Target)', Target: 'GUARD(1)' });
+  const guardedCommands = createRibbonCommands(handle(guarded), selected, 'page', () => {}, () => {}, () => {});
+  expect(guardedCommands.rotateRight.enabled).toBe(false);
+  const chained = snapshot({ Angle: 'SETATREF(A)', A: 'SETATREF(B)', B: 'GUARD(1)' });
+  const chainedCommands = createRibbonCommands(handle(chained), selected, 'page', () => {}, () => {}, () => {});
+  expect(chainedCommands.rotateRight.enabled).toBe(false);
+  const plain = snapshot({ Angle: 'SETATREF(Target)', Target: '3' });
+  const plainCommands = createRibbonCommands(handle(plain), selected, 'page', () => {}, () => {}, () => {});
+  expect(plainCommands.rotateRight.enabled).toBe(true);
+});
+
+test('a nested or dangling SETATREF blocks the write the policy would refuse', () => {
+  expect(cellIsGuarded(snapshot({ Angle: 'SETATREF(Target)+1' }).pages[0].shapes[1], 'Angle')).toBe(true);
+  expect(cellIsGuarded(snapshot({ Angle: 'SETATREF(Absent)' }).pages[0].shapes[1], 'Angle')).toBe(true);
+  expect(cellIsGuarded(snapshot({ Angle: 'SETATREF(A)', A: 'SETATREF(Angle)' }).pages[0].shapes[1], 'Angle')).toBe(true);
+});
+
+test('a formula-derived LocPin tracks the size while a literal one stays put', () => {
+  const derived = snapshot({ LocPinX: 'Width*0.5', LocPinY: 'Height*0.5' }).pages[0].shapes[1];
+  expect(locPinAxisFractional(derived, 'LocPinX')).toBe(true);
+  expect(locPinAxisFractional(derived, 'LocPinY')).toBe(true);
+  const literal = snapshot({ LocPinX: '1', LocPinY: '=2' }).pages[0].shapes[1];
+  expect(locPinAxisFractional(literal, 'LocPinX')).toBe(false);
+  expect(locPinAxisFractional(literal, 'LocPinY')).toBe(false);
+  expect(locPinAxisFractional(snapshot().pages[0].shapes[1], 'LocPinX')).toBe(true);
+});
+
+test('a drag start matches its shape until a peer moves it', () => {
+  const shape = snapshot({ PinX: '5', PinY: '2', Width: '2', Height: '1', LocPinX: '1', LocPinY: '0.5', Angle: '0', FlipX: '0', FlipY: '0' }).pages[0].shapes[1];
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, size: { width: 2, height: 1 }, angle: 0, flipX: false, flipY: false };
+  expect(dragStartMatchesShape(shape, start)).toBe(true);
+  expect(dragStartMatchesShape(null, start)).toBe(false);
+  const moved = snapshot({ PinX: '9', PinY: '2', Width: '2', Height: '1', LocPinX: '1', LocPinY: '0.5', Angle: '0', FlipX: '0', FlipY: '0' }).pages[0].shapes[1];
+  expect(dragStartMatchesShape(moved, start)).toBe(false);
+  const resized = snapshot({ PinX: '5', PinY: '2', Width: '4', Height: '1', LocPinX: '1', LocPinY: '0.5', Angle: '0', FlipX: '0', FlipY: '0' }).pages[0].shapes[1];
+  expect(dragStartMatchesShape(resized, start)).toBe(false);
+  const rotated = snapshot({ PinX: '5', PinY: '2', Width: '2', Height: '1', LocPinX: '1', LocPinY: '0.5', Angle: '0.5', FlipX: '0', FlipY: '0' }).pages[0].shapes[1];
+  expect(dragStartMatchesShape(rotated, start)).toBe(false);
 });
 
 test('does not reorder forward past the topmost shape', () => {

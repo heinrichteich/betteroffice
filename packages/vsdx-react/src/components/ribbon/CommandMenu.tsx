@@ -5,7 +5,6 @@ import type { RibbonIconName } from './RibbonIcon';
 import { useRibbonCommands } from './commands';
 import type { RibbonCommandId } from './commands';
 
-/** Single entry in a keyboard-navigable command menu, optionally opening a submenu. */
 export interface CommandMenuEntry {
   id: RibbonCommandId;
   icon: RibbonIconName;
@@ -25,14 +24,12 @@ interface CommandMenuProps {
   onCloseAndFocus: () => void;
 }
 
-/** One menu item bound to a ribbon command id. */
 export function CommandMenuItem({ id, icon, label, shortcut, itemRef, onSelect }: { id: RibbonCommandId; icon: RibbonIconName; label: string; shortcut?: string; itemRef: (node: HTMLButtonElement | null) => void; onSelect: () => void }) {
   const command = useRibbonCommands()[id];
   const checkable = command.active !== undefined;
   return <button ref={itemRef} type="button" role={checkable ? 'menuitemcheckbox' : 'menuitem'} aria-checked={checkable ? command.active : undefined} aria-keyshortcuts={shortcut} disabled={!command.enabled} aria-label={shortcut ? `${label} ${shortcut}` : label} data-command-id={id} tabIndex={-1} onMouseDown={(event) => event.preventDefault()} onClick={() => { command.run(); onSelect(); }} onMouseOver={(event) => { if (command.enabled) event.currentTarget.style.backgroundColor = '#f5f5f5'; }} onMouseOut={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; }} style={{ ...styles.menuItem, color: command.enabled ? '#242424' : '#b4b4b4' }}><RibbonIcon name={icon} size={18} /><span>{label}</span>{shortcut && <span aria-hidden="true" style={styles.shortcut}>{shortcut}</span>}</button>;
 }
 
-/** Shared keyboard-navigable command menu behind the ribbon split buttons and the canvas context menu. */
 export function CommandMenu({ menuLabel, entries, position, dividerAfter, anchorRef, initialFocus = 'first', label, onClose, onCloseAndFocus }: CommandMenuProps) {
   const commands = useRibbonCommands();
   const menuRef = useRef<HTMLDivElement>(null);

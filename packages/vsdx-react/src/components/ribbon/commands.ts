@@ -2,6 +2,7 @@ import { createContext, createElement, useContext, useMemo } from 'react';
 import type { ReactNode } from 'react';
 import type { DiagramHandle, DiagramSnapshot, PageSnapshot, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { VsdxShapeSelection } from '../../VsdxEditor';
+import type { DragStart } from '../../interactions';
 import { standardShapeById } from '../shapes/shapeLibrary';
 
 export type RibbonCommandId =
@@ -87,17 +88,79 @@ export function numericCellValue(shape: ShapeSnapshot, name: string, fallback?: 
   return parsed;
 }
 
-/** True when a ShapeSheet lock cell evaluates to the enabled value 1. */
 export function lockCellEnabled(shape: ShapeSnapshot | null, name: string): boolean {
   return Number(cellValue(shape, name)) === 1;
 }
 
-/** True when the stored formula for a cell carries a GUARD interception. */
 export function cellIsGuarded(shape: ShapeSnapshot | null, name: string): boolean {
-  return (cellFormula(shape, name) ?? '').toUpperCase().includes('GUARD');
+  if (!shape) return false;
+  const seen = new Set<string>();
+  let current: string | undefined = name;
+  for (let hop = 0; hop <= 10 && current !== undefined; hop += 1) {
+    if (seen.has(current)) return true;
+    seen.add(current);
+    const formula = cellFormula(shape, current);
+    if (formula === undefined) return false;
+    if (hasGuardCall(formula)) return true;
+    const target = setatrefTarget(formula);
+    if (target === null) return mentionsSetatref(formula);
+    if (!findCell(shape, target)) return true;
+    current = target;
+  }
+  return true;
 }
 
-/** True when a delete would be refused by LockDelete or a GUARD on it. */
+function stripQuoted(text: string): string {
+  return text.replace(/"(?:""|[^"])*"/g, ' ');
+}
+
+function hasGuardCall(formula: string): boolean {
+  return /(^|[^A-Za-z0-9_])GUARD\s*\(/i.test(stripQuoted(formula));
+}
+
+function mentionsSetatref(formula: string): boolean {
+  return /(^|[^A-Za-z0-9_])SETATREF\s*\(/i.test(stripQuoted(formula));
+}
+
+function setatrefTarget(formula: string): string | null {
+  const call = splitRootCall(formula);
+  if (!call || call.name !== 'SETATREF' || call.args.length !== 1) return null;
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(call.args[0]) ? call.args[0] : null;
+}
+
+function splitRootCall(formula: string): { name: string; args: string[] } | null {
+  const text = formula.replace(/^=+/, '').trim();
+  const head = /^([A-Za-z_][A-Za-z0-9_.]*)\s*\(/.exec(text);
+  if (!head || head.index !== 0) return null;
+  let depth = 1;
+  let quoted = false;
+  let current = '';
+  const args: string[] = [];
+  for (let index = head[0].length; index < text.length; index += 1) {
+    const ch = text[index];
+    if (quoted) {
+      if (ch === '"') {
+        if (text[index + 1] === '"') { current += '""'; index += 1; }
+        else quoted = false;
+      } else current += ch;
+      continue;
+    }
+    if (ch === '"') { quoted = true; continue; }
+    if (ch === '(') { depth += 1; current += ch; continue; }
+    if (ch === ')') {
+      depth -= 1;
+      if (depth === 0) break;
+      current += ch;
+      continue;
+    }
+    if (ch === ',' && depth === 1) { args.push(current); current = ''; continue; }
+    current += ch;
+  }
+  if (depth !== 0 || quoted) return null;
+  args.push(current);
+  return { name: head[1].toUpperCase(), args: args.map((arg) => arg.trim()) };
+}
+
 export function isDeleteBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   return lockCellEnabled(shape, 'LockDelete') || cellIsGuarded(shape, 'LockDelete');
@@ -105,17 +168,46 @@ export function isDeleteBlocked(shape: ShapeSnapshot | null): boolean {
 
 export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'LockHeight', 'LockAspect'] as const;
 
-/** True when a handle resize would be refused by a lock or a GUARD on its pin or size. */
 export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   if (HANDLE_RESIZE_LOCKS.some((lock) => lockCellEnabled(shape, lock))) return true;
   return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => cellIsGuarded(shape, cell));
 }
 
-/** True when a single-cell write would be refused by a GUARD on that cell. */
 export function isCellWriteBlocked(shape: ShapeSnapshot | null, cellName: string): boolean {
   if (!shape) return false;
   return cellIsGuarded(shape, cellName);
+}
+
+const DRAG_STALE_EPSILON = 1e-9;
+
+export function dragStartMatchesShape(shape: ShapeSnapshot | null, start: DragStart): boolean {
+  if (!shape) return false;
+  try {
+    const width = numericCellValue(shape, 'Width');
+    const height = numericCellValue(shape, 'Height');
+    if (Math.abs(width - start.size.width) > DRAG_STALE_EPSILON) return false;
+    if (Math.abs(height - start.size.height) > DRAG_STALE_EPSILON) return false;
+    if (Math.abs(numericCellValue(shape, 'PinX') - start.pin.x) > DRAG_STALE_EPSILON) return false;
+    if (Math.abs(numericCellValue(shape, 'PinY') - start.pin.y) > DRAG_STALE_EPSILON) return false;
+    if (Math.abs(numericCellValue(shape, 'LocPinX', width / 2) - (start.locPin?.x ?? start.size.width / 2)) > DRAG_STALE_EPSILON) return false;
+    if (Math.abs(numericCellValue(shape, 'LocPinY', height / 2) - (start.locPin?.y ?? start.size.height / 2)) > DRAG_STALE_EPSILON) return false;
+    if (Math.abs(numericCellValue(shape, 'Angle', 0) - (start.angle ?? 0)) > DRAG_STALE_EPSILON) return false;
+    if ((numericCellValue(shape, 'FlipX', 0) === 1) !== Boolean(start.flipX)) return false;
+    if ((numericCellValue(shape, 'FlipY', 0) === 1) !== Boolean(start.flipY)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function locPinAxisFractional(shape: ShapeSnapshot | null, name: string): boolean {
+  const cell = findCell(shape, name);
+  if (!cell) return true;
+  const formula = (cell.formula ?? '').replace(/^=+/, '').trim();
+  if (formula !== '') return !Number.isFinite(Number(formula));
+  const value = (cell.value ?? '').trim();
+  return value === '' || !Number.isFinite(Number(value));
 }
 
 export function createRibbonCommands(

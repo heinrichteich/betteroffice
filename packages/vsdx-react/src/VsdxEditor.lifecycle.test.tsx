@@ -774,6 +774,45 @@ test('a rotate grip drag commits the expected angle', async () => {
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
+test('a peer move during a drag cancels the gesture instead of committing stale geometry', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 4, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
+    const moves: string[][] = [];
+    const originalMove = handle.moveShape.bind(handle);
+    handle.moveShape = ((...args: [string, string, string, string]) => { moves.push([...args]); return originalMove(...args); }) as DiagramHandle['moveShape'];
+    await act(async () => { ready!.refresh(); });
+    const canvases = view.container.querySelectorAll('canvas');
+    const main = canvases[0] as HTMLCanvasElement;
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    (main as unknown as { releasePointerCapture: (id: number) => void }).releasePointerCapture = () => {};
+    (main as unknown as { hasPointerCapture: (id: number) => boolean }).hasPointerCapture = () => false;
+    const { fireEvent } = await import('@testing-library/react');
+    fireEvent.pointerDown(main, { pointerId: 1, clientX: 100, clientY: 100 });
+    await act(async () => {});
+    fireEvent.pointerMove(main, { pointerId: 1, clientX: 120, clientY: 130 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    const pageId = handle.snapshot().pages[0].id;
+    await act(async () => { handle.setCellFormula(pageId, 'page:1:shape:20', { cellName: 'PinX' }, '9'); });
+    fireEvent.pointerUp(main, { pointerId: 1, clientX: 120, clientY: 130 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(moves).toHaveLength(0);
+    const pinX = handle.snapshot().pages[0].shapes.find((shape) => shape.id === 'page:1:shape:20')?.cells.find((cell) => cell.name === 'PinX')?.value;
+    expect(Number(pinX)).toBeCloseTo(9, 6);
+    expect(view.container.querySelector('output')).toBeNull();
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
 test('hovering handles sets resize and rotation cursors', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
