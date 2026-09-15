@@ -1187,6 +1187,46 @@ mod tests {
     }
 
     #[test]
+    fn converging_setatref_redirects_refuse_the_batch_without_writing() {
+        let session = session();
+        add_cell(&session, "PinX", Some("SETATREF(Target)"), None);
+        add_cell(&session, "Width", Some("SETATREF(Target)"), None);
+        add_cell(&session, "PinY", Some("2"), None);
+        add_cell(&session, "Height", Some("4"), None);
+        add_cell(&session, "Target", Some("1"), None);
+        let error = session
+            .transform_shape(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                "5",
+                "6",
+                "7",
+                "8",
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("Target"));
+        let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+        for (name, formula) in [
+            ("PinX", "SETATREF(Target)"),
+            ("Width", "SETATREF(Target)"),
+            ("PinY", "2"),
+            ("Height", "4"),
+            ("Target", "1"),
+        ] {
+            assert_eq!(
+                cells
+                    .iter()
+                    .find(|cell| cell.name == name)
+                    .unwrap()
+                    .formula
+                    .as_deref(),
+                Some(formula)
+            );
+        }
+    }
+
+    #[test]
     fn inherited_guard_materialized_in_the_crdt_refuses_edits() {
         let session = session();
         add_cell(&session, "Width", Some("GUARD(1)"), None);

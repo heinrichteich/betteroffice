@@ -878,6 +878,16 @@ impl DiagramSession {
                 }
             }
         }
+        let mut seen: Vec<CellLocator> = Vec::with_capacity(resolved.len());
+        for (target, _) in &resolved {
+            if seen.contains(target) {
+                return Err(EditError::InvalidState(format!(
+                    "converging redirects target {} more than once",
+                    target.cell_name
+                )));
+            }
+            seen.push(target.clone());
+        }
         let mut maps = Vec::with_capacity(resolved.len());
         for (target, _) in &resolved {
             let cell = cell_map(&mut txn, page_id, shape_id, target)?;
