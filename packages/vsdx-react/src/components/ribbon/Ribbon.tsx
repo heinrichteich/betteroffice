@@ -6,8 +6,8 @@ import { RibbonIcon } from './RibbonIcon';
 import { useRibbonCommands } from './commands';
 import type { RibbonCommandId } from './commands';
 
-const tabs = ['file', 'home', 'insert', 'design', 'review', 'view', 'help'] as const;
-type RibbonTab = (typeof tabs)[number];
+const baseTabs = ['file', 'home', 'insert'] as const;
+type RibbonTab = (typeof baseTabs)[number] | 'shape';
 
 type IconName = Parameters<typeof RibbonIcon>[0]['name'];
 
@@ -64,8 +64,12 @@ function RibbonSplitButton({ defaultId, defaultIcon, entries, label }: { default
   );
 }
 
-function EmptyState({ t }: { t: TFunction }) {
-  return <div style={styles.empty}><span>{t('ribbon.empty')}</span></div>;
+function ArrangeRun({ t }: { t: TFunction }) {
+  const label = (id: RibbonCommandId) => t(`ribbon.commands.${id}`);
+  return <RibbonRun label={t('ribbon.groups.arrange')}>
+    <RibbonSplitButton defaultId="bringToFront" defaultIcon="front" label={label} entries={[{ id: 'bringToFront', icon: 'front' }, { id: 'bringForward', icon: 'forward' }, { id: 'sendBackward', icon: 'backward' }, { id: 'sendToBack', icon: 'back' }]} />
+    <RibbonSplitButton defaultId="rotateRight" defaultIcon="rotateRight" label={label} entries={[{ id: 'rotateRight', icon: 'rotateRight' }, { id: 'rotateLeft', icon: 'rotateLeft' }, { id: 'flipHorizontal', icon: 'flipHorizontal' }, { id: 'flipVertical', icon: 'flipVertical' }]} />
+  </RibbonRun>;
 }
 
 function HomePanel({ t }: { t: TFunction }) {
@@ -77,34 +81,45 @@ function HomePanel({ t }: { t: TFunction }) {
     <Divider />
     <RibbonRun label={t('ribbon.groups.shape')}><ColorButton id="fillColor" icon="fill" label={label('fillColor')} /><ColorButton id="lineColor" icon="line" label={label('lineColor')} /><LineFormulaControl id="lineWeight" icon="weight" label={label('lineWeight')} /><LineFormulaControl id="linePattern" icon="pattern" label={label('linePattern')} /></RibbonRun>
     <Divider />
-    <RibbonRun label={t('ribbon.groups.arrange')}>
-      <RibbonSplitButton defaultId="bringToFront" defaultIcon="front" label={label} entries={[{ id: 'bringToFront', icon: 'front' }, { id: 'bringForward', icon: 'forward' }, { id: 'sendBackward', icon: 'backward' }, { id: 'sendToBack', icon: 'back' }]} />
-      <RibbonSplitButton defaultId="rotateRight" defaultIcon="rotateRight" label={label} entries={[{ id: 'rotateRight', icon: 'rotateRight' }, { id: 'rotateLeft', icon: 'rotateLeft' }, { id: 'flipHorizontal', icon: 'flipHorizontal' }, { id: 'flipVertical', icon: 'flipVertical' }]} />
-    </RibbonRun>
+    <ArrangeRun t={t} />
   </div>;
 }
 
-export function Ribbon({ t }: { t: TFunction }) {
-  const [active, setActive] = useState<RibbonTab>('home');
+function ShapePanel({ t }: { t: TFunction }) {
+  return <div style={styles.surface} data-testid="vsdx-ribbon-shape-panel">
+    <ArrangeRun t={t} />
+  </div>;
+}
+
+export function Ribbon({ t, hasSelection = false }: { t: TFunction; hasSelection?: boolean }) {
+  const visibleTabs: readonly RibbonTab[] = hasSelection ? [...baseTabs, 'shape'] : baseTabs;
+  const [active, setActive] = useState<RibbonTab>(hasSelection ? 'shape' : 'home');
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const previousSelection = useRef(hasSelection);
+  useEffect(() => {
+    const previous = previousSelection.current;
+    previousSelection.current = hasSelection;
+    if (hasSelection && !previous) setActive('shape');
+    else if (!hasSelection && previous) setActive((current) => (current === 'shape' ? 'home' : current));
+  }, [hasSelection]);
   const select = (next: RibbonTab) => setActive(next);
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     let next = index;
-    if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
-    else if (event.key === 'ArrowLeft') next = (index + tabs.length - 1) % tabs.length;
+    if (event.key === 'ArrowRight') next = (index + 1) % visibleTabs.length;
+    else if (event.key === 'ArrowLeft') next = (index + visibleTabs.length - 1) % visibleTabs.length;
     else if (event.key === 'Home') next = 0;
-    else if (event.key === 'End') next = tabs.length - 1;
+    else if (event.key === 'End') next = visibleTabs.length - 1;
     else return;
-    event.preventDefault(); select(tabs[next]); tabRefs.current[next]?.focus();
+    event.preventDefault(); select(visibleTabs[next]); tabRefs.current[next]?.focus();
   };
   return <section aria-label={t('ribbon.label')} className="vsdx-ribbon-flat" style={styles.root}>
     <style>{'[data-command-id]:focus-visible,.vsdx-cmd-btn:focus-visible,.vsdx-ribbon-flat [role="tab"]:focus-visible{outline:2px solid #0f6cbd;outline-offset:1px}.vsdx-cmd-btn:not(:disabled):hover{background-color:#f5f5f5}.vsdx-cmd-btn:not(:disabled):active{background-color:#ebebeb}'}</style>
-    <div role="tablist" aria-label={t('ribbon.tabsLabel')} style={styles.tabs}>{tabs.map((tab, index) => {
+    <div role="tablist" aria-label={t('ribbon.tabsLabel')} style={styles.tabs}>{visibleTabs.map((tab, index) => {
       const selected = active === tab;
       return <button ref={(node) => { tabRefs.current[index] = node; }} key={tab} id={`vsdx-ribbon-tab-${tab}`} type="button" role="tab" aria-selected={selected} aria-controls={`vsdx-ribbon-panel-${tab}`} tabIndex={selected ? 0 : -1} onClick={() => select(tab)} onKeyDown={(event) => onKeyDown(event, index)} style={styles.tab}><span style={{ ...styles.tabLabel, borderBottomColor: selected ? '#0f6cbd' : 'transparent', color: '#242424', fontWeight: selected ? 600 : 400 }}>{t(`ribbon.tabs.${tab}`)}</span></button>;
     })}</div>
     <div id={`vsdx-ribbon-panel-${active}`} role="tabpanel" aria-labelledby={`vsdx-ribbon-tab-${active}`} style={styles.panel}>
-      {active === 'home' ? <HomePanel t={t} /> : active === 'file' ? <div style={styles.surface}><RibbonRun label={t('ribbon.groups.file')}><CommandButton id="download" icon="download" label={t('ribbon.commands.download')} /></RibbonRun></div> : active === 'insert' ? <div style={styles.surface}><RibbonRun label={t('ribbon.groups.insert')}><CommandButton id="addShape" icon="add" label={t('ribbon.commands.addShape')} /></RibbonRun></div> : <div style={styles.surface}><EmptyState t={t} /></div>}
+      {active === 'home' ? <HomePanel t={t} /> : active === 'shape' ? <ShapePanel t={t} /> : active === 'file' ? <div style={styles.surface}><RibbonRun label={t('ribbon.groups.file')}><CommandButton id="download" icon="download" label={t('ribbon.commands.download')} /></RibbonRun></div> : <div style={styles.surface}><RibbonRun label={t('ribbon.groups.insert')}><CommandButton id="addShape" icon="add" label={t('ribbon.commands.addShape')} /></RibbonRun></div>}
     </div>
   </section>;
 }
@@ -124,5 +139,4 @@ const styles: Record<string, CSSProperties> = {
   split: { display: 'inline-flex', alignItems: 'stretch' },
   splitMain: { appearance: 'none', display: 'inline-grid', placeItems: 'center', width: 28, height: 32, padding: 0, border: 0, borderRadius: '4px 0 0 4px', boxSizing: 'border-box' },
   splitChevron: { appearance: 'none', display: 'inline-grid', placeItems: 'center', width: 16, height: 32, padding: 0, border: 0, borderRadius: '0 4px 4px 0', boxSizing: 'border-box' },
-  empty: { display: 'flex', alignItems: 'center', height: 32, padding: '0 8px', color: '#424242', fontSize: 12 },
 };
