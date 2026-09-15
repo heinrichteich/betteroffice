@@ -57,6 +57,17 @@ test('locks and guards disable the operations the mutation policy would refuse',
   expect(commands.sendBackward.enabled).toBe(true);
 });
 
+test('a GUARD substring inside a reference name disables nothing', () => {
+  const state = snapshot({ LockDelete: 'User.GuardDelete', Angle: 'User.GuardAngle', FlipX: 'User.GuardFlip', FlipY: 'User.GuardFlip' });
+  const diagram = handle(state);
+  const commands = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {});
+  expect(commands.delete.enabled).toBe(true);
+  expect(commands.rotateLeft.enabled).toBe(true);
+  expect(commands.rotateRight.enabled).toBe(true);
+  expect(commands.flipHorizontal.enabled).toBe(true);
+  expect(commands.flipVertical.enabled).toBe(true);
+});
+
 test('does not reorder forward past the topmost shape', () => {
   const state = snapshot(); const diagram = handle(state); const commands = createRibbonCommands(diagram, { ...selected, shapeId: 'three', hit: { kind: 'shape', shapeId: 'three' } }, 'page', () => {}, () => {}, () => {});
   expect(commands.bringForward.enabled).toBe(false); commands.bringForward.run(); expect(diagram.reorderShape).not.toHaveBeenCalled();
