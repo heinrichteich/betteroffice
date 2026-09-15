@@ -341,7 +341,17 @@ mod tests {
     }
 
     fn add_cell(session: &DiagramSession, name: &str, formula: Option<&str>, value: Option<&str>) {
-        add_cell_at(session, name, None, None, formula, value);
+        add_cell_to(session, "page:1:shape:1", name, formula, value);
+    }
+
+    fn add_cell_to(
+        session: &DiagramSession,
+        shape_id: &str,
+        name: &str,
+        formula: Option<&str>,
+        value: Option<&str>,
+    ) {
+        add_cell_at_to(session, shape_id, name, None, None, formula, value);
     }
 
     fn add_cell_at(
@@ -352,9 +362,29 @@ mod tests {
         formula: Option<&str>,
         value: Option<&str>,
     ) {
+        add_cell_at_to(
+            session,
+            "page:1:shape:1",
+            name,
+            section,
+            row,
+            formula,
+            value,
+        );
+    }
+
+    fn add_cell_at_to(
+        session: &DiagramSession,
+        shape_id: &str,
+        name: &str,
+        section: Option<&str>,
+        row: Option<CellRow>,
+        formula: Option<&str>,
+        value: Option<&str>,
+    ) {
         let mut txn = session.doc.transact_mut_with(HYDRATE_ORIGIN);
         let sheets = txn.get_map(SHEETS).unwrap();
-        let shape = match sheets.get(&txn, "page:1:shape:1") {
+        let shape = match sheets.get(&txn, shape_id) {
             Some(yrs::Out::YMap(shape)) => shape,
             _ => unreachable!(),
         };
@@ -1184,6 +1214,192 @@ mod tests {
                 .unwrap();
         }
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn place_shape_commits_size_and_pin_in_a_single_update() {
+        use std::sync::{Arc, Mutex};
+        let session = session();
+        for name in ["Width", "Height", "PinX", "PinY"] {
+            add_cell(&session, name, Some("1"), None);
+        }
+        let updates = Arc::new(Mutex::new(0usize));
+        let observed = Arc::clone(&updates);
+        let _subscription = session
+            .observe_update_v1(move |_| {
+                *observed.lock().unwrap() += 1;
+            })
+            .unwrap();
+        let receipts = session
+            .place_shape(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                PlaceShapeFormulas {
+                    width: "2".to_owned(),
+                    height: "3".to_owned(),
+                    x: "4".to_owned(),
+                    y: "5".to_owned(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            receipts
+                .iter()
+                .map(|receipt| receipt.cell_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Width", "Height", "PinX", "PinY"]
+        );
+        assert_eq!(*updates.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn place_shape_undoes_size_and_pin_together() {
+        let session = session();
+        for name in ["Width", "Height", "PinX", "PinY"] {
+            add_cell(&session, name, Some("1"), None);
+        }
+        session
+            .place_shape(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                PlaceShapeFormulas {
+                    width: "2".to_owned(),
+                    height: "3".to_owned(),
+                    x: "4".to_owned(),
+                    y: "5".to_owned(),
+                },
+            )
+            .unwrap();
+        assert!(session.undo());
+        let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+        for name in ["Width", "Height", "PinX", "PinY"] {
+            assert_eq!(
+                cells
+                    .iter()
+                    .find(|cell| cell.name == name)
+                    .unwrap()
+                    .formula
+                    .as_deref(),
+                Some("1")
+            );
+        }
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn move_shapes_undoes_every_pin_together() {
+        let session = session();
+        for shape_id in ["page:1:shape:1", "page:1:shape:2"] {
+            add_cell_to(&session, shape_id, "PinX", Some("1"), None);
+            add_cell_to(&session, shape_id, "PinY", Some("1"), None);
+        }
+        session
+            .move_shapes(
+                &EditCtx::local("a"),
+                &[
+                    ShapeMove {
+                        page_id: "page:1".to_owned(),
+                        shape_id: "page:1:shape:1".to_owned(),
+                        x: "2".to_owned(),
+                        y: "3".to_owned(),
+                    },
+                    ShapeMove {
+                        page_id: "page:1".to_owned(),
+                        shape_id: "page:1:shape:2".to_owned(),
+                        x: "4".to_owned(),
+                        y: "5".to_owned(),
+                    },
+                ],
+            )
+            .unwrap();
+        assert!(session.undo());
+        let shapes = &session.snapshot().unwrap().pages[0].shapes;
+        for shape in shapes {
+            for name in ["PinX", "PinY"] {
+                assert_eq!(
+                    shape
+                        .cells
+                        .iter()
+                        .find(|cell| cell.name == name)
+                        .unwrap()
+                        .formula
+                        .as_deref(),
+                    Some("1")
+                );
+            }
+        }
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn delete_shapes_undoes_every_shape_together() {
+        let session = session();
+        for shape_id in ["page:1:shape:1", "page:1:shape:2"] {
+            add_cell_to(&session, shape_id, "PinX", Some("1"), None);
+        }
+        session
+            .delete_shapes(
+                &EditCtx::local("a"),
+                &[
+                    ShapeDelete {
+                        page_id: "page:1".to_owned(),
+                        shape_id: "page:1:shape:1".to_owned(),
+                    },
+                    ShapeDelete {
+                        page_id: "page:1".to_owned(),
+                        shape_id: "page:1:shape:2".to_owned(),
+                    },
+                ],
+            )
+            .unwrap();
+        assert!(session.snapshot().unwrap().pages[0].shapes.is_empty());
+        assert!(session.undo());
+        assert_eq!(session.snapshot().unwrap().pages[0].shapes.len(), 2);
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn set_cell_formulas_undoes_every_shape_together() {
+        let session = session();
+        for shape_id in ["page:1:shape:1", "page:1:shape:2"] {
+            add_cell_to(&session, shape_id, "FillForegnd", Some("1"), None);
+        }
+        session
+            .set_cell_formulas(
+                &EditCtx::local("a"),
+                &[
+                    CellFormulaWrite {
+                        page_id: "page:1".to_owned(),
+                        shape_id: "page:1:shape:1".to_owned(),
+                        cell_name: "FillForegnd".to_owned(),
+                        formula: "2".to_owned(),
+                    },
+                    CellFormulaWrite {
+                        page_id: "page:1".to_owned(),
+                        shape_id: "page:1:shape:2".to_owned(),
+                        cell_name: "FillForegnd".to_owned(),
+                        formula: "2".to_owned(),
+                    },
+                ],
+            )
+            .unwrap();
+        assert!(session.undo());
+        let shapes = &session.snapshot().unwrap().pages[0].shapes;
+        for shape in shapes {
+            assert_eq!(
+                shape
+                    .cells
+                    .iter()
+                    .find(|cell| cell.name == "FillForegnd")
+                    .unwrap()
+                    .formula
+                    .as_deref(),
+                Some("1")
+            );
+        }
+        assert!(!session.can_undo());
     }
 
     #[test]

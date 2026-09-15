@@ -38,7 +38,7 @@ export const isEditableKeyboardTarget = (target: unknown): boolean => {
   }
   return false;
 };
-/** Pure key-to-intent mapping for the editor canvas. Y is up, so ArrowUp yields +dy. */
+/** Y is up. */
 export const canvasKeyboardIntent = (event: CanvasKeyboardEventLike, zoom: number): CanvasKeyboardIntent | null => {
   if (isEditableKeyboardTarget(event.target)) return null;
   const ctrl = Boolean(event.ctrlKey);
@@ -224,7 +224,7 @@ export const rotationGripPosition = (corners: readonly ModelPoint[], zoom: numbe
   const offset = SELECTION_ROTATE_OFFSET_CSS / Math.max(zoom, 1e-6);
   return { x: topCenter.x + (outX / length) * offset, y: topCenter.y + (outY / length) * offset };
 };
-export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: readonly ModelPoint[], dpr: number, scale: number, resizeHandles: readonly ResizeHandle[] = RESIZE_HANDLES): void => {
+export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: readonly ModelPoint[], dpr: number, scale: number, resizeHandles: readonly ResizeHandle[] = RESIZE_HANDLES, showRotateGrip = true): void => {
   if (corners.length < 4) return;
   const zoom = Number.isFinite(scale) && scale > 0 ? scale : 1;
   const handleRadius = SELECTION_HANDLE_CSS / zoom / 2;
@@ -242,10 +242,12 @@ export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: 
     for (let index = 1; index < corners.length; index += 1) context.lineTo(corners[index].x, corners[index].y);
     context.closePath();
     context.stroke();
-    context.beginPath();
-    context.moveTo(topCenter.x, topCenter.y);
-    context.lineTo(grip.x, grip.y);
-    context.stroke();
+    if (showRotateGrip) {
+      context.beginPath();
+      context.moveTo(topCenter.x, topCenter.y);
+      context.lineTo(grip.x, grip.y);
+      context.stroke();
+    }
     for (const key of resizeHandles) {
       const anchor = handles[key];
       context.beginPath();
@@ -254,11 +256,13 @@ export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: 
       context.fill();
       context.stroke();
     }
-    context.beginPath();
-    context.arc(grip.x, grip.y, gripRadius, 0, Math.PI * 2);
-    context.fillStyle = SELECTION_HANDLE_FILL;
-    context.fill();
-    context.stroke();
+    if (showRotateGrip) {
+      context.beginPath();
+      context.arc(grip.x, grip.y, gripRadius, 0, Math.PI * 2);
+      context.fillStyle = SELECTION_HANDLE_FILL;
+      context.fill();
+      context.stroke();
+    }
   } finally { context.restore(); }
 };
 const pointInQuad = (point: ModelPoint, corners: readonly ModelPoint[]): boolean => {

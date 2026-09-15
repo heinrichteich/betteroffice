@@ -16,9 +16,9 @@ use yrs::{
 };
 
 use crate::{
-    CellFormulaReceipt, CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx, EditError,
-    EditResult, LocPinAtSize, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES, ShapeDraft,
-    ShapeReceipt, ShapeSnapshot,
+    CellFormulaReceipt, CellFormulaWrite, CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx,
+    EditError, EditResult, LocPinAtSize, META, PAGE_ORDER, PAGES, PageSnapshot, PlaceShapeFormulas,
+    SHEETS, STORIES, ShapeDelete, ShapeDraft, ShapeMove, ShapeReceipt, ShapeSnapshot,
 };
 
 const SCHEMA_VERSION: f64 = 1.0;
@@ -660,6 +660,279 @@ impl DiagramSession {
         )
     }
 
+    pub fn place_shape(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        formulas: PlaceShapeFormulas,
+    ) -> EditResult<[CellFormulaReceipt; 4]> {
+        self.set_cell_formula_group(
+            context,
+            page_id,
+            shape_id,
+            [
+                ("Width", formulas.width, MutationGesture::ResizeWidth),
+                ("Height", formulas.height, MutationGesture::ResizeHeight),
+                ("PinX", formulas.x, MutationGesture::MoveX),
+                ("PinY", formulas.y, MutationGesture::MoveY),
+            ],
+        )
+    }
+
+    pub fn move_shapes(
+        &self,
+        context: &EditCtx,
+        moves: &[ShapeMove],
+    ) -> EditResult<Vec<[CellFormulaReceipt; 2]>> {
+        if moves.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut txn = self.transact_for(context);
+        let mut pending = Vec::with_capacity(moves.len() * 2);
+        for shape_move in moves {
+            let context_for_policy =
+                CrdtMutationContext::new(&txn, &shape_move.page_id, &shape_move.shape_id)?;
+            for (name, formula, gesture) in [
+                ("PinX", shape_move.x.clone(), MutationGesture::MoveX),
+                ("PinY", shape_move.y.clone(), MutationGesture::MoveY),
+            ] {
+                match decide_mutation(
+                    &context_for_policy,
+                    context_for_policy.locator(CellLocator {
+                        sheet: CellSheet::Page(0),
+                        shape_id: None,
+                        section: None,
+                        section_index: None,
+                        row: None,
+                        cell_name: name.to_owned(),
+                    }),
+                    gesture,
+                    formula.clone(),
+                    &ParseLimits::default(),
+                ) {
+                    MutationOutcome::Allowed { target, .. } => pending.push((
+                        shape_move.page_id.clone(),
+                        shape_move.shape_id.clone(),
+                        target,
+                        formula,
+                    )),
+                    MutationOutcome::Refused { reason }
+                    | MutationOutcome::Unsupported { reason } => {
+                        return Err(EditError::InvalidState(reason));
+                    }
+                }
+            }
+        }
+        let mut receipts = Vec::with_capacity(moves.len());
+        for pair in pending.chunks(2) {
+            let [first, second] = pair else {
+                return Err(EditError::InvalidState(
+                    "cell group arity changed".to_owned(),
+                ));
+            };
+            let mut pair_receipts = Vec::with_capacity(2);
+            for (page_id, shape_id, target, formula) in [first, second] {
+                let cell = cell_map(&mut txn, page_id, shape_id, target)?;
+                let before = map_string(&cell, &txn, "formula");
+                cell.insert(&mut txn, "formula", formula.as_str());
+                pair_receipts.push(CellFormulaReceipt {
+                    page_id: page_id.clone(),
+                    shape_id: shape_id.clone(),
+                    cell_name: target.cell_name.clone(),
+                    before,
+                    after: formula.clone(),
+                });
+            }
+            let [first, second] = pair_receipts
+                .try_into()
+                .map_err(|_| EditError::InvalidState("cell group arity changed".to_owned()))?;
+            receipts.push([first, second]);
+        }
+        Ok(receipts)
+    }
+
+    pub fn delete_shapes(
+        &self,
+        context: &EditCtx,
+        deletes: &[ShapeDelete],
+    ) -> EditResult<Vec<ShapeReceipt>> {
+        if deletes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut txn = self.transact_for(context);
+        for entry in deletes {
+            let context_for_policy =
+                CrdtMutationContext::new(&txn, &entry.page_id, &entry.shape_id)?;
+            match decide_mutation(
+                &context_for_policy,
+                context_for_policy.locator(CellLocator {
+                    sheet: CellSheet::Page(0),
+                    shape_id: None,
+                    section: None,
+                    section_index: None,
+                    row: None,
+                    cell_name: "LockDelete".to_owned(),
+                }),
+                MutationGesture::Delete,
+                String::new(),
+                &ParseLimits::default(),
+            ) {
+                MutationOutcome::Allowed { .. } => {}
+                MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                    return Err(EditError::InvalidState(reason));
+                }
+            }
+        }
+        let mut receipts = Vec::with_capacity(deletes.len());
+        let mut remaining: Vec<(String, String)> = deletes
+            .iter()
+            .map(|entry| (entry.page_id.clone(), entry.shape_id.clone()))
+            .collect();
+        while !remaining.is_empty() {
+            let mut best: Option<(usize, String, String, ArrayRef, u32, usize, Vec<String>)> = None;
+            for (position, (page_id, shape_id)) in remaining.iter().enumerate() {
+                let pages = txn
+                    .get_map(PAGES)
+                    .ok_or_else(|| EditError::InvalidState("missing pages map".to_owned()))?;
+                let page = match map_ref(&pages, &txn, page_id) {
+                    Ok(page) => page,
+                    Err(_) => continue,
+                };
+                let root_order = match map_array(&page, &txn, "shapes") {
+                    Ok(order) => order,
+                    Err(_) => continue,
+                };
+                let sheets = txn
+                    .get_map(SHEETS)
+                    .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
+                let entries = shape_tree_entries(&sheets, &txn, &root_order)?;
+                let Some(target) = entries.iter().position(|entry| entry.id == *shape_id) else {
+                    continue;
+                };
+                let order = entries[target].order.clone();
+                let from = entries[target].index;
+                let depth = entries[target].depth;
+                let removed = entries
+                    .iter()
+                    .skip(target)
+                    .enumerate()
+                    .take_while(|(offset, entry)| *offset == 0 || entry.depth > depth)
+                    .map(|(_, entry)| entry)
+                    .map(|entry| entry.id.clone())
+                    .collect::<Vec<_>>();
+                let replace = match &best {
+                    None => true,
+                    Some((_, _, _, _, best_from, _, _)) => from > *best_from,
+                };
+                if replace {
+                    best = Some((
+                        position,
+                        page_id.clone(),
+                        shape_id.clone(),
+                        order,
+                        from,
+                        depth,
+                        removed,
+                    ));
+                }
+            }
+            let Some((position, page_id, shape_id, order, from, _, removed)) = best else {
+                let (page_id, shape_id) = &remaining[0];
+                if deletes
+                    .iter()
+                    .any(|entry| &entry.page_id == page_id && &entry.shape_id == shape_id)
+                {
+                    return Err(EditError::ShapeNotFound(shape_id.clone()));
+                }
+                remaining.remove(0);
+                continue;
+            };
+            {
+                let sheets = txn
+                    .get_map(SHEETS)
+                    .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
+                order.remove_range(&mut txn, from, 1);
+                for id in &removed {
+                    sheets.remove(&mut txn, id.as_str());
+                }
+            }
+            receipts.push(ShapeReceipt {
+                page_id: page_id.clone(),
+                shape_id: shape_id.clone(),
+                from_index: Some(from),
+                to_index: None,
+            });
+            remaining.remove(position);
+            remaining.retain(|(_, shape_id)| !removed.contains(shape_id));
+        }
+        receipts.sort_by(|left, right| {
+            deletes
+                .iter()
+                .position(|entry| entry.shape_id == left.shape_id)
+                .cmp(
+                    &deletes
+                        .iter()
+                        .position(|entry| entry.shape_id == right.shape_id),
+                )
+        });
+        Ok(receipts)
+    }
+
+    pub fn set_cell_formulas(
+        &self,
+        context: &EditCtx,
+        writes: &[CellFormulaWrite],
+    ) -> EditResult<Vec<CellFormulaReceipt>> {
+        if writes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut txn = self.transact_for(context);
+        let mut pending = Vec::with_capacity(writes.len());
+        for write in writes {
+            let context_for_policy =
+                CrdtMutationContext::new(&txn, &write.page_id, &write.shape_id)?;
+            match decide_mutation(
+                &context_for_policy,
+                context_for_policy.locator(CellLocator {
+                    sheet: CellSheet::Page(0),
+                    shape_id: None,
+                    section: None,
+                    section_index: None,
+                    row: None,
+                    cell_name: write.cell_name.clone(),
+                }),
+                gesture_for_cell(&write.cell_name),
+                write.formula.clone(),
+                &ParseLimits::default(),
+            ) {
+                MutationOutcome::Allowed { target, .. } => pending.push((
+                    write.page_id.clone(),
+                    write.shape_id.clone(),
+                    target,
+                    write.formula.clone(),
+                )),
+                MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                    return Err(EditError::InvalidState(reason));
+                }
+            }
+        }
+        let mut receipts = Vec::with_capacity(pending.len());
+        for (page_id, shape_id, target, formula) in pending {
+            let cell = cell_map(&mut txn, &page_id, &shape_id, &target)?;
+            let before = map_string(&cell, &txn, "formula");
+            cell.insert(&mut txn, "formula", formula.as_str());
+            receipts.push(CellFormulaReceipt {
+                page_id,
+                shape_id,
+                cell_name: target.cell_name,
+                before,
+                after: formula,
+            });
+        }
+        Ok(receipts)
+    }
+
     /// Evaluates LocPinX/Y against a proposed size, in inches.
     ///
     /// Unevaluatable and Pin-dependent formulas hold their current value, which
@@ -847,6 +1120,18 @@ impl DiagramSession {
         first: (&str, String, MutationGesture),
         second: (&str, String, MutationGesture),
     ) -> EditResult<[CellFormulaReceipt; 2]> {
+        let [first, second] =
+            self.set_cell_formula_group(context, page_id, shape_id, [first, second])?;
+        Ok([first, second])
+    }
+
+    fn set_cell_formula_group<const N: usize>(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        cells: [(&str, String, MutationGesture); N],
+    ) -> EditResult<[CellFormulaReceipt; N]> {
         let mut txn = self.transact_for(context);
         let context_for_policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
         let decide =
@@ -869,30 +1154,27 @@ impl DiagramSession {
                     Err(EditError::InvalidState(reason))
                 }
             };
-        let (first_target, first_formula) = decide(first)?;
-        let (second_target, second_formula) = decide(second)?;
-        let first_cell = cell_map(&mut txn, page_id, shape_id, &first_target)?;
-        let second_cell = cell_map(&mut txn, page_id, shape_id, &second_target)?;
-        let first_before = map_string(&first_cell, &txn, "formula");
-        let second_before = map_string(&second_cell, &txn, "formula");
-        first_cell.insert(&mut txn, "formula", first_formula.as_str());
-        second_cell.insert(&mut txn, "formula", second_formula.as_str());
-        Ok([
-            CellFormulaReceipt {
+        let decided = cells.map(decide);
+        let mut pending = Vec::with_capacity(N);
+        for entry in decided {
+            pending.push(entry?);
+        }
+        let mut receipts = Vec::with_capacity(N);
+        for (target, formula) in pending {
+            let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
+            let before = map_string(&cell, &txn, "formula");
+            cell.insert(&mut txn, "formula", formula.as_str());
+            receipts.push(CellFormulaReceipt {
                 page_id: page_id.to_owned(),
                 shape_id: shape_id.to_owned(),
-                cell_name: first_target.cell_name,
-                before: first_before,
-                after: first_formula,
-            },
-            CellFormulaReceipt {
-                page_id: page_id.to_owned(),
-                shape_id: shape_id.to_owned(),
-                cell_name: second_target.cell_name,
-                before: second_before,
-                after: second_formula,
-            },
-        ])
+                cell_name: target.cell_name,
+                before,
+                after: formula,
+            });
+        }
+        receipts.try_into().map_err(|_: Vec<CellFormulaReceipt>| {
+            EditError::InvalidState("cell group arity changed".to_owned())
+        })
     }
 }
 

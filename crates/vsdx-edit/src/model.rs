@@ -79,6 +79,36 @@ pub struct CellFormulaReceipt {
     pub after: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaceShapeFormulas {
+    pub width: String,
+    pub height: String,
+    pub x: String,
+    pub y: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShapeMove {
+    pub page_id: String,
+    pub shape_id: String,
+    pub x: String,
+    pub y: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShapeDelete {
+    pub page_id: String,
+    pub shape_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellFormulaWrite {
+    pub page_id: String,
+    pub shape_id: String,
+    pub cell_name: String,
+    pub formula: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LocPinAtSize {
     pub x: f64,

@@ -7,15 +7,25 @@ function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
 }
 
 function handle(state: DiagramSnapshot, history = { undo: true, redo: false }) {
-  const setCellFormula = mock((pageId: string, shapeId: string, locator: { cellName: string }, formula: string) => {
+  const applyWrite = (pageId: string, shapeId: string, cellName: string, formula: string) => {
     const target = state.pages.find((page) => page.id === pageId)?.shapes.find((shape) => shape.id === shapeId);
-    const targetCell = target?.cells.find((item) => item.locator.cellName === locator.cellName);
+    const targetCell = target?.cells.find((item) => item.locator.cellName === cellName);
     if (targetCell) { targetCell.formula = formula; targetCell.value = formula; }
+  };
+  const setCellFormula = mock((pageId: string, shapeId: string, locator: { cellName: string }, formula: string) => {
+    applyWrite(pageId, shapeId, locator.cellName, formula);
     return {};
+  });
+  const setCellFormulas = mock((writes: ReadonlyArray<{ pageId: string; shapeId: string; cellName: string; formula: string }>) => {
+    for (const write of writes) applyWrite(write.pageId, write.shapeId, write.cellName, write.formula);
+    return writes.map(() => ({}));
+  });
+  const deleteShapes = mock((deletes: ReadonlyArray<{ pageId: string; shapeId: string }>) => {
+    return deletes.map(() => ({}));
   });
   const value = {
     snapshot: () => state, canUndo: () => history.undo, canRedo: () => history.redo,
-    undo: mock(() => ({})), redo: mock(() => ({})), deleteShape: mock(() => ({})), setCellFormula, reorderShape: mock(() => ({})), addShape: mock(() => ({})), save: mock(() => new Uint8Array()),
+    undo: mock(() => ({})), redo: mock(() => ({})), deleteShape: mock(() => ({})), deleteShapes, setCellFormula, setCellFormulas, reorderShape: mock(() => ({})), addShape: mock(() => ({})), save: mock(() => new Uint8Array()),
   };
   return value as unknown as DiagramHandle & typeof value;
 }
@@ -38,9 +48,10 @@ test('uses exact z-order bounds and ShapeSheet formulas', () => {
   const commands = createRibbonCommands(diagram, [selected], 'page', () => {}, () => {}, () => {});
   commands.bringToFront.run(); commands.sendToBack.run(); commands.fillColor.run('#abcdef'); commands.lineColor.run('#fedcba'); commands.rotateRight.run(); commands.rotateRight.run(); commands.flipHorizontal.run();
   expect(diagram.reorderShape).toHaveBeenNthCalledWith(1, 'page', 'two', 2); expect(diagram.reorderShape).toHaveBeenNthCalledWith(2, 'page', 'two', 0);
-  expect(diagram.setCellFormula).toHaveBeenCalledWith('page', 'two', { cellName: 'FillForegnd' }, 'RGB(171,205,239)'); expect(diagram.setCellFormula).toHaveBeenCalledWith('page', 'two', { cellName: 'LineColor' }, 'RGB(254,220,186)');
-  expect(diagram.setCellFormula).toHaveBeenCalledWith('page', 'two', { cellName: 'Angle' }, String(Math.PI));
-  expect(diagram.setCellFormula).toHaveBeenCalledWith('page', 'two', { cellName: 'FlipX' }, '1');
+  expect(diagram.setCellFormulas).toHaveBeenCalledWith([{ pageId: 'page', shapeId: 'two', cellName: 'FillForegnd', formula: 'RGB(171,205,239)' }]);
+  expect(diagram.setCellFormulas).toHaveBeenCalledWith([{ pageId: 'page', shapeId: 'two', cellName: 'LineColor', formula: 'RGB(254,220,186)' }]);
+  expect(diagram.setCellFormulas).toHaveBeenCalledWith([{ pageId: 'page', shapeId: 'two', cellName: 'Angle', formula: String(Math.PI) }]);
+  expect(diagram.setCellFormulas).toHaveBeenCalledWith([{ pageId: 'page', shapeId: 'two', cellName: 'FlipX', formula: '1' }]);
   expect(commands.fillColor.value).toBe('#112233'); expect(commands.lineColor.value).toBe('#445566'); expect(commands.lineWeight.value).toBe('0.01 in'); expect(commands.linePattern.value).toBe('4');
 });
 
@@ -139,7 +150,7 @@ test('does not mistake a prefix of an unresolved formula for a numeric angle', (
   const errors: unknown[] = [];
   const commands = createRibbonCommands(diagram, [selected], 'page', () => {}, (error) => errors.push(error), () => {});
   commands.rotateRight.run();
-  expect(diagram.setCellFormula).not.toHaveBeenCalled();
+  expect(diagram.setCellFormulas).not.toHaveBeenCalled();
   expect(errors[0]).toEqual(new Error('Shape cell Angle has no resolved numeric value.'));
 });
 
@@ -162,9 +173,8 @@ test('deletes every selected shape while z-order stays single-selection', () => 
   expect(commands.bringToFront.enabled).toBe(false);
   expect(commands.sendBackward.enabled).toBe(false);
   commands.delete.run();
-  expect(diagram.deleteShape).toHaveBeenCalledTimes(2);
-  expect(diagram.deleteShape).toHaveBeenNthCalledWith(1, 'page', 'one');
-  expect(diagram.deleteShape).toHaveBeenNthCalledWith(2, 'page', 'two');
+  expect(diagram.deleteShapes).toHaveBeenCalledTimes(1);
+  expect(diagram.deleteShapes).toHaveBeenCalledWith([{ pageId: 'page', shapeId: 'one' }, { pageId: 'page', shapeId: 'two' }]);
 });
 
 test('a locked member disables delete for the whole selection', () => {

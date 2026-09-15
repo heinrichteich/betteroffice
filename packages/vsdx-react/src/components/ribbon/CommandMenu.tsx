@@ -5,7 +5,6 @@ import type { RibbonIconName } from './RibbonIcon';
 import { useRibbonCommands } from './commands';
 import type { RibbonCommandId } from './commands';
 
-/** Single entry in a keyboard-navigable command menu, optionally opening a submenu. */
 export interface CommandMenuEntry {
   id: RibbonCommandId;
   icon: RibbonIconName;
@@ -25,7 +24,6 @@ interface CommandMenuProps {
   onCloseAndFocus: () => void;
 }
 
-/** One menu item bound to a ribbon command id. */
 export function CommandMenuItem({ id, icon, label, shortcut, itemRef, onSelect }: { id: RibbonCommandId; icon: RibbonIconName; label: string; shortcut?: string; itemRef: (node: HTMLButtonElement | null) => void; onSelect: () => void }) {
   const command = useRibbonCommands()[id];
   const checkable = command.active !== undefined;
@@ -36,7 +34,6 @@ export function CommandMenuItem({ id, icon, label, shortcut, itemRef, onSelect }
 export function submenuSide(parentRight: number, submenuWidth: number, viewportWidth: number, margin = 4): 'left' | 'right' {
   return parentRight + submenuWidth > viewportWidth - margin ? 'left' : 'right';
 }
-/** Shared keyboard-navigable command menu behind the ribbon split buttons and the canvas context menu. */
 export function CommandMenu({ menuLabel, entries, position, dividerAfter, anchorRef, initialFocus = 'first', label, onClose, onCloseAndFocus }: CommandMenuProps) {
   const commands = useRibbonCommands();
   const menuRef = useRef<HTMLDivElement>(null);

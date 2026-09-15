@@ -36,10 +36,15 @@ function stubHandle(state: DiagramSnapshot, calls: Calls): DiagramHandle {
     canUndo: () => false,
     canRedo: () => false,
     deleteShape: (...args: [string, string]) => { calls.deletes.push([...args]); return {}; },
+    deleteShapes: (deletes: ReadonlyArray<{ pageId: string; shapeId: string }>) => { calls.deletes.push([...deletes]); return []; },
     reorderShape: (...args: [string, string, number]) => { calls.reorders.push([...args]); return {}; },
     setCellFormula: (pageId: string, shapeId: string, locator: { cellName: string }, formula: string) => {
       calls.formulas.push({ pageId, shapeId, cell: locator.cellName, formula });
       return {};
+    },
+    setCellFormulas: (writes: ReadonlyArray<{ pageId: string; shapeId: string; cellName: string; formula: string }>) => {
+      for (const write of writes) calls.formulas.push({ pageId: write.pageId, shapeId: write.shapeId, cell: write.cellName, formula: write.formula });
+      return [];
     },
   } as unknown as DiagramHandle;
 }
@@ -137,7 +142,7 @@ test('each entry runs its command and closes the menu', () => {
       }
       expect(item).not.toBeNull();
       fireEvent.click(item);
-      if (id === 'delete') expect(calls.deletes).toEqual([['page', 'three']]);
+      if (id === 'delete') expect(calls.deletes).toEqual([[{ pageId: 'page', shapeId: 'three' }]]);
       else if (id === 'bringToFront') expect(last(calls.reorders)).toEqual(['page', 'three', 4]);
       else if (id === 'bringForward') expect(last(calls.reorders)).toEqual(['page', 'three', 3]);
       else if (id === 'sendBackward') expect(last(calls.reorders)).toEqual(['page', 'three', 1]);

@@ -1,7 +1,7 @@
 import { createT, deepMerge, diagnosticMessage, en } from '@betteroffice/vsdx-i18n';
 import type { TFunction, Translations } from '@betteroffice/vsdx-i18n';
 import { canvasPointToModel, initWasm, openDiagram, paintPage, sizeCanvasForPage } from '@betteroffice/vsdx';
-import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
+import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeMove, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
@@ -211,7 +211,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           const corners = selectionCorners(page, frame, item);
           const placement = findShapePlacement(page.shapes, item.shapeId);
           const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
-          if (corners) paintSelectionFrame(context, corners, dpr, zoom, blocked ? [] : undefined);
+          const rotateBlocked = placement ? isRotateBlocked(placement.shape) : false;
+          if (corners) paintSelectionFrame(context, corners, dpr, zoom, blocked ? [] : undefined, !rotateBlocked);
         } catch { void 0; }
       }
     }
@@ -242,7 +243,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           const corners = selectionCorners(page, frame, item);
           const placement = findShapePlacement(page.shapes, item.shapeId);
           const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
-          if (corners) paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current, blocked ? [] : undefined);
+          const rotateBlocked = placement ? isRotateBlocked(placement.shape) : false;
+          if (corners) paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current, blocked ? [] : undefined, !rotateBlocked);
         } catch { void 0; }
       }
     }
@@ -281,8 +283,11 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           const placement = findShapePlacement(page.shapes, active.shapeId);
           if (!placement) continue;
           if (target === 'rotate' ? isRotateBlocked(placement.shape) : isHandleResizeBlocked(placement.shape)) {
-            reportError(new Error(target === 'rotate' ? 'Shape rotation is locked and cannot be changed with handles.' : 'Shape is locked and cannot be resized with handles.'));
-            return;
+            if (target !== 'rotate') {
+              reportError(new Error('Shape is locked and cannot be resized with handles.'));
+              return;
+            }
+            continue;
           }
           const base = dragStartForPlacement(page, placement.shape, frame, (width, height) => handle.locPinAtSize(page.id, placement.shape.id, width, height));
           pointerRef.current = {
@@ -395,14 +400,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         const livePage = handle.snapshot().pages.find((page) => page.id === selected.pageId);
         const livePlacement = livePage ? findShapePlacement(livePage.shapes, selected.shapeId) : null;
         if (livePlacement && isHandleResizeBlocked(livePlacement.shape)) throw new Error('Shape is locked and cannot be resized with handles.');
-        handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
-        try {
-          handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
-        } catch (moveError) {
-          try { if (handle.canUndo()) handle.undo(); } catch { void 0; }
-          try { refresh(undefined, false); } catch { void 0; }
-          throw moveError;
-        }
+        handle.placeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height), inchFormula(geometry.x), inchFormula(geometry.y));
       }
       else if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
       else handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
@@ -462,21 +460,26 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     try {
       const snapshot = handle.snapshot();
       const frame = modelRef.current.frame;
+      const moves: ShapeMove[] = [];
       for (const item of selected) {
         const page = snapshot.pages.find((entry) => entry.id === item.pageId);
         if (!page) continue;
         const placement = findShapePlacement(page.shapes, item.shapeId);
         if (!placement) continue;
         if (!frame) {
-          handle.moveShape(item.pageId, item.shapeId, inchFormula(numericCellValue(placement.shape, 'PinX') + dx), inchFormula(numericCellValue(placement.shape, 'PinY') + dy));
+          moves.push({ pageId: item.pageId, shapeId: item.shapeId, xFormula: inchFormula(numericCellValue(placement.shape, 'PinX') + dx), yFormula: inchFormula(numericCellValue(placement.shape, 'PinY') + dy) });
           continue;
         }
         const base = dragStartForPlacement(page, placement.shape, frame);
         const geometry = resolveNudgeGeometry({ canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, ...base }, dx, dy);
-        handle.moveShape(item.pageId, item.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
+        moves.push({ pageId: item.pageId, shapeId: item.shapeId, xFormula: inchFormula(geometry.x), yFormula: inchFormula(geometry.y) });
       }
+      if (moves.length > 0) handle.moveShapes(moves);
       refresh(undefined, true);
-    } catch (value) { reportError(value); }
+    } catch (value) {
+      try { refresh(undefined, false); } catch { void 0; }
+      reportError(value);
+    }
   };
   const selectAllShapes = () => {
     const current = modelRef.current;
@@ -611,7 +614,7 @@ export function canvasLabel(t: TFunction, pageIndex: number, total: number, sele
   return t('pages.canvasLabel', { current: pageIndex + 1, total });
 }
 
-/** Current selection corners in scale-1 canvas coordinates for overlay paint and hit tests. */
+/** Scale-1 corners for paint and hit tests. */
 export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, selection: VsdxShapeSelection): ModelPoint[] | null {
   const placement = findShapePlacement(page.shapes, selection.shapeId);
   if (!placement) return null;
@@ -634,7 +637,6 @@ export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, sel
 }
 
 export function collectDiagnostics(frame: PageDisplayList): TextDiagnostic[] { const result: TextDiagnostic[] = []; const work = frame.primitives.map((primitive) => ({ primitive, depth: 0 })); while (work.length) { const current = work.pop(); if (!current || current.depth >= 256) continue; if (current.primitive.kind === 'textBox') for (const paragraph of current.primitive.paragraphs) for (const run of paragraph.runs) result.push(...run.diagnostics); if (current.primitive.kind === 'group') for (const primitive of current.primitive.primitives) work.push({ primitive, depth: current.depth + 1 }); } return result; }
-/** Latest ribbon commands for the canvas keyboard layer, which lives outside the provider. */
 function RibbonCommandsBridge({ target }: { target: { current: RibbonCommands | null } }) {
   const commands = useRibbonCommands();
   useEffect(() => { target.current = commands; }, [commands, target]);

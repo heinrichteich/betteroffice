@@ -94,6 +94,53 @@ struct ResizeShapeArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PlaceShapeArgs {
+    page_id: String,
+    shape_id: String,
+    width_formula: String,
+    height_formula: String,
+    x_formula: String,
+    y_formula: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShapeMoveArgs {
+    page_id: String,
+    shape_id: String,
+    x_formula: String,
+    y_formula: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveShapesArgs {
+    moves: Vec<ShapeMoveArgs>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteShapesArgs {
+    deletes: Vec<DeleteShapeArgs>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CellFormulaWriteArgs {
+    page_id: String,
+    shape_id: String,
+    cell_name: String,
+    formula: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetCellFormulasArgs {
+    writes: Vec<CellFormulaWriteArgs>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LocPinAtSizeArgs {
     page_id: String,
     shape_id: String,
@@ -329,6 +376,26 @@ impl VsdxDocument {
         self.resize_shape_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = placeShapeJson)]
+    pub fn place_shape_json(&self, args: &str) -> Result<String, JsValue> {
+        self.place_shape_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = moveShapesJson)]
+    pub fn move_shapes_json(&self, args: &str) -> Result<String, JsValue> {
+        self.move_shapes_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = deleteShapesJson)]
+    pub fn delete_shapes_json(&self, args: &str) -> Result<String, JsValue> {
+        self.delete_shapes_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = setCellFormulasJson)]
+    pub fn set_cell_formulas_json(&self, args: &str) -> Result<String, JsValue> {
+        self.set_cell_formulas_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = locPinAtSizeJson)]
     pub fn loc_pin_at_size_json(&self, args: &str) -> Result<String, JsValue> {
         self.loc_pin_at_size_json_inner(args).map_err(js_error)
@@ -512,6 +579,106 @@ impl VsdxDocument {
     fn resize_shape_json_inner(&self, args: &str) -> Result<String, String> {
         let args = parse_args_inner(args)?;
         self.resize_shape(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn place_shape(
+        &self,
+        args: PlaceShapeArgs,
+    ) -> crate::EditResult<[crate::CellFormulaReceipt; 4]> {
+        self.session.place_shape(
+            &local_context(),
+            &args.page_id,
+            &args.shape_id,
+            crate::PlaceShapeFormulas {
+                width: args.width_formula,
+                height: args.height_formula,
+                x: args.x_formula,
+                y: args.y_formula,
+            },
+        )
+    }
+
+    fn place_shape_json_inner(&self, args: &str) -> Result<String, String> {
+        let args = parse_args_inner(args)?;
+        self.place_shape(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn move_shapes(
+        &self,
+        args: MoveShapesArgs,
+    ) -> crate::EditResult<Vec<[crate::CellFormulaReceipt; 2]>> {
+        self.session.move_shapes(
+            &local_context(),
+            &args
+                .moves
+                .into_iter()
+                .map(|shape_move| crate::ShapeMove {
+                    page_id: shape_move.page_id,
+                    shape_id: shape_move.shape_id,
+                    x: shape_move.x_formula,
+                    y: shape_move.y_formula,
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn move_shapes_json_inner(&self, args: &str) -> Result<String, String> {
+        let args = parse_args_inner(args)?;
+        self.move_shapes(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn delete_shapes(
+        &self,
+        args: DeleteShapesArgs,
+    ) -> crate::EditResult<Vec<crate::ShapeReceipt>> {
+        self.session.delete_shapes(
+            &local_context(),
+            &args
+                .deletes
+                .into_iter()
+                .map(|entry| crate::ShapeDelete {
+                    page_id: entry.page_id,
+                    shape_id: entry.shape_id,
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn delete_shapes_json_inner(&self, args: &str) -> Result<String, String> {
+        let args = parse_args_inner(args)?;
+        self.delete_shapes(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn set_cell_formulas(
+        &self,
+        args: SetCellFormulasArgs,
+    ) -> crate::EditResult<Vec<crate::CellFormulaReceipt>> {
+        self.session.set_cell_formulas(
+            &local_context(),
+            &args
+                .writes
+                .into_iter()
+                .map(|write| crate::CellFormulaWrite {
+                    page_id: write.page_id,
+                    shape_id: write.shape_id,
+                    cell_name: write.cell_name,
+                    formula: write.formula,
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn set_cell_formulas_json_inner(&self, args: &str) -> Result<String, String> {
+        let args = parse_args_inner(args)?;
+        self.set_cell_formulas(args)
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }

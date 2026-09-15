@@ -91,17 +91,14 @@ export function numericCellValue(shape: ShapeSnapshot, name: string, fallback?: 
   return parsed;
 }
 
-/** True when a ShapeSheet lock cell evaluates to the enabled value 1. */
 export function lockCellEnabled(shape: ShapeSnapshot | null, name: string): boolean {
   return Number(cellValue(shape, name)) === 1;
 }
 
-/** True when the stored formula for a cell carries a GUARD interception. */
 export function cellIsGuarded(shape: ShapeSnapshot | null, name: string): boolean {
   return (cellFormula(shape, name) ?? '').toUpperCase().includes('GUARD');
 }
 
-/** True when a delete would be refused by LockDelete or a GUARD on it. */
 export function isDeleteBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   return lockCellEnabled(shape, 'LockDelete') || cellIsGuarded(shape, 'LockDelete');
@@ -109,20 +106,17 @@ export function isDeleteBlocked(shape: ShapeSnapshot | null): boolean {
 
 export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'LockHeight', 'LockAspect'] as const;
 
-/** True when a handle resize would be refused by a lock or a GUARD on its pin or size. */
 export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   if (HANDLE_RESIZE_LOCKS.some((lock) => lockCellEnabled(shape, lock))) return true;
   return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => cellIsGuarded(shape, cell));
 }
 
-/** True when a single-cell write would be refused by a GUARD on that cell. */
 export function isCellWriteBlocked(shape: ShapeSnapshot | null, cellName: string): boolean {
   if (!shape) return false;
   return cellIsGuarded(shape, cellName);
 }
 
-/** True when a rotation would be refused by LockRotate or a GUARD on Angle. */
 export function isRotateBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   return lockCellEnabled(shape, 'LockRotate') || cellIsGuarded(shape, 'Angle');
@@ -149,9 +143,9 @@ export function createRibbonCommands(
   const topIndex = single ? single.placement.siblings.length - 1 : 0;
   const livePlacements = (currentHandle: DiagramHandle) => placementsIn(currentHandle.snapshot().pages, selection);
   const formula = (cellName: string, value: string) => execute((currentHandle) => {
-    for (const { selection: item } of livePlacements(currentHandle)) {
-      currentHandle.setCellFormula(item.pageId, item.shapeId, { cellName }, value);
-    }
+    const live = livePlacements(currentHandle);
+    if (live.length === 0) return;
+    currentHandle.setCellFormulas(live.map(({ selection: item }) => ({ pageId: item.pageId, shapeId: item.shapeId, cellName, formula: value })));
   }, true);
   const reorderTo = (target: (placement: ShapePlacement) => number, allowed: (placement: ShapePlacement) => boolean) => execute((currentHandle) => {
     const live = livePlacements(currentHandle);
@@ -160,17 +154,17 @@ export function createRibbonCommands(
     if (allowed(placement)) currentHandle.reorderShape(item.pageId, item.shapeId, target(placement));
   }, true);
   const setNumeric = (cellName: string, next: (value: number) => string) => execute((currentHandle) => {
-    for (const { selection: item, placement } of livePlacements(currentHandle)) {
-      currentHandle.setCellFormula(item.pageId, item.shapeId, { cellName }, next(numericCellValue(placement.shape, cellName, 0)));
-    }
+    const live = livePlacements(currentHandle);
+    if (live.length === 0) return;
+    currentHandle.setCellFormulas(live.map(({ selection: item, placement }) => ({ pageId: item.pageId, shapeId: item.shapeId, cellName, formula: next(numericCellValue(placement.shape, cellName, 0)) })));
   }, true);
   const commands = {
     undo: { id: 'undo', enabled: Boolean(handle?.canUndo()), run: execute((currentHandle) => { currentHandle.undo(); }) },
     redo: { id: 'redo', enabled: Boolean(handle?.canRedo()), run: execute((currentHandle) => { currentHandle.redo(); }) },
     delete: { id: 'delete', enabled: selected && placements.every((entry) => !isDeleteBlocked(entry.placement.shape)), run: execute((currentHandle) => {
-      for (const { selection: item } of livePlacements(currentHandle)) {
-        currentHandle.deleteShape(item.pageId, item.shapeId);
-      }
+      const live = livePlacements(currentHandle);
+      if (live.length === 0) return;
+      currentHandle.deleteShapes(live.map(({ selection: item }) => ({ pageId: item.pageId, shapeId: item.shapeId })));
     }, true) },
     fillColor: { id: 'fillColor', enabled: selected, value: color(cellValue(shape, 'FillForegnd'), '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
     lineColor: { id: 'lineColor', enabled: selected, value: color(cellValue(shape, 'LineColor'), '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },

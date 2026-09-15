@@ -629,7 +629,7 @@ test('concurrent pointers cannot commit or cancel each other', async () => {
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
-test('a resize from a handle moves the pin with moveShape and resizeShape', async () => {
+test('a resize from a handle moves the pin with placeShape', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
   canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
@@ -642,12 +642,9 @@ test('a resize from a handle moves the pin with moveShape and resizeShape', asyn
     const fakeFrame = { contractVersion: 4, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
-    const moves: string[][] = [];
-    const originalMove = handle.moveShape.bind(handle);
-    handle.moveShape = ((...args: [string, string, string, string]) => { moves.push([...args]); return originalMove(...args); }) as DiagramHandle['moveShape'];
-    const resizes: string[][] = [];
-    const originalResize = handle.resizeShape.bind(handle);
-    handle.resizeShape = ((...args: [string, string, string, string]) => { resizes.push([...args]); return originalResize(...args); }) as DiagramHandle['resizeShape'];
+    const places: Array<[string, string, string, string, string, string]> = [];
+    const originalPlace = handle.placeShape.bind(handle);
+    handle.placeShape = ((...args: [string, string, string, string, string, string]) => { places.push([...args]); return originalPlace(...args); }) as DiagramHandle['placeShape'];
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
     const canvases = view.container.querySelectorAll('canvas');
@@ -688,11 +685,10 @@ test('a resize from a handle moves the pin with moveShape and resizeShape', asyn
     expect(calls.some((entry) => entry.startsWith('fillRect:'))).toBe(false);
     fireEvent.pointerUp(main, { pointerId: 2, clientX: se.x + 48, clientY: se.y + 48 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
-    expect(moves).toHaveLength(1);
-    expect(resizes).toHaveLength(1);
-    expect(Number(resizes[0][2])).toBeGreaterThan(width);
-    expect(Number(moves[0][2])).toBeCloseTo(pinX, 6);
-    expect(Number(moves[0][3])).not.toBeCloseTo(pinY, 6);
+    expect(places).toHaveLength(1);
+    expect(Number(places[0][2])).toBeGreaterThan(width);
+    expect(Number(places[0][4])).toBeCloseTo(pinX, 6);
+    expect(Number(places[0][5])).not.toBeCloseTo(pinY, 6);
     expect(view.container.querySelector('output')).toBeNull();
     expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
@@ -759,7 +755,7 @@ test('a rotate grip drag commits the expected angle', async () => {
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
-test('a rotation-locked grip refuses the drag and keeps the angle', async () => {
+test('a rotation-locked grip stays disabled and keeps the angle', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
   canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
@@ -814,7 +810,7 @@ test('a rotation-locked grip refuses the drag and keeps the angle', async () => 
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(formulas.some((entry) => entry.cellName === 'Angle')).toBe(false);
     expect(Number(handle.snapshot().pages[0].shapes.find((item) => item.id === lockedId)?.cells.find((cell) => cell.name === 'Angle')?.value ?? 0)).toBe(0);
-    expect(errors.map((error) => String((error as Error).message))).toContain('Shape rotation is locked and cannot be changed with handles.');
+    expect(errors).toHaveLength(0);
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
@@ -1036,9 +1032,9 @@ test('the canvas is focusable and ArrowUp nudges PinY by one screen pixel', asyn
     const fakeFrame = { contractVersion: 4, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
-    const moves: string[][] = [];
-    const originalMove = handle.moveShape.bind(handle);
-    handle.moveShape = ((...args: [string, string, string, string]) => { moves.push([...args]); return originalMove(...args); }) as DiagramHandle['moveShape'];
+    const moves: Array<ReadonlyArray<{ pageId: string; shapeId: string; xFormula: string; yFormula: string }>> = [];
+    const originalMoves = handle.moveShapes.bind(handle);
+    handle.moveShapes = ((arg: ReadonlyArray<{ pageId: string; shapeId: string; xFormula: string; yFormula: string }>) => { moves.push(arg); return originalMoves(arg); }) as DiagramHandle['moveShapes'];
     await act(async () => { ready!.refresh(); });
     const canvases = view.container.querySelectorAll('canvas');
     const main = canvases[0] as HTMLCanvasElement;
@@ -1060,8 +1056,9 @@ test('the canvas is focusable and ArrowUp nudges PinY by one screen pixel', asyn
     fireEvent.keyDown(main, { key: 'ArrowUp' });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(moves).toHaveLength(1);
-    expect(Number(moves[0][3])).toBeGreaterThan(pinY);
-    expect(Number(moves[0][3])).toBeCloseTo(pinY + 1 / 96, 6);
+    expect(moves[0]).toHaveLength(1);
+    expect(Number(moves[0][0].yFormula)).toBeGreaterThan(pinY);
+    expect(Number(moves[0][0].yFormula)).toBeCloseTo(pinY + 1 / 96, 6);
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 

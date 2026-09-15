@@ -5,6 +5,9 @@ import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, Diagra
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; initialUpdate?: Uint8Array; }
 export interface CollaborationResync { update: Uint8Array; }
+export interface ShapeMove { pageId: string; shapeId: string; xFormula: string; yFormula: string; }
+export interface ShapeDelete { pageId: string; shapeId: string; }
+export interface CellFormulaWrite { pageId: string; shapeId: string; cellName: string; formula: string; }
 export interface DiagramHandle {
   readonly clientId: number;
   snapshot(): DiagramSnapshot;
@@ -13,8 +16,12 @@ export interface DiagramHandle {
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(assetId: string): Uint8Array;
   setCellFormula(pageId: string, shapeId: string, locator: CellLocator, formula: string): CellFormulaReceipt;
+  setCellFormulas(writes: ReadonlyArray<CellFormulaWrite>): CellFormulaReceipt[];
   moveShape(pageId: string, shapeId: string, xFormula: string, yFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
+  moveShapes(moves: ReadonlyArray<ShapeMove>): Array<[CellFormulaReceipt, CellFormulaReceipt]>;
   resizeShape(pageId: string, shapeId: string, widthFormula: string, heightFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
+  placeShape(pageId: string, shapeId: string, widthFormula: string, heightFormula: string, xFormula: string, yFormula: string): [CellFormulaReceipt, CellFormulaReceipt, CellFormulaReceipt, CellFormulaReceipt];
+  deleteShapes(deletes: ReadonlyArray<ShapeDelete>): ShapeReceipt[];
   locPinAtSize(pageId: string, shapeId: string, width: number, height: number): { x: number; y: number };
   reorderShape(pageId: string, shapeId: string, toIndex: number): ShapeReceipt;
   reorderPage(pageId: string, toIndex: number): ShapeReceipt;
@@ -123,13 +130,17 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
       return hit && shapeId ? { ...hit, shapeId } : null;
     }, mediaBytes: assetId => wasm(() => doc.mediaBytes(assetId).slice()),
     setCellFormula: (pageId, shapeId, locator, formula) => json(() => doc.setCellFormulaJson(JSON.stringify({ pageId, shapeId, locator, formula })), true),
+    setCellFormulas: (writes) => json(() => doc.setCellFormulasJson(JSON.stringify({ writes: [...writes] })), true),
     moveShape: (pageId, shapeId, xFormula, yFormula) => json(() => doc.moveShapeJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula })), true),
+    moveShapes: (moves) => json(() => doc.moveShapesJson(JSON.stringify({ moves: [...moves] })), true),
     resizeShape: (pageId, shapeId, widthFormula, heightFormula) => json(() => doc.resizeShapeJson(JSON.stringify({ pageId, shapeId, widthFormula, heightFormula })), true),
+    placeShape: (pageId, shapeId, widthFormula, heightFormula, xFormula, yFormula) => json(() => doc.placeShapeJson(JSON.stringify({ pageId, shapeId, widthFormula, heightFormula, xFormula, yFormula })), true),
     locPinAtSize: (pageId, shapeId, width, height) => json(() => doc.locPinAtSizeJson(JSON.stringify({ pageId, shapeId, width, height })) as string),
     reorderShape: (pageId, shapeId, toIndex) => json(() => doc.reorderShapeJson(JSON.stringify({ pageId, shapeId, toIndex })), true),
     reorderPage: (pageId, toIndex) => json(() => doc.reorderPageJson(JSON.stringify({ pageId, toIndex })), true),
     addShape: (pageId, draft) => json(() => doc.addShapeJson(JSON.stringify({ pageId, draft })), true),
     deleteShape: (pageId, shapeId) => json(() => doc.deleteShapeJson(JSON.stringify({ pageId, shapeId })), true),
+    deleteShapes: (deletes) => json(() => doc.deleteShapesJson(JSON.stringify({ deletes: [...deletes] })), true),
     save: () => wasm(() => doc.save().slice()),
     canUndo: () => wasm(() => doc.canUndo()), canRedo: () => wasm(() => doc.canRedo()), undo: () => json(() => doc.undoJson(), true), redo: () => json(() => doc.redoJson(), true),
     encodeStateVector: () => wasm(() => doc.encodeStateVector().slice()), encodeStateAsUpdate: vector => wasm(() => (vector === undefined ? doc.encodeStateAsUpdate() : doc.encodeDiff(vector.slice())).slice()), encodeDiff: vector => wasm(() => doc.encodeDiff(vector.slice()).slice()), applyUpdate: update => json(() => doc.applyUpdateJson(update.slice()), true),
