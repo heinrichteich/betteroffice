@@ -27,7 +27,7 @@
       "bringToFront": "Bring to Front", "bringForward": "Bring Forward", "sendBackward": "Send Backward", "sendToBack": "Send to Back", "rotateLeft": "Rotate left", "rotateRight": "Rotate right", "flipHorizontal": "Flip horizontal", "flipVertical": "Flip vertical", "addShape": "Add shape", "download": "Download"
     }
   },
-  "contextMenu": { "label": "Shape actions", "canvasLabel": "Canvas actions" },
+  "contextMenu": { "label": "Shape actions", "canvasLabel": "Canvas actions", "miniToolbarLabel": "Shape formatting" },
   "shapesPanel": {
     "title": "Shapes",
     "collapse": "Collapse Shapes",
