@@ -420,14 +420,17 @@ export function quickShapePlacement(source: ShapeSnapshot, side: AutoConnectSide
   return placeQuickShape(from, orientDirection(shapeOrientation(source), AUTO_CONNECT_DIRS[side]), width, height, gap);
 }
 
-/** Insert geometry from a page-space edge; null when an ancestor has no bounds. */
+/** Insert geometry from a page-space edge; width and height are source-local and scaled to page space. Null when an ancestor has no bounds. */
 export function globalQuickShapePlacement(source: ShapeSnapshot, ancestors: readonly ShapeSnapshot[], side: AutoConnectSide, width: number, height: number, gap = QUICK_SHAPE_GAP_INCHES): QuickShapePlacement | null {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
   const scene = sceneTransformForAncestors(ancestors);
   if (!scene) return null;
   const from = globalConnectionPoints(source, ancestors)?.find((point) => point.side === side);
   if (!from) return null;
-  return placeQuickShape(from, applyAffineToDirection(scene, orientDirection(shapeOrientation(source), AUTO_CONNECT_DIRS[side])), width, height, gap);
+  const pageWidth = Math.abs(scene.a) * width + Math.abs(scene.c) * height;
+  const pageHeight = Math.abs(scene.b) * width + Math.abs(scene.d) * height;
+  if (!Number.isFinite(pageWidth) || !Number.isFinite(pageHeight) || pageWidth <= 0 || pageHeight <= 0) return null;
+  return placeQuickShape(from, applyAffineToDirection(scene, orientDirection(shapeOrientation(source), AUTO_CONNECT_DIRS[side])), pageWidth, pageHeight, gap);
 }
 
 function placeQuickShape(from: ConnectionPoint, dir: ModelPoint, width: number, height: number, gap: number): QuickShapePlacement | null {

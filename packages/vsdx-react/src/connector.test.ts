@@ -699,3 +699,23 @@ test('a quick shape seats on the facing edge of a nested source', () => {
   expect(nested.y).toBeGreaterThan(nested.from.y);
   expect(nested.to.side).toBe('south');
 });
+
+test('a quick shape from a scaled nest matches its page size', () => {
+  const leaf = nestedShape('leaf', leafCells);
+  const group = nestedShape('group', { PinX: '10', PinY: '10', Width: '2', Height: '2', LocPinX: '0', LocPinY: '0' }, [leaf]);
+  const page = [group];
+  const nested = globalQuickShapePlacement(leaf, ancestorChain(page, 'leaf')!, 'east', 1, 1)!;
+  expect(nested.from).toEqual({ side: 'east', x: 12, y: 11 });
+  expect(nested.width).toBeCloseTo(2, 10);
+  expect(nested.height).toBeCloseTo(2, 10);
+  expect(nested.x).toBeCloseTo(13.5, 10);
+  expect(nested.y).toBeCloseTo(11, 10);
+});
+
+test('a quick shape from a rotated nest takes the page bounding size', () => {
+  const page = [rotatedGroup()];
+  const leaf = page[0].children[0];
+  const nested = globalQuickShapePlacement(leaf, ancestorChain(page, 'leaf')!, 'east', 2, 1)!;
+  expect(nested.width).toBeCloseTo(2, 10);
+  expect(nested.height).toBeCloseTo(4, 10);
+});
