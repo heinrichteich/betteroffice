@@ -24,18 +24,18 @@ const selected = { pageId: 'page', shapeId: 'two', hit: { kind: 'shape' as const
 
 test('exposes history from the handle and refreshes after mutations', () => {
   const state = snapshot(); const historyState = { undo: true, redo: false }; const diagram = handle(state, historyState); const refresh = mock(() => {});
-  const commands = createRibbonCommands(diagram, null, 'page', refresh, () => {}, () => {});
+  const commands = createRibbonCommands(diagram, [], 'page', refresh, () => {}, () => {});
   expect(commands.undo.enabled).toBe(true); expect(commands.redo.enabled).toBe(false); expect(commands.addShape.enabled).toBe(true); expect(commands.download.enabled).toBe(true); expect(commands.delete.enabled).toBe(false);
   commands.undo.run(); commands.addShape.run();
   expect(diagram.undo).toHaveBeenCalledTimes(1); expect(diagram.addShape).toHaveBeenCalledTimes(1); expect(refresh).toHaveBeenCalledTimes(2);
   historyState.undo = false; historyState.redo = true;
-  const refreshed = createRibbonCommands(diagram, null, 'page', refresh, () => {}, () => {});
+  const refreshed = createRibbonCommands(diagram, [], 'page', refresh, () => {}, () => {});
   expect(refreshed.undo.enabled).toBe(false); expect(refreshed.redo.enabled).toBe(true);
 });
 
 test('uses exact z-order bounds and ShapeSheet formulas', () => {
   const state = snapshot({ Angle: '0', FlipX: '0', FillForegnd: '#112233', LineColor: '#445566', LineWeight: '0.01 in', LinePattern: '4' }); const diagram = handle(state);
-  const commands = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {});
+  const commands = createRibbonCommands(diagram, [selected], 'page', () => {}, () => {}, () => {});
   commands.bringToFront.run(); commands.sendToBack.run(); commands.fillColor.run('#abcdef'); commands.lineColor.run('#fedcba'); commands.rotateRight.run(); commands.rotateRight.run(); commands.flipHorizontal.run();
   expect(diagram.reorderShape).toHaveBeenNthCalledWith(1, 'page', 'two', 2); expect(diagram.reorderShape).toHaveBeenNthCalledWith(2, 'page', 'two', 0);
   expect(diagram.setCellFormula).toHaveBeenCalledWith('page', 'two', { cellName: 'FillForegnd' }, 'RGB(171,205,239)'); expect(diagram.setCellFormula).toHaveBeenCalledWith('page', 'two', { cellName: 'LineColor' }, 'RGB(254,220,186)');
@@ -47,7 +47,7 @@ test('uses exact z-order bounds and ShapeSheet formulas', () => {
 test('locks and guards disable the operations the mutation policy would refuse', () => {
   const state = snapshot({ LockDelete: '1', Angle: 'GUARD(0)', FlipX: 'GUARD(0)', FlipY: '0' });
   const diagram = handle(state);
-  const commands = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {});
+  const commands = createRibbonCommands(diagram, [selected], 'page', () => {}, () => {}, () => {});
   expect(commands.delete.enabled).toBe(false);
   expect(commands.rotateLeft.enabled).toBe(false);
   expect(commands.rotateRight.enabled).toBe(false);
@@ -58,7 +58,7 @@ test('locks and guards disable the operations the mutation policy would refuse',
 });
 
 test('does not reorder forward past the topmost shape', () => {
-  const state = snapshot(); const diagram = handle(state); const commands = createRibbonCommands(diagram, { ...selected, shapeId: 'three', hit: { kind: 'shape', shapeId: 'three' } }, 'page', () => {}, () => {}, () => {});
+  const state = snapshot(); const diagram = handle(state); const commands = createRibbonCommands(diagram, [{ ...selected, shapeId: 'three', hit: { kind: 'shape', shapeId: 'three' } }], 'page', () => {}, () => {}, () => {});
   expect(commands.bringForward.enabled).toBe(false); commands.bringForward.run(); expect(diagram.reorderShape).not.toHaveBeenCalled();
 });
 
@@ -93,7 +93,7 @@ test('enables and reorders group members against their own sibling order', () =>
   const state = groupedSnapshot();
   const diagram = handle(state);
   const nested = { pageId: 'page', shapeId: 'inner-a', hit: { kind: 'shape' as const, shapeId: 'inner-a' } };
-  const commands = createRibbonCommands(diagram, nested, 'page', () => {}, () => {}, () => {});
+  const commands = createRibbonCommands(diagram, [nested], 'page', () => {}, () => {}, () => {});
   expect(commands.delete.enabled).toBe(true);
   expect(commands.fillColor.enabled).toBe(true);
   expect(commands.fillColor.value).toBe('#010203');
@@ -108,14 +108,14 @@ test('offers the stored formula rather than the cached value for formula control
     pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: [{ id: 'two', sourceId: 1, name: 'two', children: [], cells: cellsOf({ LineWeight: { formula: 'ThePage!LineWeight', value: '0.01 in' }, LinePattern: { formula: 'Sheet.5!LinePattern', value: '4' } }) }] }],
   };
   const diagram = handle(state);
-  const commands = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {});
+  const commands = createRibbonCommands(diagram, [selected], 'page', () => {}, () => {}, () => {});
   expect(commands.lineWeight.value).toBe('ThePage!LineWeight');
   expect(commands.linePattern.value).toBe('Sheet.5!LinePattern');
 });
 
 test('adds a rectangle carrying geometry rows instead of a bodiless shape', () => {
   const diagram = handle(snapshot());
-  const commands = createRibbonCommands(diagram, null, 'page', () => {}, () => {}, () => {});
+  const commands = createRibbonCommands(diagram, [], 'page', () => {}, () => {}, () => {});
   commands.addShape.run();
   const draft = (diagram.addShape as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][1] as { cells: Array<{ locator: { section?: string } }> };
   expect(draft.cells.some((cell) => cell.locator.section === 'Geometry')).toBe(true);
@@ -124,7 +124,7 @@ test('adds a rectangle carrying geometry rows instead of a bodiless shape', () =
 test('refuses to add a shape onto a page that is no longer present', () => {
   const diagram = handle(snapshot());
   const errors: unknown[] = [];
-  const commands = createRibbonCommands(diagram, null, 'missing-page', () => {}, (error) => errors.push(error), () => {});
+  const commands = createRibbonCommands(diagram, [], 'missing-page', () => {}, (error) => errors.push(error), () => {});
   expect(commands.addShape.enabled).toBe(false);
   commands.addShape.run();
   expect(diagram.addShape).not.toHaveBeenCalled();
@@ -137,7 +137,7 @@ test('does not mistake a prefix of an unresolved formula for a numeric angle', (
   state.pages[0].shapes[1].cells[0].value = null;
   const diagram = handle(state);
   const errors: unknown[] = [];
-  const commands = createRibbonCommands(diagram, selected, 'page', () => {}, (error) => errors.push(error), () => {});
+  const commands = createRibbonCommands(diagram, [selected], 'page', () => {}, (error) => errors.push(error), () => {});
   commands.rotateRight.run();
   expect(diagram.setCellFormula).not.toHaveBeenCalled();
   expect(errors[0]).toEqual(new Error('Shape cell Angle has no resolved numeric value.'));
@@ -150,4 +150,27 @@ test('uses a shape root cell without confusing a same-named User cell', () => {
   expect(numericCellValue(shape, 'PinX')).toBe(4);
   shape.cells.pop();
   expect(() => numericCellValue(shape, 'PinX')).toThrow('Shape cell PinX has no resolved numeric value.');
+});
+
+test('deletes every selected shape while z-order stays single-selection', () => {
+  const state = snapshot();
+  const diagram = handle(state);
+  const both = [{ ...selected, shapeId: 'one', hit: { kind: 'shape' as const, shapeId: 'one' } }, { ...selected, shapeId: 'two', hit: { kind: 'shape' as const, shapeId: 'two' } }];
+  const commands = createRibbonCommands(diagram, both, 'page', () => {}, () => {}, () => {});
+  expect(commands.delete.enabled).toBe(true);
+  expect(commands.fillColor.enabled).toBe(true);
+  expect(commands.bringToFront.enabled).toBe(false);
+  expect(commands.sendBackward.enabled).toBe(false);
+  commands.delete.run();
+  expect(diagram.deleteShape).toHaveBeenCalledTimes(2);
+  expect(diagram.deleteShape).toHaveBeenNthCalledWith(1, 'page', 'one');
+  expect(diagram.deleteShape).toHaveBeenNthCalledWith(2, 'page', 'two');
+});
+
+test('a locked member disables delete for the whole selection', () => {
+  const state = snapshot({ LockDelete: '1' });
+  const diagram = handle(state);
+  const both = [{ ...selected, shapeId: 'one', hit: { kind: 'shape' as const, shapeId: 'one' } }, { ...selected, shapeId: 'two', hit: { kind: 'shape' as const, shapeId: 'two' } }];
+  const commands = createRibbonCommands(diagram, both, 'page', () => {}, () => {}, () => {});
+  expect(commands.delete.enabled).toBe(false);
 });

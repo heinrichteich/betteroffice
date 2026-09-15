@@ -1,5 +1,5 @@
 import { createT, deepMerge, diagnosticMessage, en } from '@betteroffice/vsdx-i18n';
-import type { Translations } from '@betteroffice/vsdx-i18n';
+import type { TFunction, Translations } from '@betteroffice/vsdx-i18n';
 import { canvasPointToModel, initWasm, openDiagram, paintPage, sizeCanvasForPage } from '@betteroffice/vsdx';
 import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -12,8 +12,8 @@ import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
 import { StatusBar, clampZoom } from './components/statusbar';
-import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent } from './interactions';
-import type { DragStart, ResizeHandle } from './interactions';
+import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent, isEditableKeyboardTarget } from './interactions';
+import type { CanvasKeyboardIntent, DragStart, ResizeHandle } from './interactions';
 export { resolveDragGeometry };
 export type { DragStart };
 
@@ -53,6 +53,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const attachedCollaborationRef = useRef<VsdxEditorCollaborationOptions | undefined>(undefined);
   const mainCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  const editorRootRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLElement>(null);
   const imageCache = useRef(new Map<string, Promise<CanvasImageSource | null>>());
   const stableFonts = useStableFontFaces(fonts);
@@ -65,7 +66,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const sessionRef = useRef({ file, clientId: requestedClientId, initialUpdate: requestedInitialUpdate });
   const [model, setModel] = useState<EditorModel>({ snapshot: null, pageIndex: 0, frame: null });
   const modelRef = useRef(model);
-  const [selection, setSelection] = useState<VsdxShapeSelection | null>(null);
+  const [selection, setSelection] = useState<VsdxShapeSelection[]>([]);
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
   const [dirty, setDirty] = useState(false);
@@ -78,7 +79,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ top: number; left: number } | null>(null);
+  const contextMenuRef = useRef(contextMenu);
+  contextMenuRef.current = contextMenu;
   const pointerRef = useRef<DragStart | null>(null);
+  const dragShapeRef = useRef<VsdxShapeSelection | null>(null);
   const dragPreviewRef = useRef<ModelPoint | null>(null);
   const previewFrameRef = useRef<number | null>(null);
   const zoomRef = useRef(zoom);
@@ -105,7 +109,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       modelRef.current = { snapshot: current, pageIndex, frame };
       setModel(modelRef.current);
       setDiagnostics(frame ? collectDiagnostics(frame) : []);
-      setSelection((existing) => existing && stillSelectable(current, pageIndex, existing) ? existing : null);
+      setSelection((existing) => existing.filter((item) => stillSelectable(current, pageIndex, item)));
     } catch (value) { reportError(value); }
   }, [reportError]);
 
@@ -115,7 +119,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     let handle: DiagramHandle | null = null;
     let stopUpdates = () => {};
     let stopResync = () => {};
-    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection(null); modelRef.current = { snapshot: null, pageIndex: 0, frame: null }; setModel(modelRef.current); setError(null); setDirty(false);
+    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection([]); modelRef.current = { snapshot: null, pageIndex: 0, frame: null }; setModel(modelRef.current); setError(null); setDirty(false);
     if (!file) { setLoading(false); return; }
     setLoading(true);
     const openingFonts = fontsRef.current;
@@ -201,13 +205,15 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const dpr = window.devicePixelRatio || 1; sizeCanvasForPage(canvas, frame, dpr, zoom); context.clearRect(0, 0, canvas.width, canvas.height);
     const snapshot = model.snapshot;
     const page = snapshot?.pages[model.pageIndex];
-    if (selection && page) {
-      try {
-        const corners = selectionCorners(page, frame, selection);
-        const placement = findShapePlacement(page.shapes, selection.shapeId);
-        const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
-        if (corners) paintSelectionFrame(context, corners, dpr, zoom, blocked ? [] : undefined);
-      } catch { void 0; }
+    if (selection.length > 0 && page) {
+      for (const item of selection) {
+        try {
+          const corners = selectionCorners(page, frame, item);
+          const placement = findShapePlacement(page.shapes, item.shapeId);
+          const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
+          if (corners) paintSelectionFrame(context, corners, dpr, zoom, blocked ? [] : undefined);
+        } catch { void 0; }
+      }
     }
     const start = pointerRef.current; const release = dragPreviewRef.current;
     if (start && release) {
@@ -230,13 +236,15 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const currentSelection = selectionRef.current;
     const page = current.snapshot?.pages[current.pageIndex];
     context.clearRect(0, 0, overlay.width, overlay.height);
-    if (currentSelection && page) {
-      try {
-        const corners = selectionCorners(page, frame, currentSelection);
-        const placement = findShapePlacement(page.shapes, currentSelection.shapeId);
-        const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
-        if (corners) paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current, blocked ? [] : undefined);
-      } catch { void 0; }
+    if (currentSelection.length > 0 && page) {
+      for (const item of currentSelection) {
+        try {
+          const corners = selectionCorners(page, frame, item);
+          const placement = findShapePlacement(page.shapes, item.shapeId);
+          const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
+          if (corners) paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current, blocked ? [] : undefined);
+        } catch { void 0; }
+      }
     }
   };
 
@@ -259,43 +267,43 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (!handle || !frame || !page) return;
     if (event.button === 2) return;
     if (pointerRef.current) return;
-    pointerRef.current = null; dragPreviewRef.current = null;
+    pointerRef.current = null; dragPreviewRef.current = null; dragShapeRef.current = null;
     try {
       const point = canvasPointerPosition(event, frame);
-      const active = selectionRef.current;
-      if (active && active.pageId === page.id) {
+      for (const active of selectionRef.current) {
+        if (active.pageId !== page.id) continue;
         try {
           const corners = selectionCorners(page, frame, active);
-          if (corners) {
-            const target = hitTestSelection(point.canvas, corners, zoomRef.current);
-            if (target) {
-              const placement = findShapePlacement(page.shapes, active.shapeId);
-              if (placement) {
-                if (target !== 'rotate' && isHandleResizeBlocked(placement.shape)) {
-                  reportError(new Error('Shape is locked and cannot be resized with handles.'));
-                  return;
-                }
-                const base = dragStartForPlacement(page, placement.shape, frame);
-                pointerRef.current = {
-                  ...point,
-                  ...base,
-                  pointerId: event.pointerId,
-                  startX: event.clientX,
-                  startY: event.clientY,
-                  resize: false,
-                  handle: target === 'rotate' ? undefined : (target as ResizeHandle),
-                  rotate: target === 'rotate',
-                };
-                event.currentTarget.setPointerCapture(event.pointerId);
-                return;
-              }
-            }
+          if (!corners) continue;
+          const target = hitTestSelection(point.canvas, corners, zoomRef.current);
+          if (!target) continue;
+          const placement = findShapePlacement(page.shapes, active.shapeId);
+          if (!placement) continue;
+          if (target !== 'rotate' && isHandleResizeBlocked(placement.shape)) {
+            reportError(new Error('Shape is locked and cannot be resized with handles.'));
+            return;
           }
+          const base = dragStartForPlacement(page, placement.shape, frame);
+          pointerRef.current = {
+            ...point,
+            ...base,
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            resize: false,
+            handle: target === 'rotate' ? undefined : (target as ResizeHandle),
+            rotate: target === 'rotate',
+          };
+          dragShapeRef.current = active;
+          setSelection([active]);
+          event.currentTarget.setPointerCapture(event.pointerId);
+          return;
         } catch { void 0; }
       }
       handle.layoutPage(model.pageIndex);
       const hit = handle.hitTest(point.canvas.x, point.canvas.y);
-      setSelection(hit ? { pageId: page.id, shapeId: hit.shapeId, hit } : null);
+      const next = hit ? [{ pageId: page.id, shapeId: hit.shapeId, hit }] : [];
+      setSelection(next);
       const placement = hit ? findShapePlacement(page.shapes, hit.shapeId) : null;
       pointerRef.current = hit && placement ? {
         ...point,
@@ -305,6 +313,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         startY: event.clientY,
         resize: event.shiftKey,
       } : null;
+      dragShapeRef.current = hit && placement ? next[0] : null;
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch (value) { reportError(value); }
   };
@@ -314,17 +323,23 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       try {
         const current = modelRef.current; const frame = current.frame;
         const page = current.snapshot?.pages[current.pageIndex];
-        const active = selectionRef.current;
-        if (!frame || !page || !active || active.pageId !== page.id) { event.currentTarget.style.cursor = ''; return; }
-        const corners = selectionCorners(page, frame, active);
-        if (!corners) { event.currentTarget.style.cursor = ''; return; }
+        const selected = selectionRef.current;
+        if (!frame || !page || selected.length === 0) { event.currentTarget.style.cursor = ''; return; }
         const point = canvasPointerPosition(event, frame);
-        const target = hitTestSelection(point.canvas, corners, zoomRef.current);
-        if (target !== 'rotate' && target) {
-          const placement = findShapePlacement(page.shapes, active.shapeId);
-          if (placement && isHandleResizeBlocked(placement.shape)) { event.currentTarget.style.cursor = ''; return; }
+        for (const active of selected) {
+          if (active.pageId !== page.id) continue;
+          const corners = selectionCorners(page, frame, active);
+          if (!corners) continue;
+          const target = hitTestSelection(point.canvas, corners, zoomRef.current);
+          if (!target) continue;
+          if (target !== 'rotate') {
+            const placement = findShapePlacement(page.shapes, active.shapeId);
+            if (placement && isHandleResizeBlocked(placement.shape)) continue;
+          }
+          event.currentTarget.style.cursor = target === 'rotate' ? 'grab' : resizeCursor(target);
+          return;
         }
-        event.currentTarget.style.cursor = target === 'rotate' ? 'grab' : target ? resizeCursor(target) : '';
+        event.currentTarget.style.cursor = '';
       } catch { void 0; }
       return;
     }
@@ -361,7 +376,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     pointerRef.current = null;
     const hadPreview = dragPreviewRef.current !== null;
     clearDragPreview();
-    const handle = handleRef.current; const selected = selection; const frame = model.frame;
+    const handle = handleRef.current; const selected = dragShapeRef.current; const frame = model.frame;
+    dragShapeRef.current = null;
     if (!handle || !selected || !frame) return;
     try {
       const point = canvasPointerPosition(event, frame);
@@ -395,13 +411,13 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const pointer = pointerRef.current;
     if (!pointer) return;
     if (pointer.pointerId !== undefined && pointer.pointerId !== event.pointerId) return;
-    pointerRef.current = null; clearDragPreview();
+    pointerRef.current = null; dragShapeRef.current = null; clearDragPreview();
   };
   const onLostPointerCapture = (event: PointerEvent<HTMLCanvasElement>) => {
     const pointer = pointerRef.current;
     if (!pointer) return;
     if (pointer.pointerId !== undefined && pointer.pointerId !== event.pointerId) return;
-    pointerRef.current = null; clearDragPreview();
+    pointerRef.current = null; dragShapeRef.current = null; clearDragPreview();
   };
   const closeContextMenu = () => setContextMenu(null);
   const closeContextMenuAndFocus = () => { setContextMenu(null); mainCanvasRef.current?.focus(); };
@@ -419,7 +435,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         return;
       }
       const active = selectionRef.current;
-      if (!active || active.pageId !== page.id || active.shapeId !== hit.shapeId) setSelection({ pageId: page.id, shapeId: hit.shapeId, hit });
+      if (active.length !== 1 || active[0].pageId !== page.id || active[0].shapeId !== hit.shapeId) setSelection([{ pageId: page.id, shapeId: hit.shapeId, hit }]);
       setContextMenu({ top: event.clientY, left: event.clientX });
     } catch (value) { reportError(value); }
   };
@@ -428,6 +444,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const pointer = pointerRef.current;
     if (!pointer) return false;
     pointerRef.current = null;
+    dragShapeRef.current = null;
     clearDragPreview();
     const canvas = mainCanvasRef.current;
     if (canvas && pointer.pointerId !== undefined) {
@@ -439,36 +456,68 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   };
   const nudgeSelection = (dx: number, dy: number) => {
     const handle = handleRef.current; const selected = selectionRef.current;
-    if (!handle || !selected) return;
+    if (!handle || selected.length === 0) return;
     try {
       const snapshot = handle.snapshot();
-      const page = snapshot.pages.find((entry) => entry.id === selected.pageId);
-      if (!page) return;
-      const placement = findShapePlacement(page.shapes, selected.shapeId);
-      if (!placement) return;
       const frame = modelRef.current.frame;
-      if (!frame) {
-        handle.moveShape(selected.pageId, selected.shapeId, inchFormula(numericCellValue(placement.shape, 'PinX') + dx), inchFormula(numericCellValue(placement.shape, 'PinY') + dy));
-        refresh(undefined, true);
-        return;
+      for (const item of selected) {
+        const page = snapshot.pages.find((entry) => entry.id === item.pageId);
+        if (!page) continue;
+        const placement = findShapePlacement(page.shapes, item.shapeId);
+        if (!placement) continue;
+        if (!frame) {
+          handle.moveShape(item.pageId, item.shapeId, inchFormula(numericCellValue(placement.shape, 'PinX') + dx), inchFormula(numericCellValue(placement.shape, 'PinY') + dy));
+          continue;
+        }
+        const base = dragStartForPlacement(page, placement.shape, frame);
+        const geometry = resolveNudgeGeometry({ canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, ...base }, dx, dy);
+        handle.moveShape(item.pageId, item.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
       }
-      const base = dragStartForPlacement(page, placement.shape, frame);
-      const geometry = resolveNudgeGeometry({ canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, ...base }, dx, dy);
-      handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
       refresh(undefined, true);
     } catch (value) { reportError(value); }
   };
-  const onCanvasKeyDown = (event: KeyboardEvent<HTMLCanvasElement>) => {
-    const intent = canvasKeyboardIntent(event, zoomRef.current);
-    if (!intent) return;
-    event.preventDefault();
+  const selectAllShapes = () => {
+    const current = modelRef.current;
+    const page = current.snapshot?.pages[current.pageIndex];
+    if (!page || page.shapes.length === 0) return;
+    setSelection(page.shapes.map((shape) => ({ pageId: page.id, shapeId: shape.id, hit: { kind: 'shape', shapeId: shape.id } as const })));
+  };
+  const runKeyboardIntent = (intent: CanvasKeyboardIntent) => {
     const commands = commandsRef.current;
     if (intent.kind === 'undo') { if (commands?.undo.enabled) commands.undo.run(); return; }
     if (intent.kind === 'redo') { if (commands?.redo.enabled) commands.redo.run(); return; }
     if (intent.kind === 'delete') { if (commands?.delete.enabled) commands.delete.run(); return; }
-    if (intent.kind === 'escape') { cancelActiveDrag(); closeContextMenu(); setSelection(null); return; }
+    if (intent.kind === 'escape') { cancelActiveDrag(); closeContextMenu(); setSelection([]); return; }
+    if (intent.kind === 'selectAll') { selectAllShapes(); return; }
     nudgeSelection(intent.dx, intent.dy);
   };
+  const runKeyboardIntentRef = useRef(runKeyboardIntent);
+  runKeyboardIntentRef.current = runKeyboardIntent;
+  const onCanvasKeyDown = (event: KeyboardEvent<HTMLCanvasElement>) => {
+    const intent = canvasKeyboardIntent(event, zoomRef.current);
+    if (!intent) return;
+    event.preventDefault();
+    runKeyboardIntent(intent);
+  };
+  useEffect(() => {
+    const onDocumentKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      const root = editorRootRef.current;
+      if (!root) return;
+      const target = event.target;
+      if (!(target instanceof Node) || !root.contains(target)) return;
+      if (isEditableKeyboardTarget(target)) return;
+      if (target instanceof Element && target.closest('[data-vsdx-text-editor]')) return;
+      if (contextMenuRef.current) return;
+      if (root.querySelector('[role="menu"], [role="dialog"], [role="listbox"], dialog[open], [aria-modal="true"], [data-vsdx-text-editor]')) return;
+      const intent = canvasKeyboardIntent(event, zoomRef.current);
+      if (!intent) return;
+      event.preventDefault();
+      runKeyboardIntentRef.current(intent);
+    };
+    document.addEventListener('keydown', onDocumentKeyDown);
+    return () => document.removeEventListener('keydown', onDocumentKeyDown);
+  }, []);
   const onCanvasFocus = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = '2px solid #0f6cbd'; event.currentTarget.style.outlineOffset = '2px'; };
   const onCanvasBlur = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = ''; event.currentTarget.style.outlineOffset = ''; };
   const insertShape = useCallback((shape: StandardShape) => {
@@ -495,7 +544,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const download = useCallback((bytes: Uint8Array) => { const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer; const url = URL.createObjectURL(new Blob([buffer], { type: 'application/vnd.visio' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'diagram.vsdx'; anchor.click(); URL.revokeObjectURL(url); setDirty(false); }, []);
   const integrity = diagnostics.filter((diagnostic) => diagnostic.category === 'integrity');
   const fidelity = diagnostics.filter((diagnostic) => diagnostic.category === 'fidelity');
-  return <div className={className} style={styles.root} aria-label={t('editor.appLabel')}>
+  return <div ref={editorRootRef} className={className} style={styles.root} aria-label={t('editor.appLabel')}>
     <header style={styles.titleBar}><strong>{t('ribbon.documentName')}</strong><span style={{ color: dirty ? '#a16207' : '#526273' }}>{dirty ? t('ribbon.dirty') : t('ribbon.saved')}</span></header>
     <RibbonCommandsProvider handle={handleRef.current} snapshot={model.snapshot} pageId={model.snapshot?.pages[model.pageIndex]?.id} selection={selection} onMutation={() => refresh(undefined, true)} onError={reportError} onDownload={download}>
     <RibbonCommandsBridge target={commandsRef} />
@@ -506,10 +555,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
       <div style={styles.canvasFrame}>
-        <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
+        <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={canvasLabel(t, model.pageIndex, model.snapshot?.pages.length ?? 0, selection)} style={styles.canvas} />
         <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
       </div>
-      {contextMenu && selection && <ShapeContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
+      {contextMenu && selection.length === 1 && <ShapeContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
       {integrity.length > 0 && <section role="alert" style={styles.integrity}><strong>{t('diagnostics.integrityHeading')}</strong>{integrity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</section>}
       {fidelity.length > 0 && <details style={styles.fidelity}><summary>{t('diagnostics.fidelityHeading')}</summary>{fidelity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</details>}
       {error && <div role="alert" style={styles.error}>{error}</div>}
@@ -552,6 +601,12 @@ export function shapeParentTransforms(primitives: readonly PagePrimitive[], id: 
 export function stillSelectable(snapshot: DiagramSnapshot, pageIndex: number, selection: VsdxShapeSelection): boolean {
   const page = snapshot.pages[pageIndex];
   return Boolean(page && page.id === selection.pageId && findShapePlacement(page.shapes, selection.shapeId));
+}
+
+export function canvasLabel(t: TFunction, pageIndex: number, total: number, selection: readonly VsdxShapeSelection[]): string {
+  if (selection.length > 1) return t('pages.canvasLabelWithMultiSelection', { current: pageIndex + 1, total, count: selection.length });
+  if (selection.length === 1) return t('pages.canvasLabelWithSelection', { current: pageIndex + 1, total, name: selection[0].shapeId });
+  return t('pages.canvasLabel', { current: pageIndex + 1, total });
 }
 
 /** Current selection corners in scale-1 canvas coordinates for overlay paint and hit tests. */

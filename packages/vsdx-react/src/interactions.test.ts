@@ -274,7 +274,10 @@ test('canvas keyboard maps history, delete and escape intents', () => {
   expect(canvasKeyboardIntent({ key: 'Delete' }, 1)).toEqual({ kind: 'delete' });
   expect(canvasKeyboardIntent({ key: 'Backspace' }, 1)).toEqual({ kind: 'delete' });
   expect(canvasKeyboardIntent({ key: 'Escape' }, 1)).toEqual({ kind: 'escape' });
-  expect(canvasKeyboardIntent({ key: 'a', ctrlKey: true }, 1)).toBeNull();
+  expect(canvasKeyboardIntent({ key: 'a', ctrlKey: true }, 1)).toEqual({ kind: 'selectAll' });
+  expect(canvasKeyboardIntent({ key: 'A', metaKey: true }, 1)).toEqual({ kind: 'selectAll' });
+  expect(canvasKeyboardIntent({ key: 'a', ctrlKey: true, shiftKey: true }, 1)).toBeNull();
+  expect(canvasKeyboardIntent({ key: 'a', ctrlKey: true, altKey: true }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true, altKey: true }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'Delete', ctrlKey: true }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'Escape', ctrlKey: true }, 1)).toBeNull();
@@ -305,5 +308,6 @@ test('canvas keyboard produces no intent from editable targets', () => {
   expect(canvasKeyboardIntent({ key: 'Delete', target: input }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'ArrowUp', target: input }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true, target: textarea }, 1)).toBeNull();
+  expect(canvasKeyboardIntent({ key: 'a', ctrlKey: true, target: input }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'Escape', target: editable }, 1)).toBeNull();
 });

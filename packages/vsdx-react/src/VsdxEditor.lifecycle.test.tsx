@@ -1183,3 +1183,209 @@ test('a right-click during a drag opens no menu and adds no commit', async () =>
     expect(moves).toHaveLength(1);
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
+
+test('Delete, undo and Escape work while editor chrome holds focus', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 4, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
+    await act(async () => { ready!.refresh(); });
+    const main = view.container.querySelectorAll('canvas')[0] as HTMLCanvasElement;
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    const { fireEvent } = await import('@testing-library/react');
+    const selectShape = async () => {
+      fireEvent.pointerDown(main, { pointerId: 7, clientX: 100, clientY: 100 });
+      await act(async () => {});
+      fireEvent.pointerUp(main, { pointerId: 7, clientX: 100, clientY: 100 });
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+      expect(main.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
+    };
+    const ribbonDelete = view.container.querySelector('[data-command-id="delete"]') as HTMLButtonElement;
+    await selectShape();
+    (ribbonDelete as HTMLButtonElement).focus();
+    expect(document.activeElement).toBe(ribbonDelete);
+    fireEvent.keyDown(ribbonDelete, { key: 'Delete' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(false);
+    fireEvent.keyDown(ribbonDelete, { key: 'z', ctrlKey: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(true);
+    await selectShape();
+    const pageTab = view.container.querySelector('footer [role="tab"]') as HTMLButtonElement;
+    pageTab.focus();
+    expect(document.activeElement).toBe(pageTab);
+    fireEvent.keyDown(pageTab, { key: 'Delete' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(false);
+    fireEvent.keyDown(ribbonDelete, { key: 'z', ctrlKey: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    await selectShape();
+    (ribbonDelete as HTMLButtonElement).focus();
+    fireEvent.keyDown(ribbonDelete, { key: 'Escape' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(main.getAttribute('aria-label')).not.toContain('selected shape');
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
+test('Ctrl+A selects every shape on the page and Delete removes them', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 4, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
+    await act(async () => { ready!.refresh(); });
+    const shapeCount = handle.snapshot().pages[0].shapes.length;
+    expect(shapeCount).toBeGreaterThan(1);
+    const main = view.container.querySelectorAll('canvas')[0] as HTMLCanvasElement;
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    const { fireEvent } = await import('@testing-library/react');
+    const ribbonDelete = view.container.querySelector('[data-command-id="delete"]') as HTMLButtonElement;
+    ribbonDelete.focus();
+    expect(fireEvent.keyDown(ribbonDelete, { key: 'a', ctrlKey: true }) === false).toBe(true);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(main.getAttribute('aria-label')).toContain(`${shapeCount} shapes selected`);
+    fireEvent.keyDown(ribbonDelete, { key: 'Escape' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(main.getAttribute('aria-label')).not.toContain('shapes selected');
+    expect(handle.snapshot().pages[0].shapes).toHaveLength(shapeCount);
+    main.focus();
+    expect(fireEvent.keyDown(main, { key: 'a', ctrlKey: true }) === false).toBe(true);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(main.getAttribute('aria-label')).toContain(`${shapeCount} shapes selected`);
+    ribbonDelete.focus();
+    fireEvent.keyDown(ribbonDelete, { key: 'Delete' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes).toHaveLength(0);
+    expect(main.getAttribute('aria-label')).not.toContain('shapes selected');
+    fireEvent.keyDown(ribbonDelete, { key: 'z', ctrlKey: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.length).toBeGreaterThan(0);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
+test('text fields keep their own undo while the ribbon uses the document history', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 4, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
+    await act(async () => { ready!.refresh(); });
+    const main = view.container.querySelectorAll('canvas')[0] as HTMLCanvasElement;
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    const { fireEvent } = await import('@testing-library/react');
+    fireEvent.pointerDown(main, { pointerId: 7, clientX: 100, clientY: 100 });
+    await act(async () => {});
+    fireEvent.pointerUp(main, { pointerId: 7, clientX: 100, clientY: 100 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    const ribbonDelete = view.container.querySelector('[data-command-id="delete"]') as HTMLButtonElement;
+    fireEvent.keyDown(main, { key: 'Delete' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(false);
+    const search = view.container.querySelector('input[type="search"]') as HTMLInputElement;
+    search.focus();
+    expect(document.activeElement).toBe(search);
+    expect(fireEvent.keyDown(search, { key: 'z', ctrlKey: true }) === false).toBe(false);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(false);
+    ribbonDelete.focus();
+    fireEvent.keyDown(ribbonDelete, { key: 'z', ctrlKey: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(true);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
+test('Delete waits out an open context menu', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 4, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
+    await act(async () => { ready!.refresh(); });
+    const main = view.container.querySelectorAll('canvas')[0] as HTMLCanvasElement;
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    const { fireEvent } = await import('@testing-library/react');
+    fireEvent.pointerDown(main, { pointerId: 7, clientX: 100, clientY: 100 });
+    await act(async () => {});
+    fireEvent.pointerUp(main, { pointerId: 7, clientX: 100, clientY: 100 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(main.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
+    const ribbonDelete = view.container.querySelector('[data-command-id="delete"]') as HTMLButtonElement;
+    expect(fireEvent.contextMenu(main, { clientX: 100, clientY: 100, button: 2 }) === false).toBe(true);
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Delete' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(true);
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' });
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+    ribbonDelete.focus();
+    fireEvent.keyDown(ribbonDelete, { key: 'Delete' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(false);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
+test('the document keyboard listener is removed on unmount', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  const added: EventListener[] = [];
+  const removed: EventListener[] = [];
+  const originalAdd = document.addEventListener.bind(document);
+  const originalRemove = document.removeEventListener.bind(document);
+  document.addEventListener = ((type: string, listener: EventListener, options?: AddEventListenerOptions) => {
+    if (type === 'keydown') added.push(listener);
+    return originalAdd(type as 'keydown', listener, options);
+  }) as typeof document.addEventListener;
+  document.removeEventListener = ((type: string, listener: EventListener, options?: EventListenerOptions) => {
+    if (type === 'keydown') removed.push(listener);
+    return originalRemove(type as 'keydown', listener, options);
+  }) as typeof document.removeEventListener;
+  try {
+    let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+    const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
+    await waitFor(() => expect(ready).toBeDefined());
+    expect(added.length).toBeGreaterThan(0);
+    view.unmount();
+    expect(removed.length).toBe(added.length);
+    for (const listener of added) expect(removed).toContain(listener);
+  } finally {
+    document.addEventListener = originalAdd as typeof document.addEventListener;
+    document.removeEventListener = originalRemove as typeof document.removeEventListener;
+    cleanup();
+    canvasPrototype.getContext = getContext;
+  }
+});

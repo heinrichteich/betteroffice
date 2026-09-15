@@ -18,7 +18,7 @@ export interface RibbonCommandsProviderProps {
   handle: DiagramHandle | null;
   snapshot: DiagramSnapshot | null;
   pageId?: string;
-  selection: VsdxShapeSelection | null;
+  selection: readonly VsdxShapeSelection[];
   onMutation: () => void;
   onError: (error: unknown) => void;
   onDownload: (bytes: Uint8Array) => void;
@@ -42,10 +42,14 @@ export function pageById(pages: readonly PageSnapshot[], pageId: string | undefi
   return (pageId === undefined ? pages[0] : pages.find((page) => page.id === pageId)) ?? null;
 }
 
-function placementIn(pages: readonly PageSnapshot[], selection: VsdxShapeSelection | null): ShapePlacement | null {
-  if (!selection) return null;
-  const page = pages.find((item) => item.id === selection.pageId);
-  return page ? findShapePlacement(page.shapes, selection.shapeId) : null;
+function placementsIn(pages: readonly PageSnapshot[], selection: readonly VsdxShapeSelection[]): Array<{ selection: VsdxShapeSelection; placement: ShapePlacement }> {
+  const result: Array<{ selection: VsdxShapeSelection; placement: ShapePlacement }> = [];
+  for (const item of selection) {
+    const page = pages.find((entry) => entry.id === item.pageId);
+    const placement = page ? findShapePlacement(page.shapes, item.shapeId) : null;
+    if (placement) result.push({ selection: item, placement });
+  }
+  return result;
 }
 
 function findCell(shape: ShapeSnapshot | null, name: string) {
@@ -120,50 +124,60 @@ export function isCellWriteBlocked(shape: ShapeSnapshot | null, cellName: string
 
 export function createRibbonCommands(
   handle: DiagramHandle | null,
-  selection: VsdxShapeSelection | null,
+  selection: readonly VsdxShapeSelection[],
   pageId: string | undefined,
   onMutation: () => void,
   onError: (error: unknown) => void,
   onDownload: (bytes: Uint8Array) => void
 ): RibbonCommands {
-  const execute = (operation: (current: DiagramHandle, selected: VsdxShapeSelection | null) => void, needsSelection = false) => () => {
-    if (!handle || (needsSelection && !selection)) return;
+  const execute = (operation: (current: DiagramHandle, selected: readonly VsdxShapeSelection[]) => void, needsSelection = false) => () => {
+    if (!handle || (needsSelection && selection.length === 0)) return;
     try { operation(handle, selection); onMutation(); } catch (error) { onError(error); }
   };
   const pages = handle ? handle.snapshot().pages : [];
-  const current = placementIn(pages, selection);
-  const shape = current?.shape ?? null;
-  const selected = Boolean(current && selection);
-  const topIndex = current ? current.siblings.length - 1 : 0;
-  const livePlacement = (currentHandle: DiagramHandle, currentSelection: VsdxShapeSelection | null) => placementIn(currentHandle.snapshot().pages, currentSelection);
-  const formula = (cellName: string, value: string) => execute((currentHandle, currentSelection) => {
-    currentHandle.setCellFormula(currentSelection!.pageId, currentSelection!.shapeId, { cellName }, value);
+  const placements = placementsIn(pages, selection);
+  const first = placements[0];
+  const single = placements.length === 1 ? placements[0] : null;
+  const shape = first?.placement.shape ?? null;
+  const selected = placements.length > 0;
+  const topIndex = single ? single.placement.siblings.length - 1 : 0;
+  const livePlacements = (currentHandle: DiagramHandle) => placementsIn(currentHandle.snapshot().pages, selection);
+  const formula = (cellName: string, value: string) => execute((currentHandle) => {
+    for (const { selection: item } of livePlacements(currentHandle)) {
+      currentHandle.setCellFormula(item.pageId, item.shapeId, { cellName }, value);
+    }
   }, true);
-  const reorderTo = (target: (placement: ShapePlacement) => number, allowed: (placement: ShapePlacement) => boolean) => execute((currentHandle, currentSelection) => {
-    const placement = livePlacement(currentHandle, currentSelection);
-    if (placement && allowed(placement)) currentHandle.reorderShape(currentSelection!.pageId, currentSelection!.shapeId, target(placement));
+  const reorderTo = (target: (placement: ShapePlacement) => number, allowed: (placement: ShapePlacement) => boolean) => execute((currentHandle) => {
+    const live = livePlacements(currentHandle);
+    if (live.length !== 1) return;
+    const { selection: item, placement } = live[0];
+    if (allowed(placement)) currentHandle.reorderShape(item.pageId, item.shapeId, target(placement));
   }, true);
-  const setNumeric = (cellName: string, next: (value: number) => string) => execute((currentHandle, currentSelection) => {
-    const placement = livePlacement(currentHandle, currentSelection);
-    if (!placement) return;
-    currentHandle.setCellFormula(currentSelection!.pageId, currentSelection!.shapeId, { cellName }, next(numericCellValue(placement.shape, cellName, 0)));
+  const setNumeric = (cellName: string, next: (value: number) => string) => execute((currentHandle) => {
+    for (const { selection: item, placement } of livePlacements(currentHandle)) {
+      currentHandle.setCellFormula(item.pageId, item.shapeId, { cellName }, next(numericCellValue(placement.shape, cellName, 0)));
+    }
   }, true);
   const commands = {
     undo: { id: 'undo', enabled: Boolean(handle?.canUndo()), run: execute((currentHandle) => { currentHandle.undo(); }) },
     redo: { id: 'redo', enabled: Boolean(handle?.canRedo()), run: execute((currentHandle) => { currentHandle.redo(); }) },
-    delete: { id: 'delete', enabled: selected && !isDeleteBlocked(shape), run: execute((currentHandle, currentSelection) => { currentHandle.deleteShape(currentSelection!.pageId, currentSelection!.shapeId); }, true) },
+    delete: { id: 'delete', enabled: selected && placements.every((entry) => !isDeleteBlocked(entry.placement.shape)), run: execute((currentHandle) => {
+      for (const { selection: item } of livePlacements(currentHandle)) {
+        currentHandle.deleteShape(item.pageId, item.shapeId);
+      }
+    }, true) },
     fillColor: { id: 'fillColor', enabled: selected, value: color(cellValue(shape, 'FillForegnd'), '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
     lineColor: { id: 'lineColor', enabled: selected, value: color(cellValue(shape, 'LineColor'), '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },
     lineWeight: { id: 'lineWeight', enabled: selected, value: cellFormula(shape, 'LineWeight'), run: (value?: string) => { if (value) formula('LineWeight', value)(); } },
     linePattern: { id: 'linePattern', enabled: selected, value: cellFormula(shape, 'LinePattern'), run: (value?: string) => { if (value) formula('LinePattern', value)(); } },
-    bringToFront: { id: 'bringToFront', enabled: selected && current!.index < topIndex, run: reorderTo((placement) => placement.siblings.length - 1, (placement) => placement.index < placement.siblings.length - 1) },
-    bringForward: { id: 'bringForward', enabled: selected && current!.index < topIndex, run: reorderTo((placement) => placement.index + 1, (placement) => placement.index < placement.siblings.length - 1) },
-    sendBackward: { id: 'sendBackward', enabled: selected && current!.index > 0, run: reorderTo((placement) => placement.index - 1, (placement) => placement.index > 0) },
-    sendToBack: { id: 'sendToBack', enabled: selected && current!.index > 0, run: reorderTo(() => 0, (placement) => placement.index > 0) },
-    rotateLeft: { id: 'rotateLeft', enabled: selected && !isCellWriteBlocked(shape, 'Angle'), run: setNumeric('Angle', (value) => String(value - Math.PI / 2)) },
-    rotateRight: { id: 'rotateRight', enabled: selected && !isCellWriteBlocked(shape, 'Angle'), run: setNumeric('Angle', (value) => String(value + Math.PI / 2)) },
-    flipHorizontal: { id: 'flipHorizontal', enabled: selected && !isCellWriteBlocked(shape, 'FlipX'), active: numberValue(cellValue(shape, 'FlipX')) !== 0, run: setNumeric('FlipX', (value) => value === 0 ? '1' : '0') },
-    flipVertical: { id: 'flipVertical', enabled: selected && !isCellWriteBlocked(shape, 'FlipY'), active: numberValue(cellValue(shape, 'FlipY')) !== 0, run: setNumeric('FlipY', (value) => value === 0 ? '1' : '0') },
+    bringToFront: { id: 'bringToFront', enabled: single !== null && single.placement.index < topIndex, run: reorderTo((placement) => placement.siblings.length - 1, (placement) => placement.index < placement.siblings.length - 1) },
+    bringForward: { id: 'bringForward', enabled: single !== null && single.placement.index < topIndex, run: reorderTo((placement) => placement.index + 1, (placement) => placement.index < placement.siblings.length - 1) },
+    sendBackward: { id: 'sendBackward', enabled: single !== null && single.placement.index > 0, run: reorderTo((placement) => placement.index - 1, (placement) => placement.index > 0) },
+    sendToBack: { id: 'sendToBack', enabled: single !== null && single.placement.index > 0, run: reorderTo(() => 0, (placement) => placement.index > 0) },
+    rotateLeft: { id: 'rotateLeft', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'Angle')), run: setNumeric('Angle', (value) => String(value - Math.PI / 2)) },
+    rotateRight: { id: 'rotateRight', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'Angle')), run: setNumeric('Angle', (value) => String(value + Math.PI / 2)) },
+    flipHorizontal: { id: 'flipHorizontal', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'FlipX')), active: numberValue(cellValue(shape, 'FlipX')) !== 0, run: setNumeric('FlipX', (value) => value === 0 ? '1' : '0') },
+    flipVertical: { id: 'flipVertical', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'FlipY')), active: numberValue(cellValue(shape, 'FlipY')) !== 0, run: setNumeric('FlipY', (value) => value === 0 ? '1' : '0') },
     addShape: {
       id: 'addShape',
       enabled: Boolean(pageById(pages, pageId)),

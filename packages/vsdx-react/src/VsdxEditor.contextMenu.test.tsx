@@ -44,7 +44,7 @@ function stubHandle(state: DiagramSnapshot, calls: Calls): DiagramHandle {
   } as unknown as DiagramHandle;
 }
 
-function Host({ diagram, selection, position, closed, focusTarget }: { diagram: DiagramHandle; selection: Selection; position: { top: number; left: number }; closed: string[]; focusTarget?: HTMLElement }) {
+function Host({ diagram, selection, position, closed, focusTarget }: { diagram: DiagramHandle; selection: Selection[]; position: { top: number; left: number }; closed: string[]; focusTarget?: HTMLElement }) {
   const [open, setOpen] = useState(true);
   if (!open) return null;
   return (
@@ -61,7 +61,7 @@ function renderMenu(options: { cells?: Array<ReturnType<typeof cell>>; position?
   const diagram = stubHandle(state, calls);
   const closed: string[] = [];
   const shapeId = options.shapeId ?? 'three';
-  const selection: Selection = { pageId: 'page', shapeId, hit: { kind: 'shape', shapeId } };
+  const selection: Selection[] = [{ pageId: 'page', shapeId, hit: { kind: 'shape', shapeId } }];
   let focusTarget: HTMLElement | undefined;
   if (options.withFocusTarget) {
     focusTarget = document.createElement('button');

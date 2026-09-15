@@ -16,7 +16,7 @@ export const HANDLE_HIT_TOLERANCE_CSS = 6;
 export const ROTATION_SNAP_STEP = Math.PI / 12;
 export const CANVAS_KEYBOARD_DPI = 96;
 export const CANVAS_KEYBOARD_NUDGE_MULTIPLIER = 10;
-export type CanvasKeyboardIntent = { kind: 'undo' } | { kind: 'redo' } | { kind: 'delete' } | { kind: 'escape' } | { kind: 'nudge'; dx: number; dy: number };
+export type CanvasKeyboardIntent = { kind: 'undo' } | { kind: 'redo' } | { kind: 'delete' } | { kind: 'escape' } | { kind: 'selectAll' } | { kind: 'nudge'; dx: number; dy: number };
 export interface CanvasKeyboardEventLike { key: string; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean; altKey?: boolean; target?: unknown; }
 /** One screen pixel in model inches at the given zoom. */
 export const keyboardNudgeStep = (zoom: number): number => {
@@ -53,6 +53,7 @@ export const canvasKeyboardIntent = (event: CanvasKeyboardEventLike, zoom: numbe
     if (lower === 'z' && !shift) return { kind: 'undo' };
     if (lower === 'y' && !shift) return { kind: 'redo' };
     if (lower === 'z' && shift) return { kind: 'redo' };
+    if (lower === 'a' && !shift) return { kind: 'selectAll' };
     return null;
   }
   if (mod || alt) return null;
