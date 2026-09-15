@@ -307,3 +307,19 @@ test('canvas keyboard produces no intent from editable targets', () => {
   expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true, target: textarea }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'Escape', target: editable }, 1)).toBeNull();
 });
+test('a guarded rotation hides the grip stalk and circle but keeps resize handles', () => {
+  const corners = [{ x: 10, y: 40 }, { x: 30, y: 40 }, { x: 30, y: 20 }, { x: 10, y: 20 }];
+  const grip = rotationGripPosition(corners, 2);
+  const calls: string[] = [];
+  const context = new Proxy({ canvas: {} }, {
+    get(target, key) {
+      if (key in target) return Reflect.get(target, key);
+      return (...args: unknown[]) => { calls.push(`${String(key)}:${args.join(',')}`); };
+    },
+    set(target, key, value) { calls.push(`${String(key)}=${String(value)}`); Reflect.set(target, key, value); return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  paintSelectionFrame(context, corners, 2, 2, RESIZE_HANDLES, false);
+  expect(calls.some((entry) => entry === `lineTo:${grip.x},${grip.y}`)).toBe(false);
+  expect(calls.some((entry) => entry.startsWith(`arc:${grip.x},${grip.y},`))).toBe(false);
+  expect(calls.filter((entry) => entry.startsWith('arc:'))).toHaveLength(8);
+});

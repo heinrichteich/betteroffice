@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
-import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
+import { RibbonCommandsProvider, findShapePlacement, isCellWriteBlocked, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
@@ -206,7 +206,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         const corners = selectionCorners(page, frame, selection);
         const placement = findShapePlacement(page.shapes, selection.shapeId);
         const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
-        if (corners) paintSelectionFrame(context, corners, dpr, zoom, blocked ? [] : undefined);
+        const rotationBlocked = placement ? isCellWriteBlocked(placement.shape, 'Angle') : false;
+        if (corners) paintSelectionFrame(context, corners, dpr, zoom, blocked ? [] : undefined, !rotationBlocked);
       } catch { void 0; }
     }
     const start = pointerRef.current; const release = dragPreviewRef.current;
@@ -235,7 +236,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         const corners = selectionCorners(page, frame, currentSelection);
         const placement = findShapePlacement(page.shapes, currentSelection.shapeId);
         const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
-        if (corners) paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current, blocked ? [] : undefined);
+        const rotationBlocked = placement ? isCellWriteBlocked(placement.shape, 'Angle') : false;
+        if (corners) paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current, blocked ? [] : undefined, !rotationBlocked);
       } catch { void 0; }
     }
   };
@@ -271,6 +273,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
             if (target) {
               const placement = findShapePlacement(page.shapes, active.shapeId);
               if (placement) {
+                if (target === 'rotate' && isCellWriteBlocked(placement.shape, 'Angle')) {
+                  reportError(new Error('Shape rotation is guarded and cannot be changed with the grip.'));
+                  return;
+                }
                 if (target !== 'rotate' && isHandleResizeBlocked(placement.shape)) {
                   reportError(new Error('Shape is locked and cannot be resized with handles.'));
                   return;
@@ -320,10 +326,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         if (!corners) { event.currentTarget.style.cursor = ''; return; }
         const point = canvasPointerPosition(event, frame);
         const target = hitTestSelection(point.canvas, corners, zoomRef.current);
-        if (target !== 'rotate' && target) {
-          const placement = findShapePlacement(page.shapes, active.shapeId);
-          if (placement && isHandleResizeBlocked(placement.shape)) { event.currentTarget.style.cursor = ''; return; }
-        }
+        const placement = findShapePlacement(page.shapes, active.shapeId);
+        if (target === 'rotate' && placement && isCellWriteBlocked(placement.shape, 'Angle')) { event.currentTarget.style.cursor = ''; return; }
+        if (target !== 'rotate' && target && placement && isHandleResizeBlocked(placement.shape)) { event.currentTarget.style.cursor = ''; return; }
         event.currentTarget.style.cursor = target === 'rotate' ? 'grab' : target ? resizeCursor(target) : '';
       } catch { void 0; }
       return;
@@ -368,6 +373,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       if (!pointer.thresholdPassed && !hadPreview && pointer.startX !== undefined && pointer.startY !== undefined && !passedDragThreshold(pointer.startX, pointer.startY, event.clientX, event.clientY)) return;
       if (!pointer.thresholdPassed && !hadPreview && Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) return;
       if (pointer.rotate) {
+        const livePage = handle.snapshot().pages.find((page) => page.id === selected.pageId);
+        const livePlacement = livePage ? findShapePlacement(livePage.shapes, selected.shapeId) : null;
+        if (livePlacement && isCellWriteBlocked(livePlacement.shape, 'Angle')) throw new Error('Shape rotation is guarded and cannot be changed with the grip.');
         handle.setCellFormula(selected.pageId, selected.shapeId, { cellName: 'Angle' }, String(resolveRotationAngle(pointer, point.model, event.shiftKey)));
         refresh(undefined, true);
         return;
