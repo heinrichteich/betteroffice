@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { canvasPointToModel, modelPointToCanvas } from '@betteroffice/vsdx';
 import type { ModelPoint } from '@betteroffice/vsdx';
-import { RESIZE_HANDLES, SELECTION_STROKE, canvasKeyboardIntent, hitTestSelection, isEditableKeyboardTarget, keyboardNudgeStep, paintSelectionFrame, paintDragPreview, passedDragThreshold, previewOutline, resizedBounds, resizeCursor, resolveDragGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions } from './interactions';
+import { RESIZE_HANDLES, SELECTION_STROKE, MARQUEE_STROKE, canvasKeyboardIntent, hitTestSelection, isEditableKeyboardTarget, keyboardNudgeStep, normalizeMarquee, marqueeEnclosesQuad, paintMarquee, paintSelectionFrame, paintDragPreview, passedDragThreshold, previewOutline, resizedBounds, resizeCursor, resolveDragGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions } from './interactions';
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 };
 const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 test('passedDragThreshold needs four css pixels by default', () => {
@@ -346,4 +346,43 @@ test('canvas keyboard produces no intent from editable targets', () => {
   expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true, target: textarea }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'a', ctrlKey: true, target: input }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'Escape', target: editable }, 1)).toBeNull();
+});
+test('a marquee normalises drags from any direction', () => {
+  expect(normalizeMarquee({ x: 10, y: 20 }, { x: 30, y: 60 })).toEqual({ left: 10, top: 20, right: 30, bottom: 60 });
+  expect(normalizeMarquee({ x: 30, y: 60 }, { x: 10, y: 20 })).toEqual({ left: 10, top: 20, right: 30, bottom: 60 });
+  expect(normalizeMarquee({ x: 30, y: 20 }, { x: 10, y: 60 })).toEqual({ left: 10, top: 20, right: 30, bottom: 60 });
+});
+test('a marquee selects only fully enclosed quads', () => {
+  const rect = normalizeMarquee({ x: 0, y: 0 }, { x: 100, y: 100 });
+  expect(marqueeEnclosesQuad([{ x: 10, y: 10 }, { x: 90, y: 10 }, { x: 90, y: 90 }, { x: 10, y: 90 }], rect)).toBe(true);
+  expect(marqueeEnclosesQuad([{ x: 10, y: 10 }, { x: 110, y: 10 }, { x: 110, y: 90 }, { x: 10, y: 90 }], rect)).toBe(false);
+  expect(marqueeEnclosesQuad([{ x: 200, y: 200 }, { x: 210, y: 200 }, { x: 210, y: 210 }, { x: 200, y: 210 }], rect)).toBe(false);
+  expect(marqueeEnclosesQuad([{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }], rect)).toBe(true);
+  expect(marqueeEnclosesQuad([{ x: 10, y: 10 }], rect)).toBe(false);
+});
+test('a marquee encloses a rotated quad by its corners, not its axis box', () => {
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 50, y: 50 }, size: { width: 40, height: 20 }, angle: Math.PI / 4 };
+  const corners = previewOutline(start, { x: 0, y: 0 }, identity);
+  const tight = normalizeMarquee({ x: 25, y: 25 }, { x: 75, y: 75 });
+  expect(marqueeEnclosesQuad(corners, tight)).toBe(true);
+  const clipped = normalizeMarquee({ x: 25, y: 25 }, { x: 60, y: 75 });
+  expect(corners.some((corner) => corner.x > 60)).toBe(true);
+  expect(marqueeEnclosesQuad(corners, clipped)).toBe(false);
+});
+test('the marquee paints a dashed rect with a wash on the overlay transform', () => {
+  const calls: string[] = [];
+  const context = new Proxy({ canvas: {} }, {
+    get(target, key) {
+      if (key in target) return Reflect.get(target, key);
+      return (...args: unknown[]) => { calls.push(`${String(key)}:${args.join(',')}`); };
+    },
+    set(target, key, value) { calls.push(`${String(key)}=${String(value)}`); Reflect.set(target, key, value); return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  paintMarquee(context, normalizeMarquee({ x: 30, y: 20 }, { x: 10, y: 60 }), 2, 1);
+  expect(calls).toContain('setTransform:2,0,0,2,0,0');
+  expect(calls).toContain(`strokeStyle=${MARQUEE_STROKE}`);
+  expect(calls).toContain('fillRect:10,20,20,40');
+  expect(calls).toContain('strokeRect:10,20,20,40');
+  expect(calls.some((entry) => entry.startsWith('setLineDash:'))).toBe(true);
+  expect(calls[calls.length - 1].startsWith('restore:')).toBe(true);
 });

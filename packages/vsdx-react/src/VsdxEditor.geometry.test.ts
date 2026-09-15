@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test';
 import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { canvasPointerPosition, inchFormula, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
-import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
+import { canvasPointerPosition, inchFormula, marqueeEnclosedShapes, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
+import { normalizeMarquee, previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
 
 const frame: PageDisplayList = {
   contractVersion: 4,
@@ -185,4 +185,43 @@ test('a nudge inside a rotated and scaled group matches the equivalent drag', ()
   expect(nudged.x).toBeCloseTo(dragged.x, 10);
   expect(nudged.y).toBeCloseTo(dragged.y, 10);
   expect(nudged.x).not.toBeCloseTo(2 + dx, 6);
+});
+function marqueeCell(name: string, value: string) {
+  return { locator: { sheet: 'document' as const, shapeId: null, section: null, row: null, cellName: name }, name, formula: value, value };
+}
+function marqueeShape(id: string, cells: Array<ReturnType<typeof marqueeCell>>) {
+  return { id, sourceId: Number(id.replace('shape', '')) || 1, name: id, children: [], cells };
+}
+function marqueePage() {
+  const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+  const frame: PageDisplayList = { contractVersion: 4, width: 816, height: 1056, paintTransform: identity, primitives: [] };
+  const page = {
+    id: 'page',
+    sourcePartPath: 'page',
+    name: 'Page',
+    shapes: [
+      marqueeShape('shape1', [marqueeCell('PinX', '100'), marqueeCell('PinY', '100'), marqueeCell('Width', '40'), marqueeCell('Height', '40')]),
+      marqueeShape('shape2', [marqueeCell('PinX', '400'), marqueeCell('PinY', '400'), marqueeCell('Width', '40'), marqueeCell('Height', '40')]),
+      marqueeShape('shape3', [marqueeCell('PinX', '600'), marqueeCell('PinY', '100'), marqueeCell('Width', '40'), marqueeCell('Height', '20'), marqueeCell('Angle', String(Math.PI / 2))]),
+      marqueeShape('shape4', [marqueeCell('PinX', '100'), marqueeCell('PinY', '600'), marqueeCell('Width', '40'), marqueeCell('Height', '40'), marqueeCell('FlipX', '1')]),
+    ],
+  };
+  return { page: page as never, frame };
+}
+test('a marquee selects every fully enclosed shape and nothing partially overlapped', () => {
+  const { page, frame } = marqueePage();
+  const enclosed = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 10, y: 10 }, { x: 200, y: 200 }));
+  expect(enclosed.map((item) => item.shapeId)).toEqual(['shape1']);
+  expect(enclosed[0]).toEqual({ pageId: 'page', shapeId: 'shape1', hit: { kind: 'shape', shapeId: 'shape1' } });
+  const clipped = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 10, y: 10 }, { x: 110, y: 110 }));
+  expect(clipped).toEqual([]);
+});
+test('a marquee encloses rotated and flipped shapes through the selection corners', () => {
+  const { page, frame } = marqueePage();
+  const rotated = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 580, y: 70 }, { x: 620, y: 130 }));
+  expect(rotated.map((item) => item.shapeId)).toEqual(['shape3']);
+  const rotatedClipped = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 580, y: 70 }, { x: 605, y: 130 }));
+  expect(rotatedClipped).toEqual([]);
+  const flipped = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 70, y: 570 }, { x: 130, y: 630 }));
+  expect(flipped.map((item) => item.shapeId)).toEqual(['shape4']);
 });

@@ -12,6 +12,8 @@ export const SELECTION_HANDLE_FILL = '#ffffff';
 export const SELECTION_HANDLE_CSS = 7;
 export const SELECTION_ROTATE_RADIUS_CSS = 5;
 export const SELECTION_ROTATE_OFFSET_CSS = 18;
+export const MARQUEE_STROKE = '#0f6cbd';
+export const MARQUEE_FILL = 'rgba(15, 108, 189, 0.08)';
 export const HANDLE_HIT_TOLERANCE_CSS = 6;
 export const ROTATION_SNAP_STEP = Math.PI / 12;
 export const CANVAS_KEYBOARD_DPI = 96;
@@ -259,6 +261,30 @@ export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: 
     context.fillStyle = SELECTION_HANDLE_FILL;
     context.fill();
     context.stroke();
+  } finally { context.restore(); }
+};
+export interface MarqueeRect { left: number; top: number; right: number; bottom: number; }
+export const normalizeMarquee = (start: ModelPoint, end: ModelPoint): MarqueeRect => ({
+  left: Math.min(start.x, end.x),
+  top: Math.min(start.y, end.y),
+  right: Math.max(start.x, end.x),
+  bottom: Math.max(start.y, end.y),
+});
+export const marqueeEnclosesQuad = (corners: readonly ModelPoint[], rect: MarqueeRect): boolean => {
+  if (corners.length < 4) return false;
+  return corners.every((corner) => corner.x >= rect.left && corner.x <= rect.right && corner.y >= rect.top && corner.y <= rect.bottom);
+};
+export const paintMarquee = (context: CanvasRenderingContext2D, rect: MarqueeRect, dpr: number, scale: number): void => {
+  const zoom = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  context.save();
+  try {
+    context.setTransform(dpr * zoom, 0, 0, dpr * zoom, 0, 0);
+    context.fillStyle = MARQUEE_FILL;
+    context.fillRect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
+    context.strokeStyle = MARQUEE_STROKE;
+    context.lineWidth = 1 / zoom;
+    context.setLineDash([4, 4]);
+    context.strokeRect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
   } finally { context.restore(); }
 };
 const pointInQuad = (point: ModelPoint, corners: readonly ModelPoint[]): boolean => {

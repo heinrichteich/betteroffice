@@ -12,8 +12,8 @@ import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
 import { StatusBar, clampZoom } from './components/statusbar';
-import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent, isEditableKeyboardTarget } from './interactions';
-import type { CanvasKeyboardIntent, DragStart, ResizeHandle } from './interactions';
+import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent, isEditableKeyboardTarget, normalizeMarquee, marqueeEnclosesQuad, paintMarquee } from './interactions';
+import type { CanvasKeyboardIntent, DragStart, MarqueeRect, ResizeHandle } from './interactions';
 export { resolveDragGeometry };
 export type { DragStart };
 
@@ -85,6 +85,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const dragShapeRef = useRef<VsdxShapeSelection | null>(null);
   const dragPreviewRef = useRef<ModelPoint | null>(null);
   const previewFrameRef = useRef<number | null>(null);
+  const marqueeRef = useRef<{ startCanvas: ModelPoint; currentCanvas: ModelPoint; pointerId?: number; startX: number; startY: number; thresholdPassed: boolean; additive: boolean } | null>(null);
+  const marqueeFrameRef = useRef<number | null>(null);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
   const [loading, setLoading] = useState(Boolean(file));
@@ -219,14 +221,28 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (start && release) {
       try { paintDragPreview(context, previewOutline(start, release, frame.paintTransform), dpr, zoom); } catch { void 0; }
     }
+    const marquee = marqueeRef.current;
+    if (marquee && marquee.thresholdPassed) {
+      try { paintMarquee(context, normalizeMarquee(marquee.startCanvas, marquee.currentCanvas), dpr, zoom); } catch { void 0; }
+    }
   }, [model.frame, model.snapshot, model.pageIndex, selection, zoom]);
 
-  useEffect(() => () => { if (previewFrameRef.current !== null) cancelAnimationFrame(previewFrameRef.current); }, []);
+  useEffect(() => () => {
+    if (previewFrameRef.current !== null) cancelAnimationFrame(previewFrameRef.current);
+    if (marqueeFrameRef.current !== null) cancelAnimationFrame(marqueeFrameRef.current);
+  }, []);
 
   const clearDragPreview = () => {
     if (previewFrameRef.current !== null) { cancelAnimationFrame(previewFrameRef.current); previewFrameRef.current = null; }
     dragPreviewRef.current = null;
     repaintOverlaySelection();
+  };
+
+  const paintMarqueeState = () => {
+    const marquee = marqueeRef.current; const overlay = overlayCanvasRef.current;
+    if (!marquee || !overlay || !marquee.thresholdPassed) return;
+    const context = overlay.getContext('2d'); if (!context) return;
+    try { paintMarquee(context, normalizeMarquee(marquee.startCanvas, marquee.currentCanvas), window.devicePixelRatio || 1, zoomRef.current); } catch { void 0; }
   };
 
   const repaintOverlaySelection = () => {
@@ -246,6 +262,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         } catch { void 0; }
       }
     }
+    paintMarqueeState();
   };
 
   const dragStartForPlacement = (page: { id: string; shapes: readonly ShapeSnapshot[]; sourcePartPath: string }, shape: ShapeSnapshot, frame: PageDisplayList, locPinAtSize?: (width: number, height: number) => { x: number; y: number }): Omit<DragStart, 'canvas' | 'model' | 'resize' | 'pointerId' | 'startX' | 'startY'> => {
@@ -267,8 +284,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
     if (!handle || !frame || !page) return;
     if (event.button === 2) return;
-    if (pointerRef.current) return;
-    pointerRef.current = null; dragPreviewRef.current = null; dragShapeRef.current = null;
+    if (pointerRef.current || marqueeRef.current) return;
+    pointerRef.current = null; dragPreviewRef.current = null; dragShapeRef.current = null; marqueeRef.current = null;
     try {
       const point = canvasPointerPosition(event, frame);
       for (const active of selectionRef.current) {
@@ -303,10 +320,17 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       }
       handle.layoutPage(model.pageIndex);
       const hit = handle.hitTest(point.canvas.x, point.canvas.y);
-      const next = hit ? [{ pageId: page.id, shapeId: hit.shapeId, hit }] : [];
+      if (!hit) {
+        const additive = event.shiftKey;
+        if (!additive) setSelection([]);
+        marqueeRef.current = { startCanvas: point.canvas, currentCanvas: point.canvas, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, thresholdPassed: false, additive };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        return;
+      }
+      const next = [{ pageId: page.id, shapeId: hit.shapeId, hit }];
       setSelection(next);
-      const placement = hit ? findShapePlacement(page.shapes, hit.shapeId) : null;
-      pointerRef.current = hit && placement ? {
+      const placement = findShapePlacement(page.shapes, hit.shapeId);
+      pointerRef.current = placement ? {
         ...point,
         ...dragStartForPlacement(page, placement.shape, frame),
         pointerId: event.pointerId,
@@ -314,11 +338,30 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         startY: event.clientY,
         resize: event.shiftKey,
       } : null;
-      dragShapeRef.current = hit && placement ? next[0] : null;
+      dragShapeRef.current = placement ? next[0] : null;
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch (value) { reportError(value); }
   };
   const onPointerMove = (event: PointerEvent<HTMLCanvasElement>) => {
+    const marquee = marqueeRef.current;
+    if (marquee) {
+      if (marquee.pointerId !== undefined && marquee.pointerId !== event.pointerId) return;
+      if (!marquee.thresholdPassed) {
+        if (!passedDragThreshold(marquee.startX, marquee.startY, event.clientX, event.clientY)) return;
+        marquee.thresholdPassed = true;
+      }
+      const marqueeFrame = modelRef.current.frame;
+      if (!marqueeFrame) return;
+      try {
+        marquee.currentCanvas = canvasPointerPosition(event, marqueeFrame).canvas;
+        if (marqueeFrameRef.current !== null) return;
+        marqueeFrameRef.current = requestAnimationFrame(() => {
+          marqueeFrameRef.current = null;
+          repaintOverlaySelection();
+        });
+      } catch (value) { reportError(value); }
+      return;
+    }
     const start = pointerRef.current;
     if (!start) {
       try {
@@ -369,6 +412,26 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     } catch (value) { reportError(value); }
   };
   const onPointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
+    const marquee = marqueeRef.current;
+    if (marquee) {
+      if (marquee.pointerId !== undefined && marquee.pointerId !== event.pointerId) return;
+      marqueeRef.current = null;
+      if (marqueeFrameRef.current !== null) { cancelAnimationFrame(marqueeFrameRef.current); marqueeFrameRef.current = null; }
+      repaintOverlaySelection();
+      if (!marquee.thresholdPassed) return;
+      try {
+        const current = modelRef.current;
+        const marqueePage = current.snapshot?.pages[current.pageIndex];
+        const marqueeFrame = current.frame;
+        if (!marqueePage || !marqueeFrame) return;
+        const enclosed = marqueeEnclosedShapes(marqueePage, marqueeFrame, normalizeMarquee(marquee.startCanvas, marquee.currentCanvas));
+        if (marquee.additive) {
+          const known = new Set(selectionRef.current.map((item) => `${item.pageId}:${item.shapeId}`));
+          setSelection([...selectionRef.current, ...enclosed.filter((item) => !known.has(`${item.pageId}:${item.shapeId}`))]);
+        } else setSelection(enclosed);
+      } catch (value) { reportError(value); }
+      return;
+    }
     const pointer = pointerRef.current;
     if (!pointer) return;
     if (pointer.pointerId !== undefined && pointer.pointerId !== event.pointerId) return;
@@ -409,13 +472,24 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       refresh(undefined, true);
     } catch (value) { reportError(value); }
   };
+  const clearMarquee = (event: PointerEvent<HTMLCanvasElement>): boolean => {
+    const marquee = marqueeRef.current;
+    if (!marquee) return false;
+    if (marquee.pointerId !== undefined && marquee.pointerId !== event.pointerId) return false;
+    marqueeRef.current = null;
+    if (marqueeFrameRef.current !== null) { cancelAnimationFrame(marqueeFrameRef.current); marqueeFrameRef.current = null; }
+    repaintOverlaySelection();
+    return true;
+  };
   const onPointerCancel = (event: PointerEvent<HTMLCanvasElement>) => {
+    if (clearMarquee(event)) return;
     const pointer = pointerRef.current;
     if (!pointer) return;
     if (pointer.pointerId !== undefined && pointer.pointerId !== event.pointerId) return;
     pointerRef.current = null; dragShapeRef.current = null; clearDragPreview();
   };
   const onLostPointerCapture = (event: PointerEvent<HTMLCanvasElement>) => {
+    if (clearMarquee(event)) return;
     const pointer = pointerRef.current;
     if (!pointer) return;
     if (pointer.pointerId !== undefined && pointer.pointerId !== event.pointerId) return;
@@ -427,7 +501,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     event.preventDefault();
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
     if (!handle || !frame || !page) return;
-    if (pointerRef.current) return;
+    if (pointerRef.current || marqueeRef.current) return;
     try {
       const point = canvasPointerPosition(event, frame);
       handle.layoutPage(model.pageIndex);
@@ -444,14 +518,19 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const commandsRef = useRef<RibbonCommands | null>(null);
   const cancelActiveDrag = () => {
     const pointer = pointerRef.current;
-    if (!pointer) return false;
+    const marquee = marqueeRef.current;
+    if (!pointer && !marquee) return false;
     pointerRef.current = null;
+    marqueeRef.current = null;
     dragShapeRef.current = null;
     clearDragPreview();
+    if (marqueeFrameRef.current !== null) { cancelAnimationFrame(marqueeFrameRef.current); marqueeFrameRef.current = null; }
+    repaintOverlaySelection();
     const canvas = mainCanvasRef.current;
-    if (canvas && pointer.pointerId !== undefined) {
+    const captured = pointer?.pointerId ?? marquee?.pointerId;
+    if (canvas && captured !== undefined) {
       try {
-        if (typeof canvas.hasPointerCapture !== 'function' || canvas.hasPointerCapture(pointer.pointerId)) canvas.releasePointerCapture(pointer.pointerId);
+        if (typeof canvas.hasPointerCapture !== 'function' || canvas.hasPointerCapture(captured)) canvas.releasePointerCapture(captured);
       } catch { void 0; }
     }
     return true;
@@ -609,6 +688,17 @@ export function canvasLabel(t: TFunction, pageIndex: number, total: number, sele
   if (selection.length > 1) return t('pages.canvasLabelWithMultiSelection', { current: pageIndex + 1, total, count: selection.length });
   if (selection.length === 1) return t('pages.canvasLabelWithSelection', { current: pageIndex + 1, total, name: selection[0].shapeId });
   return t('pages.canvasLabel', { current: pageIndex + 1, total });
+}
+
+export function marqueeEnclosedShapes(page: PageSnapshot, frame: PageDisplayList, rect: MarqueeRect): VsdxShapeSelection[] {
+  const enclosed: VsdxShapeSelection[] = [];
+  for (const shape of page.shapes) {
+    try {
+      const corners = selectionCorners(page, frame, { pageId: page.id, shapeId: shape.id, hit: { kind: 'shape', shapeId: shape.id } });
+      if (corners && marqueeEnclosesQuad(corners, rect)) enclosed.push({ pageId: page.id, shapeId: shape.id, hit: { kind: 'shape', shapeId: shape.id } });
+    } catch { void 0; }
+  }
+  return enclosed;
 }
 
 /** Current selection corners in scale-1 canvas coordinates for overlay paint and hit tests. */
