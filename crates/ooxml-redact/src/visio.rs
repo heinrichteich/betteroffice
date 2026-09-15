@@ -141,8 +141,7 @@ fn is_known_section(name: &str) -> bool {
     )
 }
 
-/// Sections whose cached values and formulas are provably numeric formatting.
-/// Every other section, including any unknown one, has its V and F redacted.
+/// Sections with provably numeric cached values and formulas; all others redact V and F.
 fn is_safe_section(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -397,8 +396,7 @@ fn is_user_cell(name: &str) -> bool {
     )
 }
 
-/// Formulas survive only without string literals and without references
-/// outside the structural vocabulary. Anything else is redacted.
+/// Formulas survive only without string literals or non-structural references.
 fn is_safe_formula(value: &str) -> bool {
     if value.contains(['"', '\'']) {
         return false;
@@ -489,9 +487,7 @@ fn is_hex_color(value: &str) -> bool {
         && value.starts_with('#')
 }
 
-/// Whether an alphabetic run surviving redaction is provably structural.
-/// Used by the unexpected-text scan so the allowlist cannot drift from the
-/// redactor: every preserved word must be recognised here.
+/// Alphabetic runs that may survive redaction; mirrors the allowlist for tests.
 #[cfg(test)]
 pub(crate) fn is_structural_word(word: &str) -> bool {
     if word.len() < 4 {
@@ -601,18 +597,21 @@ pub(crate) fn is_structural_word(word: &str) -> bool {
     )
 }
 
-/// Whether a Visio attribute value is provably structural and survives.
-/// `key` is the full attribute name, `section` the enclosing Section N,
-/// `cell` the enclosing Cell N.
+/// Structural Visio attribute values survive; everything else is redacted.
 pub(crate) fn preserve_attribute(
     element: &str,
     key: &str,
     value: &str,
     section: Option<&str>,
     cell: Option<&str>,
+    is_relationship: bool,
 ) -> bool {
     let local = attribute_local(key);
-    if key == "r:id" {
+    if element.eq_ignore_ascii_case("Rel")
+        && local.eq_ignore_ascii_case("id")
+        && is_relationship
+        && is_rel_id(value)
+    {
         return true;
     }
     if local.eq_ignore_ascii_case("ID") || local.eq_ignore_ascii_case("IX") {
@@ -621,6 +620,10 @@ pub(crate) fn preserve_attribute(
     }
     if local.eq_ignore_ascii_case("Del") {
         return matches!(value.trim(), "0" | "1");
+    }
+    if is_style_reference(local) {
+        let trimmed = value.trim();
+        return !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_digit());
     }
     if element.eq_ignore_ascii_case("Cell") {
         if local.eq_ignore_ascii_case("N") {
@@ -671,15 +674,6 @@ pub(crate) fn preserve_attribute(
     if element.eq_ignore_ascii_case("Shape") {
         if local.eq_ignore_ascii_case("Type") {
             return is_known_shape_type(value);
-        }
-        if local.eq_ignore_ascii_case("Master")
-            || local.eq_ignore_ascii_case("MasterShape")
-            || local.eq_ignore_ascii_case("LineStyle")
-            || local.eq_ignore_ascii_case("FillStyle")
-            || local.eq_ignore_ascii_case("TextStyle")
-        {
-            let trimmed = value.trim();
-            return !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_digit());
         }
         return false;
     }
@@ -732,10 +726,116 @@ pub(crate) fn preserve_attribute(
         }
         return false;
     }
-    if element.eq_ignore_ascii_case("Rel") {
-        return local.eq_ignore_ascii_case("id");
-    }
     false
+}
+
+/// Schema-valid replacement for a redacted Visio attribute value.
+pub(crate) fn redacted_value(element: &str, key: &str, value: &str) -> String {
+    let local = attribute_local(key);
+    if local.eq_ignore_ascii_case("Date") || local.eq_ignore_ascii_case("dateUtc") {
+        return "1970-01-01T00:00:00Z".to_owned();
+    }
+    if local.eq_ignore_ascii_case("UniqueID")
+        || local.eq_ignore_ascii_case("BaseID")
+        || local.to_ascii_lowercase().ends_with("guid")
+    {
+        if value.trim_start().starts_with('{') && value.trim_end().ends_with('}') {
+            return "{00000000-0000-0000-0000-000000000000}".to_owned();
+        }
+        return "00000000-0000-0000-0000-000000000000".to_owned();
+    }
+    if element.eq_ignore_ascii_case("ColorEntry") && local.eq_ignore_ascii_case("RGB") {
+        return "#000000".to_owned();
+    }
+    if element.eq_ignore_ascii_case("ForeignData") && local.eq_ignore_ascii_case("CompressionType")
+    {
+        return "0".to_owned();
+    }
+    if element.eq_ignore_ascii_case("RefBy") && local.eq_ignore_ascii_case("T") {
+        return "Page".to_owned();
+    }
+    if is_numeric_attribute(local) {
+        return "0".to_owned();
+    }
+    crate::xml::placeholder(value)
+}
+
+/// Relationship reference ids are emitter-assigned counters without author text.
+fn is_rel_id(value: &str) -> bool {
+    value
+        .strip_prefix("rId")
+        .is_some_and(|tail| !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Style references are numeric ids on any element carrying a stylesheet.
+fn is_style_reference(local: &str) -> bool {
+    matches!(
+        local.to_ascii_lowercase().as_str(),
+        "master"
+            | "mastershape"
+            | "linestyle"
+            | "fillstyle"
+            | "textstyle"
+            | "defaultlinestyle"
+            | "defaultfillstyle"
+            | "defaulttextstyle"
+            | "defaultguidestyle"
+    )
+}
+
+/// Attribute names whose values are integers, decimals, or booleans.
+fn is_numeric_attribute(local: &str) -> bool {
+    matches!(
+        local.to_ascii_lowercase().as_str(),
+        "id" | "ix"
+            | "del"
+            | "master"
+            | "mastershape"
+            | "linestyle"
+            | "fillstyle"
+            | "textstyle"
+            | "defaultlinestyle"
+            | "defaultfillstyle"
+            | "defaulttextstyle"
+            | "defaultguidestyle"
+            | "fromsheet"
+            | "tosheet"
+            | "frompart"
+            | "topart"
+            | "basedon"
+            | "originalid"
+            | "parentwindow"
+            | "page"
+            | "toppage"
+            | "iconsize"
+            | "alignname"
+            | "patternflags"
+            | "mastertype"
+            | "iconupdate"
+            | "hidden"
+            | "iscustomname"
+            | "iscustomnameu"
+            | "matchbyname"
+            | "windowstate"
+            | "windowleft"
+            | "windowtop"
+            | "windowwidth"
+            | "windowheight"
+            | "clientwidth"
+            | "clientheight"
+            | "viewscale"
+            | "viewcenterx"
+            | "viewcentery"
+            | "unicoderanges"
+            | "charsets"
+            | "panose"
+            | "flags"
+            | "schemeenum"
+            | "fontidx"
+            | "fillidx"
+            | "lineidx"
+            | "effectidx"
+    )
 }
 
 #[cfg(test)]
@@ -744,9 +844,7 @@ mod vocabulary_tests {
         is_known_cell, is_known_row_type, is_known_section, is_safe_section, is_user_cell,
     };
 
-    /// Visio spells these cells in mixed case; vocabularies that lowercase before
-    /// matching make an arm carrying a capital unreachable, so the name is
-    /// redacted as if it were author-defined.
+    /// Canonical mixed-case Visio spellings the vocabulary must recognise.
     #[test]
     fn canonical_visio_spellings_are_recognised() {
         for name in [
@@ -776,8 +874,7 @@ mod vocabulary_tests {
         assert!(is_user_cell("Prompt"));
     }
 
-    /// A `matches!` arm containing a capital is unreachable when the scrutinee is
-    /// lowercased first. Guards the whole class, not just the five that were wrong.
+    /// Lowercased matches! arms must not contain capitals.
     #[test]
     fn lowercased_match_arms_have_no_unreachable_capitals() {
         let whole = include_str!("visio.rs");

@@ -325,12 +325,26 @@ fn rewrite_start(
             } else {
                 None
             };
-            let preserve =
-                visio::preserve_attribute(element, &key, &value, section, visio_cell.as_deref());
+            let is_relationship = matches!(
+                reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
+                ResolveResult::Bound(namespace)
+                    if namespace.as_ref()
+                        == b"http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                        || namespace.as_ref()
+                            == b"http://purl.oclc.org/ooxml/officeDocument/relationships"
+            );
+            let preserve = visio::preserve_attribute(
+                element,
+                &key,
+                &value,
+                section,
+                visio_cell.as_deref(),
+                is_relationship,
+            );
             if preserve {
                 None
             } else {
-                Some(placeholder(&value))
+                Some(visio::redacted_value(element, &key, &value))
             }
         } else if !key.starts_with("xmlns")
             && !(schema && is_unqualified(&key) && schema::preserve_attribute(element, local))
@@ -545,7 +559,7 @@ fn sensitive_attribute(
     }
 }
 
-fn placeholder(text: &str) -> String {
+pub(crate) fn placeholder(text: &str) -> String {
     text.chars()
         .map(|character| {
             if character.is_whitespace() {

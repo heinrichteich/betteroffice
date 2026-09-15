@@ -2771,6 +2771,90 @@ fn after_parts(parts: &[(String, Vec<u8>)]) -> Vec<(String, Vec<u8>)> {
     parts.to_vec()
 }
 
+#[test]
+fn vsdx_relationship_references_reject_author_text() {
+    let input = "<Pages xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:other=\"urn:other\"><Page ID=\"1\" NameU=\"Page-1\"><Rel r:id=\"rId1\"/></Page><Page ID=\"2\" NameU=\"Page-2\"><Rel r:id=\"rIdSECRETLEAK\"/></Page><Page ID=\"3\" NameU=\"Page-3\"><Rel other:id=\"rIdSECRETLEAK\"/></Page><Shape ID=\"4\" Type=\"Shape\" r:id=\"rIdSECRETLEAK\"/></Pages>";
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/pages/pages.xml",
+        input.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        !text.contains("SECRETLEAK"),
+        "author text in a relationship reference survived: {text}"
+    );
+    assert!(
+        text.contains("r:id=\"rId1\""),
+        "declared relationship reference lost: {text}"
+    );
+}
+
+#[test]
+fn vsdx_typed_attributes_keep_valid_values() {
+    let input = "<Comments xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Comment Author=\"SENTINELCOMMENTAUTHOR\" Date=\"2026-01-02T03:04:05Z\">SENTINELCOMMENTBODY</Comment></Comments>";
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/comments.xml",
+        input.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        !text.contains("SENTINEL"),
+        "comment secret survived: {text}"
+    );
+    assert!(
+        !text.contains("2026-01-02"),
+        "comment date survived: {text}"
+    );
+    assert!(
+        text.contains("Date=\"1970-01-01T00:00:00Z\""),
+        "comment date lost its dateTime shape: {text}"
+    );
+    let input = "<Masters xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Master ID=\"2\" NameU=\"Rectangle\" UniqueID=\"{08840884-0002-0000-8E40-00608CF305B2}\" BaseID=\"{265F9737-E810-4325-8E7F-292854638452}\"/></Masters>";
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/masters/masters.xml",
+        input.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("08840884"), "master GUID survived: {text}");
+    assert!(!text.contains("265F9737"), "master GUID survived: {text}");
+    assert!(
+        text.matches("{00000000-0000-0000-0000-000000000000}")
+            .count()
+            == 2,
+        "master GUIDs lost their GUID shape: {text}"
+    );
+    let input = "<Pages xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Page ID=\"0\" NameU=\"Page-1\"><PageSheet LineStyle=\"3\" FillStyle=\"SECRET\"/><Shape ID=\"SECRET\" Type=\"Shape\"/></Page></Pages>";
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/pages/pages.xml",
+        input.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        !text.contains("SECRET"),
+        "identifier secret survived: {text}"
+    );
+    assert!(
+        text.contains("LineStyle=\"3\""),
+        "numeric style reference outside Shape lost: {text}"
+    );
+    assert!(
+        text.contains("FillStyle=\"0\"") && text.contains("ID=\"0\""),
+        "rejected numerics lost their integer shape: {text}"
+    );
+}
+
 fn visio_surviving_words(parts: &[(String, Vec<u8>)]) -> Vec<String> {
     let mut found = std::collections::BTreeSet::new();
     for (path, bytes) in parts {
