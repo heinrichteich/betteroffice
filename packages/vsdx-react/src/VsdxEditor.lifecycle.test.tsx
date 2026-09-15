@@ -1356,3 +1356,77 @@ test('a selected control handle paints yellow and drags through the edit session
     expect(nextX?.formula).toBe('1');
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
+
+test('a control drag skips guarded cells instead of partially committing', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  let readyGuarded: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const errors: string[] = [];
+  const view = render(<VsdxEditor file={foundation} fonts={[]} onReady={(api) => { readyGuarded = api; }} onError={(error) => { errors.push(error.message); }} />);
+  try {
+    await waitFor(() => expect(readyGuarded).toBeDefined());
+    const handle = readyGuarded!.handle;
+    const fakeFrame = { contractVersion: 4, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    const pageId = handle.snapshot().pages[0].id;
+    const added = await act(async () => handle.addShape(pageId, { name: 'adjustable', cells: [
+      { locator: { cellName: 'PinX' }, formula: '1' },
+      { locator: { cellName: 'PinY' }, formula: '1' },
+      { locator: { cellName: 'Width' }, formula: '2' },
+      { locator: { cellName: 'Height' }, formula: '1' },
+      { locator: { section: 'Control', rowName: 'Row_1', cellName: 'X' }, formula: 'GUARD(Width*0.25)' },
+      { locator: { section: 'Control', rowName: 'Row_1', cellName: 'Y' }, formula: 'Height*0.5' },
+      { locator: { section: 'Control', rowName: 'Row_1', cellName: 'XCon' }, formula: '0' },
+      { locator: { section: 'Control', rowName: 'Row_1', cellName: 'YCon' }, formula: '0' },
+    ] }));
+    const shapeId = (added as unknown as { shapeId: string }).shapeId;
+    handle.hitTest = (() => ({ kind: 'shape', shapeId })) as unknown as DiagramHandle['hitTest'];
+    await act(async () => { readyGuarded!.refresh(); });
+    const canvases = view.container.querySelectorAll('canvas');
+    const main = canvases[0] as HTMLCanvasElement;
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    (main as unknown as { releasePointerCapture: (id: number) => void }).releasePointerCapture = () => {};
+    (main as unknown as { hasPointerCapture: (id: number) => boolean }).hasPointerCapture = () => false;
+    const { fireEvent } = await import('@testing-library/react');
+    fireEvent.pointerDown(main, { pointerId: 1, clientX: 100, clientY: 100 });
+    await act(async () => {});
+    fireEvent.pointerUp(main, { pointerId: 1, clientX: 100, clientY: 100 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    const writes: Array<{ locator: unknown; formula: string }> = [];
+    const originalSet = handle.setCellFormula.bind(handle);
+    handle.setCellFormula = ((...args: Parameters<DiagramHandle['setCellFormula']>) => {
+      writes.push({ locator: args[2], formula: args[3] });
+      return originalSet(...args);
+    }) as DiagramHandle['setCellFormula'];
+    const shape = handle.snapshot().pages[0].shapes.find((entry) => entry.id === shapeId)!;
+    const positions = controlHandleCanvasPositions(shape, {
+      pin: { x: 1, y: 1 },
+      locPin: { x: 1, y: 0.5 },
+      size: { width: 2, height: 1 },
+    }, fakeFrame.paintTransform);
+    expect(positions.map((position) => position.row)).toEqual(['Row_1']);
+    const anchor = positions[0].canvas;
+    fireEvent.pointerDown(main, { pointerId: 2, clientX: anchor.x, clientY: anchor.y });
+    await act(async () => {});
+    fireEvent.pointerMove(main, { pointerId: 2, clientX: anchor.x + 48, clientY: anchor.y });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    fireEvent.pointerUp(main, { pointerId: 2, clientX: anchor.x + 48, clientY: anchor.y });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(writes).toEqual([{ locator: { section: 'Control', rowName: 'Row_1', cellName: 'Y' }, formula: '0.5' }]);
+    expect(errors).toEqual([]);
+    const after = handle.snapshot().pages[0].shapes.find((entry) => entry.id === shapeId)!;
+    expect(after.cells.find((cell) => cell.locator.section === 'Control' && cell.name === 'X')?.formula).toBe('GUARD(Width*0.25)');
+    expect(after.cells.find((cell) => cell.locator.section === 'Control' && cell.name === 'Y')?.formula).toBe('0.5');
+    await act(async () => { handle.setCellFormula(pageId, shapeId, { section: 'Control', rowName: 'Row_1', cellName: 'Y' }, 'GUARD(Height*0.5)'); });
+    await act(async () => { readyGuarded!.refresh(); });
+    writes.length = 0;
+    fireEvent.pointerDown(main, { pointerId: 3, clientX: anchor.x, clientY: anchor.y });
+    await act(async () => {});
+    fireEvent.pointerUp(main, { pointerId: 3, clientX: anchor.x, clientY: anchor.y });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(writes.filter((write) => (write.locator as { section?: string }).section === 'Control')).toEqual([]);
+    expect(errors).toEqual([]);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});

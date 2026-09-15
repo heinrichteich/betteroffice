@@ -12,7 +12,7 @@ import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
 import { StatusBar, clampZoom } from './components/statusbar';
-import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, hitTestControlHandles, controlHandleCanvasPositions, controlHandlesForShape, paintControlHandles, resolveControlDrag, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent, shapeLocalToPage } from './interactions';
+import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, hitTestControlHandles, controlCellWriteBlocked, controlHandleCanvasPositions, controlHandlesForShape, paintControlHandles, resolveControlDrag, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent, shapeLocalToPage } from './interactions';
 import type { ControlDrag, DragStart, ResizeHandle } from './interactions';
 export { resolveDragGeometry };
 export type { DragStart };
@@ -261,7 +261,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
             const row = hitTestControlHandles(point.canvas, controls, zoomRef.current);
             const hit = row ? controls.find((entry) => entry.row === row) : undefined;
             const drag = hit && row ? controlDragStart(placement.shape, row, hit) : null;
-            if (hit && drag && !(hit.lockedX && hit.lockedY)) {
+            if (hit && drag && !(drag.lockedX && drag.lockedY)) {
               pointerRef.current = {
                 ...point,
                 ...base,
@@ -406,9 +406,13 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       if (!pointer.thresholdPassed && !hadPreview && pointer.startX !== undefined && pointer.startY !== undefined && !passedDragThreshold(pointer.startX, pointer.startY, event.clientX, event.clientY)) return;
       if (!pointer.thresholdPassed && !hadPreview && Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) return;
       if (pointer.control) {
-        const next = resolveControlDrag(pointer, pointer.control.startLocal, point.model, pointer.control.lockedX, pointer.control.lockedY);
-        if (!pointer.control.lockedX) handle.setCellFormula(selected.pageId, selected.shapeId, { section: 'Control', rowName: pointer.control.row, cellName: 'X' }, inchFormula(next.x));
-        if (!pointer.control.lockedY) handle.setCellFormula(selected.pageId, selected.shapeId, { section: 'Control', rowName: pointer.control.row, cellName: 'Y' }, inchFormula(next.y));
+        const livePage = handle.snapshot().pages.find((page) => page.id === selected.pageId);
+        const liveShape = livePage ? findShapePlacement(livePage.shapes, selected.shapeId)?.shape : undefined;
+        const lockedX = pointer.control.lockedX || (liveShape ? controlCellWriteBlocked(liveShape, pointer.control.row, 'X') : false);
+        const lockedY = pointer.control.lockedY || (liveShape ? controlCellWriteBlocked(liveShape, pointer.control.row, 'Y') : false);
+        const next = resolveControlDrag(pointer, pointer.control.startLocal, point.model, lockedX, lockedY);
+        if (!lockedX) handle.setCellFormula(selected.pageId, selected.shapeId, { section: 'Control', rowName: pointer.control.row, cellName: 'X' }, inchFormula(next.x));
+        if (!lockedY) handle.setCellFormula(selected.pageId, selected.shapeId, { section: 'Control', rowName: pointer.control.row, cellName: 'Y' }, inchFormula(next.y));
         refresh(undefined, true);
         return;
       }
@@ -623,7 +627,7 @@ export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, sel
 export function controlDragStart(shape: ShapeSnapshot, row: string, hit: { lockedX: boolean; lockedY: boolean }): ControlDrag | null {
   const handle = controlHandlesForShape(shape).find((entry) => entry.row === row);
   if (!handle) return null;
-  return { row, startLocal: { x: handle.x, y: handle.y }, lockedX: hit.lockedX, lockedY: hit.lockedY };
+  return { row, startLocal: { x: handle.x, y: handle.y }, lockedX: hit.lockedX || controlCellWriteBlocked(shape, row, 'X'), lockedY: hit.lockedY || controlCellWriteBlocked(shape, row, 'Y') };
 }
 
 export function collectDiagnostics(frame: PageDisplayList): TextDiagnostic[] { const result: TextDiagnostic[] = []; const work = frame.primitives.map((primitive) => ({ primitive, depth: 0 })); while (work.length) { const current = work.pop(); if (!current || current.depth >= 256) continue; if (current.primitive.kind === 'shape') result.push(...(current.primitive.diagnostics ?? [])); if (current.primitive.kind === 'textBox') for (const paragraph of current.primitive.paragraphs) for (const run of paragraph.runs) result.push(...(run.diagnostics ?? [])); if (current.primitive.kind === 'group') for (const primitive of current.primitive.primitives) work.push({ primitive, depth: current.depth + 1 }); } return result; }

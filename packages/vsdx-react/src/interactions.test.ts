@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { canvasPointToModel, modelPointToCanvas } from '@betteroffice/vsdx';
 import type { ModelPoint } from '@betteroffice/vsdx';
-import { RESIZE_HANDLES, SELECTION_STROKE, canvasKeyboardIntent, controlHandleCanvasPositions, controlHandleHidden, controlHandleLockedX, controlHandleLockedY, controlHandlesForShape, hitTestControlHandles, hitTestSelection, isEditableKeyboardTarget, keyboardNudgeStep, paintControlHandles, paintSelectionFrame, paintDragPreview, pageToShapeLocal, passedDragThreshold, previewOutline, resolveControlDrag, resizedBounds, resizeCursor, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions, shapeLocalToPage } from './interactions';
+import { RESIZE_HANDLES, SELECTION_STROKE, canvasKeyboardIntent, controlCellWriteBlocked, controlHandleCanvasPositions, controlHandleHidden, controlHandleLockedX, controlHandleLockedY, controlHandlesForShape, hitTestControlHandles, hitTestSelection, isEditableKeyboardTarget, keyboardNudgeStep, paintControlHandles, paintSelectionFrame, paintDragPreview, pageToShapeLocal, passedDragThreshold, previewOutline, resolveControlDrag, resizedBounds, resizeCursor, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions, shapeLocalToPage } from './interactions';
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 };
 const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 test('passedDragThreshold needs four css pixels by default', () => {
@@ -350,6 +350,19 @@ test('control handles resolve named rows and honour hidden and locked variants',
   expect(first.x).toBe(0.5);
   expect(controlHandleLockedX(first)).toBe(true);
   expect(controlHandleLockedY(first)).toBe(false);
+});
+test('control handles report guarded and redirected cells as write-blocked', () => {
+  const shape = controlShape([
+    { section: 'Control', row: 'Row_1', cell: 'X', value: 'GUARD(Width*0.25)' },
+    { section: 'Control', row: 'Row_1', cell: 'Y', value: 'Height*0.5' },
+    { section: 'Control', row: 'Row_2', cell: 'X', value: '0.2' },
+    { section: 'Control', row: 'Row_2', cell: 'Y', value: 'SETATREF(Controls.Row_1.Y,0)' },
+  ]);
+  expect(controlCellWriteBlocked(shape as never, 'Row_1', 'X')).toBe(true);
+  expect(controlCellWriteBlocked(shape as never, 'Row_1', 'Y')).toBe(false);
+  expect(controlCellWriteBlocked(shape as never, 'Row_2', 'X')).toBe(false);
+  expect(controlCellWriteBlocked(shape as never, 'Row_2', 'Y')).toBe(true);
+  expect(controlCellWriteBlocked(shape as never, 'Row_9', 'X')).toBe(false);
 });
 test('control handles map between shape-local and page coordinates', () => {
   const base = { pin: { x: 3, y: 3 }, locPin: { x: 1, y: 0.5 }, size: { width: 2, height: 1 } };

@@ -3,6 +3,7 @@
 "@betteroffice/vsdx-i18n": patch
 ---
 
-Add a right-click menu for the selected shape with keyboard navigation and z-order submenus that
-stay inside the viewport, draw the rotation grip as a circle on a stalk, and give the shapes panel
-a header, a search box and a category rail. A queued drag preview follows the latest Shift state.
+Add yellow control handles that reshape selected shapes, plus a right-click menu with keyboard
+navigation and viewport-aware z-order submenus. Draw the rotation grip as a circle on a stalk, give
+the shapes panel a header, search box and category rail, and follow the latest Shift state in queued
+drag previews.
