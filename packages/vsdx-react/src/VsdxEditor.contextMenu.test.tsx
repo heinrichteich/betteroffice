@@ -259,6 +259,32 @@ test('the menu flips inside the viewport near an edge', () => {
   }
 });
 
+test('the menu re-clamps when the viewport shrinks while it is open', () => {
+  const originalRect = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+    if (this.getAttribute?.('role') === 'menu' && !this.hasAttribute('data-submenu')) return { x: 0, y: 0, width: 220, height: 340, top: 0, left: 0, right: 220, bottom: 340, toJSON: () => ({}) } as DOMRect;
+    return originalRect.call(this);
+  };
+  const originalWidth = window.innerWidth;
+  const originalHeight = window.innerHeight;
+  const { view } = renderMenu({ position: { top: 100, left: 100 } });
+  try {
+    const menu = parentMenu() as HTMLElement;
+    expect(menu.style.top).toBe('100px');
+    expect(menu.style.left).toBe('100px');
+    Object.defineProperty(window, 'innerWidth', { value: 300, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { value: 200, configurable: true });
+    fireEvent(window, new window.Event('resize'));
+    expect(menu.style.left).toBe('76px');
+    expect(menu.style.top).toBe('4px');
+  } finally {
+    Object.defineProperty(window, 'innerWidth', { value: originalWidth, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { value: originalHeight, configurable: true });
+    HTMLElement.prototype.getBoundingClientRect = originalRect;
+    view.unmount();
+  }
+});
+
 test('a locked shape disables its refused operation and focuses the first allowed entry', () => {
   const { view } = renderMenu({ cells: [cell('LockDelete', '1'), cell('Angle', 'GUARD(0)'), cell('FlipX', '0'), cell('FlipY', '0')] });
   try {

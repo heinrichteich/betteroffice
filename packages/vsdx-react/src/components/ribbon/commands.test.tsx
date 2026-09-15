@@ -57,6 +57,14 @@ test('locks and guards disable the operations the mutation policy would refuse',
   expect(commands.sendBackward.enabled).toBe(true);
 });
 
+test('a GUARD on a colour cell disables its picker instead of refusing on pick', () => {
+  const state = snapshot({ FillForegnd: 'GUARD(RGB(255,0,0))', LineColor: 'RGB(0,0,255)' });
+  const diagram = handle(state);
+  const commands = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {});
+  expect(commands.fillColor.enabled).toBe(false);
+  expect(commands.lineColor.enabled).toBe(true);
+});
+
 test('a GUARD substring inside a reference name disables nothing', () => {
   const state = snapshot({ LockDelete: 'User.GuardDelete', Angle: 'User.GuardAngle', FlipX: 'User.GuardFlip', FlipY: 'User.GuardFlip' });
   const diagram = handle(state);
