@@ -25,6 +25,14 @@ export const SHAPE_CONTEXT_ENTRIES: ReadonlyArray<CommandMenuEntry> = [
       { id: 'sendToBack', icon: 'back' },
     ],
   },
+  {
+    id: 'rotateRight', icon: 'rotateRight', children: [
+      { id: 'rotateRight', icon: 'rotateRight' },
+      { id: 'rotateLeft', icon: 'rotateLeft' },
+      { id: 'flipHorizontal', icon: 'flipHorizontal' },
+      { id: 'flipVertical', icon: 'flipVertical' },
+    ],
+  },
 ];
 
 const SHAPE_CONTEXT_DIVIDERS: ReadonlySet<RibbonCommandId> = new Set(['delete']);
