@@ -2817,6 +2817,34 @@ mod tests {
         assert_eq!(session.save().unwrap(), before);
     }
 
+    /// A formula the resolver cannot evaluate falls back to endpoints on both sides.
+    #[test]
+    fn one_d_beyond_the_resolver_falls_back_to_endpoints() {
+        let (session, from_id, to_id, _) = glued_fixture();
+        let mut draft = connector_draft();
+        for cell in &mut draft.cells {
+            if cell.name == "OneD" {
+                cell.formula = Some("ABS(0)".to_owned());
+                cell.value = None;
+            }
+        }
+        session
+            .add_connector(
+                &EditCtx::local("resolver-parity"),
+                "page:1",
+                &draft,
+                &ConnectorGlue {
+                    shape_id: from_id.clone(),
+                    to_cell: None,
+                },
+                &ConnectorGlue {
+                    shape_id: to_id.clone(),
+                    to_cell: None,
+                },
+            )
+            .expect("the resolver reads this shape as 1D, so creation must agree");
+    }
+
     /// An `OneD` expression evaluating to nonzero still describes a connector.
     #[test]
     fn expression_one_d_nonzero_is_accepted() {
@@ -2877,6 +2905,49 @@ mod tests {
             glue
         );
         assert_eq!(session.save().unwrap(), before);
+    }
+
+    /// Implied points need a resolvable extent, or the resolver cannot synthesise them.
+    #[test]
+    fn implied_connection_points_need_a_resolvable_extent() {
+        let (session, from_id, _, _) = glued_fixture();
+        let part = page_part(&session);
+        let extentless = session
+            .add_shape(
+                &EditCtx::local("extentless"),
+                "page:1",
+                &ShapeDraft {
+                    name: None,
+                    cells: Vec::new(),
+                },
+            )
+            .unwrap()
+            .shape_id;
+        let glue = session.package().unwrap().page_contents[&part]
+            .connects()
+            .count();
+        let receipt = session.add_connector(
+            &EditCtx::local("extentless-row"),
+            "page:1",
+            &connector_draft(),
+            &ConnectorGlue {
+                shape_id: from_id.clone(),
+                to_cell: None,
+            },
+            &ConnectorGlue {
+                shape_id: extentless,
+                to_cell: Some("Connections.X2".to_owned()),
+            },
+        );
+        assert!(
+            matches!(receipt, Err(EditError::InvalidState(reason)) if reason == "connector glue references a missing connection point")
+        );
+        assert_eq!(
+            session.package().unwrap().page_contents[&part]
+                .connects()
+                .count(),
+            glue
+        );
     }
 
     /// A sectionless target still offers the four implied N/E/S/W points.

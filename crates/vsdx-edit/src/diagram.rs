@@ -252,7 +252,31 @@ fn connection_point_exists<T: ReadTxn>(
             return true;
         }
     }
-    !has_section && row < 4
+    !has_section && row < 4 && has_implied_extent(&cells, txn)
+}
+
+/// The resolver synthesises implied points from Width and Height, so both must be finite.
+fn has_implied_extent<T: ReadTxn>(cells: &yrs::MapRef, txn: &T) -> bool {
+    ["Width", "Height"]
+        .into_iter()
+        .all(|name| sheet_extent(cells, txn, name).is_some_and(f64::is_finite))
+}
+
+fn sheet_extent<T: ReadTxn>(cells: &yrs::MapRef, txn: &T, name: &str) -> Option<f64> {
+    for (_, entry) in cells.iter(txn) {
+        let yrs::Out::YMap(cell) = entry else {
+            continue;
+        };
+        if map_string(&cell, txn, "section").is_some()
+            || map_string(&cell, txn, "name").as_deref() != Some(name)
+        {
+            continue;
+        }
+        return map_string(&cell, txn, "value")
+            .or_else(|| map_string(&cell, txn, "formula"))
+            .and_then(|text| text.trim_start_matches('=').trim().parse::<f64>().ok());
+    }
+    None
 }
 
 fn glue_text_valid(value: &str) -> bool {
@@ -267,46 +291,51 @@ fn glue_text_valid(value: &str) -> bool {
 /// Evaluated `OneD` decides alone, matching the resolver.
 fn draft_is_one_d(draft: &ShapeDraft) -> bool {
     let mut endpoints = HashSet::new();
+    let mut one_d = None;
     for cell in &draft.cells {
         if cell.locator.section.is_some() {
             continue;
         }
         match cell.name.as_str() {
-            "OneD" => {
-                let formula = cell.formula.as_deref().unwrap_or_default();
-                if let vsdx_eval::Evaluation::Evaluated(result) = evaluate(
-                    formula.trim_start_matches('='),
-                    &draft_formulas(draft),
-                    &ParseLimits::default(),
-                ) {
-                    match result.value {
-                        vsdx_eval::Value::Number(number) => return number.number != 0.0,
-                        vsdx_eval::Value::Color(_) => {}
-                    }
-                }
-            }
+            "OneD" => one_d = draft_number(draft, cell),
             "BeginX" | "BeginY" | "EndX" | "EndY" => {
                 endpoints.insert(cell.name.as_str());
             }
             _ => {}
         }
     }
-    ["BeginX", "BeginY", "EndX", "EndY"]
-        .into_iter()
-        .all(|name| endpoints.contains(name))
+    match one_d {
+        Some(value) => value != 0.0,
+        None => ["BeginX", "BeginY", "EndX", "EndY"]
+            .into_iter()
+            .all(|name| endpoints.contains(name)),
+    }
 }
 
-fn draft_formulas(draft: &ShapeDraft) -> std::collections::BTreeMap<String, String> {
-    draft
-        .cells
-        .iter()
-        .filter(|cell| cell.locator.section.is_none())
-        .filter_map(|cell| {
-            cell.formula
-                .as_deref()
-                .map(|formula| (cell.name.clone(), formula.to_owned()))
+/// Mirrors the resolver's cell-number precedence so creation and resolution agree.
+fn draft_number(draft: &ShapeDraft, cell: &CellSnapshot) -> Option<f64> {
+    let limits = vsdx_formula::Limits {
+        max_depth: 64,
+        max_nodes: 1_024,
+        max_tokens: 1_024,
+    };
+    if let Some(number) = cell.formula.as_deref().and_then(|formula| {
+        vsdx_formula::evaluate_number(formula, limits, &mut |name| {
+            let name = name.trim();
+            draft
+                .cells
+                .iter()
+                .find(|other| other.locator.section.is_none() && other.name == name)
+                .and_then(|other| other.formula.clone().or_else(|| other.value.clone()))
         })
-        .collect()
+    }) {
+        return Some(number);
+    }
+    cell.value
+        .as_deref()?
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
 }
 
 fn glue_records<T: ReadTxn>(txn: &T) -> EditResult<Vec<GlueRecord>> {
