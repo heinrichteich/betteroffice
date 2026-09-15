@@ -19,7 +19,7 @@ const transform = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 test('replays primitives in z order and paints placeholders', async () => {
   const log: string[] = [];
   const list: PageDisplayList = {
-    contractVersion: 4, width: 100, height: 100, paintTransform: transform,
+    contractVersion: 5, width: 100, height: 100, printWidth: 100, printHeight: 100, paintTransform: transform,
     primitives: [
       { kind: 'placeholder', id: 'late', zOrder: 2, x: 10, y: 10, width: 20, height: 20, reason: 'missing image' },
       { kind: 'shape', id: 'early', zOrder: 1, path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 1, y: 1 }], fill: { kind: 'solid', color: '#000' } },
@@ -31,14 +31,14 @@ test('replays primitives in z order and paints placeholders', async () => {
   expect(log.some(entry => entry.startsWith('fillText:missing image'))).toBe(true);
 });
 
-test('rejects display-list versions other than v4', async () => {
+test('rejects display-list versions other than v5', async () => {
   await expect(paintPage(context([]), { contractVersion: 2, width: 1, height: 1, paintTransform: transform, primitives: [] } as unknown as PageDisplayList)).rejects.toThrow('unsupported VSDX display-list contract version 2');
 });
 
 test('replays positioned text runs at their line caret positions', async () => {
   const log: string[] = [];
   const list: PageDisplayList = {
-    contractVersion: 4, width: 100, height: 100, paintTransform: transform,
+    contractVersion: 5, width: 100, height: 100, printWidth: 100, printHeight: 100, paintTransform: transform,
     primitives: [{
       kind: 'textBox', id: 'text', zOrder: 1, x: 1, y: 2, width: 90, height: 80,
       paragraphs: [
@@ -94,7 +94,7 @@ test('an enormous surface stays within the backing store caps', () => {
 test('surface paint translates page content by the pad origin', async () => {
   const log: string[] = [];
   const list: PageDisplayList = {
-    contractVersion: 4, width: 100, height: 100, paintTransform: transform,
+    contractVersion: 5, width: 100, height: 100, printWidth: 100, printHeight: 100, paintTransform: transform,
     primitives: [
       { kind: 'shape', id: 'early', zOrder: 1, path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 1, y: 1 }], fill: { kind: 'solid', color: '#000' } },
     ],
@@ -145,7 +145,7 @@ test('a delayed image cannot overwrite a newer page or disturb its canvas state'
   const log: string[] = [];
   const ctx = context(log);
   let finish: (image: CanvasImageSource) => void = () => {};
-  const oldPage: PageDisplayList = { contractVersion: 4, width: 100, height: 100, paintTransform: transform, primitives: [{ kind: 'image', id: 'old', zOrder: 0, assetId: 'slow', x: 0, y: 0, width: 1, height: 1 }] };
+  const oldPage: PageDisplayList = { contractVersion: 5, width: 100, height: 100, printWidth: 100, printHeight: 100, paintTransform: transform, primitives: [{ kind: 'image', id: 'old', zOrder: 0, assetId: 'slow', x: 0, y: 0, width: 1, height: 1 }] };
   const oldPaint = paintPage(ctx, oldPage, 1, 1, { resolveImage: () => new Promise(resolve => { finish = resolve; }) });
   expect(log).toEqual([]);
   await paintPage(ctx, { ...oldPage, primitives: [] });
@@ -159,7 +159,7 @@ test('an aborted page never touches the canvas after its images load', async () 
   const log: string[] = [];
   const controller = new AbortController();
   controller.abort();
-  await paintPage(context(log), { contractVersion: 4, width: 1, height: 1, paintTransform: transform, primitives: [] }, 1, 1, { signal: controller.signal });
+  await paintPage(context(log), { contractVersion: 5, width: 1, height: 1, printWidth: 1, printHeight: 1, paintTransform: transform, primitives: [] }, 1, 1, { signal: controller.signal });
   expect(log).toEqual([]);
 });
 
@@ -182,7 +182,7 @@ test('places the top of an image above its bottom in a Y-up diagram', async () =
       bottom = (y + height) * yScale + yOffset;
     },
   } as unknown as CanvasRenderingContext2D;
-  await paintPage(ctx, { contractVersion: 4, width: 192, height: 192, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 192 }, primitives: [{ kind: 'image', id: 'picture', assetId: 'picture', zOrder: 0, x: 0, y: 0, width: 2, height: 2 }] }, 1, 1, { resolveImage: () => ({} as CanvasImageSource) });
+  await paintPage(ctx, { contractVersion: 5, width: 192, height: 192, printWidth: 192, printHeight: 192, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 192 }, primitives: [{ kind: 'image', id: 'picture', assetId: 'picture', zOrder: 0, x: 0, y: 0, width: 2, height: 2 }] }, 1, 1, { resolveImage: () => ({} as CanvasImageSource) });
   expect(top).toBe(0);
   expect(bottom).toBe(192);
 });

@@ -43,7 +43,7 @@ export function modelPointToCanvas(paintTransform: Affine, x: number, y: number,
 }
 const paintRequests = new WeakMap<CanvasRenderingContext2D, object>();
 export async function paintPage(ctx: CanvasRenderingContext2D, list: PageDisplayList, dpr = 1, scale = 1, options: PaintPageOptions = {}): Promise<void> {
-  if (list.contractVersion !== 4) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
+  if (list.contractVersion !== 5) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
   const request = {};
   paintRequests.set(ctx, request);
   const images = new Map<string, CanvasImageSource | null>();

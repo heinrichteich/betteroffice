@@ -38,9 +38,9 @@ describe('VSDX wasm boundary', () => {
     expect(() => diagram.snapshot()).toThrow('diagram handle is disposed');
   });
 
-  test('accepts only v4 display lists', () => {
+  test('accepts only v5 display lists', () => {
     const diagram = openDiagram(foundation, { clientId: 9002 });
-    expect(diagram.layoutPage(0).contractVersion).toBe(4);
+    expect(diagram.layoutPage(0).contractVersion).toBe(5);
 
     const layoutPageJson = VsdxRenderer.prototype.layoutPageJson;
     VsdxRenderer.prototype.layoutPageJson = () => JSON.stringify({ contractVersion: 2 });
@@ -50,6 +50,14 @@ describe('VSDX wasm boundary', () => {
       VsdxRenderer.prototype.layoutPageJson = layoutPageJson;
       diagram.dispose();
     }
+  });
+
+  test('reports the printable paper tile for page breaks', () => {
+    const diagram = openDiagram(foundation, { clientId: 9054 });
+    const frame = diagram.layoutPage(0);
+    expect(frame.printWidth).toBeCloseTo(8.26772 * 96, 2);
+    expect(frame.printHeight).toBeCloseTo(11.69291 * 96, 2);
+    diagram.dispose();
   });
 
   test('frees the document when applying the initial update fails', () => {

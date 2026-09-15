@@ -565,6 +565,7 @@ impl Renderer {
                 "dimensions must be positive finite canvas values".into(),
             ));
         }
+        let print_tile = print_tile_inches(&resolver, package, page_part);
         let mut state = State {
             count: 0,
             z_order: 0,
@@ -597,6 +598,8 @@ impl Renderer {
             contract_version: CONTRACT_VERSION,
             width: page_width as f32 * PIXELS_PER_INCH,
             height: page_height as f32 * PIXELS_PER_INCH,
+            print_width: print_tile.0 as f32 * PIXELS_PER_INCH,
+            print_height: print_tile.1 as f32 * PIXELS_PER_INCH,
             paint_transform: final_paint_transform(page_height as f32),
             primitives: state.primitives,
         };
@@ -1618,6 +1621,43 @@ fn page_dimension(
         .ok()
         .filter(|value: &f64| value.is_finite())
 }
+const A4_WIDTH_INCHES: f64 = 8.26772;
+const A4_HEIGHT_INCHES: f64 = 11.69291;
+fn print_tile_inches(resolver: &Resolver<'_>, package: &VsdxPackage, page: &str) -> (f64, f64) {
+    let paper = |name: &str, fallback: f64| {
+        page_dimension(resolver, package, page, name)
+            .filter(|value| *value > 0.0)
+            .unwrap_or(fallback)
+    };
+    let margin = |name: &str| {
+        page_dimension(resolver, package, page, name)
+            .filter(|value| *value >= 0.0)
+            .unwrap_or(0.0)
+    };
+    let landscape = page_dimension(resolver, package, page, "PrintPageOrientation")
+        .is_some_and(|orientation| orientation.round() == 2.0);
+    let (paper_width, paper_height) = if landscape {
+        (
+            paper("PrintPageHeight", A4_HEIGHT_INCHES),
+            paper("PrintPageWidth", A4_WIDTH_INCHES),
+        )
+    } else {
+        (
+            paper("PrintPageWidth", A4_WIDTH_INCHES),
+            paper("PrintPageHeight", A4_HEIGHT_INCHES),
+        )
+    };
+    let tile = (
+        paper_width - margin("PageLeftMargin") - margin("PageRightMargin"),
+        paper_height - margin("PageTopMargin") - margin("PageBottomMargin"),
+    );
+    let finite = |value: f64| value.is_finite() && (value as f32).is_finite();
+    if tile.0 > 0.0 && tile.1 > 0.0 && finite(tile.0) && finite(tile.1) {
+        tile
+    } else {
+        (paper_width, paper_height)
+    }
+}
 fn bounds(
     package: &VsdxPackage,
     references: Option<&PageShapeReferences>,
@@ -2465,6 +2505,71 @@ mod tests {
     fn render(shapes: Vec<Shape>) -> VsdxDisplayList {
         let package = package(shapes);
         Renderer::default().layout_page(&package, "page").unwrap()
+    }
+
+    fn print_sheet(cells: Vec<(&str, &str)>) -> VsdxDisplayList {
+        let mut laid = package(vec![]);
+        laid.page_sheets.get_mut(&1).unwrap().children.extend(
+            cells
+                .into_iter()
+                .map(|(name, value)| SheetChild::Cell(cell(name, value))),
+        );
+        Renderer::default().layout_page(&laid, "page").unwrap()
+    }
+
+    #[test]
+    fn print_tile_defaults_to_a4_portrait() {
+        let list = print_sheet(vec![]);
+        assert_eq!(list.print_width, A4_WIDTH_INCHES as f32 * PIXELS_PER_INCH);
+        assert_eq!(list.print_height, A4_HEIGHT_INCHES as f32 * PIXELS_PER_INCH);
+    }
+
+    #[test]
+    fn print_tile_landscape_swaps_a4() {
+        let list = print_sheet(vec![("PrintPageOrientation", "2")]);
+        assert_eq!(list.print_width, A4_HEIGHT_INCHES as f32 * PIXELS_PER_INCH);
+        assert_eq!(list.print_height, A4_WIDTH_INCHES as f32 * PIXELS_PER_INCH);
+    }
+
+    #[test]
+    fn print_tile_uses_an_explicit_print_size() {
+        let list = print_sheet(vec![
+            ("PrintPageWidth", "10"),
+            ("PrintPageHeight", "7"),
+            ("PrintPageOrientation", "1"),
+        ]);
+        assert_eq!(list.print_width, 10.0 * PIXELS_PER_INCH);
+        assert_eq!(list.print_height, 7.0 * PIXELS_PER_INCH);
+    }
+
+    #[test]
+    fn print_tile_subtracts_print_margins() {
+        let list = print_sheet(vec![
+            ("PageLeftMargin", "0.25"),
+            ("PageRightMargin", "0.25"),
+            ("PageTopMargin", "0.25"),
+            ("PageBottomMargin", "0.25"),
+        ]);
+        assert_eq!(
+            list.print_width,
+            (A4_WIDTH_INCHES - 0.25 - 0.25) as f32 * PIXELS_PER_INCH
+        );
+        assert_eq!(
+            list.print_height,
+            (A4_HEIGHT_INCHES - 0.25 - 0.25) as f32 * PIXELS_PER_INCH
+        );
+    }
+
+    #[test]
+    fn print_tile_ignores_degenerate_margins() {
+        let list = print_sheet(vec![
+            ("PageLeftMargin", "99"),
+            ("PageRightMargin", "99"),
+            ("PageTopMargin", "99"),
+            ("PageBottomMargin", "99"),
+        ]);
+        assert_eq!(list.print_width, A4_WIDTH_INCHES as f32 * PIXELS_PER_INCH);
+        assert_eq!(list.print_height, A4_HEIGHT_INCHES as f32 * PIXELS_PER_INCH);
     }
 
     fn glued_connector_package(to_cell: &str) -> VsdxPackage {
@@ -3592,6 +3697,8 @@ mod tests {
             contract_version: CONTRACT_VERSION,
             width: 100.0,
             height: 100.0,
+            print_width: 100.0,
+            print_height: 100.0,
             paint_transform: final_paint_transform(1.0),
             primitives: vec![
                 Primitive::Shape {
@@ -4068,6 +4175,8 @@ mod tests {
             contract_version: CONTRACT_VERSION + 1,
             width: 0.0,
             height: 0.0,
+            print_width: 0.0,
+            print_height: 0.0,
             paint_transform: final_paint_transform(0.0),
             primitives: vec![],
         };
@@ -4561,6 +4670,8 @@ mod tests {
                 contract_version: CONTRACT_VERSION,
                 width: 0.0,
                 height: 0.0,
+                print_width: 0.0,
+                print_height: 0.0,
                 paint_transform: final_paint_transform(0.0),
                 primitives: vec![Primitive::TextBox {
                     id: "fixture".into(),

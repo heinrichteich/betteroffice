@@ -708,10 +708,13 @@ export function surfaceDpr(frame: Pick<PageDisplayList, 'width' | 'height'>, zoo
   return effectiveDprForSurface(frame.width * zoom + pad * 2, frame.height * zoom + pad * 2, dpr);
 }
 
-/** Page-break grid lines tiling the surface in CSS pixels, aligned to the page origin. */
-export function pageBreakLines(frameWidth: number, frameHeight: number, zoom: number, pad: number, surfaceWidth: number, surfaceHeight: number): { vertical: number[]; horizontal: number[] } {
-  const stepX = frameWidth * zoom;
-  const stepY = frameHeight * zoom;
+/** Printable paper tile behind the page-break grid; absent on frames predating the print fields. */
+export interface PageBreakFrame { width: number; height: number; printWidth?: number; printHeight?: number; }
+
+/** Page-break grid lines tiling the surface in CSS pixels from the page origin. */
+export function pageBreakLines(frameWidth: number, frameHeight: number, zoom: number, pad: number, surfaceWidth: number, surfaceHeight: number, tileWidth = frameWidth, tileHeight = frameHeight): { vertical: number[]; horizontal: number[] } {
+  const stepX = tileWidth * zoom;
+  const stepY = tileHeight * zoom;
   const vertical: number[] = [];
   const horizontal: number[] = [];
   if (stepX > 0) {
@@ -723,9 +726,9 @@ export function pageBreakLines(frameWidth: number, frameHeight: number, zoom: nu
   return { vertical, horizontal };
 }
 
-/** Tiled print guides the size of the page, covering the scrollable surface. */
-export function PageBreakGrid({ frame, zoom, surfaceWidth, surfaceHeight, pad = SURFACE_PAD }: { frame: Pick<PageDisplayList, 'width' | 'height'>; zoom: number; surfaceWidth: number; surfaceHeight: number; pad?: number }) {
-  const lines = pageBreakLines(frame.width, frame.height, zoom, pad, surfaceWidth, surfaceHeight);
+/** Tiled printer-paper guides covering the scrollable surface. */
+export function PageBreakGrid({ frame, zoom, surfaceWidth, surfaceHeight, pad = SURFACE_PAD }: { frame: PageBreakFrame; zoom: number; surfaceWidth: number; surfaceHeight: number; pad?: number }) {
+  const lines = pageBreakLines(frame.width, frame.height, zoom, pad, surfaceWidth, surfaceHeight, frame.printWidth ?? frame.width, frame.printHeight ?? frame.height);
   return <div data-testid="vsdx-page-breaks" aria-hidden="true" style={{ ...styles.pageBreaks, width: surfaceWidth, height: surfaceHeight }}>
     {lines.vertical.map((x) => <div key={`v${x}`} aria-hidden="true" style={{ ...styles.pageBreakLine, left: x, top: 0, width: 1, height: surfaceHeight }} />)}
     {lines.horizontal.map((y) => <div key={`h${y}`} aria-hidden="true" style={{ ...styles.pageBreakLine, left: 0, top: y, width: surfaceWidth, height: 1 }} />)}

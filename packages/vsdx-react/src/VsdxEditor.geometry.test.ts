@@ -5,9 +5,11 @@ import { anchoredZoomScroll, canvasPointerPosition, centredPageScroll, inchFormu
 import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
 
 const frame: PageDisplayList = {
-  contractVersion: 4,
+  contractVersion: 5,
   width: 816,
   height: 1056,
+  printWidth: 480,
+  printHeight: 360,
   paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 },
   primitives: [],
 };
@@ -231,24 +233,47 @@ test('a pointer-anchored zoom on the surface keeps the page point under the curs
   }
 });
 
-test('page breaks tile the surface in page-sized cells aligned to the page origin', () => {
+test('page breaks tile the surface in printer-paper cells from the page origin', () => {
   const pad = 2000;
   const zoom = 1;
   const surface = surfaceSize(frame.width, frame.height, zoom, pad);
-  const lines = pageBreakLines(frame.width, frame.height, zoom, pad, surface.width, surface.height);
+  const lines = pageBreakLines(frame.width, frame.height, zoom, pad, surface.width, surface.height, frame.printWidth, frame.printHeight);
   expect(lines.vertical).toContain(pad);
   expect(lines.horizontal).toContain(pad);
-  expect(lines.vertical).toContain(pad + frame.width);
-  expect(lines.horizontal).toContain(pad + frame.height);
-  for (let i = 1; i < lines.vertical.length; i += 1) expect(lines.vertical[i] - lines.vertical[i - 1]).toBeCloseTo(frame.width, 8);
-  for (let i = 1; i < lines.horizontal.length; i += 1) expect(lines.horizontal[i] - lines.horizontal[i - 1]).toBeCloseTo(frame.height, 8);
+  expect(lines.vertical).toContain(pad + frame.printWidth);
+  expect(lines.horizontal).toContain(pad + frame.printHeight);
+  for (let i = 1; i < lines.vertical.length; i += 1) expect(lines.vertical[i] - lines.vertical[i - 1]).toBeCloseTo(frame.printWidth, 8);
+  for (let i = 1; i < lines.horizontal.length; i += 1) expect(lines.horizontal[i] - lines.horizontal[i - 1]).toBeCloseTo(frame.printHeight, 8);
   expect(lines.vertical[0]).toBeLessThan(pad);
   expect(lines.vertical[lines.vertical.length - 1]).toBeGreaterThan(pad);
   expect(lines.horizontal[0]).toBeLessThan(pad);
   expect(lines.horizontal[lines.horizontal.length - 1]).toBeGreaterThan(pad);
-  const zoomed = pageBreakLines(frame.width, frame.height, 1.5, pad, surface.width, surface.height);
+  const zoomed = pageBreakLines(frame.width, frame.height, 1.5, pad, surface.width, surface.height, frame.printWidth, frame.printHeight);
   expect(zoomed.vertical).toContain(pad);
   expect(zoomed.horizontal).toContain(pad);
+});
+
+test('page breaks fall back to the page extent without a print tile', () => {
+  const pad = 2000;
+  const surface = surfaceSize(frame.width, frame.height, 1, pad);
+  const lines = pageBreakLines(frame.width, frame.height, 1, pad, surface.width, surface.height);
+  expect(lines.vertical).toContain(pad + frame.width);
+  expect(lines.horizontal).toContain(pad + frame.height);
+});
+
+test('a large plan spans four by five landscape A4 sheets', () => {
+  const pad = 2000;
+  const zoom = 1;
+  const frameWidth = 45.27165 * 96;
+  const frameHeight = 39.33858 * 96;
+  const tileWidth = 11.69291 * 96;
+  const tileHeight = 8.26772 * 96;
+  const surface = surfaceSize(frameWidth, frameHeight, zoom, pad);
+  const lines = pageBreakLines(frameWidth, frameHeight, zoom, pad, surface.width, surface.height, tileWidth, tileHeight);
+  const interiorVertical = lines.vertical.filter((x) => x > pad + 1e-6 && x < pad + frameWidth - 1e-6);
+  const interiorHorizontal = lines.horizontal.filter((y) => y > pad + 1e-6 && y < pad + frameHeight - 1e-6);
+  expect(interiorVertical).toHaveLength(3);
+  expect(interiorHorizontal).toHaveLength(4);
 });
 
 test('the surface DPR clamps large backing stores instead of exceeding browser limits', () => {
