@@ -18,17 +18,17 @@ function stubDiagram(ids: string[] = []) {
 
 function renderRibbon(diagram: DiagramHandle, selection: { pageId: string; shapeId: string; hit: { kind: 'shape'; shapeId: string } } | null) {
   cleanup();
-  return render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selection} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} /></RibbonCommandsProvider>);
+  return render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selection} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} hasSelection={selection !== null} /></RibbonCommandsProvider>);
 }
 
-test('renders all tabs and supports click and roving arrow-key selection', () => {
+test('renders file, home and insert tabs and supports click and roving arrow-key selection', () => {
   cleanup();
   const diagram = { snapshot: () => ({ pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: [] }] }), canUndo: () => false, canRedo: () => false } as unknown as DiagramHandle;
-  const view = render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={null} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} /></RibbonCommandsProvider>);
+  const view = render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={null} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} hasSelection={false} /></RibbonCommandsProvider>);
   const home = view.getByRole('tab', { name: 'Home' }); const insert = view.getByRole('tab', { name: 'Insert' });
-  expect(view.getAllByRole('tab')).toHaveLength(7); expect(home.getAttribute('aria-selected')).toBe('true'); expect(home.tabIndex).toBe(0); expect(insert.tabIndex).toBe(-1);
+  expect(view.getAllByRole('tab')).toHaveLength(3); expect(home.getAttribute('aria-selected')).toBe('true'); expect(home.tabIndex).toBe(0); expect(insert.tabIndex).toBe(-1);
   fireEvent.click(insert); expect(insert.getAttribute('aria-selected')).toBe('true'); expect(insert.tabIndex).toBe(0);
-  fireEvent.keyDown(insert, { key: 'ArrowRight' }); const design = view.getByRole('tab', { name: 'Design' }); expect(design.getAttribute('aria-selected')).toBe('true'); expect(document.activeElement).toBe(design);
+  fireEvent.keyDown(insert, { key: 'ArrowRight' }); const file = view.getByRole('tab', { name: 'File' }); expect(file.getAttribute('aria-selected')).toBe('true'); expect(document.activeElement).toBe(file);
 });
 
 test('home surface is one flat row with no group-label text nodes', () => {
@@ -57,9 +57,41 @@ test('only the active tab is selected and arrow keys move it', () => {
   expect(view.getByRole('tab', { name: 'File' }).getAttribute('aria-selected')).toBe('true');
   expect(document.activeElement).toBe(view.getByRole('tab', { name: 'File' }));
   fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'End' });
-  expect(view.getByRole('tab', { name: 'Help' }).getAttribute('aria-selected')).toBe('true');
+  expect(view.getByRole('tab', { name: 'Insert' }).getAttribute('aria-selected')).toBe('true');
   fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Home' });
   expect(view.getByRole('tab', { name: 'File' }).getAttribute('aria-selected')).toBe('true');
+  view.unmount();
+});
+
+test('shape tab appears on selection, activates itself, and disappears with the selection', () => {
+  const diagram = stubDiagram(['one']);
+  const view = renderRibbon(diagram, null);
+  expect(view.queryByRole('tab', { name: 'Shape' })).toBeNull();
+  view.rerender(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selectionFor('one')} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} hasSelection={true} /></RibbonCommandsProvider>);
+  const shape = view.getByRole('tab', { name: 'Shape' });
+  expect(shape.getAttribute('aria-selected')).toBe('true');
+  expect(view.getByTestId('vsdx-ribbon-shape-panel')).not.toBeNull();
+  view.rerender(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={null} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} hasSelection={false} /></RibbonCommandsProvider>);
+  expect(view.queryByRole('tab', { name: 'Shape' })).toBeNull();
+  expect(view.queryByTestId('vsdx-ribbon-shape-panel')).toBeNull();
+  expect(view.getByRole('tab', { name: 'Home' }).getAttribute('aria-selected')).toBe('true');
+  view.unmount();
+});
+
+test('shape panel holds only registered commands and keeps flip reachable', () => {
+  const diagram = stubDiagram(['one']);
+  const selection = selectionFor('one');
+  const valid = new Set(Object.keys(createRibbonCommands(diagram, selection, 'page', () => {}, () => {}, () => {})));
+  const view = renderRibbon(diagram, selection);
+  fireEvent.click(view.getByRole('tab', { name: 'Shape' }));
+  const panel = view.getByTestId('vsdx-ribbon-shape-panel');
+  const rendered = panel.querySelectorAll('[data-command-id]');
+  expect(rendered.length).toBeGreaterThan(0);
+  for (const node of rendered) expect(valid.has(node.getAttribute('data-command-id') ?? '')).toBe(true);
+  const toggle = panel.querySelector('[data-split-toggle="rotateRight"]') as HTMLElement;
+  fireEvent.click(toggle);
+  expect(view.getByRole('menuitemcheckbox', { name: en.ribbon.commands.flipHorizontal })).not.toBeNull();
+  expect(view.getByRole('menuitemcheckbox', { name: en.ribbon.commands.flipVertical })).not.toBeNull();
   view.unmount();
 });
 
@@ -68,7 +100,7 @@ test('every rendered command maps to a command id from commands.ts', () => {
   const selection = { pageId: 'page', shapeId: 'one', hit: { kind: 'shape' as const, shapeId: 'one' } };
   const valid = new Set(Object.keys(createRibbonCommands(diagram, null, 'page', () => {}, () => {}, () => {})));
   const view = renderRibbon(diagram, selection);
-  for (const tab of ['File', 'Home', 'Insert', 'Design', 'Review', 'View', 'Help']) fireEvent.click(view.getByRole('tab', { name: tab }));
+  for (const tab of ['File', 'Home', 'Insert', 'Shape']) fireEvent.click(view.getByRole('tab', { name: tab }));
   fireEvent.click(view.getByRole('tab', { name: 'Home' }));
   for (const toggle of view.container.querySelectorAll('[data-split-toggle]')) fireEvent.click(toggle);
   const rendered = view.container.querySelectorAll('[data-command-id]');
@@ -96,13 +128,9 @@ test('disabled commands keep their labels and stay out of the tab order', () => 
   view.unmount();
 });
 
-test('tabs without commands render an honest empty state', () => {
+test('tabs without commands stay hidden until they have content', () => {
   const view = renderRibbon(stubDiagram(), null);
-  for (const name of ['Design', 'Review', 'View', 'Help']) {
-    fireEvent.click(view.getByRole('tab', { name }));
-    expect(view.getByText(en.ribbon.empty)).not.toBeNull();
-  }
-  fireEvent.click(view.getByRole('tab', { name: 'Insert' }));
+  for (const name of ['Design', 'Review', 'View', 'Help', 'Shape']) expect(view.queryByRole('tab', { name })).toBeNull();
   expect(view.queryByText(en.ribbon.empty)).toBeNull();
   view.unmount();
 });
@@ -147,7 +175,7 @@ test('opening a split menu focuses the checked item when one is checked', () => 
   const calls = { reorder: [] as unknown[][], mutation: 0 };
   const diagram = richDiagram([{ id: 'one', cells: [cell('FlipX', '1'), cell('FlipY', '0')] }], calls);
   cleanup();
-  const view = render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selectionFor('one')} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} /></RibbonCommandsProvider>);
+  const view = render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selectionFor('one')} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} hasSelection={true} /></RibbonCommandsProvider>);
   const toggle = view.container.querySelector('[data-split-toggle="rotateRight"]') as HTMLElement;
   fireEvent.click(toggle);
   const checked = view.getByRole('menuitemcheckbox', { name: en.ribbon.commands.flipHorizontal });
@@ -190,7 +218,7 @@ test('activating an item runs the command and returns focus to the trigger', () 
   const calls = { reorder: [] as unknown[][], mutation: 0 };
   const diagram = richDiagram([{ id: 'one' }, { id: 'two' }], calls);
   cleanup();
-  const view = render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selectionFor('one')} onMutation={() => { calls.mutation += 1; }} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} /></RibbonCommandsProvider>);
+  const view = render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selectionFor('one')} onMutation={() => { calls.mutation += 1; }} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} hasSelection={true} /></RibbonCommandsProvider>);
   const toggle = view.container.querySelector('[data-split-toggle="bringToFront"]') as HTMLElement;
   fireEvent.click(toggle);
   const item = view.getByRole('menuitem', { name: en.ribbon.commands.bringToFront });
