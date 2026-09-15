@@ -20,7 +20,9 @@ use crate::{
 
 mod connect;
 
-const SCHEMA_VERSION: f64 = 1.0;
+const SCHEMA_VERSION: f64 = 2.0;
+const LEGACY_SCHEMA_VERSION: f64 = 1.0;
+const MIGRATE_ORIGIN: &str = "vsdx:migrate";
 pub(crate) const MAX_SHAPE_NESTING: usize = 256;
 type SectionRows<'a> = Vec<(
     (String, Option<u32>),
@@ -1225,8 +1227,53 @@ fn validate_shape_draft(draft: &ShapeDraft) -> EditResult<()> {
 }
 
 pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
+    migrate_doc(doc)?;
     validate_schema(doc)?;
     serializable_doc(doc)
+}
+
+/// Carries a version 1 document forward: stories held resolved text tokens
+/// as JSON, while version 2 stores the plain text behind them.
+pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
+    let version = {
+        let txn = doc.transact();
+        let meta = required_map(&txn, META)?;
+        map_number(&meta, &txn, "schemaVersion")
+    };
+    if version == Some(SCHEMA_VERSION) {
+        return Ok(());
+    }
+    if version != Some(LEGACY_SCHEMA_VERSION) {
+        return Err(EditError::InvalidState(
+            "unsupported diagram schema version".to_owned(),
+        ));
+    }
+    let rewrites = {
+        let txn = doc.transact();
+        let Some(stories) = txn.get_map(STORIES) else {
+            return Err(EditError::InvalidState(
+                "missing vsdx:stories map".to_owned(),
+            ));
+        };
+        let mut rewrites = Vec::new();
+        for (key, value) in stories.iter(&txn) {
+            let Out::Any(Any::String(value)) = value else {
+                continue;
+            };
+            if let Ok(tokens) = serde_json::from_str::<Vec<vsdx_resolve::ResolvedTextToken>>(&value)
+            {
+                rewrites.push((key.to_owned(), plain_text(&tokens)));
+            }
+        }
+        rewrites
+    };
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let stories = required_map(&txn, STORIES)?;
+    for (key, text) in &rewrites {
+        stories.insert(&mut txn, key.as_str(), text.as_str());
+    }
+    required_map(&txn, META)?.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+    Ok(())
 }
 
 fn validate_schema(doc: &Doc) -> EditResult<()> {
@@ -1400,6 +1447,7 @@ pub(crate) fn normalize_concurrent_orders(staged: &Doc) -> EditResult<()> {
 }
 
 pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<()> {
+    migrate_doc(staged)?;
     validate_schema(staged)?;
     validate_immutable_metadata(before, staged)?;
     validate_session_topology(before, staged)?;
@@ -3280,6 +3328,40 @@ mod tests {
             .part_bytes(path)
             .unwrap()
             .to_vec()
+    }
+
+    #[test]
+    fn legacy_json_stories_migrate_to_plain_text_on_open() {
+        let source = include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx");
+        let session = DiagramSession::open(source, 3).unwrap();
+        let plain = session.shape_text("page:1", "page:1:shape:3").unwrap();
+        assert!(!plain.is_empty());
+        let legacy = serde_json::to_string(&vec![vsdx_resolve::ResolvedTextToken::Literal(
+            plain.clone(),
+        )])
+        .unwrap();
+        assert_ne!(legacy, plain);
+        {
+            let mut txn = session.doc.transact_mut();
+            txn.get_map(STORIES)
+                .unwrap()
+                .insert(&mut txn, "page:1:shape:3", legacy.as_str());
+            txn.get_map(META)
+                .unwrap()
+                .insert(&mut txn, "schemaVersion", LEGACY_SCHEMA_VERSION);
+        }
+        let update = session.encode_state_as_update_v1();
+        let reopened = DiagramSession::open_from_update(&update, 4).unwrap();
+        assert_eq!(
+            reopened.shape_text("page:1", "page:1:shape:3").unwrap(),
+            plain
+        );
+        let txn = reopened.doc.transact();
+        assert_eq!(
+            map_number(&txn.get_map(META).unwrap(), &txn, "schemaVersion"),
+            Some(SCHEMA_VERSION)
+        );
+        assert!(semantic_text_edits(&reopened.doc).unwrap().is_empty());
     }
 
     #[test]

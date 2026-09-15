@@ -145,11 +145,15 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const handle = handleRef.current;
     if (!current || !handle) return;
     const text = draftRef.current;
-    setEditing(null);
-    editingRef.current = null;
-    if (text === committedTextRef.current) return;
+    if (text === committedTextRef.current) {
+      setEditing(null);
+      editingRef.current = null;
+      return;
+    }
     try { handle.setShapeText(current.pageId, current.shapeId, text); }
     catch (value) { reportError(value); return; }
+    setEditing(null);
+    editingRef.current = null;
     refresh(undefined, true);
   }, [refresh, reportError]);
   const cancelTextEdit = useCallback(() => {

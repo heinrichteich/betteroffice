@@ -294,7 +294,7 @@ mod tests {
         let doc = doc_with_client_id(7);
         let mut txn = doc.transact_mut_with(HYDRATE_ORIGIN);
         let meta = txn.get_or_insert_map(META);
-        meta.insert(&mut txn, "schemaVersion", 1.0);
+        meta.insert(&mut txn, "schemaVersion", 2.0);
         meta.insert(&mut txn, "fingerprint", "test");
         meta.insert(
             &mut txn,
