@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm, openDiagram } from '@betteroffice/vsdx';
 import type { PagePrimitive } from '@betteroffice/vsdx';
-import { arrowShapes, standardShapes } from './shapeLibrary';
+import { arrowShapes, calloutShapes, standardShapes } from './shapeLibrary';
 
 const root = resolve(import.meta.dir, '../../../../..');
 let fixture: Uint8Array;
@@ -16,7 +16,7 @@ function paths(primitives: PagePrimitive[]): unknown[] {
   return primitives.flatMap((primitive): unknown[] => primitive.kind === 'shape' ? [primitive.path] : primitive.kind === 'group' ? paths(primitive.primitives) : []);
 }
 
-for (const shape of [...standardShapes, ...arrowShapes]) {
+for (const shape of [...standardShapes, ...arrowShapes, ...calloutShapes]) {
   test(`${shape.id} keeps its geometry through collaboration and save`, () => {
     const diagram = openDiagram(fixture, { clientId: 501 });
     const peer = openDiagram(fixture, { clientId: 502 });

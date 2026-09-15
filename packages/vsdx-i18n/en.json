@@ -37,6 +37,14 @@
     "categoriesLabel": "Shape categories",
     "standardShapes": "Standard Shapes",
     "arrowShapes": "Arrows and Lines",
+    "calloutShapes": "Callouts",
+    "categoryBasicDiagram": "Basic Diagram",
+    "addShapes": "Add Shapes",
+    "browseBack": "Back to Shapes",
+    "addStencil": "Add",
+    "addedStencil": "Added",
+    "shapeCount": "{count} shapes",
+    "browserEmpty": "No stencils found",
     "empty": "No shapes found",
     "shape": {
       "rectangle": "Rectangle",
@@ -95,7 +103,13 @@
       "leftRightUp": "Left-Right-Up",
       "lineDouble": "Line Double",
       "dottedLine": "Dotted Line",
-      "arcedLine": "Arced Line"
+      "arcedLine": "Arced Line",
+      "calloutBottom": "Rectangular Callout",
+      "calloutTop": "Top Callout",
+      "calloutLeft": "Left Callout",
+      "calloutRight": "Right Callout",
+      "calloutOval": "Oval Callout",
+      "lineCallout": "Line Callout"
     }
   }
 }

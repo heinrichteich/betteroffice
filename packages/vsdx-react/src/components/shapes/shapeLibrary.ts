@@ -510,9 +510,65 @@ export function arrowShapeById(id: string): StandardShape | undefined {
   return arrowShapes.find((shape) => shape.id === id);
 }
 
+export const calloutVertices: Readonly<Record<string, readonly Point[]>> = {
+  calloutBottom: [[0, 1], [1, 1], [1, 0.22], [0.62, 0.22], [0.5, 0], [0.38, 0.22], [0, 0.22]],
+  calloutTop: [[0, 0], [1, 0], [1, 0.78], [0.62, 0.78], [0.5, 1], [0.38, 0.78], [0, 0.78]],
+  calloutLeft: [[0.22, 0], [1, 0], [1, 1], [0.22, 1], [0.22, 0.62], [0, 0.5], [0.22, 0.38]],
+  calloutRight: [[0, 0], [0.78, 0], [0.78, 0.38], [1, 0.5], [0.78, 0.62], [0.78, 1], [0, 1]],
+};
+
+function ovalCalloutVertices(): readonly Point[] {
+  const body = (degrees: number): Point => {
+    const radians = (degrees * Math.PI) / 180;
+    return [cleanNumber(0.5 + 0.5 * Math.cos(radians)), cleanNumber(0.25 + 0.75 * (0.5 + 0.5 * Math.sin(radians)))] as const;
+  };
+  return [body(90), body(120), body(150), body(180), body(210), body(240), [0.5, 0], body(300), body(330), body(0), body(30), body(60)];
+}
+
+function calloutPolygonShape(id: string, vertices: readonly Point[]): StandardShape {
+  const path = polygonPath(vertices);
+  return {
+    id,
+    nameKey: `shapesPanel.shape.${id}` as TranslationKey,
+    preview: path.preview,
+    draft: draftFor(id, path, false),
+  };
+}
+
+export const calloutShapes: readonly StandardShape[] = [
+  calloutPolygonShape('calloutBottom', calloutVertices.calloutBottom),
+  calloutPolygonShape('calloutTop', calloutVertices.calloutTop),
+  calloutPolygonShape('calloutLeft', calloutVertices.calloutLeft),
+  calloutPolygonShape('calloutRight', calloutVertices.calloutRight),
+  calloutPolygonShape('calloutOval', ovalCalloutVertices()),
+  openShape('lineCallout', [
+    { type: 'MoveTo', end: [0.08, 0.9] },
+    { type: 'LineTo', end: [0.45, 0.55] },
+    { type: 'LineTo', end: [0.92, 0.55] },
+  ], 'M 0.08 0.1 L 0.45 0.45 L 0.92 0.45'),
+];
+
+export function calloutShapeById(id: string): StandardShape | undefined {
+  return calloutShapes.find((shape) => shape.id === id);
+}
+
 export const shapeStencils: readonly ShapeStencil[] = [
   { id: 'standard', nameKey: 'shapesPanel.standardShapes', shapes: standardShapes },
   { id: 'arrows', nameKey: 'shapesPanel.arrowShapes', shapes: arrowShapes },
+  { id: 'callouts', nameKey: 'shapesPanel.calloutShapes', shapes: calloutShapes },
+];
+
+/** Stencils pinned to the rail before the browser adds more. */
+export const initialRailStencilIds: readonly string[] = ['standard', 'arrows'];
+
+export interface StencilCategory {
+  id: string;
+  nameKey: TranslationKey;
+  stencilIds: readonly string[];
+}
+
+export const stencilCatalogue: readonly StencilCategory[] = [
+  { id: 'basicDiagram', nameKey: 'shapesPanel.categoryBasicDiagram', stencilIds: ['standard', 'arrows', 'callouts'] },
 ];
 
 export function standardShapeById(id: string): StandardShape | undefined {

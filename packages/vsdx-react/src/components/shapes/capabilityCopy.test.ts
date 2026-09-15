@@ -15,6 +15,9 @@ describe('capability copy', () => {
   });
 
   test('stencil galleries are public copy everywhere', () => {
-    for (const copy of [pkg.description, README, CONTENT, LLMS]) expect(copy).toMatch(/two switchable stencils/);
+    for (const copy of [pkg.description, README, CONTENT, LLMS]) {
+      expect(copy).toMatch(/three switchable stencils/);
+      expect(copy).toMatch(/stencil browser/);
+    }
   });
 });

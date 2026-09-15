@@ -1,12 +1,12 @@
 import { expect, test } from 'bun:test';
-import { arrowShapes, arrowVertices, polygonVertices, previewPathForVertices, shapeStencils, standardShapes } from './shapeLibrary';
+import { arrowShapes, arrowVertices, calloutShapes, calloutVertices, polygonVertices, previewPathForVertices, shapeStencils, standardShapes, stencilCatalogue } from './shapeLibrary';
 
 function geometry(shapeId: string) {
-  return standardShapes.find((shape) => shape.id === shapeId)!.draft(2, 3, 4, 5).cells.filter((cell) => !['Angle', 'FlipX', 'FlipY', 'FillPattern', 'FillForegnd', 'LinePattern', 'LineColor', 'LineWeight'].includes(cell.locator.cellName));
+  return [...standardShapes, ...arrowShapes, ...calloutShapes].find((shape) => shape.id === shapeId)!.draft(2, 3, 4, 5).cells.filter((cell) => !['Angle', 'FlipX', 'FlipY', 'FillPattern', 'FillForegnd', 'LinePattern', 'LineColor', 'LineWeight'].includes(cell.locator.cellName));
 }
 
 test('produces finite, complete formula-only drafts', () => {
-  for (const shape of [...standardShapes, ...arrowShapes]) {
+  for (const shape of [...standardShapes, ...arrowShapes, ...calloutShapes]) {
     for (const cell of shape.draft(Number.NaN, Number.POSITIVE_INFINITY, Number.NaN, Number.NEGATIVE_INFINITY).cells) {
       expect(cell.formula).toBeTruthy();
       expect(cell.formula).not.toMatch(/(?:nan|infinity)/i);
@@ -69,15 +69,64 @@ test('derives every arrow polygon preview and geometry from shared vertices', ()
   }
 });
 
-test('exposes two stencils covering every shape', () => {
-  expect(shapeStencils.map((stencil) => stencil.id)).toEqual(['standard', 'arrows']);
+test('exposes three stencils covering every shape', () => {
+  expect(shapeStencils.map((stencil) => stencil.id)).toEqual(['standard', 'arrows', 'callouts']);
   expect(shapeStencils[0].shapes).toEqual(standardShapes);
   expect(shapeStencils[1].shapes).toEqual(arrowShapes);
+  expect(shapeStencils[2].shapes).toEqual(calloutShapes);
   expect(arrowShapes).toHaveLength(37);
+  expect(calloutShapes).toHaveLength(6);
 });
 
-test('draws every arrow preview from its draft geometry', () => {
-  for (const shape of arrowShapes) {
+test('lists only stencils that ship shapes in the browser catalogue', () => {
+  expect(stencilCatalogue.length).toBeGreaterThan(0);
+  for (const category of stencilCatalogue) {
+    expect(category.stencilIds.length).toBeGreaterThan(0);
+    for (const id of category.stencilIds) {
+      const stencil = shapeStencils.find((candidate) => candidate.id === id);
+      expect(stencil).toBeDefined();
+      expect(stencil!.shapes.length).toBeGreaterThan(0);
+    }
+  }
+});
+
+test('encodes the rectangular callout cell by cell', () => {
+  expect(geometry('calloutBottom')).toEqual([
+    { locator: { cellName: 'PinX' }, name: 'PinX', formula: '2' },
+    { locator: { cellName: 'PinY' }, name: 'PinY', formula: '3' },
+    { locator: { cellName: 'Width' }, name: 'Width', formula: '4' },
+    { locator: { cellName: 'Height' }, name: 'Height', formula: '5' },
+    { locator: { cellName: 'LocPinX' }, name: 'LocPinX', formula: 'Width*0.5' },
+    { locator: { cellName: 'LocPinY' }, name: 'LocPinY', formula: 'Height*0.5' },
+    { locator: { section: 'Geometry', rowIndex: 0, rowType: 'MoveTo', cellName: 'X' }, name: 'X', formula: 'Width*0' },
+    { locator: { section: 'Geometry', rowIndex: 0, rowType: 'MoveTo', cellName: 'Y' }, name: 'Y', formula: 'Height*1' },
+    { locator: { section: 'Geometry', rowIndex: 1, rowType: 'LineTo', cellName: 'X' }, name: 'X', formula: 'Width*1' },
+    { locator: { section: 'Geometry', rowIndex: 1, rowType: 'LineTo', cellName: 'Y' }, name: 'Y', formula: 'Height*1' },
+    { locator: { section: 'Geometry', rowIndex: 2, rowType: 'LineTo', cellName: 'X' }, name: 'X', formula: 'Width*1' },
+    { locator: { section: 'Geometry', rowIndex: 2, rowType: 'LineTo', cellName: 'Y' }, name: 'Y', formula: 'Height*0.22' },
+    { locator: { section: 'Geometry', rowIndex: 3, rowType: 'LineTo', cellName: 'X' }, name: 'X', formula: 'Width*0.62' },
+    { locator: { section: 'Geometry', rowIndex: 3, rowType: 'LineTo', cellName: 'Y' }, name: 'Y', formula: 'Height*0.22' },
+    { locator: { section: 'Geometry', rowIndex: 4, rowType: 'LineTo', cellName: 'X' }, name: 'X', formula: 'Width*0.5' },
+    { locator: { section: 'Geometry', rowIndex: 4, rowType: 'LineTo', cellName: 'Y' }, name: 'Y', formula: 'Height*0' },
+    { locator: { section: 'Geometry', rowIndex: 5, rowType: 'LineTo', cellName: 'X' }, name: 'X', formula: 'Width*0.38' },
+    { locator: { section: 'Geometry', rowIndex: 5, rowType: 'LineTo', cellName: 'Y' }, name: 'Y', formula: 'Height*0.22' },
+    { locator: { section: 'Geometry', rowIndex: 6, rowType: 'LineTo', cellName: 'X' }, name: 'X', formula: 'Width*0' },
+    { locator: { section: 'Geometry', rowIndex: 6, rowType: 'LineTo', cellName: 'Y' }, name: 'Y', formula: 'Height*0.22' },
+    { locator: { section: 'Geometry', rowIndex: 7, rowType: 'Close', cellName: 'NoShow' }, name: 'NoShow', formula: '0' },
+  ]);
+});
+
+test('derives every rectangular callout preview and geometry from shared vertices', () => {
+  for (const [id, vertices] of Object.entries(calloutVertices)) {
+    const shape = calloutShapes.find((candidate) => candidate.id === id)!;
+    const cells = shape.draft(0, 0, 1, 1).cells.filter((cell) => cell.name === 'X' || cell.name === 'Y').slice(0, vertices.length * 2);
+    expect(shape.preview.startsWith(previewPathForVertices(vertices))).toBe(true);
+    expect(cells.map((cell) => cell.formula)).toEqual(vertices.flatMap(([x, y]) => [`Width*${x}`, `Height*${y}`]));
+  }
+});
+
+test('draws every arrow and callout preview from its draft geometry', () => {
+  for (const shape of [...arrowShapes, ...calloutShapes]) {
     const rows = new Map<number, { type: string; x?: number; y?: number }>();
     for (const cell of shape.draft(0, 0, 1, 1).cells) {
       const locator = cell.locator as { section?: string; rowIndex?: number; rowType?: string };

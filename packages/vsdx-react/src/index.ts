@@ -11,7 +11,7 @@ export { RibbonCommandsContext, RibbonCommandsProvider, createRibbonCommands, fi
 export type { RibbonCommand, RibbonCommandId, RibbonCommands, RibbonCommandsProviderProps, ShapePlacement } from './components/ribbon/commands';
 export { ShapesPanel } from './components/shapes/ShapesPanel';
 export type { ShapesPanelProps } from './components/shapes/ShapesPanel';
-export { arrowShapeById, arrowShapes, shapeStencils, standardShapeById, standardShapes } from './components/shapes/shapeLibrary';
-export type { ShapeStencil, StandardShape } from './components/shapes/shapeLibrary';
+export { arrowShapeById, arrowShapes, calloutShapeById, calloutShapes, initialRailStencilIds, shapeStencils, standardShapeById, standardShapes, stencilCatalogue } from './components/shapes/shapeLibrary';
+export type { ShapeStencil, StandardShape, StencilCategory } from './components/shapes/shapeLibrary';
 export { MAX_ZOOM, MIN_ZOOM, StatusBar, ZOOM_STOPS, clampZoom, sliderPositionForZoom, zoomForSliderPosition } from './components/statusbar';
 export type { StatusBarPage, StatusBarProps } from './components/statusbar';

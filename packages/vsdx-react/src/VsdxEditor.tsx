@@ -9,7 +9,7 @@ import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
 import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
-import { shapeStencils } from './components/shapes/shapeLibrary';
+import { initialRailStencilIds, shapeStencils } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
 import { StatusBar, clampZoom } from './components/statusbar';
 import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent } from './interactions';
@@ -76,6 +76,15 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [zoom, setZoom] = useState(1);
   const [shapesCollapsed, setShapesCollapsed] = useState(false);
   const [activeStencilId, setActiveStencilId] = useState(shapeStencils[0].id);
+  const [railStencilIds, setRailStencilIds] = useState<readonly string[]>(initialRailStencilIds);
+  const railStencils = useMemo(() => {
+    const pinned = railStencilIds.map((id) => shapeStencils.find((stencil) => stencil.id === id)).filter((stencil) => stencil !== undefined);
+    return pinned.length > 0 ? pinned : [shapeStencils[0]];
+  }, [railStencilIds]);
+  const addStencilToRail = useCallback((id: string) => {
+    setRailStencilIds((previous) => (previous.includes(id) ? previous : [...previous, id]));
+    setActiveStencilId(id);
+  }, []);
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ top: number; left: number } | null>(null);
@@ -495,7 +504,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     <RibbonCommandsBridge target={commandsRef} />
     <Ribbon t={t} />
     <div style={styles.contentRow}>
-    {leftPanel === undefined ? <ShapesPanel stencils={shapeStencils} activeStencilId={activeStencilId} onSelectStencil={setActiveStencilId} collapsed={shapesCollapsed} onToggleCollapsed={() => setShapesCollapsed((value) => !value)} onInsert={insertShape} t={t} /> : leftPanel}
+    {leftPanel === undefined ? <ShapesPanel stencils={railStencils} activeStencilId={activeStencilId} onSelectStencil={setActiveStencilId} onAddStencil={addStencilToRail} collapsed={shapesCollapsed} onToggleCollapsed={() => setShapesCollapsed((value) => !value)} onInsert={insertShape} t={t} /> : leftPanel}
     <main ref={workspaceRef} style={styles.workspace}>
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
