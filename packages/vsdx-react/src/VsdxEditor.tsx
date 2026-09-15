@@ -5,6 +5,7 @@ import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, Diagra
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
+import { CanvasContextMenu } from './components/ribbon/CanvasContextMenu';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
 import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
@@ -77,7 +78,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [shapesCollapsed, setShapesCollapsed] = useState(false);
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [contextMenu, setContextMenu] = useState<{ top: number; left: number } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ top: number; left: number; kind: 'shape' | 'canvas' } | null>(null);
   const pointerRef = useRef<DragStart | null>(null);
   const dragPreviewRef = useRef<ModelPoint | null>(null);
   const dragSnapRef = useRef(false);
@@ -397,12 +398,13 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       const hit = handle.hitTest(point.canvas.x, point.canvas.y);
       const next = hit ? selectionForHit(page, hit) : null;
       if (!next) {
-        closeContextMenu();
+        setSelection(null);
+        setContextMenu({ top: event.clientY, left: event.clientX, kind: 'canvas' });
         return;
       }
       const active = selectionRef.current;
       if (!active || active.pageId !== next.pageId || active.shapeId !== next.shapeId) setSelection(next);
-      setContextMenu({ top: event.clientY, left: event.clientX });
+      setContextMenu({ top: event.clientY, left: event.clientX, kind: 'shape' });
     } catch (value) { reportError(value); }
   };
   const commandsRef = useRef<RibbonCommands | null>(null);
@@ -487,7 +489,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
         <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
       </div>
-      {contextMenu && selection && <ShapeContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
+      {contextMenu?.kind === 'shape' && selection && <ShapeContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
+      {contextMenu?.kind === 'canvas' && <CanvasContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
       {integrity.length > 0 && <section role="alert" style={styles.integrity}><strong>{t('diagnostics.integrityHeading')}</strong>{integrity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</section>}
       {fidelity.length > 0 && <details style={styles.fidelity}><summary>{t('diagnostics.fidelityHeading')}</summary>{fidelity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</details>}
       {error && <div role="alert" style={styles.error}>{error}</div>}

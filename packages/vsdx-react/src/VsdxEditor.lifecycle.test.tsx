@@ -1177,7 +1177,7 @@ test('typing Delete in the shapes search box keeps the selected shape', async ()
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
-test('a right-click opens the shape menu with a selection and empty canvas opens nothing', async () => {
+test('a right-click opens the shape menu on a shape and the canvas menu on empty canvas', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
   canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
@@ -1199,8 +1199,13 @@ test('a right-click opens the shape menu with a selection and empty canvas opens
     const { fireEvent } = await import('@testing-library/react');
     const { en } = await import('@betteroffice/vsdx-i18n');
     expect(fireEvent.contextMenu(main, { clientX: 900, clientY: 700, button: 2 }) === false).toBe(true);
-    expect(document.querySelector('[role="menu"]')).toBeNull();
+    const emptyMenu = document.querySelector('[role="menu"]');
+    expect(emptyMenu === null).toBe(false);
+    expect(emptyMenu?.getAttribute('aria-label')).toBe(en.contextMenu.canvasLabel);
     expect(main.getAttribute('aria-label')).not.toContain('selected shape');
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' });
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+    expect(document.activeElement).toBe(main);
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     expect(fireEvent.contextMenu(main, { clientX: 100, clientY: 100, button: 2 }) === false).toBe(true);
     const menu = document.querySelector('[role="menu"]');

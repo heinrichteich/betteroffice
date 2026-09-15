@@ -5,6 +5,8 @@ export { CommandMenu, CommandMenuItem } from './components/ribbon/CommandMenu';
 export type { CommandMenuEntry } from './components/ribbon/CommandMenu';
 export { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
 export type { ShapeContextMenuProps } from './components/ribbon/ShapeContextMenu';
+export { CanvasContextMenu } from './components/ribbon/CanvasContextMenu';
+export type { CanvasContextMenuProps } from './components/ribbon/CanvasContextMenu';
 export { RibbonIcon } from './components/ribbon/RibbonIcon';
 export type { RibbonIconName } from './components/ribbon/RibbonIcon';
 export { RibbonCommandsContext, RibbonCommandsProvider, createRibbonCommands, findShapePlacement, isCellWriteBlocked, isDeleteBlocked, useRibbonCommands } from './components/ribbon/commands';
