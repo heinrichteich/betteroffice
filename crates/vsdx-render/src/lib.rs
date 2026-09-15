@@ -731,8 +731,7 @@ impl Renderer {
         });
         let child_shapes = shape.shapes().collect::<Vec<_>>();
         if !child_shapes.is_empty() {
-            let group_transform =
-                fixed_group_transform(package, references, resolved, shape.id);
+            let group_transform = fixed_group_transform(package, references, resolved, shape.id);
             let start = state.primitives.len();
             for child in child_shapes {
                 self.layout_shape(
@@ -1439,7 +1438,8 @@ fn fixed_group_transform(
     shape_id: u32,
 ) -> Affine {
     let group = bounds(package, references, resolved, shape_id).unwrap_or_default();
-    let flip = |name| evaluated(package, references, resolved, shape_id, name).unwrap_or(0.0) != 0.0;
+    let flip =
+        |name| evaluated(package, references, resolved, shape_id, name).unwrap_or(0.0) != 0.0;
     affine(vsdx_resolve::bounds_affine(
         vsdx_resolve::ShapeBounds {
             x: group.x,
@@ -1767,7 +1767,9 @@ pub fn hit_test(list: &VsdxDisplayList, x: f32, y: f32) -> Option<HitTestResult>
         for primitive in primitives {
             match primitive {
                 Primitive::Group {
-                    primitives, transform, ..
+                    primitives,
+                    transform,
+                    ..
                 } => collect(primitives, ancestor.compose(*transform), output),
                 Primitive::Shape { transform, .. }
                 | Primitive::Image { transform, .. }
@@ -2063,10 +2065,7 @@ mod tests {
             (9.292_893, 22.121_32),
         );
         assert_point_close(
-            page.apply_point(
-                lines[0].caret_stops[1].x,
-                lines[0].caret_stops[1].y,
-            ),
+            page.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
             (9.351_819, 22.180_246),
         );
     }
@@ -2562,14 +2561,18 @@ mod tests {
             matrix.apply_point(x, y + height),
             matrix.apply_point(x + width, y + height),
         ];
-        let (min_x, max_x) = corners.iter().map(|(x, _)| *x).fold(
-            (f32::INFINITY, f32::NEG_INFINITY),
-            |(min, max), value| (min.min(value), max.max(value)),
-        );
-        let (min_y, max_y) = corners.iter().map(|(_, y)| *y).fold(
-            (f32::INFINITY, f32::NEG_INFINITY),
-            |(min, max), value| (min.min(value), max.max(value)),
-        );
+        let (min_x, max_x) = corners
+            .iter()
+            .map(|(x, _)| *x)
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), value| {
+                (min.min(value), max.max(value))
+            });
+        let (min_y, max_y) = corners
+            .iter()
+            .map(|(_, y)| *y)
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), value| {
+                (min.min(value), max.max(value))
+            });
         (min_x, min_y, max_x - min_x, max_y - min_y)
     }
     #[test]
@@ -3155,7 +3158,9 @@ mod tests {
             unreachable!()
         };
         assert_point_close(
-            group_transform.compose(*transform).apply_point(x as f32, y as f32),
+            group_transform
+                .compose(*transform)
+                .apply_point(x as f32, y as f32),
             (10.0, 19.0),
         );
     }
@@ -3292,10 +3297,7 @@ mod tests {
             (9.292_893, 22.121_32),
         );
         assert_point_close(
-            page.apply_point(
-                lines[0].caret_stops[1].x,
-                lines[0].caret_stops[1].y,
-            ),
+            page.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
             (9.351_819, 22.180_246),
         );
     }
@@ -3468,7 +3470,17 @@ mod tests {
             unreachable!()
         };
         assert_eq!((*x, *y, *width, *height), (0.0, 0.0, 1.0, 1.0));
-        assert_eq!(*transform, Affine { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 1.0, f: 2.0 });
+        assert_eq!(
+            *transform,
+            Affine {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: 1.0,
+                f: 2.0
+            }
+        );
         let rotation = Affine {
             a: std::f32::consts::FRAC_1_SQRT_2,
             b: std::f32::consts::FRAC_1_SQRT_2,
@@ -3481,8 +3493,8 @@ mod tests {
         assert_point_close((group.c, group.d), (rotation.c, rotation.d));
         assert_point_close((group.e, group.f), (rotation.e, rotation.f));
         let page = group.compose(*transform);
-        let corners = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
-            .map(|(x, y)| page.apply_point(x, y));
+        let corners =
+            [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].map(|(x, y)| page.apply_point(x, y));
         let expected = [
             (9.292_893, 22.121_32),
             (10.0, 22.828_427),
@@ -3550,30 +3562,12 @@ mod tests {
             e: 2.0,
             f: 3.0,
         };
-        assert_point_close(
-            (outer_transform.a, outer_transform.b),
-            (outer.a, outer.b),
-        );
-        assert_point_close(
-            (outer_transform.c, outer_transform.d),
-            (outer.c, outer.d),
-        );
-        assert_point_close(
-            (outer_transform.e, outer_transform.f),
-            (outer.e, outer.f),
-        );
-        assert_point_close(
-            (inner_transform.a, inner_transform.b),
-            (inner.a, inner.b),
-        );
-        assert_point_close(
-            (inner_transform.c, inner_transform.d),
-            (inner.c, inner.d),
-        );
-        assert_point_close(
-            (inner_transform.e, inner_transform.f),
-            (inner.e, inner.f),
-        );
+        assert_point_close((outer_transform.a, outer_transform.b), (outer.a, outer.b));
+        assert_point_close((outer_transform.c, outer_transform.d), (outer.c, outer.d));
+        assert_point_close((outer_transform.e, outer_transform.f), (outer.e, outer.f));
+        assert_point_close((inner_transform.a, inner_transform.b), (inner.a, inner.b));
+        assert_point_close((inner_transform.c, inner_transform.d), (inner.c, inner.d));
+        assert_point_close((inner_transform.e, inner_transform.f), (inner.e, inner.f));
         assert_eq!(*transform, Affine::identity());
         let GeometryPathCommand::Move { x, y } = path[0] else {
             unreachable!()
@@ -4337,8 +4331,9 @@ mod tests {
         let mut local = vec![(x, y)];
         for command in path.iter().skip(1) {
             match *command {
-                GeometryPathCommand::Move { x, y }
-                | GeometryPathCommand::Line { x, y } => local.push((x, y)),
+                GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
+                    local.push((x, y))
+                }
                 _ => {}
             }
         }
@@ -4371,7 +4366,9 @@ mod tests {
         };
         assert_point_close((*x, *y), (0.0, 0.0));
         assert_point_close((*width, *height), (1.0, 1.0));
-        let text_page = outer_transform.compose(*inner_transform).compose(*transform);
+        let text_page = outer_transform
+            .compose(*inner_transform)
+            .compose(*transform);
         let stop = lines[0].caret_stops[1];
         let caret = text_page.apply_point(stop.x, stop.y + height * 0.25);
         let (canvas_x, canvas_y) = to_canvas(list.paint_transform, caret.0, caret.1);
@@ -4391,7 +4388,9 @@ mod tests {
         else {
             unreachable!()
         };
-        let image_page = outer_transform.compose(*inner_transform).compose(*transform);
+        let image_page = outer_transform
+            .compose(*inner_transform)
+            .compose(*transform);
         let centre = image_page.apply_point(x + width / 2.0, y + height / 2.0);
         let (canvas_x, canvas_y) = to_canvas(list.paint_transform, centre.0, centre.1);
         assert_eq!(
