@@ -31,7 +31,7 @@ export const AUTO_CONNECT_FADE_MS = 120;
 export const HOVER_PROXIMITY_PX = 12;
 /** Grab radius of one connection point, in screen pixels. */
 export const HOVER_POINT_HIT_PX = 10;
-/** Visio square size for one connection point, in screen pixels. */
+/** Visio ring diameter for one connection point, in screen pixels. */
 export const HOVER_POINT_SIZE_PX = 9;
 /** Minimum drag that creates a free-ended connector, in model inches. */
 export const HOVER_FREE_DRAG_INCHES = 0.05;
@@ -781,16 +781,11 @@ function strokeRoute(ctx: CanvasRenderingContext2D, route: readonly ModelPoint[]
   ctx.stroke();
 }
 
-/** Green Visio square with a pale cross, at a fixed screen size. */
-function paintHoverPoint(ctx: CanvasRenderingContext2D, at: ModelPoint, half: number, color: string, width: number): void {
-  ctx.fillStyle = color;
-  ctx.fillRect(at.x - half, at.y - half, half * 2, half * 2);
+/** Hollow Visio ring on the outline, at a fixed screen size. */
+function paintHoverPoint(ctx: CanvasRenderingContext2D, at: ModelPoint, radius: number, color: string, width: number): void {
   ctx.beginPath();
-  ctx.moveTo(at.x - half, at.y - half);
-  ctx.lineTo(at.x + half, at.y + half);
-  ctx.moveTo(at.x + half, at.y - half);
-  ctx.lineTo(at.x - half, at.y + half);
-  ctx.strokeStyle = '#ffffff';
+  ctx.arc(at.x, at.y, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = color;
   ctx.lineWidth = width;
   ctx.stroke();
 }

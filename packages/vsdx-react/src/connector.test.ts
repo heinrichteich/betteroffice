@@ -559,27 +559,30 @@ test('holds the grab radius in screen pixels across zoom', () => {
   expect(hoverPointAt(points, frame, 2, at)).toBeNull();
 });
 
-test('paints hover points as fixed-screen green squares with a pale cross', () => {
-  const rects: unknown[][] = [];
+test('paints hover points as fixed-screen hollow green rings', () => {
+  const arcs: unknown[][] = [];
+  const fills: unknown[][] = [];
   const strokes: unknown[] = [];
   const store: Record<string, unknown> = {};
   const ctx = new Proxy({}, {
     get: (_target, name: string) => (...args: unknown[]) => {
-      if (name === 'fillRect') rects.push(args);
+      if (name === 'arc') arcs.push(args);
+      if (name === 'fillRect' || name === 'fill') fills.push(args);
       if (name === 'stroke') strokes.push(store['strokeStyle']);
     },
     set: (_target, name: string, value: unknown) => { store[name] = value; return true; },
   }) as unknown as CanvasRenderingContext2D;
   const scene = { hoverPoints: [{ side: 'east' as const, x: 3, y: 2 }], snapPoint: null, previewRoute: null, reroutePreview: [], connectors: [] };
   paintConnectorOverlay(ctx, frame, 1, 1, scene);
-  expect(rects).toHaveLength(1);
-  expect(rects[0][2]).toBeCloseTo(HOVER_POINT_SIZE_PX / 96, 10);
-  expect(rects[0][3]).toBeCloseTo(HOVER_POINT_SIZE_PX / 96, 10);
-  expect(strokes).toEqual(['#ffffff']);
-  rects.length = 0;
+  expect(fills).toHaveLength(0);
+  expect(arcs).toHaveLength(1);
+  expect(arcs[0][2]).toBeCloseTo(HOVER_POINT_SIZE_PX / 2 / 96, 10);
+  expect(strokes).toEqual(['#16a34a']);
+  arcs.length = 0;
   paintConnectorOverlay(ctx, frame, 1, 2, scene);
-  expect(rects).toHaveLength(1);
-  expect(rects[0][2]).toBeCloseTo(HOVER_POINT_SIZE_PX / 192, 10);
+  expect(fills).toHaveLength(0);
+  expect(arcs).toHaveLength(1);
+  expect(arcs[0][2]).toBeCloseTo(HOVER_POINT_SIZE_PX / 2 / 192, 10);
 });
 
 function nestedShape(id: string, cells: Record<string, string>, children: ShapeSnapshot[] = []): ShapeSnapshot {
