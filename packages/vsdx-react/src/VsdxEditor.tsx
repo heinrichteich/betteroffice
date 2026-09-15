@@ -7,8 +7,10 @@ import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent
 import { Ribbon } from './components/ribbon/Ribbon';
 import { CanvasContextMenu } from './components/ribbon/CanvasContextMenu';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
-import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
+import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands, addShapeWithText, copySelection, pasteEntry } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
+import type { VsdxClipboardEntry } from './components/ribbon/clipboard';
+import { DUPLICATE_OFFSET, PASTE_OFFSET, draftForPaste } from './components/ribbon/clipboard';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { ShapeDataPanel } from './components/shapeData/ShapeDataPanel';
 import { LayersPanel } from './components/layers/LayersPanel';
@@ -79,6 +81,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const committedTextRef = useRef('');
   const editWrapRef = useRef<HTMLDivElement>(null);
   const editBoxRef = useRef<HTMLTextAreaElement>(null);
+
+  const [clipboard, setClipboard] = useState<VsdxClipboardEntry | null>(null);
+  const clipboardRef = useRef(clipboard);
+  clipboardRef.current = clipboard;
   editingRef.current = editing;
   draftRef.current = draft;
   const [dirty, setDirty] = useState(false);
@@ -176,7 +182,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     let handle: DiagramHandle | null = null;
     let stopUpdates = () => {};
     let stopResync = () => {};
-    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection(null); setEditing(null); setDraft(''); modelRef.current = { snapshot: null, pageIndex: 0, frame: null, layers: [] }; setModel(modelRef.current); setError(null); setDirty(false);
+    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection(null); setClipboard(null); setEditing(null); setDraft(''); modelRef.current = { snapshot: null, pageIndex: 0, frame: null, layers: [] }; setModel(modelRef.current); setError(null); setDirty(false);
     if (!file) { setLoading(false); return; }
     setLoading(true);
     const openingFonts = fontsRef.current;
@@ -283,36 +289,6 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     }
   }, [model.frame, model.snapshot, model.pageIndex, selection, zoom]);
 
-  useEffect(() => {
-    if (!editing) return;
-    if (!selection || selection.pageId !== editing.pageId || selection.shapeId !== editing.shapeId) setEditing(null);
-  }, [editing, selection]);
-
-  useEffect(() => {
-    const box = editBoxRef.current;
-    if (!editing || !box) return;
-    box.focus();
-    if (editing.selectAll) box.select();
-    else box.setSelectionRange(box.value.length, box.value.length);
-  }, [editing]);
-
-  useEffect(() => {
-    const box = editBoxRef.current;
-    if (!editing || !box) return;
-    box.style.height = 'auto';
-    box.style.height = `${box.scrollHeight}px`;
-  }, [editing, draft, zoom, model.frame]);
-
-  useEffect(() => {
-    if (!editing) return;
-    const onDown = (event: globalThis.PointerEvent) => {
-      if (editWrapRef.current?.contains(event.target as Node)) return;
-      commitTextEdit();
-    };
-    document.addEventListener('pointerdown', onDown, true);
-    return () => document.removeEventListener('pointerdown', onDown, true);
-  }, [editing, commitTextEdit]);
-
   useEffect(() => () => { if (previewFrameRef.current !== null) cancelAnimationFrame(previewFrameRef.current); }, []);
 
   const clearDragPreview = () => {
@@ -339,7 +315,40 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     }
   };
 
+  useEffect(() => {
+    if (!editing) return;
+    if (!selection || selection.pageId !== editing.pageId || selection.shapeId !== editing.shapeId) setEditing(null);
+  }, [editing, selection]);
+
+  useEffect(() => {
+    if (!editing) return;
+    const box = editBoxRef.current;
+    if (!box) return;
+    box.focus();
+    if (editing.selectAll) box.select();
+    else box.setSelectionRange(box.value.length, box.value.length);
+  }, [editing]);
+
+  useEffect(() => {
+    if (!editing) return;
+    const box = editBoxRef.current;
+    if (!box) return;
+    box.style.height = 'auto';
+    box.style.height = `${box.scrollHeight}px`;
+  }, [editing, draft, zoom, model.frame]);
+
+  useEffect(() => {
+    if (!editing) return;
+    const onDown = (event: globalThis.PointerEvent) => {
+      if (editWrapRef.current?.contains(event.target as Node)) return;
+      commitTextEdit();
+    };
+    document.addEventListener('pointerdown', onDown, true);
+    return () => document.removeEventListener('pointerdown', onDown, true);
+  }, [editing, commitTextEdit]);
+
   const onPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
+    if (editingRef.current) commitTextEdit();
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
     if (!handle || !frame || !page) return;
     if (event.button === 2) return;
@@ -488,6 +497,69 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       });
     } catch (value) { reportError(value); }
   };
+
+  const copySelected = useCallback(() => {
+    const handle = handleRef.current;
+    if (!handle || !selection) return;
+    try { setClipboard(copySelection(handle, selection)); } catch (value) { reportError(value); }
+  }, [selection, reportError]);
+  const cutSelected = useCallback(() => {
+    const handle = handleRef.current;
+    if (!handle || !selection) return;
+    try {
+      setClipboard(copySelection(handle, selection));
+      handle.deleteShape(selection.pageId, selection.shapeId);
+      refresh(undefined, true);
+    } catch (value) { reportError(value); }
+  }, [selection, refresh, reportError]);
+  const pasteClipboardEntry = useCallback(() => {
+    const handle = handleRef.current;
+    const entry = clipboardRef.current;
+    if (!handle || !entry) return;
+    try {
+      const target = modelRef.current.snapshot?.pages[modelRef.current.pageIndex]?.id ?? selection?.pageId ?? entry.pageId;
+      const step = entry.pasteCount + 1;
+      const { receipt, entry: next } = pasteEntry(handle, target, entry, PASTE_OFFSET.x * step, PASTE_OFFSET.y * step);
+      setClipboard(next);
+      setSelection({ pageId: target, shapeId: receipt.shapeId, hit: { kind: 'shape', shapeId: receipt.shapeId } });
+      refresh(undefined, true);
+    } catch (value) { reportError(value); }
+  }, [selection, refresh, reportError]);
+  const duplicateSelected = useCallback(() => {
+    const handle = handleRef.current;
+    if (!handle || !selection) return;
+    try {
+      const entry = copySelection(handle, selection);
+      const receipt = addShapeWithText(handle, selection.pageId, draftForPaste(entry, DUPLICATE_OFFSET.x, DUPLICATE_OFFSET.y), entry.text);
+      setSelection({ pageId: selection.pageId, shapeId: receipt.shapeId, hit: { kind: 'shape', shapeId: receipt.shapeId } });
+      refresh(undefined, true);
+    } catch (value) { reportError(value); }
+  }, [selection, refresh, reportError]);
+  const onCanvasKeyDown = (event: KeyboardEvent<HTMLCanvasElement>) => {
+    const selected = selectionRef.current;
+    if (editingRef.current) return;
+    if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+      const key = event.key.toLowerCase();
+      if (key === 'c' && selected) { event.preventDefault(); copySelected(); return; }
+      if (key === 'x' && selected) { event.preventDefault(); cutSelected(); return; }
+      if (key === 'v' && clipboardRef.current) { event.preventDefault(); pasteClipboardEntry(); return; }
+      if (key === 'd' && selected) { event.preventDefault(); duplicateSelected(); return; }
+      return;
+    }
+    if (selected && !editingRef.current) {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); enterTextEdit(selected.pageId, selected.shapeId); return; }
+      if (isPrintableEntryKey(event)) { event.preventDefault(); enterTextEdit(selected.pageId, selected.shapeId, event.key); return; }
+    }
+    const intent = canvasKeyboardIntent(event, zoomRef.current);
+    if (!intent) return;
+    event.preventDefault();
+    const commands = commandsRef.current;
+    if (intent.kind === 'undo') { if (commands?.undo.enabled) commands.undo.run(); return; }
+    if (intent.kind === 'redo') { if (commands?.redo.enabled) commands.redo.run(); return; }
+    if (intent.kind === 'delete') { if (commands?.delete.enabled) commands.delete.run(); return; }
+    if (intent.kind === 'escape') { cancelActiveDrag(); closeContextMenu(); setSelection(null); return; }
+    nudgeSelection(intent.dx, intent.dy);
+  };
   const onPointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
     const pointer = pointerRef.current;
     if (!pointer) return;
@@ -604,22 +676,6 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       refresh(undefined, true);
     } catch (value) { reportError(value); }
   };
-  const onCanvasKeyDown = (event: KeyboardEvent<HTMLCanvasElement>) => {
-    const selected = selectionRef.current;
-    if (selected && !editingRef.current) {
-      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); enterTextEdit(selected.pageId, selected.shapeId); return; }
-      if (isPrintableEntryKey(event)) { event.preventDefault(); enterTextEdit(selected.pageId, selected.shapeId, event.key); return; }
-    }
-    const intent = canvasKeyboardIntent(event, zoomRef.current);
-    if (!intent) return;
-    event.preventDefault();
-    const commands = commandsRef.current;
-    if (intent.kind === 'undo') { if (commands?.undo.enabled) commands.undo.run(); return; }
-    if (intent.kind === 'redo') { if (commands?.redo.enabled) commands.redo.run(); return; }
-    if (intent.kind === 'delete') { if (commands?.delete.enabled) commands.delete.run(); return; }
-    if (intent.kind === 'escape') { cancelActiveDrag(); closeContextMenu(); setSelection(null); return; }
-    nudgeSelection(intent.dx, intent.dy);
-  };
   const onCanvasFocus = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = '2px solid #0f6cbd'; event.currentTarget.style.outlineOffset = '2px'; };
   const onCanvasBlur = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = ''; event.currentTarget.style.outlineOffset = ''; };
   const insertShape = useCallback((shape: StandardShape) => {
@@ -673,7 +729,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const fidelity = diagnostics.filter((diagnostic) => diagnostic.category === 'fidelity');
   return <div className={className} style={styles.root} aria-label={t('editor.appLabel')}>
     <header style={styles.titleBar}><strong>{t('ribbon.documentName')}</strong><span style={{ color: dirty ? '#a16207' : '#526273' }}>{dirty ? t('ribbon.dirty') : t('ribbon.saved')}</span></header>
-    <RibbonCommandsProvider handle={handleRef.current} snapshot={model.snapshot} pageId={model.snapshot?.pages[model.pageIndex]?.id} selection={selection} onMutation={() => refresh(undefined, true)} onError={reportError} onDownload={download}>
+    <RibbonCommandsProvider handle={handleRef.current} snapshot={model.snapshot} pageId={model.snapshot?.pages[model.pageIndex]?.id} selection={selection} clipboard={clipboard} onClipboardChange={setClipboard} onSelectShape={setSelection} onMutation={() => refresh(undefined, true)} onError={reportError} onDownload={download}>
     <RibbonCommandsBridge target={commandsRef} />
     <Ribbon t={t} hasSelection={selection !== null} />
     <div style={styles.contentRow}>
@@ -720,7 +776,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     </main>
     {rightPanel === undefined ? <ShapeDataPanel shape={selectedShape} onCommit={commitShapeData} onError={reportError} t={t} /> : rightPanel}
     </div>
-    {statusBar === undefined ? <StatusBar pages={model.snapshot?.pages ?? []} activeIndex={model.pageIndex} onSelectPage={(index) => refresh(index)} onReorderPage={reorderPage} zoom={zoom} onZoomChange={setZoom} onFitToWindow={fitToWindow} t={t} /> : statusBar}
+    {statusBar === undefined ? <StatusBar pages={model.snapshot?.pages ?? []} activeIndex={model.pageIndex} onSelectPage={(index) => { if (editingRef.current) commitTextEdit(); refresh(index); }} onReorderPage={reorderPage} zoom={zoom} onZoomChange={setZoom} onFitToWindow={fitToWindow} t={t} /> : statusBar}
     </RibbonCommandsProvider>
   </div>;
 }
@@ -736,7 +792,8 @@ function readPageLayers(handle: DiagramHandle, pageIndex: number): PageLayer[] {
   }
 }
 
-export function canvasPointerPosition(event: PointerEvent<HTMLCanvasElement> | MouseEvent<HTMLCanvasElement>, frame: PageDisplayList): { canvas: ModelPoint; model: ModelPoint } {
+export function canvasPointerPosition(event: PointerEvent<HTMLCanvasElement> | MouseEvent<HTMLCanvasElement>, frame: PageDisplayList): { canvas: ModelPoint; model: ModelPoint };
+export function canvasPointerPosition(event: { clientX: number; clientY: number; currentTarget: HTMLCanvasElement }, frame: PageDisplayList): { canvas: ModelPoint; model: ModelPoint } {
   const rect = event.currentTarget.getBoundingClientRect();
   const canvas = {
     x: (event.clientX - rect.left) * frame.width / Math.max(rect.width, 1),
@@ -847,6 +904,7 @@ function RibbonCommandsBridge({ target }: { target: { current: RibbonCommands | 
   target.current = commands;
   return null;
 }
+
 interface LoadedFont { key: string; face: FontFace; }
 async function loadFonts(fonts: ReadonlyArray<VsdxFontFace>): Promise<LoadedFont[]> {
   if (typeof FontFace === 'undefined' || typeof document === 'undefined') return [];

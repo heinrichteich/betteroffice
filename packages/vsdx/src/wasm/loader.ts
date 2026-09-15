@@ -23,6 +23,7 @@ export interface DiagramHandle {
   reorderShape(pageId: string, shapeId: string, toIndex: number): ShapeReceipt;
   reorderPage(pageId: string, toIndex: number): ShapeReceipt;
   addShape(pageId: string, draft: FormulaShapeDraft): ShapeReceipt;
+  addShapeWithText(pageId: string, draft: FormulaShapeDraft, text: string): ShapeReceipt;
   addConnector(pageId: string, draft: FormulaShapeDraft, from: ConnectorGlue, to: ConnectorGlue): ShapeReceipt;
   deleteShape(pageId: string, shapeId: string): ShapeReceipt;
   shapeText(pageId: string, shapeId: string): string;
@@ -140,6 +141,13 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     reorderShape: (pageId, shapeId, toIndex) => json(() => doc.reorderShapeJson(JSON.stringify({ pageId, shapeId, toIndex })), true),
     reorderPage: (pageId, toIndex) => json(() => doc.reorderPageJson(JSON.stringify({ pageId, toIndex })), true),
     addShape: (pageId, draft) => json(() => doc.addShapeJson(JSON.stringify({ pageId, draft })), true),
+    addShapeWithText: (pageId, draft, text) => json(() => {
+      const withText = doc as unknown as { addShapeWithTextJson?: (args: string) => string };
+      if (typeof withText.addShapeWithTextJson === 'function') return withText.addShapeWithTextJson(JSON.stringify({ pageId, draft, text }));
+      const receipt = doc.addShapeJson(JSON.stringify({ pageId, draft }));
+      if (text) doc.setShapeTextJson(JSON.stringify({ pageId, shapeId: (JSON.parse(receipt) as ShapeReceipt).shapeId, text }));
+      return receipt;
+    }, true),
     addConnector: (pageId, draft, from, to) => json(() => doc.addConnectorJson(JSON.stringify({ pageId, draft, from, to })), true),
     deleteShape: (pageId, shapeId) => json(() => doc.deleteShapeJson(JSON.stringify({ pageId, shapeId })), true),
     shapeText: (pageId, shapeId) => json(() => doc.shapeTextJson(JSON.stringify({ pageId, shapeId }))),

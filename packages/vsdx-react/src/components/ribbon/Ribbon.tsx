@@ -79,6 +79,8 @@ function HomePanel({ t }: { t: TFunction }) {
     <Divider />
     <RibbonRun label={t('ribbon.groups.insert')}><CommandButton id="delete" icon="delete" label={label('delete')} /><CommandButton id="addShape" icon="add" label={label('addShape')} /></RibbonRun>
     <Divider />
+    <RibbonRun label={t('ribbon.groups.clipboard')}><CommandButton id="cut" icon="cut" label={t('ribbon.commands.cut')} /><CommandButton id="copy" icon="copy" label={t('ribbon.commands.copy')} /><CommandButton id="paste" icon="paste" label={t('ribbon.commands.paste')} /><CommandButton id="duplicate" icon="duplicate" label={t('ribbon.commands.duplicate')} /></RibbonRun>
+    <Divider />
     <RibbonRun label={t('ribbon.groups.shape')}><ColorButton id="fillColor" icon="fill" label={label('fillColor')} /><ColorButton id="lineColor" icon="line" label={label('lineColor')} /><LineFormulaControl id="lineWeight" icon="weight" label={label('lineWeight')} /><LineFormulaControl id="linePattern" icon="pattern" label={label('linePattern')} /></RibbonRun>
     <Divider />
     <ArrangeRun t={t} />

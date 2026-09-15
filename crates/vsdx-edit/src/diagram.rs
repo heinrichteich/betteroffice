@@ -14,8 +14,7 @@ use yrs::{
 
 use crate::{
     CONNECTS, CellFormulaReceipt, CellSnapshot, DiagramSession, DiagramSnapshot,
-    EditCtx, EditError, EditResult, META, PAGES, PAGE_ORDER, PageSnapshot, SHEETS, STORIES,
-    ShapeDraft, ShapeReceipt, ShapeSnapshot, TextReceipt,
+    EditCtx, EditError, EditResult, META, PAGES, PAGE_ORDER, PageSnapshot, SHEETS, STORIES,    ShapeDraft, ShapeReceipt, ShapeSnapshot, TextReceipt,
 };
 
 mod connect;
@@ -1072,9 +1071,26 @@ impl DiagramSession {
         page_id: &str,
         draft: &ShapeDraft,
     ) -> EditResult<ShapeReceipt> {
-        validate_shape_draft(draft)?;
+        validate_shape_draft(draft, false)?;
         let mut txn = self.transact_for(context);
         insert_shape(&mut txn, self.client_id, page_id, draft)
+    }
+
+    /** Adds a shape with initial text in one transaction, so paste stays one undo step. */
+    pub fn add_shape_with_text(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        draft: &ShapeDraft,
+        text: String,
+    ) -> EditResult<ShapeReceipt> {
+        validate_shape_draft(draft, true)?;
+        validate_story_text(&text)?;
+        let mut txn = self.transact_for(context);
+        let receipt = insert_shape(&mut txn, self.client_id, page_id, draft)?;
+        txn.get_or_insert_map(STORIES)
+            .insert(&mut txn, receipt.shape_id.as_str(), text.as_str());
+        Ok(receipt)
     }
 
     pub fn delete_shape(
@@ -1280,7 +1296,8 @@ fn insert_shape(
     })
 }
 
-fn validate_shape_draft(draft: &ShapeDraft) -> EditResult<()> {
+/** Paste reuses trusted cached values for formula-less cells; other drafts stay formula-only. */
+fn validate_shape_draft(draft: &ShapeDraft, allow_values: bool) -> EditResult<()> {
     let limits = ParseLimits::default();
     let text = |value: &str| -> EditResult<()> {
         if value.len() > limits.max_attribute_bytes || value.chars().any(|c| !matches!(c, '\t' | '\r' | '\n' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')) {
@@ -1300,10 +1317,13 @@ fn validate_shape_draft(draft: &ShapeDraft) -> EditResult<()> {
     let mut row_types = std::collections::BTreeMap::new();
     for cell in &draft.cells {
         let locator = &cell.locator;
-        if cell.value.is_some() {
+        if !allow_values && cell.value.is_some() {
             return Err(EditError::InvalidState(
                 "shape draft cells must not contain value".to_owned(),
             ));
+        }
+        if let Some(value) = &cell.value {
+            text(value)?;
         }
         if locator.cell_name.is_empty()
             || cell.name != locator.cell_name

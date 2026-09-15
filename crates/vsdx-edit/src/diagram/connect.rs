@@ -83,7 +83,7 @@ impl DiagramSession {
         from: &ConnectorGlue,
         to: &ConnectorGlue,
     ) -> EditResult<ShapeReceipt> {
-        validate_shape_draft(draft)?;
+        validate_shape_draft(draft, false)?;
         let glue = [(GlueEndpoint::Begin, from), (GlueEndpoint::End, to)];
         self.validate_session_glue_targets(page_id, &glue)?;
         self.validate_connector(page_id, draft, &glue)?;
