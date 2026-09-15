@@ -4,7 +4,7 @@ export type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 export const RESIZE_HANDLES: readonly ResizeHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 export type RotateHandle = 'rotate';
 interface FrameBounds { x: number; y: number; width: number; height: number; }
-export interface DragStart { canvas: ModelPoint; model: ModelPoint; resize: boolean; handle?: ResizeHandle; rotate?: boolean; pin: ModelPoint; locPin?: ModelPoint; size: { width: number; height: number }; parentTransforms?: readonly Affine[]; angle?: number; flipX?: boolean; flipY?: boolean; pointerId?: number; startX?: number; startY?: number; thresholdPassed?: boolean; }
+export interface DragStart { canvas: ModelPoint; model: ModelPoint; resize: boolean; handle?: ResizeHandle; rotate?: boolean; pin: ModelPoint; locPin?: ModelPoint; locPinFormula?: { x: boolean; y: boolean }; size: { width: number; height: number }; parentTransforms?: readonly Affine[]; angle?: number; flipX?: boolean; flipY?: boolean; pointerId?: number; startX?: number; startY?: number; thresholdPassed?: boolean; }
 const MIN_SHAPE_INCHES = 0.01;
 /** Fluent 2 colorNeutralStrokeAccessible. */
 export const SELECTION_STROKE = '#616161';
@@ -125,8 +125,10 @@ export const resolveDragGeometry = (start: DragStart, release: ModelPoint): { x:
     const boxY = start.pin.y - locPin.y;
     const box: FrameBounds = { x: boxX, y: boxY, width: start.size.width, height: start.size.height };
     const next = resizedBounds(box, yDownHandle(localHandle), { x: localX, y: localY }, MIN_SHAPE_INCHES);
-    const newLocPinX = start.locPin?.x === undefined ? fx * next.width : locPin.x;
-    const newLocPinY = start.locPin?.y === undefined ? fy * next.height : locPin.y;
+    const trackX = start.locPin?.x === undefined || start.locPinFormula?.x === true;
+    const trackY = start.locPin?.y === undefined || start.locPinFormula?.y === true;
+    const newLocPinX = trackX ? fx * next.width : locPin.x;
+    const newLocPinY = trackY ? fy * next.height : locPin.y;
     const shiftX = (next.x + newLocPinX) - (boxX + locPin.x);
     const shiftY = (next.y + newLocPinY) - (boxY + locPin.y);
     const unflippedX = shiftX * flipSignX;
@@ -165,8 +167,8 @@ export const previewOutline = (start: DragStart, release: ModelPoint, paintTrans
   const locPin = locPinInches(start);
   const oldFx = start.size.width > 0 ? locPin.x / start.size.width : 0.5;
   const oldFy = start.size.height > 0 ? locPin.y / start.size.height : 0.5;
-  const effFx = start.locPin?.x === undefined ? oldFx : (geometry.width > 0 ? locPin.x / geometry.width : 0.5);
-  const effFy = start.locPin?.y === undefined ? oldFy : (geometry.height > 0 ? locPin.y / geometry.height : 0.5);
+  const effFx = start.locPin?.x === undefined || start.locPinFormula?.x === true ? oldFx : (geometry.width > 0 ? locPin.x / geometry.width : 0.5);
+  const effFy = start.locPin?.y === undefined || start.locPinFormula?.y === true ? oldFy : (geometry.height > 0 ? locPin.y / geometry.height : 0.5);
   const fvx = start.flipX ? 1 - effFx : effFx;
   const fvy = start.flipY ? 1 - effFy : effFy;
   const centreOffsetX = (0.5 - fvx) * geometry.width;

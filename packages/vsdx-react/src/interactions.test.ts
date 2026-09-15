@@ -203,6 +203,26 @@ test('locPin governs the handle box instead of cancelling out', () => {
   expect(Math.min(...northCorners.map((corner) => corner.y))).toBeCloseTo(2, 10);
   expect(Math.max(...northCorners.map((corner) => corner.y))).toBeCloseTo(4, 10);
 });
+test('a formula-derived LocPin tracks the resized size so the anchored edge stays put', () => {
+  const east = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, locPinFormula: { x: true, y: false }, size: { width: 2, height: 1 } };
+  const grown = resolveDragGeometry(east, { x: 1, y: 0 });
+  expect(grown.width).toBeCloseTo(3, 10);
+  expect(grown.x).toBeCloseTo(5.5, 10);
+  expect(grown.x - 0.5 * grown.width).toBeCloseTo(4, 10);
+  expect(grown.y).toBeCloseTo(2, 10);
+  const corners = previewOutline(east, { x: 1, y: 0 }, identity);
+  expect(Math.min(...corners.map((corner) => corner.x))).toBeCloseTo(4, 10);
+  expect(Math.max(...corners.map((corner) => corner.x))).toBeCloseTo(7, 10);
+  const west = { ...east, handle: 'nw' as const };
+  const stretched = resolveDragGeometry(west, { x: -1, y: 1 });
+  expect(stretched.width).toBeCloseTo(3, 10);
+  expect(stretched.height).toBeCloseTo(2, 10);
+  expect(stretched.x - 0.5 * stretched.width + stretched.width).toBeCloseTo(6, 10);
+  const literal = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, locPinFormula: { x: false, y: false }, size: { width: 2, height: 1 } };
+  const held = resolveDragGeometry(literal, { x: 1, y: 0 });
+  expect(held.width).toBeCloseTo(3, 10);
+  expect(held.x).toBeCloseTo(5, 10);
+});
 test('a flipped handle resize grows outward on both axes', () => {
   const flipX = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 0, y: 0 }, size: { width: 20, height: 10 }, flipX: true };
   const grownX = resolveDragGeometry(flipX, { x: 2, y: 0 });

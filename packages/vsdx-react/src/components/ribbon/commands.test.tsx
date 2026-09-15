@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 import type { DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
-import { createRibbonCommands, findShapePlacement, numericCellValue } from './commands';
+import { createRibbonCommands, findShapePlacement, isFormulaDerived, locPinSizeDriven, numericCellValue } from './commands';
 
 function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
   return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ['one', 'two', 'three'].map((id) => ({ id, sourceId: 1, name: id, children: [], cells: Object.entries(cells).map(([name, value]) => ({ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: value, value })) })) }] };
@@ -141,6 +141,23 @@ test('does not mistake a prefix of an unresolved formula for a numeric angle', (
   commands.rotateRight.run();
   expect(diagram.setCellFormula).not.toHaveBeenCalled();
   expect(errors[0]).toEqual(new Error('Shape cell Angle has no resolved numeric value.'));
+});
+
+test('distinguishes formula-derived LocPin cells from fixed literals', () => {
+  expect(isFormulaDerived(null)).toBe(false);
+  expect(isFormulaDerived(undefined)).toBe(false);
+  expect(isFormulaDerived('')).toBe(false);
+  expect(isFormulaDerived('1')).toBe(false);
+  expect(isFormulaDerived(' 0.5 ')).toBe(false);
+  expect(isFormulaDerived('GUARD(0.5)')).toBe(false);
+  expect(isFormulaDerived('Width*0.5')).toBe(true);
+  expect(isFormulaDerived('Height*0.5')).toBe(true);
+  expect(isFormulaDerived('GUARD(Width*0.5)')).toBe(true);
+  const shape = { id: 's', sourceId: 1, name: null, children: [], cells: cellsOf({ LocPinX: { formula: 'Width*0.5', value: '1' }, LocPinY: { formula: '0.5', value: '0.5' } }) };
+  expect(locPinSizeDriven(shape as never)).toEqual({ x: true, y: false });
+  const literal = { ...shape, cells: cellsOf({ LocPinX: { formula: '1', value: '1' } }) };
+  expect(locPinSizeDriven(literal as never)).toEqual({ x: false, y: false });
+  expect(locPinSizeDriven(null)).toEqual({ x: false, y: false });
 });
 
 test('uses a shape root cell without confusing a same-named User cell', () => {

@@ -57,7 +57,7 @@ export function cellValue(shape: ShapeSnapshot | null, name: string): string | u
   return current?.value ?? current?.formula ?? undefined;
 }
 
-function cellFormula(shape: ShapeSnapshot | null, name: string): string | undefined {
+export function cellFormula(shape: ShapeSnapshot | null, name: string): string | undefined {
   const current = findCell(shape, name);
   return current?.formula ?? current?.value ?? undefined;
 }
@@ -110,6 +110,21 @@ export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   if (HANDLE_RESIZE_LOCKS.some((lock) => lockCellEnabled(shape, lock))) return true;
   return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => cellIsGuarded(shape, cell));
+}
+
+/** True when a stored formula is a relative reference rather than a fixed literal. */
+export function isFormulaDerived(formula: string | null | undefined): boolean {
+  if (formula === null || formula === undefined) return false;
+  let text = formula.trim();
+  if (!text) return false;
+  const guard = text.match(/^GUARD\((.*)\)$/i);
+  if (guard) text = guard[1].trim();
+  return !/^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(text);
+}
+
+/** Per-axis flags for LocPin cells whose stored formula re-evaluates on resize. */
+export function locPinSizeDriven(shape: ShapeSnapshot | null): { x: boolean; y: boolean } {
+  return { x: isFormulaDerived(cellFormula(shape, 'LocPinX')), y: isFormulaDerived(cellFormula(shape, 'LocPinY')) };
 }
 
 /** True when a single-cell write would be refused by a GUARD on that cell. */

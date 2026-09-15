@@ -629,7 +629,7 @@ test('concurrent pointers cannot commit or cancel each other', async () => {
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
-test('a resize from a handle moves the pin with moveShape and resizeShape', async () => {
+test('a resize from a handle commits size and pin with one placeShape update', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
   canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
@@ -648,6 +648,11 @@ test('a resize from a handle moves the pin with moveShape and resizeShape', asyn
     const resizes: string[][] = [];
     const originalResize = handle.resizeShape.bind(handle);
     handle.resizeShape = ((...args: [string, string, string, string]) => { resizes.push([...args]); return originalResize(...args); }) as DiagramHandle['resizeShape'];
+    const places: string[][] = [];
+    const originalPlace = handle.placeShape.bind(handle);
+    handle.placeShape = ((...args: [string, string, string, string, string, string]) => { places.push([...args]); return originalPlace(...args); }) as DiagramHandle['placeShape'];
+    const localUpdates: string[] = [];
+    const stopUpdates = handle.onUpdate((_update, origin) => { localUpdates.push(origin); });
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
     const canvases = view.container.querySelectorAll('canvas');
@@ -675,6 +680,7 @@ test('a resize from a handle moves the pin with moveShape and resizeShape', asyn
     const pinX = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinX')?.value);
     const pinY = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinY')?.value);
     const width = Number(shapeBefore?.cells.find((cell) => cell.name === 'Width')?.value);
+    const height = Number(shapeBefore?.cells.find((cell) => cell.name === 'Height')?.value);
     const corners = selectionCorners(page, fakeFrame as never, { pageId: page.id, shapeId: 'page:1:shape:20', hit: { kind: 'shape', shapeId: 'page:1:shape:20' } });
     expect(corners).not.toBeNull();
     const se = selectionHandlePositions(corners!).handles.se;
@@ -688,11 +694,22 @@ test('a resize from a handle moves the pin with moveShape and resizeShape', asyn
     expect(calls.some((entry) => entry.startsWith('fillRect:'))).toBe(false);
     fireEvent.pointerUp(main, { pointerId: 2, clientX: se.x + 48, clientY: se.y + 48 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
-    expect(moves).toHaveLength(1);
-    expect(resizes).toHaveLength(1);
-    expect(Number(resizes[0][2])).toBeGreaterThan(width);
-    expect(Number(moves[0][2])).toBeCloseTo(pinX, 6);
-    expect(Number(moves[0][3])).not.toBeCloseTo(pinY, 6);
+    expect(moves).toHaveLength(0);
+    expect(resizes).toHaveLength(0);
+    expect(places).toHaveLength(1);
+    expect(places[0].slice(0, 2)).toEqual([page.id, 'page:1:shape:20']);
+    expect(Number(places[0][2])).toBeGreaterThan(width);
+    expect(Number(places[0][3])).toBeGreaterThan(height);
+    expect(Number(places[0][4])).toBeCloseTo(pinX, 6);
+    expect(Number(places[0][5])).not.toBeCloseTo(pinY, 6);
+    expect(localUpdates.filter((origin) => origin === 'local')).toHaveLength(1);
+    stopUpdates();
+    await act(async () => { handle.undo(); });
+    const shapeUndone = handle.snapshot().pages[0].shapes.find((shape) => shape.id === 'page:1:shape:20');
+    expect(Number(shapeUndone?.cells.find((cell) => cell.name === 'Width')?.value)).toBeCloseTo(width, 6);
+    expect(Number(shapeUndone?.cells.find((cell) => cell.name === 'Height')?.value)).toBeCloseTo(height, 6);
+    expect(Number(shapeUndone?.cells.find((cell) => cell.name === 'PinX')?.value)).toBeCloseTo(pinX, 6);
+    expect(Number(shapeUndone?.cells.find((cell) => cell.name === 'PinY')?.value)).toBeCloseTo(pinY, 6);
     expect(view.container.querySelector('output')).toBeNull();
     expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
@@ -1268,5 +1285,51 @@ test('a right-click during a drag opens no menu and adds no commit', async () =>
     fireEvent.pointerUp(main, { pointerId: 2, button: 2, clientX: 100, clientY: 100 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(moves).toHaveLength(1);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
+test('a refresh keeps the user scroll position instead of recentring the page', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={foundation} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const workspace = view.container.querySelector('main') as HTMLElement;
+    expect(workspace).not.toBeNull();
+    await waitFor(() => expect(workspace.scrollLeft).toBeGreaterThan(0));
+    const centredLeft = workspace.scrollLeft;
+    const centredTop = workspace.scrollTop;
+    await act(async () => { workspace.scrollLeft = 0; workspace.scrollTop = 0; });
+    await act(async () => { ready!.refresh(); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(workspace.scrollLeft).toBe(0);
+    expect(workspace.scrollTop).toBe(0);
+    expect(centredLeft).toBeGreaterThan(0);
+    expect(centredTop).toBeGreaterThan(0);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
+test('losing focus while space is held releases the pan state', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={foundation} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const { fireEvent } = await import('@testing-library/react');
+    const main = view.container.querySelectorAll('canvas')[0] as HTMLCanvasElement;
+    fireEvent.keyDown(main, { key: ' ' });
+    expect(main.style.cursor).toBe('grab');
+    window.dispatchEvent(new Event('blur'));
+    await act(async () => {});
+    expect(main.style.cursor).toBe('');
+    fireEvent.keyDown(main, { key: ' ' });
+    expect(main.style.cursor).toBe('grab');
+    fireEvent.blur(main);
+    await act(async () => {});
+    expect(main.style.cursor).toBe('');
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });

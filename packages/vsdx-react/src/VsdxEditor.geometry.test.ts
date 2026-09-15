@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { anchoredZoomScroll, canvasPointerPosition, centredPageScroll, inchFormula, pageBreakLines, resolveDragGeometry, selectionCorners, stillSelectable, surfaceDpr, surfaceSize, zoomForWheelDelta } from './VsdxEditor';
+import { anchoredZoomScroll, canvasPointerPosition, centredPageScroll, inchFormula, pageBreakLines, resolveDragGeometry, selectionCorners, stillSelectable, surfaceDpr, surfaceSize, viewportCentreKey, zoomForWheelDelta } from './VsdxEditor';
 import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
 
 const frame: PageDisplayList = {
@@ -274,4 +274,13 @@ test('fit centres the page extent inside the workspace', () => {
   const centred = centredPageScroll(frame.width, frame.height, 1, 1200, 800, 2000);
   expect(centred.left).toBeCloseTo(2000 + 816 / 2 - 600, 8);
   expect(centred.top).toBeCloseTo(2000 + 1056 / 2 - 400, 8);
+});
+
+test('the viewport centre key is stable across refreshes and changes with the page', () => {
+  const snapshot = { pages: [{ id: 'page:1' }, { id: 'page:2' }] } as unknown as DiagramSnapshot;
+  expect(viewportCentreKey(snapshot, 0)).toBe('page:1');
+  expect(viewportCentreKey(snapshot, 0)).toBe(viewportCentreKey(snapshot, 0));
+  expect(viewportCentreKey(snapshot, 1)).toBe('page:2');
+  expect(viewportCentreKey(snapshot, 1)).not.toBe(viewportCentreKey(snapshot, 0));
+  expect(viewportCentreKey(null, 0)).toBe('index:0');
 });

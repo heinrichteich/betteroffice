@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
-import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
+import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, locPinSizeDriven, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
@@ -85,6 +85,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
   const spaceHeldRef = useRef(false);
+  const centredPageRef = useRef<string | null>(null);
   const panRef = useRef<{ pointerId: number; startX: number; startY: number; startLeft: number; startTop: number } | null>(null);
   const [loading, setLoading] = useState(Boolean(file));
   onReadyRef.current = onReady;
@@ -118,7 +119,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     let handle: DiagramHandle | null = null;
     let stopUpdates = () => {};
     let stopResync = () => {};
-    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection(null); modelRef.current = { snapshot: null, pageIndex: 0, frame: null }; setModel(modelRef.current); setError(null); setDirty(false);
+    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection(null); modelRef.current = { snapshot: null, pageIndex: 0, frame: null }; setModel(modelRef.current); setError(null); setDirty(false); centredPageRef.current = null;
     if (!file) { setLoading(false); return; }
     setLoading(true);
     const openingFonts = fontsRef.current;
@@ -231,10 +232,15 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   useEffect(() => {
     const workspace = workspaceRef.current;
     if (!workspace) return;
-    const frame = modelRef.current.frame;
+    const current = modelRef.current;
+    const frame = current.frame;
     if (!frame) return;
-    workspace.scrollLeft = Math.max(0, SURFACE_PAD + (frame.width * zoomRef.current) / 2 - workspace.clientWidth / 2);
-    workspace.scrollTop = Math.max(0, SURFACE_PAD + (frame.height * zoomRef.current) / 2 - workspace.clientHeight / 2);
+    const key = viewportCentreKey(current.snapshot, current.pageIndex);
+    if (centredPageRef.current === key) return;
+    centredPageRef.current = key;
+    const target = centredPageScroll(frame.width, frame.height, zoomRef.current, workspace.clientWidth, workspace.clientHeight);
+    workspace.scrollLeft = target.left;
+    workspace.scrollTop = target.top;
   }, [model.frame, model.pageIndex]);
 
   useEffect(() => {
@@ -273,6 +279,13 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   }, []);
 
   useEffect(() => {
+    const resetSpacePan = () => {
+      spaceHeldRef.current = false;
+      panRef.current = null;
+      const canvas = mainCanvasRef.current;
+      if (canvas) canvas.style.cursor = '';
+    };
+    const onVisibility = () => { if (document.hidden) resetSpacePan(); };
     const onKeyUp = (event: globalThis.KeyboardEvent) => {
       if (event.key === ' ' || event.key === 'Spacebar') {
         spaceHeldRef.current = false;
@@ -296,7 +309,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     };
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('keydown', onKeyDown);
-    return () => { window.removeEventListener('keyup', onKeyUp); window.removeEventListener('keydown', onKeyDown); };
+    window.addEventListener('blur', resetSpacePan);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => { window.removeEventListener('keyup', onKeyUp); window.removeEventListener('keydown', onKeyDown); window.removeEventListener('blur', resetSpacePan); document.removeEventListener('visibilitychange', onVisibility); };
   }, []);
 
   const clearDragPreview = () => {
@@ -333,6 +348,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       flipY: numericCellValue(shape, 'FlipY', 0) === 1,
       pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
       locPin: { x: numericCellValue(shape, 'LocPinX', width / 2), y: numericCellValue(shape, 'LocPinY', height / 2) },
+      locPinFormula: locPinSizeDriven(shape),
       size: { width, height },
     };
   };
@@ -492,14 +508,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         const livePage = handle.snapshot().pages.find((page) => page.id === selected.pageId);
         const livePlacement = livePage ? findShapePlacement(livePage.shapes, selected.shapeId) : null;
         if (livePlacement && isHandleResizeBlocked(livePlacement.shape)) throw new Error('Shape is locked and cannot be resized with handles.');
-        handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
-        try {
-          handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
-        } catch (moveError) {
-          try { if (handle.canUndo()) handle.undo(); } catch { void 0; }
-          try { refresh(undefined, false); } catch { void 0; }
-          throw moveError;
-        }
+        handle.placeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height), inchFormula(geometry.x), inchFormula(geometry.y));
       }
       else if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
       else handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
@@ -622,7 +631,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     }
   };
   const onCanvasFocus = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = '2px solid #0f6cbd'; event.currentTarget.style.outlineOffset = '2px'; };
-  const onCanvasBlur = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = ''; event.currentTarget.style.outlineOffset = ''; };
+  const onCanvasBlur = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = ''; event.currentTarget.style.outlineOffset = ''; spaceHeldRef.current = false; if (!panRef.current) event.currentTarget.style.cursor = ''; };
   const insertShape = useCallback((shape: StandardShape) => {
     const handle = handleRef.current; const current = modelRef.current; const frame = current.frame;
     const page = current.snapshot?.pages[current.pageIndex];
@@ -731,6 +740,11 @@ export function centredPageScroll(frameWidth: number, frameHeight: number, zoom:
   };
 }
 
+/** Identity a viewport-centring pass has already served; refreshes reuse the same key. */
+export function viewportCentreKey(snapshot: DiagramSnapshot | null, pageIndex: number): string {
+  return snapshot?.pages[pageIndex]?.id ?? `index:${pageIndex}`;
+}
+
 /** Scroll adjustment keeping the surface point under the pointer stable across zoom. */
 export function anchoredZoomScroll(scrollLeft: number, scrollTop: number, cssX: number, cssY: number, oldZoom: number, newZoom: number, pad = 0): { left: number; top: number } {
   const safeOld = Number.isFinite(oldZoom) && oldZoom > 0 ? oldZoom : 1;
@@ -794,6 +808,7 @@ export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, sel
     resize: false,
     pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
     locPin: { x: numericCellValue(shape, 'LocPinX', width / 2), y: numericCellValue(shape, 'LocPinY', height / 2) },
+    locPinFormula: locPinSizeDriven(shape),
     size: { width, height },
     parentTransforms: shapeParentTransforms(frame.primitives, `${page.sourcePartPath}:${shape.sourceId}`) ?? [],
     angle: numericCellValue(shape, 'Angle', 0),
