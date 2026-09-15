@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
-import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
+import { RibbonCommandsProvider, cellFormula, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { shapeStencils } from './components/shapes/shapeLibrary';
@@ -239,20 +239,6 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         if (corners) paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current, blocked ? [] : undefined);
       } catch { void 0; }
     }
-  };
-
-  const dragStartForPlacement = (page: { shapes: readonly ShapeSnapshot[]; sourcePartPath: string }, shape: ShapeSnapshot, frame: PageDisplayList): Omit<DragStart, 'canvas' | 'model' | 'resize' | 'pointerId' | 'startX' | 'startY'> => {
-    const width = numericCellValue(shape, 'Width');
-    const height = numericCellValue(shape, 'Height');
-    return {
-      parentTransforms: shapeParentTransforms(frame.primitives, `${page.sourcePartPath}:${shape.sourceId}`) ?? [],
-      angle: numericCellValue(shape, 'Angle', 0),
-      flipX: numericCellValue(shape, 'FlipX', 0) === 1,
-      flipY: numericCellValue(shape, 'FlipY', 0) === 1,
-      pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
-      locPin: { x: numericCellValue(shape, 'LocPinX', width / 2), y: numericCellValue(shape, 'LocPinY', height / 2) },
-      size: { width, height },
-    };
   };
 
   const onPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
@@ -548,24 +534,41 @@ export function stillSelectable(snapshot: DiagramSnapshot, pageIndex: number, se
   return Boolean(page && page.id === selection.pageId && findShapePlacement(page.shapes, selection.shapeId));
 }
 
-/** Current selection corners in scale-1 canvas coordinates for overlay paint and hit tests. */
-export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, selection: VsdxShapeSelection): ModelPoint[] | null {
-  const placement = findShapePlacement(page.shapes, selection.shapeId);
-  if (!placement) return null;
-  const shape: ShapeSnapshot = placement.shape;
+export function hasLocPinCell(shape: ShapeSnapshot, name: string): boolean {
+  return shape.cells.some((item) => item.locator.section === null && item.locator.row === null && item.locator.cellName === name);
+}
+
+export function locPinTracksDimension(shape: ShapeSnapshot, name: string, dimension: string): boolean {
+  const formula = cellFormula(shape, name);
+  if (typeof formula !== 'string' || formula.includes('!')) return false;
+  return new RegExp(`\\b${dimension}\\b`, 'i').test(formula);
+}
+
+export function dragStartForPlacement(page: { shapes: readonly ShapeSnapshot[]; sourcePartPath: string }, shape: ShapeSnapshot, frame: PageDisplayList): Omit<DragStart, 'canvas' | 'model' | 'resize' | 'pointerId' | 'startX' | 'startY'> {
   const width = numericCellValue(shape, 'Width');
   const height = numericCellValue(shape, 'Height');
-  const start: DragStart = {
-    canvas: { x: 0, y: 0 },
-    model: { x: 0, y: 0 },
-    resize: false,
-    pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
-    locPin: { x: numericCellValue(shape, 'LocPinX', width / 2), y: numericCellValue(shape, 'LocPinY', height / 2) },
-    size: { width, height },
+  const locPinX = locPinTracksDimension(shape, 'LocPinX', 'Width') || !hasLocPinCell(shape, 'LocPinX') ? undefined : numericCellValue(shape, 'LocPinX', width / 2);
+  const locPinY = locPinTracksDimension(shape, 'LocPinY', 'Height') || !hasLocPinCell(shape, 'LocPinY') ? undefined : numericCellValue(shape, 'LocPinY', height / 2);
+  return {
     parentTransforms: shapeParentTransforms(frame.primitives, `${page.sourcePartPath}:${shape.sourceId}`) ?? [],
     angle: numericCellValue(shape, 'Angle', 0),
     flipX: numericCellValue(shape, 'FlipX', 0) === 1,
     flipY: numericCellValue(shape, 'FlipY', 0) === 1,
+    pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
+    locPin: locPinX === undefined && locPinY === undefined ? undefined : { ...(locPinX === undefined ? {} : { x: locPinX }), ...(locPinY === undefined ? {} : { y: locPinY }) },
+    size: { width, height },
+  };
+}
+
+/** Current selection corners in scale-1 canvas coordinates for overlay paint and hit tests. */
+export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, selection: VsdxShapeSelection): ModelPoint[] | null {
+  const placement = findShapePlacement(page.shapes, selection.shapeId);
+  if (!placement) return null;
+  const start: DragStart = {
+    canvas: { x: 0, y: 0 },
+    model: { x: 0, y: 0 },
+    resize: false,
+    ...dragStartForPlacement(page, placement.shape, frame),
   };
   return previewOutline(start, { x: 0, y: 0 }, frame.paintTransform);
 }

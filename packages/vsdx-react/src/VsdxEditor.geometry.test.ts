@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
-import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
+import type { DiagramSnapshot, PageDisplayList, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { canvasPointerPosition, inchFormula, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
+import { canvasPointerPosition, dragStartForPlacement, inchFormula, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
 import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
 
 const frame: PageDisplayList = {
@@ -185,4 +185,88 @@ test('a nudge inside a rotated and scaled group matches the equivalent drag', ()
   expect(nudged.x).toBeCloseTo(dragged.x, 10);
   expect(nudged.y).toBeCloseTo(dragged.y, 10);
   expect(nudged.x).not.toBeCloseTo(2 + dx, 6);
+});
+
+function placementShape(cells: Array<{ cellName: string; formula: string | null; value: string }>): ShapeSnapshot {
+  return {
+    id: 'shape',
+    sourceId: 1,
+    name: null,
+    children: [],
+    cells: cells.map((cell) => ({
+      locator: { sheet: 'document' as const, shapeId: 1, section: null, row: null, cellName: cell.cellName },
+      name: cell.cellName,
+      formula: cell.formula,
+      value: cell.value,
+    })),
+  };
+}
+
+function centredLibraryShape(): ShapeSnapshot {
+  return placementShape([
+    { cellName: 'PinX', formula: '5', value: '5' },
+    { cellName: 'PinY', formula: '2', value: '2' },
+    { cellName: 'Width', formula: '2', value: '2' },
+    { cellName: 'Height', formula: '1', value: '1' },
+    { cellName: 'LocPinX', formula: 'Width*0.5', value: '1' },
+    { cellName: 'LocPinY', formula: 'Height*0.5', value: '0.5' },
+  ]);
+}
+
+test('a formula-backed LocPin resizes as a fraction so the commit keeps the opposite edge', () => {
+  const shape = centredLibraryShape();
+  const page = { shapes: [shape], sourcePartPath: 'page' };
+  const start = dragStartForPlacement(page, shape, frame);
+  expect(start.locPin).toBeUndefined();
+  const drag = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, ...start };
+  const grown = resolveDragGeometry(drag, { x: 1, y: 0 });
+  expect(grown.width).toBeCloseTo(3, 10);
+  expect(grown.x).toBeCloseTo(5.5, 10);
+  expect(grown.x - 1.5).toBeCloseTo(4, 10);
+  const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+  const corners = previewOutline(drag, { x: 1, y: 0 }, identity);
+  expect(Math.min(...corners.map((corner) => corner.x))).toBeCloseTo(4, 10);
+  expect(Math.max(...corners.map((corner) => corner.x))).toBeCloseTo(7, 10);
+});
+
+test('a literal LocPin stays absolute through a handle resize', () => {
+  const shape = placementShape([
+    { cellName: 'PinX', formula: '5', value: '5' },
+    { cellName: 'PinY', formula: '2', value: '2' },
+    { cellName: 'Width', formula: '2', value: '2' },
+    { cellName: 'Height', formula: '1', value: '1' },
+    { cellName: 'LocPinX', formula: '0.5', value: '0.5' },
+    { cellName: 'LocPinY', formula: '0.25', value: '0.25' },
+  ]);
+  const page = { shapes: [shape], sourcePartPath: 'page' };
+  const start = dragStartForPlacement(page, shape, frame);
+  expect(start.locPin).toEqual({ x: 0.5, y: 0.25 });
+  const drag = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, ...start };
+  const grown = resolveDragGeometry(drag, { x: 1, y: 0 });
+  expect(grown.width).toBeCloseTo(3, 10);
+  expect(grown.x).toBeCloseTo(5, 10);
+});
+
+test('a missing LocPin resizes as a fraction like the renderer default', () => {
+  const shape = placementShape([
+    { cellName: 'PinX', formula: '5', value: '5' },
+    { cellName: 'PinY', formula: '2', value: '2' },
+    { cellName: 'Width', formula: '2', value: '2' },
+    { cellName: 'Height', formula: '1', value: '1' },
+  ]);
+  const page = { shapes: [shape], sourcePartPath: 'page' };
+  expect(dragStartForPlacement(page, shape, frame).locPin).toBeUndefined();
+});
+
+test('each LocPin axis follows its own formula', () => {
+  const shape = placementShape([
+    { cellName: 'PinX', formula: '5', value: '5' },
+    { cellName: 'PinY', formula: '2', value: '2' },
+    { cellName: 'Width', formula: '2', value: '2' },
+    { cellName: 'Height', formula: '1', value: '1' },
+    { cellName: 'LocPinX', formula: 'Width*0.5', value: '1' },
+    { cellName: 'LocPinY', formula: '0.25', value: '0.25' },
+  ]);
+  const page = { shapes: [shape], sourcePartPath: 'page' };
+  expect(dragStartForPlacement(page, shape, frame).locPin).toEqual({ y: 0.25 });
 });
