@@ -21,7 +21,7 @@ export function modelPointToCanvas(paintTransform: Affine, x: number, y: number,
 }
 const paintRequests = new WeakMap<CanvasRenderingContext2D, object>();
 export async function paintPage(ctx: CanvasRenderingContext2D, list: PageDisplayList, dpr = 1, scale = 1, options: PaintPageOptions = {}): Promise<void> {
-  if (list.contractVersion !== 4) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
+  if (list.contractVersion !== 5) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
   const request = {};
   paintRequests.set(ctx, request);
   const images = new Map<string, CanvasImageSource | null>();
@@ -56,8 +56,30 @@ function paintPrimitive(ctx: CanvasRenderingContext2D, primitive: PagePrimitive,
   } finally { ctx.restore(); }
 }
 function identity(): Affine { return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }; }
-function paintShape(ctx: CanvasRenderingContext2D, shape: ShapePrimitive): void { ctx.beginPath(); for (const command of shape.path) { if (command.type === 'move') ctx.moveTo(Number(command.x), Number(command.y)); else if (command.type === 'line') ctx.lineTo(Number(command.x), Number(command.y)); else if (command.type === 'quad') ctx.quadraticCurveTo(Number(command.cpx), Number(command.cpy), Number(command.x), Number(command.y)); else if (command.type === 'cubic') ctx.bezierCurveTo(Number(command.cp1x), Number(command.cp1y), Number(command.cp2x), Number(command.cp2y), Number(command.x), Number(command.y)); else if (command.type === 'close') ctx.closePath(); } if (shape.fill) { ctx.fillStyle = paintStyle(ctx, shape.fill); ctx.fill(); } if (shape.stroke) stroke(ctx, shape.stroke); }
-function paintStyle(ctx: CanvasRenderingContext2D, paint: Paint): string | CanvasGradient { if (paint.kind === 'solid') return paint.color; const gradient = ctx.createLinearGradient(0, 0, 1, 1); for (const stop of paint.stops) gradient.addColorStop(Math.max(0, Math.min(1, stop.position)), stop.color); return gradient; }
+function paintShape(ctx: CanvasRenderingContext2D, shape: ShapePrimitive): void { ctx.beginPath(); for (const command of shape.path) { if (command.type === 'move') ctx.moveTo(Number(command.x), Number(command.y)); else if (command.type === 'line') ctx.lineTo(Number(command.x), Number(command.y)); else if (command.type === 'quad') ctx.quadraticCurveTo(Number(command.cpx), Number(command.cpy), Number(command.x), Number(command.y)); else if (command.type === 'cubic') ctx.bezierCurveTo(Number(command.cp1x), Number(command.cp1y), Number(command.cp2x), Number(command.cp2y), Number(command.x), Number(command.y)); else if (command.type === 'close') ctx.closePath(); } if (shape.fill) { ctx.fillStyle = paintStyle(ctx, shape.fill, shapeBounds(shape.path)); ctx.fill(); } if (shape.stroke) stroke(ctx, shape.stroke); }
+function shapeBounds(path: ShapePrimitive['path']): { x: number; y: number; width: number; height: number } {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const command of path) for (const key of ['x', 'y', 'cpx', 'cpy', 'cp1x', 'cp1y', 'cp2x', 'cp2y'] as const) {
+    const value = Number(command[key]);
+    if (!Number.isFinite(value)) continue;
+    if (key === 'y' || key === 'cpy' || key === 'cp1y' || key === 'cp2y') { if (value < minY) minY = value; if (value > maxY) maxY = value; }
+    else { if (value < minX) minX = value; if (value > maxX) maxX = value; }
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) return { x: 0, y: 0, width: 0, height: 0 };
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+function paintStyle(ctx: CanvasRenderingContext2D, paint: Paint, box: { x: number; y: number; width: number; height: number }): string | CanvasGradient {
+  if (paint.kind === 'solid') return paint.color;
+  const first = paint.stops[0]?.color ?? '#000000';
+  if (paint.stops.length === 0) return first;
+  const radians = ((paint.angleDeg ?? 0) * Math.PI) / 180;
+  const centerX = box.x + box.width / 2, centerY = box.y + box.height / 2;
+  const radius = Math.hypot(box.width, box.height) / 2;
+  if (!Number.isFinite(radius) || radius === 0) return first;
+  const gradient = ctx.createLinearGradient(centerX - Math.cos(radians) * radius, centerY - Math.sin(radians) * radius, centerX + Math.cos(radians) * radius, centerY + Math.sin(radians) * radius);
+  for (const stop of paint.stops) gradient.addColorStop(Math.max(0, Math.min(1, stop.position)), stop.color);
+  return gradient;
+}
 function stroke(ctx: CanvasRenderingContext2D, value: Stroke): void { ctx.strokeStyle = value.color; ctx.lineWidth = value.width; ctx.setLineDash(value.dashed ? [Math.max(3, value.width * 2), Math.max(2, value.width)] : []); ctx.stroke(); }
 function paintTextBox(ctx: CanvasRenderingContext2D, text: TextBoxPrimitive): void {
   ctx.translate(0, 2 * text.y + text.height); ctx.scale(1, -1); ctx.textBaseline = 'top';

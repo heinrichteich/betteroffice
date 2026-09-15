@@ -1797,7 +1797,10 @@ fn primitives_finite(primitives: &[Primitive]) -> bool {
 }
 fn paint_finite(paint: &Option<Paint>) -> bool {
     match paint {
-        Some(Paint::Gradient { stops }) => stops.iter().all(|stop| stop.position.is_finite()),
+        Some(Paint::Gradient { angle_deg, stops }) => {
+            angle_deg.is_none_or(f32::is_finite)
+                && stops.iter().all(|stop| stop.position.is_finite())
+        }
         _ => true,
     }
 }
@@ -2428,6 +2431,7 @@ mod tests {
         }
     }
 
+    mod gradient_fill;
     mod section_controls;
 
     #[test]
