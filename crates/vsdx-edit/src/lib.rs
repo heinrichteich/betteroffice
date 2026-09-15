@@ -2950,6 +2950,42 @@ mod tests {
         );
     }
 
+    /// The resolver evaluates extent formulas, so glue validation must too.
+    #[test]
+    fn implied_points_accept_a_formula_extent() {
+        let (session, from_id, _, _) = glued_fixture();
+        let context = EditCtx::local("formula-extent");
+        let target = session
+            .add_shape(
+                &context,
+                "page:1",
+                &ShapeDraft {
+                    name: None,
+                    cells: [("Width", "2+2"), ("Height", "1+1")]
+                        .into_iter()
+                        .map(|(name, formula)| singleton_cell(name, formula))
+                        .collect(),
+                },
+            )
+            .unwrap()
+            .shape_id;
+        session
+            .add_connector(
+                &context,
+                "page:1",
+                &connector_draft(),
+                &ConnectorGlue {
+                    shape_id: from_id.clone(),
+                    to_cell: None,
+                },
+                &ConnectorGlue {
+                    shape_id: target,
+                    to_cell: Some("Connections.X2".to_owned()),
+                },
+            )
+            .expect("the resolver evaluates 2+2, so validation must accept it");
+    }
+
     /// A sectionless target still offers the four implied N/E/S/W points.
     #[test]
     fn implied_connection_points_are_accepted() {

@@ -255,6 +255,12 @@ fn connection_point_exists<T: ReadTxn>(
     !has_section && row < 4 && has_implied_extent(&cells, txn)
 }
 
+const EXTENT_LIMITS: vsdx_formula::Limits = vsdx_formula::Limits {
+    max_depth: 64,
+    max_nodes: 1_024,
+    max_tokens: 1_024,
+};
+
 /// The resolver synthesises implied points from Width and Height, so both must be finite.
 fn has_implied_extent<T: ReadTxn>(cells: &yrs::MapRef, txn: &T) -> bool {
     ["Width", "Height"]
@@ -263,20 +269,27 @@ fn has_implied_extent<T: ReadTxn>(cells: &yrs::MapRef, txn: &T) -> bool {
 }
 
 fn sheet_extent<T: ReadTxn>(cells: &yrs::MapRef, txn: &T, name: &str) -> Option<f64> {
-    for (_, entry) in cells.iter(txn) {
-        let yrs::Out::YMap(cell) = entry else {
-            continue;
-        };
-        if map_string(&cell, txn, "section").is_some()
-            || map_string(&cell, txn, "name").as_deref() != Some(name)
-        {
-            continue;
-        }
-        return map_string(&cell, txn, "value")
-            .or_else(|| map_string(&cell, txn, "formula"))
-            .and_then(|text| text.trim_start_matches('=').trim().parse::<f64>().ok());
+    let cell = sheet_cell(cells, txn, name)?;
+    if let Some(number) = map_string(&cell, txn, "formula").and_then(|formula| {
+        vsdx_formula::evaluate_number(&formula, EXTENT_LIMITS, &mut |reference| {
+            let cell = sheet_cell(cells, txn, reference.trim())?;
+            map_string(&cell, txn, "formula").or_else(|| map_string(&cell, txn, "value"))
+        })
+    }) {
+        return Some(number);
     }
-    None
+    map_string(&cell, txn, "value").and_then(|text| text.trim().parse::<f64>().ok())
+}
+
+fn sheet_cell<T: ReadTxn>(cells: &yrs::MapRef, txn: &T, name: &str) -> Option<yrs::MapRef> {
+    cells.iter(txn).find_map(|(_, entry)| {
+        let yrs::Out::YMap(cell) = entry else {
+            return None;
+        };
+        (map_string(&cell, txn, "section").is_none()
+            && map_string(&cell, txn, "name").as_deref() == Some(name))
+        .then_some(cell)
+    })
 }
 
 fn glue_text_valid(value: &str) -> bool {
