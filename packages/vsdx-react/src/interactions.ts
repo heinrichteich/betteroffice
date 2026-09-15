@@ -379,6 +379,7 @@ export const textEditOverlay = (frame: PageDisplayList, primitiveId: string, zoo
       color: run?.color || '#000000',
     },
   };
+};
 
 export interface ControlHandle { row: string; x: number; y: number; xCon: number; yCon: number; }
 export interface ControlHandlePosition { row: string; canvas: ModelPoint; lockedX: boolean; lockedY: boolean; }
