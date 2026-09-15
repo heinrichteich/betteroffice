@@ -355,8 +355,6 @@ fn is_false(value: &bool) -> bool {
 mod text_run_contract {
     use super::TextRun;
 
-    /// The TypeScript `TextRun` declares `diagnostics` as required, so an empty
-    /// vector must still reach the wire or every consumer spreads `undefined`.
     #[test]
     fn empty_diagnostics_still_serialise() {
         let run = TextRun {
