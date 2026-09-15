@@ -116,6 +116,14 @@ struct AddShapeArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AddShapeWithTextArgs {
+    page_id: String,
+    draft: FormulaShapeDraft,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DeleteShapeArgs {
     page_id: String,
     shape_id: String,
@@ -165,15 +173,15 @@ struct FormulaShapeDraft {
 struct FormulaShapeCell {
     locator: CellLocatorArgs,
     formula: Option<String>,
+    value: Option<String>,
 }
 
-impl TryFrom<FormulaShapeDraft> for ShapeDraft {
-    type Error = &'static str;
-
-    fn try_from(value: FormulaShapeDraft) -> Result<Self, Self::Error> {
-        let mut cells = Vec::with_capacity(value.cells.len());
-        for cell in value.cells {
-            if cell.get("value").is_some() {
+impl FormulaShapeDraft {
+    /** Paste carries trusted cached values so formula-less cells survive; other drafts stay formula-only. */
+    fn into_shape_draft(self, allow_values: bool) -> Result<ShapeDraft, &'static str> {
+        let mut cells = Vec::with_capacity(self.cells.len());
+        for cell in self.cells {
+            if !allow_values && cell.get("value").is_some() {
                 return Err("shape draft cells must not contain value");
             }
             let cell = serde_json::from_value::<FormulaShapeCell>(cell)
@@ -185,13 +193,21 @@ impl TryFrom<FormulaShapeDraft> for ShapeDraft {
                 name: locator.cell_name.clone(),
                 locator,
                 formula: cell.formula,
-                value: None,
+                value: cell.value,
             });
         }
-        Ok(Self {
-            name: value.name,
+        Ok(ShapeDraft {
+            name: self.name,
             cells,
         })
+    }
+}
+
+impl TryFrom<FormulaShapeDraft> for ShapeDraft {
+    type Error = &'static str;
+
+    fn try_from(value: FormulaShapeDraft) -> Result<Self, Self::Error> {
+        value.into_shape_draft(false)
     }
 }
 
@@ -366,6 +382,11 @@ impl VsdxDocument {
         self.add_shape_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = addShapeWithTextJson)]
+    pub fn add_shape_with_text_json(&self, args: &str) -> Result<String, JsValue> {
+        self.add_shape_with_text_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = deleteShapeJson)]
     pub fn delete_shape_json(&self, args: &str) -> Result<String, JsValue> {
         self.delete_shape_json_inner(args).map_err(js_error)
@@ -512,6 +533,15 @@ impl VsdxDocument {
         let draft = args.draft.try_into().map_err(str::to_owned)?;
         self.session
             .add_shape(&local_context(), &args.page_id, &draft)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn add_shape_with_text_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddShapeWithTextArgs = parse_args_inner(args)?;
+        let draft = args.draft.into_shape_draft(true).map_err(str::to_owned)?;
+        self.session
+            .add_shape_with_text(&local_context(), &args.page_id, &draft, args.text)
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }
@@ -1202,6 +1232,37 @@ mod tests {
     }
 
     #[test]
+    fn add_shape_with_text_json_inner_keeps_cached_values() {
+        let document = document();
+        let receipt: serde_json::Value = serde_json::from_str(
+            &document
+                .add_shape_with_text_json(
+                    r#"{"pageId":"page:1","draft":{"cells":[{"locator":{"cellName":"Width"},"value":"3.5"},{"locator":{"cellName":"PinX"},"formula":"1"}]},"text":"hello"}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let shape_id = receipt["shapeId"].as_str().unwrap().to_owned();
+        let snapshot = document.session().snapshot().unwrap();
+        let shape = snapshot.pages[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == shape_id)
+            .unwrap();
+        let width = shape
+            .cells
+            .iter()
+            .find(|cell| cell.name == "Width")
+            .unwrap();
+        assert_eq!(width.formula, None);
+        assert_eq!(width.value.as_deref(), Some("3.5"));
+        assert_eq!(
+            document.session().shape_text("page:1", &shape_id).unwrap(),
+            "hello"
+        );
+    }
+
+    #[test]
     fn remote_cell_additions_must_be_formula_only() {
         let raw = document();
         assert_eq!(
@@ -1562,9 +1623,7 @@ mod tests {
         let saved = document.save_inner().unwrap();
         let reopened = DiagramSession::open(&saved, 2).unwrap();
         assert_eq!(
-            reopened
-                .shape_text("page:1", "page:1:shape:1")
-                .unwrap(),
+            reopened.shape_text("page:1", "page:1:shape:1").unwrap(),
             "Hello\nNew line"
         );
         let package = reopened.package().unwrap();
@@ -1577,7 +1636,7 @@ mod tests {
             shape.text(),
             Some([vsdx_parse::TextToken::Literal("Hello\nNew line".to_owned())].as_slice())
         );
-        assert_eq!(receipt.before.is_empty(), false);
+        assert!(!receipt.before.is_empty());
     }
 
     #[test]
@@ -1602,11 +1661,13 @@ mod tests {
 
     #[test]
     fn set_shape_text_json_rejects_forbidden_characters() {
-        assert!(document()
-            .set_shape_text_json_inner(
-                "{\"pageId\":\"page:1\",\"shapeId\":\"page:1:shape:1\",\"text\":\"bad\0\"}"
-            )
-            .is_err());
+        assert!(
+            document()
+                .set_shape_text_json_inner(
+                    "{\"pageId\":\"page:1\",\"shapeId\":\"page:1:shape:1\",\"text\":\"bad\0\"}"
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -1620,9 +1681,7 @@ mod tests {
             "from a peer",
         )
         .unwrap();
-        let update = peer
-            .encode_diff_v1(&live.encode_state_vector())
-            .unwrap();
+        let update = peer.encode_diff_v1(&live.encode_state_vector()).unwrap();
         live.apply_update_json_inner(&update).unwrap();
         assert_eq!(
             live.session()

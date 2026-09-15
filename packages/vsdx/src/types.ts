@@ -11,7 +11,7 @@ export interface CellFormulaReceipt { pageId: string; shapeId: string; cellName:
 export interface ShapeReceipt { pageId: string; shapeId: string; fromIndex: number | null; toIndex: number | null; }
 export interface TextReceipt { pageId: string; shapeId: string; before: string; after: string; }
 export interface TextReceipt { pageId: string; shapeId: string; before: string; after: string; }
-export interface FormulaShapeDraft { name?: string; cells: Array<{ locator: CellLocator & { rowType?: string }; name?: string; formula?: string }> }
+export interface FormulaShapeDraft { name?: string; cells: Array<{ locator: CellLocator & { rowType?: string }; name?: string; formula?: string; value?: string }> }
 export interface ConnectorGlue { shapeId: string; toCell?: string; }
 export interface VsdxFontFace { family: string; bold?: boolean; italic?: boolean; bytes: Uint8Array; }
 export type Paint = { kind: 'solid'; color: string } | { kind: 'gradient'; stops: Array<{ position: number; color: string }> };

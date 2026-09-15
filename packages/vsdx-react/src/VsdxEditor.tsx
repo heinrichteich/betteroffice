@@ -5,7 +5,9 @@ import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, Diagra
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
-import { RibbonCommandsProvider, findShapePlacement, numericCellValue } from './components/ribbon/commands';
+import { RibbonCommandsProvider, addShapeWithText, copySelection, findShapePlacement, numericCellValue, pasteEntry } from './components/ribbon/commands';
+import type { VsdxClipboardEntry } from './components/ribbon/clipboard';
+import { DUPLICATE_OFFSET, PASTE_OFFSET, draftForPaste } from './components/ribbon/clipboard';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
@@ -62,6 +64,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [model, setModel] = useState<EditorModel>({ snapshot: null, pageIndex: 0, frame: null });
   const modelRef = useRef(model);
   const [selection, setSelection] = useState<VsdxShapeSelection | null>(null);
+  const [clipboard, setClipboard] = useState<VsdxClipboardEntry | null>(null);
+  const clipboardRef = useRef(clipboard);
+  clipboardRef.current = clipboard;
   const [editing, setEditing] = useState<{ pageId: string; shapeId: string; initial: string; selectAll: boolean } | null>(null);
   const [draft, setDraft] = useState('');
   const editingRef = useRef(editing);
@@ -140,7 +145,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     let handle: DiagramHandle | null = null;
     let stopUpdates = () => {};
     let stopResync = () => {};
-    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection(null); setEditing(null); setDraft(''); modelRef.current = { snapshot: null, pageIndex: 0, frame: null }; setModel(modelRef.current); setError(null); setDirty(false);
+    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection(null); setClipboard(null); setEditing(null); setDraft(''); modelRef.current = { snapshot: null, pageIndex: 0, frame: null }; setModel(modelRef.current); setError(null); setDirty(false);
     if (!file) { setLoading(false); return; }
     setLoading(true);
     const openingFonts = fontsRef.current;
@@ -295,9 +300,55 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       enterTextEdit(page.id, hit.shapeId);
     } catch (value) { reportError(value); }
   };
+  const copySelected = useCallback(() => {
+    const handle = handleRef.current;
+    if (!handle || !selection) return;
+    try { setClipboard(copySelection(handle, selection)); } catch (value) { reportError(value); }
+  }, [selection, reportError]);
+  const cutSelected = useCallback(() => {
+    const handle = handleRef.current;
+    if (!handle || !selection) return;
+    try {
+      setClipboard(copySelection(handle, selection));
+      handle.deleteShape(selection.pageId, selection.shapeId);
+      refresh(undefined, true);
+    } catch (value) { reportError(value); }
+  }, [selection, refresh, reportError]);
+  const pasteClipboardEntry = useCallback(() => {
+    const handle = handleRef.current;
+    const entry = clipboardRef.current;
+    if (!handle || !entry) return;
+    try {
+      const target = modelRef.current.snapshot?.pages[modelRef.current.pageIndex]?.id ?? selection?.pageId ?? entry.pageId;
+      const step = entry.pasteCount + 1;
+      const { receipt, entry: next } = pasteEntry(handle, target, entry, PASTE_OFFSET.x * step, PASTE_OFFSET.y * step);
+      setClipboard(next);
+      setSelection({ pageId: target, shapeId: receipt.shapeId, hit: { kind: 'shape', shapeId: receipt.shapeId } });
+      refresh(undefined, true);
+    } catch (value) { reportError(value); }
+  }, [selection, refresh, reportError]);
+  const duplicateSelected = useCallback(() => {
+    const handle = handleRef.current;
+    if (!handle || !selection) return;
+    try {
+      const entry = copySelection(handle, selection);
+      const receipt = addShapeWithText(handle, selection.pageId, draftForPaste(entry, DUPLICATE_OFFSET.x, DUPLICATE_OFFSET.y), entry.text);
+      setSelection({ pageId: selection.pageId, shapeId: receipt.shapeId, hit: { kind: 'shape', shapeId: receipt.shapeId } });
+      refresh(undefined, true);
+    } catch (value) { reportError(value); }
+  }, [selection, refresh, reportError]);
   const onCanvasKeyDown = (event: KeyboardEvent<HTMLCanvasElement>) => {
     const selected = selection;
-    if (!selected || editingRef.current) return;
+    if (editingRef.current) return;
+    if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+      const key = event.key.toLowerCase();
+      if (key === 'c' && selected) { event.preventDefault(); copySelected(); return; }
+      if (key === 'x' && selected) { event.preventDefault(); cutSelected(); return; }
+      if (key === 'v' && clipboardRef.current) { event.preventDefault(); pasteClipboardEntry(); return; }
+      if (key === 'd' && selected) { event.preventDefault(); duplicateSelected(); return; }
+      return;
+    }
+    if (!selected) return;
     if (event.key === 'F2') return;
     if (event.key === 'Enter') { event.preventDefault(); enterTextEdit(selected.pageId, selected.shapeId); return; }
     if (isPrintableEntryKey(event)) { event.preventDefault(); enterTextEdit(selected.pageId, selected.shapeId, event.key); }
@@ -342,7 +393,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const editOverlay = editing && model.frame && model.snapshot ? textEditOverlay(model.frame, model.snapshot, model.pageIndex, editing, zoom) : null;
   return <div className={className} style={styles.root} aria-label={t('editor.appLabel')}>
     <header style={styles.titleBar}><strong>{t('ribbon.documentName')}</strong><span style={{ color: dirty ? '#a16207' : '#526273' }}>{dirty ? t('ribbon.dirty') : t('ribbon.saved')}</span></header>
-    <RibbonCommandsProvider handle={handleRef.current} snapshot={model.snapshot} pageId={model.snapshot?.pages[model.pageIndex]?.id} selection={selection} onMutation={() => refresh(undefined, true)} onError={reportError} onDownload={download}>
+    <RibbonCommandsProvider handle={handleRef.current} snapshot={model.snapshot} pageId={model.snapshot?.pages[model.pageIndex]?.id} selection={selection} clipboard={clipboard} onClipboardChange={setClipboard} onSelectShape={setSelection} onMutation={() => refresh(undefined, true)} onError={reportError} onDownload={download}>
     <Ribbon t={t} />
     <div style={styles.contentRow}>
     {leftPanel === undefined ? <ShapesPanel shapes={standardShapes} collapsed={shapesCollapsed} onToggleCollapsed={() => setShapesCollapsed((value) => !value)} onInsert={insertShape} t={t} /> : leftPanel}

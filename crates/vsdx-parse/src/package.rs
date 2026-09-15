@@ -972,7 +972,8 @@ pub fn save_semantic_text_edits(
             })?;
         let text = part.spans.iter().find(|span| {
             local_name(&span.name) == "Text"
-                && nearest_parent(part, span.span, "Shape").is_some_and(|parent| parent.span == shape.span)
+                && nearest_parent(part, span.span, "Shape")
+                    .is_some_and(|parent| parent.span == shape.span)
         });
         let escaped = escape_text_content(&edit.text);
         match text {
@@ -1011,7 +1012,8 @@ pub fn save_semantic_text_edits(
                             offset: outer_end - 2,
                             length: 2,
                         },
-                        replacement: format!("><Text>{escaped}</Text></{}>", shape.name).into_bytes(),
+                        replacement: format!("><Text>{escaped}</Text></{}>", shape.name)
+                            .into_bytes(),
                     });
                 } else {
                     let closing = part.bytes[..outer_end]

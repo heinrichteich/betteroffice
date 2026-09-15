@@ -27,7 +27,7 @@ function HomePanel({ t }: { t: TFunction }) {
   return <div style={styles.surface} data-testid="vsdx-ribbon-home-panel">
     <RibbonGroup label={t('ribbon.groups.history')}><CommandButton id="undo" icon="undo" label={t('ribbon.commands.undo')} /><CommandButton id="redo" icon="redo" label={t('ribbon.commands.redo')} /></RibbonGroup>
     <Divider />
-    <RibbonGroup label={t('ribbon.groups.clipboard')} empty />
+    <RibbonGroup label={t('ribbon.groups.clipboard')}><CommandButton id="cut" icon="cut" label={t('ribbon.commands.cut')} /><CommandButton id="copy" icon="copy" label={t('ribbon.commands.copy')} /><CommandButton id="paste" icon="paste" label={t('ribbon.commands.paste')} /><CommandButton id="duplicate" icon="duplicate" label={t('ribbon.commands.duplicate')} /></RibbonGroup>
     <Divider />
     <RibbonGroup label={t('ribbon.groups.font')} empty />
     <Divider />

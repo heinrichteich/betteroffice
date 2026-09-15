@@ -100,7 +100,13 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage>
     let snapshot = snapshot_doc(doc)?;
     let glue = glue_records(&doc.transact())?;
     let texts = edited_story_texts(doc, &snapshot, &package)?;
-    materialize_snapshot(&mut package, &snapshot, &original_shape_ids(doc)?, &glue, &texts)?;
+    materialize_snapshot(
+        &mut package,
+        &snapshot,
+        &original_shape_ids(doc)?,
+        &glue,
+        &texts,
+    )?;
     package.page_part_paths = page_part_paths_for_snapshot(&package, &snapshot)?;
     Ok(package)
 }
@@ -175,11 +181,15 @@ fn materialize_page_text(
         if let Some(text) = texts.get(shape.id.as_str())
             && let Some(target) = shape_by_source_mut(sheet, shape.source_id)
         {
-            target.children.retain(|child| !matches!(child, ShapeChild::Text(_)));
+            target
+                .children
+                .retain(|child| !matches!(child, ShapeChild::Text(_)));
             if !text.is_empty() {
-                target.children.push(ShapeChild::Text(vec![
-                    vsdx_parse::TextToken::Literal(text.clone()),
-                ]));
+                target
+                    .children
+                    .push(ShapeChild::Text(vec![vsdx_parse::TextToken::Literal(
+                        text.clone(),
+                    )]));
             }
         }
         pending.extend(shape.children.iter());
@@ -246,8 +256,7 @@ fn edited_story_texts(
     }
     let mut texts = std::collections::BTreeMap::new();
     for edit in semantic_text_edits_in(doc, package)? {
-        let (source_page_id, source_shape_id) = match (&edit.locator.sheet, edit.locator.shape_id)
-        {
+        let (source_page_id, source_shape_id) = match (&edit.locator.sheet, edit.locator.shape_id) {
             (CellSheet::Page(page_id), Some(shape_id)) => (*page_id, shape_id),
             _ => continue,
         };
@@ -263,7 +272,10 @@ fn edited_story_texts(
         if shape_origin(&shape, &txn)? != ShapeOrigin::Added {
             continue;
         }
-        let current = match stories.as_ref().and_then(|stories| stories.get(&txn, shape_id)) {
+        let current = match stories
+            .as_ref()
+            .and_then(|stories| stories.get(&txn, shape_id))
+        {
             Some(Out::Any(Any::String(value))) => value.to_string(),
             _ => continue,
         };
@@ -818,7 +830,10 @@ fn seed_shape(
 }
 
 /// Plain text behind resolved `Text` markers; paragraph and tab runs become controls.
-fn plain_text(tokens: &[vsdx_resolve::ResolvedTextToken], resolved: &vsdx_resolve::ResolvedShape) -> String {
+fn plain_text(
+    tokens: &[vsdx_resolve::ResolvedTextToken],
+    resolved: &vsdx_resolve::ResolvedShape,
+) -> String {
     let mut output = String::new();
     for token in tokens {
         match token {
@@ -1001,7 +1016,8 @@ impl DiagramSession {
             }
         }
         let before = story_text(&txn, shape_id);
-        txn.get_or_insert_map(STORIES).insert(&mut txn, shape_id, text.as_str());
+        txn.get_or_insert_map(STORIES)
+            .insert(&mut txn, shape_id, text.as_str());
         Ok(TextReceipt {
             page_id: page_id.to_owned(),
             shape_id: shape_id.to_owned(),
@@ -1076,7 +1092,7 @@ impl DiagramSession {
         page_id: &str,
         draft: &ShapeDraft,
     ) -> EditResult<ShapeReceipt> {
-        validate_shape_draft(draft)?;
+        validate_shape_draft(draft, false)?;
         let mut txn = self.transact_for(context);
         let pages = txn
             .get_map(PAGES)
@@ -1123,7 +1139,74 @@ impl DiagramSession {
             );
         }
         order.push_back(&mut txn, id.as_str());
-        txn.get_or_insert_map(STORIES).insert(&mut txn, id.as_str(), "");
+        txn.get_or_insert_map(STORIES)
+            .insert(&mut txn, id.as_str(), "");
+        Ok(ShapeReceipt {
+            page_id: page_id.to_owned(),
+            shape_id: id,
+            from_index: None,
+            to_index: Some(index),
+        })
+    }
+
+    /** Adds a shape with initial text in one transaction, so paste stays one undo step. */
+    pub fn add_shape_with_text(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        draft: &ShapeDraft,
+        text: String,
+    ) -> EditResult<ShapeReceipt> {
+        validate_shape_draft(draft, true)?;
+        validate_story_text(&text)?;
+        let mut txn = self.transact_for(context);
+        let pages = txn
+            .get_map(PAGES)
+            .ok_or_else(|| EditError::InvalidState("missing pages map".to_owned()))?;
+        let page = map_ref(&pages, &txn, page_id)?;
+        let order = map_array(&page, &txn, "shapes")?;
+        let index = order.len(&txn);
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
+        let id_prefix = format!("{page_id}:shape:added:{}:", self.client_id);
+        if sheets.len(&txn) as usize >= ParseLimits::default().max_shapes {
+            return Err(EditError::InvalidState(
+                "shape count exceeds maximum".to_owned(),
+            ));
+        }
+        let source_bound = map_u32(&page, &txn, "maxSourceId")?
+            .ok_or_else(|| EditError::InvalidState("missing page source ID bound".to_owned()))?;
+        let allocated = materialized_source_ids(&sheets, &txn, &order, source_bound)?;
+        let largest = allocated.values().copied().max().unwrap_or(source_bound);
+        largest.checked_add(1).ok_or_else(|| {
+            EditError::InvalidState("cannot allocate a materialized source ID".to_owned())
+        })?;
+        let sequence = txn.state_vector().get(&yrs::ClientID::new(self.client_id));
+        let id = format!("{id_prefix}{sequence}");
+        let shape = sheets.insert(&mut txn, id.as_str(), MapPrelim::default());
+        shape.insert(&mut txn, "id", id.as_str());
+        shape.insert(&mut txn, "pageId", page_id);
+        shape.insert(&mut txn, "sourceId", 0.0);
+        shape.insert(&mut txn, "origin", "added");
+        if let Some(name) = &draft.name {
+            shape.insert(&mut txn, "name", name.as_str());
+        }
+        let cells = shape.insert(&mut txn, "cells", MapPrelim::default());
+        shape.insert(&mut txn, "shapes", ArrayPrelim::default());
+        for cell in &draft.cells {
+            seed_cell(
+                &cells,
+                &mut txn,
+                &cell.locator,
+                cell.formula.as_deref(),
+                cell.value.as_deref(),
+                cell.row_type.as_deref(),
+            );
+        }
+        order.push_back(&mut txn, id.as_str());
+        txn.get_or_insert_map(STORIES)
+            .insert(&mut txn, id.as_str(), text.as_str());
         Ok(ShapeReceipt {
             page_id: page_id.to_owned(),
             shape_id: id,
@@ -1141,7 +1224,7 @@ impl DiagramSession {
         from: &ConnectorGlue,
         to: &ConnectorGlue,
     ) -> EditResult<ShapeReceipt> {
-        validate_shape_draft(draft)?;
+        validate_shape_draft(draft, false)?;
         if !draft_is_one_d(draft) {
             return Err(EditError::InvalidState(
                 "connector draft must describe a 1D shape".to_owned(),
@@ -1215,7 +1298,8 @@ impl DiagramSession {
             );
         }
         order.push_back(&mut txn, id.as_str());
-        txn.get_or_insert_map(STORIES).insert(&mut txn, id.as_str(), "");
+        txn.get_or_insert_map(STORIES)
+            .insert(&mut txn, id.as_str(), "");
         let connects = txn.get_or_insert_map(CONNECTS);
         for (endpoint, target, cell) in [
             (GlueEndpoint::Begin, &from.shape_id, from_cell),
@@ -1384,7 +1468,8 @@ impl DiagramSession {
     }
 }
 
-fn validate_shape_draft(draft: &ShapeDraft) -> EditResult<()> {
+/** Paste reuses trusted cached values for formula-less cells; other drafts stay formula-only. */
+fn validate_shape_draft(draft: &ShapeDraft, allow_values: bool) -> EditResult<()> {
     let limits = ParseLimits::default();
     let text = |value: &str| -> EditResult<()> {
         if value.len() > limits.max_attribute_bytes || value.chars().any(|c| !matches!(c, '\t' | '\r' | '\n' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')) {
@@ -1404,10 +1489,13 @@ fn validate_shape_draft(draft: &ShapeDraft) -> EditResult<()> {
     let mut row_types = std::collections::BTreeMap::new();
     for cell in &draft.cells {
         let locator = &cell.locator;
-        if cell.value.is_some() {
+        if !allow_values && cell.value.is_some() {
             return Err(EditError::InvalidState(
                 "shape draft cells must not contain value".to_owned(),
             ));
+        }
+        if let Some(value) = &cell.value {
+            text(value)?;
         }
         if locator.cell_name.is_empty()
             || cell.name != locator.cell_name
@@ -2209,9 +2297,8 @@ fn validate_remote_text(before: &Doc, staged: &Doc) -> EditResult<()> {
             continue;
         }
         validate_story_text(&after_text)?;
-        let page_id = map_string(&before_shape, &before_txn, "pageId").ok_or_else(|| {
-            EditError::InvalidState("shape is missing its page".to_owned())
-        })?;
+        let page_id = map_string(&before_shape, &before_txn, "pageId")
+            .ok_or_else(|| EditError::InvalidState("shape is missing its page".to_owned()))?;
         let context = CrdtMutationContext::new(&before_txn, &page_id, shape_id)?;
         match decide_mutation(
             &context,
@@ -2749,14 +2836,17 @@ fn semantic_text_edits_in(
     let txn = doc.transact();
     let sheets = required_map(&txn, SHEETS)?;
     let stories = txn.get_map(STORIES);
-    let resolver = Resolver::new(&package);
+    let resolver = Resolver::new(package);
     let mut edits = Vec::new();
     for (shape_id, shape) in sheets.iter(&txn) {
         let Out::YMap(shape) = shape else { continue };
         if shape_origin(&shape, &txn)? != ShapeOrigin::Original {
             continue;
         }
-        let current = match stories.as_ref().and_then(|stories| stories.get(&txn, shape_id)) {
+        let current = match stories
+            .as_ref()
+            .and_then(|stories| stories.get(&txn, shape_id))
+        {
             None => continue,
             Some(Out::Any(Any::String(value))) => value.to_string(),
             Some(_) => {
@@ -2766,9 +2856,8 @@ fn semantic_text_edits_in(
             }
         };
         validate_story_text(&current)?;
-        let page_id = map_string(&shape, &txn, "pageId").ok_or_else(|| {
-            EditError::InvalidState("shape is missing its page".to_owned())
-        })?;
+        let page_id = map_string(&shape, &txn, "pageId")
+            .ok_or_else(|| EditError::InvalidState("shape is missing its page".to_owned()))?;
         let source_id = map_number(&shape, &txn, "sourceId")
             .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
             as u32;
@@ -2781,9 +2870,10 @@ fn semantic_text_edits_in(
             .iter()
             .find_map(|(path, id)| (*id == source_page_id).then(|| path.clone()))
             .ok_or_else(|| EditError::InvalidState("page is missing".to_owned()))?;
-        let contents = package.page_contents.get(&path).ok_or_else(|| {
-            EditError::InvalidState("page content is missing".to_owned())
-        })?;
+        let contents = package
+            .page_contents
+            .get(&path)
+            .ok_or_else(|| EditError::InvalidState("page content is missing".to_owned()))?;
         let Some(original) = find_shape_in(contents, source_id) else {
             continue;
         };
@@ -2961,16 +3051,24 @@ fn structural_edits(
                 ))
             })?;
             added.insert(shape.id.as_str(), shape.source_id);
-            let text = stories.as_ref().map(|stories| match stories.get(&txn, shape.id.as_str()) {
-                Some(Out::Any(Any::String(value))) => value.to_string(),
-                _ => String::new(),
-            });
+            let text = stories
+                .as_ref()
+                .map(|stories| match stories.get(&txn, shape.id.as_str()) {
+                    Some(Out::Any(Any::String(value))) => value.to_string(),
+                    _ => String::new(),
+                });
             if let Some(text) = text.as_ref() {
                 validate_story_text(text)?;
             }
             edits.push(StructuralEdit::AddShape {
                 page_id: *page_id,
-                shape_xml: shape_xml(snapshot, text.as_ref().filter(|text| !text.is_empty()).map(String::as_str)).into_bytes(),
+                shape_xml: shape_xml(
+                    snapshot,
+                    text.as_ref()
+                        .filter(|text| !text.is_empty())
+                        .map(String::as_str),
+                )
+                .into_bytes(),
             });
         }
         let by_id = desired

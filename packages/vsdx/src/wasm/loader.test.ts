@@ -572,12 +572,16 @@ describe('VSDX wasm boundary', () => {
     diagram.dispose();
   });
 
-  test('keeps shape drafts formula-only at the type boundary', () => {
-    const draft: FormulaShapeDraft = { cells: [] };
-    expect(draft.cells).toEqual([]);
-    // @ts-expect-error Shape cells accept formulas, never cached values.
-    const invalid: FormulaShapeDraft = { cells: [{ locator: { cellName: 'Width' }, formula: '1', value: '1' }] };
-    expect(invalid).toBeDefined();
+  test('keeps plain shape drafts formula-only while paste carries cached values', () => {
+    const diagram = openDiagram(foundation, { clientId: 9011 });
+    try {
+      expect(() => diagram.addShape('page:1', { cells: [{ locator: { cellName: 'Width' }, value: '1' }] })).toThrow('must not contain value');
+      const receipt = diagram.addShapeWithText('page:1', { cells: [{ locator: { cellName: 'Width' }, value: '1' }] }, '');
+      const added = diagram.snapshot().pages[0].shapes.find(shape => shape.id === receipt.shapeId);
+      expect(added?.cells.find(cell => cell.name === 'Width')?.value).toBe('1');
+    } finally {
+      diagram.dispose();
+    }
   });
 
   test('adds a shape from the declared cell locator shape', () => {

@@ -1,11 +1,14 @@
 import { createContext, createElement, useContext, useMemo } from 'react';
 import type { ReactNode } from 'react';
-import type { DiagramHandle, DiagramSnapshot, PageSnapshot, ShapeSnapshot } from '@betteroffice/vsdx';
+import type { DiagramHandle, DiagramSnapshot, FormulaShapeDraft, PageSnapshot, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { VsdxShapeSelection } from '../../VsdxEditor';
 import { standardShapeById } from '../shapes/shapeLibrary';
+import { DUPLICATE_OFFSET, PASTE_OFFSET, buildClipboardEntry, draftForPaste } from './clipboard';
+import type { VsdxClipboardEntry } from './clipboard';
 
 export type RibbonCommandId =
-  | 'undo' | 'redo' | 'delete' | 'fillColor' | 'lineColor' | 'lineWeight' | 'linePattern'
+  | 'undo' | 'redo' | 'delete' | 'cut' | 'copy' | 'paste' | 'duplicate'
+  | 'fillColor' | 'lineColor' | 'lineWeight' | 'linePattern'
   | 'bringToFront' | 'bringForward' | 'sendBackward' | 'sendToBack'
   | 'rotateLeft' | 'rotateRight' | 'flipHorizontal' | 'flipVertical' | 'addShape' | 'download';
 
@@ -19,6 +22,9 @@ export interface RibbonCommandsProviderProps {
   snapshot: DiagramSnapshot | null;
   pageId?: string;
   selection: VsdxShapeSelection | null;
+  clipboard?: VsdxClipboardEntry | null;
+  onClipboardChange?: (next: VsdxClipboardEntry | null) => void;
+  onSelectShape?: (selection: VsdxShapeSelection) => void;
   onMutation: () => void;
   onError: (error: unknown) => void;
   onDownload: (bytes: Uint8Array) => void;
@@ -87,13 +93,44 @@ export function numericCellValue(shape: ShapeSnapshot, name: string, fallback?: 
   return parsed;
 }
 
+/** Snapshot the selection into an in-app clipboard entry. */
+export function copySelection(handle: DiagramHandle, selection: VsdxShapeSelection): VsdxClipboardEntry {
+  const placement = placementIn(handle.snapshot().pages, selection);
+  if (!placement) throw new Error(`vsdx shape ${selection.shapeId} is no longer part of the diagram`);
+  let text = '';
+  try { text = handle.shapeText(selection.pageId, selection.shapeId); }
+  catch { text = ''; }
+  return buildClipboardEntry(selection.pageId, placement.shape, text);
+}
+
+/** Paste a clipboard entry with a model-space offset as one atomic shape addition. */
+export function pasteEntry(handle: DiagramHandle, targetPageId: string, entry: VsdxClipboardEntry, dx: number, dy: number): { receipt: { shapeId: string }; entry: VsdxClipboardEntry } {
+  const page = pageById(handle.snapshot().pages, targetPageId);
+  if (!page) throw new Error(`vsdx page ${targetPageId} is no longer part of the diagram`);
+  const draft = draftForPaste(entry, dx, dy);
+  const receipt = addShapeWithText(handle, page.id, draft, entry.text);
+  return { receipt, entry: { ...entry, pasteCount: entry.pasteCount + 1 } };
+}
+
+export function addShapeWithText(handle: DiagramHandle, pageId: string, draft: FormulaShapeDraft, text: string): { shapeId: string } {
+  if (typeof (handle as { addShapeWithText?: unknown }).addShapeWithText === 'function') {
+    return (handle as unknown as { addShapeWithText: (pageId: string, draft: FormulaShapeDraft, text: string) => { shapeId: string } }).addShapeWithText(pageId, draft, text);
+  }
+  const receipt = handle.addShape(pageId, draft);
+  if (text) handle.setShapeText(pageId, receipt.shapeId, text);
+  return receipt;
+}
+
 export function createRibbonCommands(
   handle: DiagramHandle | null,
   selection: VsdxShapeSelection | null,
   pageId: string | undefined,
   onMutation: () => void,
   onError: (error: unknown) => void,
-  onDownload: (bytes: Uint8Array) => void
+  onDownload: (bytes: Uint8Array) => void,
+  clipboard: VsdxClipboardEntry | null = null,
+  onClipboardChange: (next: VsdxClipboardEntry | null) => void = () => {},
+  onSelectShape: (selection: VsdxShapeSelection) => void = () => {}
 ): RibbonCommands {
   const execute = (operation: (current: DiagramHandle, selected: VsdxShapeSelection | null) => void, needsSelection = false) => () => {
     if (!handle || (needsSelection && !selection)) return;
@@ -144,13 +181,62 @@ export function createRibbonCommands(
         currentHandle.addShape(page.id, rectangle.draft(1, 1, 1, 1));
       }),
     },
+    cut: {
+      id: 'cut',
+      enabled: selected,
+      run: () => {
+        if (!handle || !selection) return;
+        try {
+          onClipboardChange(copySelection(handle, selection));
+          handle.deleteShape(selection.pageId, selection.shapeId);
+          onMutation();
+        } catch (error) { onError(error); }
+      },
+    },
+    copy: {
+      id: 'copy',
+      enabled: selected,
+      run: () => {
+        if (!handle || !selection) return;
+        try { onClipboardChange(copySelection(handle, selection)); } catch (error) { onError(error); }
+      },
+    },
+    paste: {
+      id: 'paste',
+      enabled: Boolean(handle && clipboard && pageById(pages, pageId ?? selection?.pageId ?? clipboard.pageId)),
+      run: () => {
+        if (!handle || !clipboard) return;
+        try {
+          const target = pageId ?? selection?.pageId ?? clipboard.pageId;
+          const step = clipboard.pasteCount + 1;
+          const { receipt, entry } = pasteEntry(handle, target, clipboard, PASTE_OFFSET.x * step, PASTE_OFFSET.y * step);
+          onClipboardChange(entry);
+          onSelectShape({ pageId: target, shapeId: receipt.shapeId, hit: { kind: 'shape', shapeId: receipt.shapeId } });
+          onMutation();
+        } catch (error) { onError(error); }
+      },
+    },
+    duplicate: {
+      id: 'duplicate',
+      enabled: selected,
+      run: () => {
+        if (!handle || !selection) return;
+        try {
+          const entry = copySelection(handle, selection);
+          const draft = draftForPaste(entry, DUPLICATE_OFFSET.x, DUPLICATE_OFFSET.y);
+          const receipt = addShapeWithText(handle, selection.pageId, draft, entry.text);
+          onSelectShape({ pageId: selection.pageId, shapeId: receipt.shapeId, hit: { kind: 'shape', shapeId: receipt.shapeId } });
+          onMutation();
+        } catch (error) { onError(error); }
+      },
+    },
     download: { id: 'download', enabled: Boolean(handle), run: () => { if (!handle) return; try { onDownload(handle.save()); } catch (error) { onError(error); } } },
   } as RibbonCommands;
   return commands;
 }
 
-export function RibbonCommandsProvider({ handle, snapshot, pageId, selection, onMutation, onError, onDownload, children }: RibbonCommandsProviderProps) {
-  const commands = useMemo(() => createRibbonCommands(handle, selection, pageId, onMutation, onError, onDownload), [handle, snapshot, pageId, selection, onMutation, onError, onDownload]);
+export function RibbonCommandsProvider({ handle, snapshot, pageId, selection, clipboard = null, onClipboardChange = () => {}, onSelectShape = () => {}, onMutation, onError, onDownload, children }: RibbonCommandsProviderProps) {
+  const commands = useMemo(() => createRibbonCommands(handle, selection, pageId, onMutation, onError, onDownload, clipboard, onClipboardChange, onSelectShape), [handle, snapshot, pageId, selection, clipboard, onClipboardChange, onSelectShape, onMutation, onError, onDownload]);
   return createElement(RibbonCommandsContext.Provider, { value: commands }, children);
 }
 

@@ -3,8 +3,10 @@ export type { VsdxEditorApi, VsdxEditorCollaborationOptions, VsdxEditorProps, Vs
 export { Ribbon } from './components/ribbon/Ribbon';
 export { RibbonIcon } from './components/ribbon/RibbonIcon';
 export type { RibbonIconName } from './components/ribbon/RibbonIcon';
-export { RibbonCommandsContext, RibbonCommandsProvider, createRibbonCommands, findShapePlacement, useRibbonCommands } from './components/ribbon/commands';
+export { RibbonCommandsContext, RibbonCommandsProvider, addShapeWithText, copySelection, createRibbonCommands, findShapePlacement, pasteEntry, useRibbonCommands } from './components/ribbon/commands';
 export type { RibbonCommand, RibbonCommandId, RibbonCommands, RibbonCommandsProviderProps, ShapePlacement } from './components/ribbon/commands';
+export { DUPLICATE_OFFSET, PASTE_OFFSET, buildClipboardEntry, draftForPaste, resolvedNumeric, toFormula } from './components/ribbon/clipboard';
+export type { VsdxClipboardEntry } from './components/ribbon/clipboard';
 export { ShapesPanel } from './components/shapes/ShapesPanel';
 export type { ShapesPanelProps } from './components/shapes/ShapesPanel';
 export { standardShapeById, standardShapes } from './components/shapes/shapeLibrary';
