@@ -1,6 +1,6 @@
 import initWasmModule, { VsdxDocument, VsdxRenderer, rendererVersion } from './generated/vsdx_wasm.js';
 import type { InitInput } from './generated/vsdx_wasm.js';
-import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectorGlue, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, TextReceipt, VsdxFontFace } from '../types';
+import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectorGlue, DiagramSnapshot, FormulaShapeDraft, FormulaShapeTreeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, ShapeTreeGlue, TextReceipt, VsdxFontFace } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; initialUpdate?: Uint8Array; }
@@ -19,6 +19,8 @@ export interface DiagramHandle {
   reorderPage(pageId: string, toIndex: number): ShapeReceipt;
   addShape(pageId: string, draft: FormulaShapeDraft): ShapeReceipt;
   addShapeWithText(pageId: string, draft: FormulaShapeDraft, text: string): ShapeReceipt;
+  addShapeTree(pageId: string, draft: FormulaShapeTreeDraft): ShapeReceipt;
+  subtreeGlue(pageId: string, shapeId: string): ShapeTreeGlue[];
   addConnector(pageId: string, draft: FormulaShapeDraft, from: ConnectorGlue, to: ConnectorGlue): ShapeReceipt;
   deleteShape(pageId: string, shapeId: string): ShapeReceipt;
   shapeText(pageId: string, shapeId: string): string;
@@ -132,6 +134,8 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     reorderPage: (pageId, toIndex) => json(() => doc.reorderPageJson(JSON.stringify({ pageId, toIndex })), true),
     addShape: (pageId, draft) => json(() => doc.addShapeJson(JSON.stringify({ pageId, draft })), true),
     addShapeWithText: (pageId, draft, text) => json(() => doc.addShapeWithTextJson(JSON.stringify({ pageId, draft, text })), true),
+    addShapeTree: (pageId, draft) => json(() => (doc as unknown as { addShapeTreeJson: (args: string) => string }).addShapeTreeJson(JSON.stringify({ pageId, draft })), true),
+    subtreeGlue: (pageId, shapeId) => json(() => (doc as unknown as { subtreeGlueJson: (args: string) => string }).subtreeGlueJson(JSON.stringify({ pageId, shapeId }))),
     addConnector: (pageId, draft, from, to) => json(() => doc.addConnectorJson(JSON.stringify({ pageId, draft, from, to })), true),
     deleteShape: (pageId, shapeId) => json(() => doc.deleteShapeJson(JSON.stringify({ pageId, shapeId })), true),
     shapeText: (pageId, shapeId) => json(() => doc.shapeTextJson(JSON.stringify({ pageId, shapeId }))),

@@ -5,9 +5,9 @@ import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, Diagra
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
-import { RibbonCommandsProvider, addShapeWithText, copySelection, findShapePlacement, numericCellValue, pasteEntry } from './components/ribbon/commands';
+import { RibbonCommandsProvider, copySelection, duplicateEntry, findShapePlacement, numericCellValue, pasteEntry } from './components/ribbon/commands';
 import type { VsdxClipboardEntry } from './components/ribbon/clipboard';
-import { DUPLICATE_OFFSET, PASTE_OFFSET, draftForPaste } from './components/ribbon/clipboard';
+import { DUPLICATE_OFFSET, PASTE_OFFSET } from './components/ribbon/clipboard';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
@@ -332,7 +332,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (!handle || !selection) return;
     try {
       const entry = copySelection(handle, selection);
-      const receipt = addShapeWithText(handle, selection.pageId, draftForPaste(entry, DUPLICATE_OFFSET.x, DUPLICATE_OFFSET.y), entry.text);
+      const receipt = duplicateEntry(handle, selection.pageId, entry, DUPLICATE_OFFSET.x, DUPLICATE_OFFSET.y);
       setSelection({ pageId: selection.pageId, shapeId: receipt.shapeId, hit: { kind: 'shape', shapeId: receipt.shapeId } });
       refresh(undefined, true);
     } catch (value) { reportError(value); }

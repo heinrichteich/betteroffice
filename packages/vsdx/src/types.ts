@@ -4,7 +4,10 @@ export type SnapshotCellSheet = 'document' | { page: number } | { master: number
 export type SnapshotCellRow = { index: number } | { name: string };
 export interface SnapshotCellLocator { sheet: SnapshotCellSheet; shapeId: number | null; section: string | null; sectionIndex?: number | null; row: SnapshotCellRow | null; cellName: string; }
 export interface CellSnapshot { locator: SnapshotCellLocator; name: string; formula: string | null; value: string | null; rowType?: string; }
-export interface ShapeSnapshot { id: string; sourceId: number; name: string | null; cells: CellSnapshot[]; children: ShapeSnapshot[]; }
+export interface ShapeSnapshot { id: string; sourceId: number; name: string | null; cells: CellSnapshot[]; children: ShapeSnapshot[]; copySourceId?: number | null; copyRefusal?: string | null; }
+export interface ShapeTreeGlue { connectorSource: string; endpoint: string; targetSource: string; toCell: string; }
+export interface FormulaShapeTreeGlue { connectorSource: string; endpoint: string; targetSource: string; toCell: string; }
+export interface FormulaShapeTreeDraft { name?: string; cells: Array<{ locator: CellLocator & { rowType?: string }; name?: string; formula?: string; value?: string }>; text?: string; copySourceId?: number | null; sourceShapeId?: string | null; sourceId?: number | null; copyRefusal?: string | null; glue?: FormulaShapeTreeGlue[]; children?: FormulaShapeTreeDraft[]; }
 export interface PageSnapshot { id: string; sourcePartPath: string; name: string | null; shapes: ShapeSnapshot[]; }
 export interface DiagramSnapshot { pages: PageSnapshot[]; }
 export interface CellFormulaReceipt { pageId: string; shapeId: string; cellName: string; before: string | null; after: string; }

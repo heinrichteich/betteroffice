@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { ShapeSnapshot } from '@betteroffice/vsdx';
-import { DUPLICATE_OFFSET, PASTE_OFFSET, buildClipboardEntry, canCopyShape, draftForPaste, resolvedNumeric, toFormula } from './clipboard';
+import { DUPLICATE_OFFSET, PASTE_OFFSET, buildClipboardEntry, canCopyShape, draftForPaste, draftTreeForPaste, resolvedNumeric, toFormula } from './clipboard';
 
 function shape(cells: Array<{ name: string; formula?: string | null; value?: string | null; section?: string | null; row?: { index: number } | { name: string } | null }>): ShapeSnapshot {
   return {
@@ -89,10 +89,25 @@ test('resolves non-literal pins through their cached value', () => {
   expect(toFormula(-0)).toBe('0');
 });
 
-test('refuses groups so a copy never flattens children', () => {
+test('copies groups with their children and offsets only the root', () => {
   const child = shape([{ name: 'PinX', formula: '1', value: '1' }]);
-  const group: ShapeSnapshot = { id: 'group:1', sourceId: 1, name: 'Group', children: [child], cells: [] };
+  const group: ShapeSnapshot = { id: 'group:1', sourceId: 1, name: 'Group', children: [{ ...child, id: 'child:1' }], cells: [{ locator: { sheet: { page: 1 }, shapeId: 1, section: null, sectionIndex: null, row: null, cellName: 'PinX' }, name: 'PinX', formula: '4', value: '4' }] };
   expect(canCopyShape(child)).toBe(true);
-  expect(canCopyShape(group)).toBe(false);
-  expect(() => buildClipboardEntry('page:1', group, '')).toThrow('vsdx group copy is not supported');
+  expect(canCopyShape(group)).toBe(true);
+  const entry = buildClipboardEntry('page:1', group, 'group text', { textFor: () => 'child text' });
+  expect(entry.children).toHaveLength(1);
+  expect(entry.children[0].text).toBe('child text');
+  expect(entry.children[0].sourceShapeId).toBe('child:1');
+  const tree = draftTreeForPaste(entry, PASTE_OFFSET.x, PASTE_OFFSET.y);
+  expect(tree.text).toBe('group text');
+  expect(tree.children?.[0]?.text).toBe('child text');
+  expect(tree.cells.find((cell) => cell.locator.cellName === 'PinX')?.formula).toBe('4.25');
+  expect(tree.children?.[0]?.cells.find((cell) => cell.locator.cellName === 'PinX')?.formula).toBe('1');
+});
+
+test('refuses only unportable content with its reason', () => {
+  const child = shape([{ name: 'PinX', formula: '1', value: '1' }]);
+  const blocked: ShapeSnapshot = { id: 'group:1', sourceId: 1, name: 'Group', copyRefusal: 'embedded media', children: [child], cells: [] };
+  expect(canCopyShape(blocked)).toBe(false);
+  expect(() => buildClipboardEntry('page:1', blocked, '')).toThrow('embedded media');
 });

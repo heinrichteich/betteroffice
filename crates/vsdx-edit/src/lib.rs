@@ -2712,4 +2712,616 @@ mod tests {
         })
         .collect()
     }
+
+    fn grouped_glue_session() -> DiagramSession {
+        DiagramSession::open(
+            include_bytes!("../../vsdx-parse/tests/fixtures/grouped-glue.vsdx"),
+            901,
+        )
+        .unwrap()
+    }
+
+    fn nested_groups_session() -> DiagramSession {
+        DiagramSession::open(
+            include_bytes!("../../vsdx-parse/tests/fixtures/nested-groups.vsdx"),
+            902,
+        )
+        .unwrap()
+    }
+
+    fn find_by_source(shapes: &[ShapeSnapshot], source_id: u32) -> &ShapeSnapshot {
+        shapes
+            .iter()
+            .find_map(|shape| {
+                if shape.source_id == source_id {
+                    Some(shape)
+                } else {
+                    find_by_source_result(&shape.children, source_id)
+                }
+            })
+            .expect("source shape is part of the snapshot")
+    }
+
+    fn find_by_source_result(shapes: &[ShapeSnapshot], source_id: u32) -> Option<&ShapeSnapshot> {
+        shapes.iter().find_map(|shape| {
+            if shape.source_id == source_id {
+                Some(shape)
+            } else {
+                find_by_source_result(&shape.children, source_id)
+            }
+        })
+    }
+
+    fn tree_draft(
+        session: &DiagramSession,
+        page_id: &str,
+        shape: &ShapeSnapshot,
+    ) -> ShapeTreeDraft {
+        let mut draft = tree_node(session, page_id, shape);
+        draft.glue = session.subtree_glue(page_id, &shape.id).unwrap();
+        draft
+    }
+
+    fn tree_node(session: &DiagramSession, page_id: &str, shape: &ShapeSnapshot) -> ShapeTreeDraft {
+        ShapeTreeDraft {
+            name: shape.name.clone(),
+            cells: shape.cells.clone(),
+            text: session.shape_text(page_id, &shape.id).unwrap(),
+            copy_source_id: Some(shape.copy_source_id.unwrap_or(shape.source_id)),
+            source_shape_id: Some(shape.id.clone()),
+            source_id: Some(shape.source_id),
+            copy_refusal: shape.copy_refusal.clone(),
+            glue: Vec::new(),
+            children: shape
+                .children
+                .iter()
+                .map(|child| tree_node(session, page_id, child))
+                .collect(),
+        }
+    }
+
+    fn paste_group(
+        session: &DiagramSession,
+        page_id: &str,
+        source_id: u32,
+    ) -> (ShapeSnapshot, ShapeReceipt) {
+        let snapshot = session.snapshot().unwrap();
+        let source = find_by_source(&snapshot.pages[0].shapes, source_id).clone();
+        let draft = tree_draft(session, page_id, &source);
+        let receipt = session
+            .add_shape_tree(&EditCtx::local("paste"), page_id, &draft)
+            .unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let pasted = snapshot.pages[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == receipt.shape_id)
+            .cloned()
+            .unwrap();
+        (pasted, receipt)
+    }
+
+    fn nest_shape(session: &DiagramSession, parent_id: &str, child_id: &str) {
+        let mut txn = session.yrs_doc().transact_mut();
+        let pages = txn.get_map(PAGES).unwrap();
+        let page = match pages.get(&txn, "page:1").unwrap() {
+            yrs::Out::YMap(page) => page,
+            _ => unreachable!(),
+        };
+        let roots = match page.get(&txn, "shapes").unwrap() {
+            yrs::Out::YArray(roots) => roots,
+            _ => unreachable!(),
+        };
+        let from = (0..roots.len(&txn))
+            .find(|index| match roots.get(&txn, *index) {
+                Some(yrs::Out::Any(Any::String(id))) => id.to_string() == child_id,
+                _ => false,
+            })
+            .unwrap();
+        roots.remove_range(&mut txn, from, 1);
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let child = match sheets.get(&txn, child_id).unwrap() {
+            yrs::Out::YMap(child) => child,
+            _ => unreachable!(),
+        };
+        child.insert(&mut txn, "parentId", parent_id);
+        let parent = match sheets.get(&txn, parent_id).unwrap() {
+            yrs::Out::YMap(parent) => parent,
+            _ => unreachable!(),
+        };
+        let siblings = match parent.get(&txn, "shapes").unwrap() {
+            yrs::Out::YArray(siblings) => siblings,
+            _ => unreachable!(),
+        };
+        siblings.push_back(&mut txn, child_id);
+    }
+
+    fn cell_formula<'a>(shape: &'a ShapeSnapshot, name: &str) -> Option<&'a str> {
+        shape
+            .cells
+            .iter()
+            .find(|cell| cell.name == name)
+            .and_then(|cell| cell.formula.as_deref())
+    }
+
+    fn collected_formulas(shape: &ShapeSnapshot) -> Vec<String> {
+        let mut formulas = shape
+            .cells
+            .iter()
+            .filter_map(|cell| cell.formula.clone())
+            .collect::<Vec<_>>();
+        for child in &shape.children {
+            formulas.extend(collected_formulas(child));
+        }
+        formulas
+    }
+
+    #[test]
+    fn group_paste_reproduces_children_at_relative_positions() {
+        let session = grouped_glue_session();
+        let before = session.snapshot().unwrap().pages[0].shapes.len();
+        let source = find_by_source(&session.snapshot().unwrap().pages[0].shapes, 10).clone();
+        let (pasted, _) = paste_group(&session, "page:1", 10);
+        assert_eq!(
+            session.snapshot().unwrap().pages[0].shapes.len(),
+            before + 1
+        );
+        assert_ne!(pasted.source_id, 10);
+        assert_eq!(pasted.children.len(), 1);
+        assert!(pasted.children[0].children.is_empty());
+        for (original, copy) in [
+            (&source, &pasted),
+            (&source.children[0], &pasted.children[0]),
+        ] {
+            assert_eq!(original.cells.len(), copy.cells.len());
+            for cell in &original.cells {
+                let mirror = copy
+                    .cells
+                    .iter()
+                    .find(|candidate| {
+                        candidate.name == cell.name
+                            && candidate.locator.section == cell.locator.section
+                            && candidate.locator.section_index == cell.locator.section_index
+                            && candidate.locator.row == cell.locator.row
+                    })
+                    .unwrap();
+                assert_eq!(mirror.formula, cell.formula);
+                assert_eq!(mirror.value, cell.value);
+            }
+        }
+        let reopened = DiagramSession::open(&session.save().unwrap(), 905).unwrap();
+        assert_reopened_projection_eq(&session, &reopened, "group paste");
+    }
+
+    #[test]
+    fn pasted_tree_references_itself_never_the_original() {
+        let session = grouped_glue_session();
+        let snapshot = session.snapshot().unwrap();
+        let child_id = find_by_source(&snapshot.pages[0].shapes, 11).id.clone();
+        session
+            .set_cell_formula(
+                &EditCtx::local("edit"),
+                "page:1",
+                &child_id,
+                "PinX",
+                "Sheet.10!Width/2",
+            )
+            .unwrap();
+        let (pasted, _) = paste_group(&session, "page:1", 10);
+        let expected = format!("Sheet.{}!Width/2", pasted.source_id);
+        assert_eq!(
+            cell_formula(&pasted.children[0], "PinX"),
+            Some(expected.as_str())
+        );
+        let saved = session.save().unwrap();
+        assert_eq!(session.save().unwrap(), saved);
+        let reopened = DiagramSession::open(&saved, 906).unwrap();
+        assert_reopened_projection_eq(&session, &reopened, "self-referential paste");
+        let resnapshot = reopened.snapshot().unwrap();
+        let root = find_by_source(&resnapshot.pages[0].shapes, pasted.source_id);
+        assert_eq!(
+            cell_formula(&root.children[0], "PinX"),
+            Some(expected.as_str())
+        );
+        let original = find_by_source(&resnapshot.pages[0].shapes, 10);
+        assert_eq!(
+            cell_formula(&original.children[0], "PinX"),
+            Some("Sheet.10!Width/2")
+        );
+        assert!(
+            collected_formulas(root)
+                .iter()
+                .all(|formula| !formula.contains("Sheet.10!")),
+            "pasted tree points back at the original"
+        );
+    }
+
+    #[test]
+    fn glue_inside_the_subtree_survives_remapped() {
+        let session = grouped_glue_session();
+        let (first, _) = paste_group(&session, "page:1", 10);
+        let child_id = first.children[0].id.clone();
+        let connector = session
+            .add_connector(
+                &EditCtx::local("connector"),
+                "page:1",
+                &connector_draft(),
+                &ConnectorGlue {
+                    shape_id: first.id.clone(),
+                    to_cell: None,
+                },
+                &ConnectorGlue {
+                    shape_id: child_id,
+                    to_cell: Some("Connections.X1".to_owned()),
+                },
+            )
+            .unwrap();
+        nest_shape(&session, &first.id, &connector.shape_id);
+        let snapshot = session.snapshot().unwrap();
+        let nested = snapshot.pages[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == first.id)
+            .cloned()
+            .unwrap();
+        assert_eq!(nested.children.len(), 2);
+        let draft = tree_draft(&session, "page:1", &nested);
+        let receipt = session
+            .add_shape_tree(&EditCtx::local("paste"), "page:1", &draft)
+            .unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let pasted = snapshot.pages[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == receipt.shape_id)
+            .unwrap();
+        assert_eq!(pasted.children.len(), 2);
+        let pasted_connector = pasted
+            .children
+            .iter()
+            .find(|child| child.name.as_deref() == Some("Connector"))
+            .unwrap();
+        let package = session.package().unwrap();
+        let part = package.page_part_paths[0].clone();
+        let glue = package.page_contents[&part]
+            .connects()
+            .filter(|connect| connect.from_sheet == pasted_connector.source_id)
+            .collect::<Vec<_>>();
+        assert_eq!(glue.len(), 2);
+        let targets = glue
+            .iter()
+            .map(|connect| connect.to_sheet)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(targets.len(), 2);
+        assert!(targets.contains(&pasted.source_id));
+        assert!(targets.contains(&pasted.children[0].source_id));
+        let saved = session.save().unwrap();
+        let reopened = DiagramSession::open(&saved, 907).unwrap();
+        let live_package = session.package().unwrap();
+        let reopened_package = reopened.package().unwrap();
+        let renderer = vsdx_render::Renderer::default();
+        assert_eq!(
+            renderer.layout_page(&live_package, &part).unwrap(),
+            renderer.layout_page(&reopened_package, &part).unwrap(),
+            "pasted internal glue rendering"
+        );
+        let resnapshot = reopened.snapshot().unwrap();
+        let rerooted = find_by_source(&resnapshot.pages[0].shapes, pasted.source_id).clone();
+        assert_eq!(rerooted.children.len(), 2);
+        let reglued = reopened_package.page_contents[&part]
+            .connects()
+            .filter(|connect| connect.from_sheet == pasted_connector.source_id)
+            .collect::<Vec<_>>();
+        assert_eq!(reglued.len(), 2);
+        let connectivity = vsdx_resolve::Resolver::new(&reopened_package)
+            .resolve_page_connectivity(&part)
+            .unwrap();
+        let resolved = &connectivity.connectors[&pasted_connector.source_id];
+        assert_eq!(resolved.glue.len(), 2);
+        assert!(resolved.glue.iter().all(|glue| {
+            glue.to
+                .as_ref()
+                .is_some_and(|end| end.connection_point.is_some())
+        }));
+        assert!(connectivity.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn glue_crossing_the_copy_boundary_is_dropped() {
+        let session = grouped_glue_session();
+        let (pasted, _) = paste_group(&session, "page:1", 10);
+        let package = session.package().unwrap();
+        let part = package.page_part_paths[0].clone();
+        let connects = package.page_contents[&part].connects().collect::<Vec<_>>();
+        assert_eq!(connects.len(), 6);
+        assert!(connects.iter().all(|connect| connect.from_sheet == 1));
+        let snapshot = session.snapshot().unwrap();
+        let connector = find_by_source(&snapshot.pages[0].shapes, 1).clone();
+        let receipt = session
+            .add_shape_tree(
+                &EditCtx::local("paste"),
+                "page:1",
+                &tree_draft(&session, "page:1", &connector),
+            )
+            .unwrap();
+        let resnapshot = session.snapshot().unwrap();
+        let copy = resnapshot.pages[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == receipt.shape_id)
+            .unwrap();
+        let package = session.package().unwrap();
+        assert_eq!(package.page_contents[&part].connects().count(), 6);
+        let connectivity = vsdx_resolve::Resolver::new(&package)
+            .resolve_page_connectivity(&part)
+            .unwrap();
+        assert!(connectivity.connectors[&copy.source_id].glue.is_empty());
+        assert_eq!(connectivity.connectors[&1].glue.len(), 6);
+        assert_eq!(pasted.children.len(), 1);
+        let saved = session.save().unwrap();
+        let reopened = DiagramSession::open(&saved, 908).unwrap();
+        assert_reopened_projection_eq(&session, &reopened, "dropped boundary glue");
+    }
+
+    #[test]
+    fn group_paste_is_one_undo_step() {
+        let session = grouped_glue_session();
+        let before = session.snapshot().unwrap().pages[0].shapes.len();
+        paste_group(&session, "page:1", 30);
+        assert_eq!(
+            session.snapshot().unwrap().pages[0].shapes.len(),
+            before + 1
+        );
+        assert!(session.undo());
+        assert_eq!(session.snapshot().unwrap().pages[0].shapes.len(), before);
+        assert!(session.redo());
+        assert_eq!(
+            session.snapshot().unwrap().pages[0].shapes.len(),
+            before + 1
+        );
+    }
+
+    #[test]
+    fn group_paste_syncs_to_a_peer_as_one_update() {
+        let session = grouped_glue_session();
+        let before = session.encode_state_as_update_v1();
+        paste_group(&session, "page:1", 10);
+        let peer = DiagramSession::open_from_update(&before, 909).unwrap();
+        let diff = session
+            .encode_diff_v1(&peer.encode_state_vector_v1())
+            .unwrap();
+        peer.apply_update_v1(&diff).unwrap();
+        assert_eq!(peer.snapshot().unwrap(), session.snapshot().unwrap());
+        let saved = peer.save().unwrap();
+        let reopened = DiagramSession::open(&saved, 910).unwrap();
+        assert_reopened_projection_eq(&peer, &reopened, "synced group paste");
+    }
+
+    #[test]
+    fn group_paste_survives_save_and_reopen_with_untouched_parts_intact() {
+        let session = grouped_glue_session();
+        let snapshot = session.snapshot().unwrap();
+        let child_id = find_by_source(&snapshot.pages[0].shapes, 32).id.clone();
+        session
+            .set_shape_text(&EditCtx::local("text"), "page:1", &child_id, "nested hello")
+            .unwrap();
+        let (pasted, _) = paste_group(&session, "page:1", 30);
+        assert_eq!(
+            session
+                .shape_text("page:1", &pasted.children[0].children[0].id)
+                .unwrap(),
+            "nested hello"
+        );
+        let saved = session.save().unwrap();
+        assert_eq!(session.save().unwrap(), saved);
+        let first = vsdx_parse::parse_vsdx(&saved).unwrap();
+        let fixture = grouped_glue_session().package().unwrap();
+        for path in &fixture.page_part_paths {
+            if path.ends_with("page1.xml") {
+                continue;
+            }
+            assert_eq!(
+                first.part_bytes(path),
+                fixture.part_bytes(path),
+                "untouched part changed: {path}"
+            );
+        }
+        let reopened = DiagramSession::open(&saved, 911).unwrap();
+        assert_reopened_projection_eq(&session, &reopened, "saved group paste");
+        let resnapshot = reopened.snapshot().unwrap();
+        let root = find_by_source(&resnapshot.pages[0].shapes, pasted.source_id);
+        assert_eq!(root.children.len(), 1);
+        assert_eq!(root.children[0].children.len(), 1);
+        assert_eq!(
+            reopened
+                .shape_text("page:1", &root.children[0].children[0].id)
+                .unwrap(),
+            "nested hello"
+        );
+    }
+
+    #[test]
+    fn group_copy_refuses_unportable_content_and_leaves_no_trace() {
+        let session = nested_groups_session();
+        let snapshot = session.snapshot().unwrap();
+        let before = session.encode_state_as_update_v1();
+        for source_id in [1, 2] {
+            let source = find_by_source(&snapshot.pages[0].shapes, source_id).clone();
+            let error = session
+                .add_shape_tree(
+                    &EditCtx::local("paste"),
+                    "page:1",
+                    &tree_draft(&session, "page:1", &source),
+                )
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("embedded media"),
+                "unexpected refusal for {source_id}: {error}"
+            );
+        }
+        let leaf = find_by_source(&snapshot.pages[0].shapes, 4).clone();
+        let error = session
+            .add_shape_tree(
+                &EditCtx::local("paste"),
+                "page:1",
+                &tree_draft(&session, "page:1", &leaf),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("embedded media"),
+            "unexpected leaf refusal: {error}"
+        );
+        assert_eq!(session.encode_state_as_update_v1(), before);
+        let clean = find_by_source(&snapshot.pages[0].shapes, 3).clone();
+        session
+            .add_shape_tree(
+                &EditCtx::local("paste"),
+                "page:1",
+                &tree_draft(&session, "page:1", &clean),
+            )
+            .unwrap();
+        let reopened = DiagramSession::open(&session.save().unwrap(), 912).unwrap();
+        assert_reopened_projection_eq(&session, &reopened, "leaf paste beside refusal");
+    }
+
+    #[test]
+    fn group_paste_refuses_malformed_drafts_atomically() {
+        let session = grouped_glue_session();
+        let before = session.encode_state_as_update_v1();
+        let mut deep = ShapeTreeDraft {
+            name: None,
+            cells: Vec::new(),
+            text: String::new(),
+            copy_source_id: None,
+            source_shape_id: Some("page:1:shape:10".to_owned()),
+            source_id: Some(10),
+            copy_refusal: None,
+            glue: Vec::new(),
+            children: Vec::new(),
+        };
+        for _ in 0..crate::diagram::MAX_SHAPE_NESTING {
+            deep = ShapeTreeDraft {
+                name: None,
+                cells: Vec::new(),
+                text: String::new(),
+                copy_source_id: None,
+                source_shape_id: Some("page:1:shape:10".to_owned()),
+                source_id: Some(10),
+                copy_refusal: None,
+                glue: Vec::new(),
+                children: vec![deep],
+            };
+        }
+        let error = session
+            .add_shape_tree(&EditCtx::local("paste"), "page:1", &deep)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("maximum depth"),
+            "unexpected depth refusal: {error}"
+        );
+        let snapshot = session.snapshot().unwrap();
+        let source = find_by_source(&snapshot.pages[0].shapes, 10).clone();
+        let mut duplicated = tree_draft(&session, "page:1", &source);
+        duplicated.children.push(duplicated.children[0].clone());
+        let error = session
+            .add_shape_tree(&EditCtx::local("paste"), "page:1", &duplicated)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("twice"),
+            "unexpected duplicate refusal: {error}"
+        );
+        let mut orphan = tree_draft(&session, "page:1", &source);
+        orphan.children[0].source_shape_id = Some("page:1:shape:missing".to_owned());
+        let error = session
+            .add_shape_tree(&EditCtx::local("paste"), "page:1", &orphan)
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::EditError::ShapeNotFound(_)),
+            "unexpected orphan refusal: {error}"
+        );
+        assert_eq!(session.encode_state_as_update_v1(), before);
+    }
+
+    #[test]
+    fn cutting_a_group_agrees_with_copy_on_boundary_glue() {
+        let session = grouped_glue_session();
+        let snapshot = session.snapshot().unwrap();
+        let source = find_by_source(&snapshot.pages[0].shapes, 10).clone();
+        let draft = tree_draft(&session, "page:1", &source);
+        session
+            .delete_shape(&EditCtx::local("cut"), "page:1", &source.id)
+            .unwrap();
+        session
+            .add_shape_tree(&EditCtx::local("paste"), "page:1", &draft)
+            .unwrap();
+        let package = session.package().unwrap();
+        let part = package.page_part_paths[0].clone();
+        let connects = package.page_contents[&part].connects().collect::<Vec<_>>();
+        assert_eq!(connects.len(), 4);
+        assert!(
+            connects
+                .iter()
+                .all(|connect| connect.from_sheet == 1 && [21, 32].contains(&connect.to_sheet))
+        );
+        let saved = session.save().unwrap();
+        let reopened = DiagramSession::open(&saved, 913).unwrap();
+        assert_reopened_projection_eq(&session, &reopened, "cut group paste");
+    }
+
+    #[test]
+    fn copies_of_copies_stay_self_referential() {
+        for save_between in [false, true] {
+            let session = grouped_glue_session();
+            let snapshot = session.snapshot().unwrap();
+            let child_id = find_by_source(&snapshot.pages[0].shapes, 11).id.clone();
+            session
+                .set_cell_formula(
+                    &EditCtx::local("edit"),
+                    "page:1",
+                    &child_id,
+                    "PinX",
+                    "Sheet.10!Width/2",
+                )
+                .unwrap();
+            let (first, _) = paste_group(&session, "page:1", 10);
+            let session = if save_between {
+                DiagramSession::open(&session.save().unwrap(), 914).unwrap()
+            } else {
+                session
+            };
+            let snapshot = session.snapshot().unwrap();
+            let source = snapshot.pages[0]
+                .shapes
+                .iter()
+                .find(|shape| shape.source_id == first.source_id)
+                .cloned()
+                .unwrap();
+            let draft = tree_draft(&session, "page:1", &source);
+            let receipt = session
+                .add_shape_tree(&EditCtx::local("paste"), "page:1", &draft)
+                .unwrap();
+            let snapshot = session.snapshot().unwrap();
+            let second = snapshot.pages[0]
+                .shapes
+                .iter()
+                .find(|shape| shape.id == receipt.shape_id)
+                .unwrap();
+            let expected = format!("Sheet.{}!Width/2", second.source_id);
+            assert_eq!(
+                cell_formula(&second.children[0], "PinX"),
+                Some(expected.as_str()),
+                "save_between={save_between}"
+            );
+            let saved = session.save().unwrap();
+            let reopened = DiagramSession::open(&saved, 915).unwrap();
+            assert_reopened_projection_eq(&session, &reopened, "second-generation paste");
+            let resnapshot = reopened.snapshot().unwrap();
+            let root = find_by_source(&resnapshot.pages[0].shapes, second.source_id);
+            assert_eq!(
+                cell_formula(&root.children[0], "PinX"),
+                Some(expected.as_str()),
+                "save_between={save_between}"
+            );
+        }
+    }
 }

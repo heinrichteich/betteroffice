@@ -5,7 +5,10 @@ export class VsdxDocument {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
+    addConnectorJson(args: string): string;
     addShapeJson(args: string): string;
+    addShapeTreeJson(args: string): string;
+    addShapeWithTextJson(args: string): string;
     applyUpdateJson(update: Uint8Array): string;
     canRedo(): boolean;
     canUndo(): boolean;
@@ -28,8 +31,11 @@ export class VsdxDocument {
     resizeShapeJson(args: string): string;
     save(): Uint8Array;
     setCellFormulaJson(args: string): string;
+    setShapeTextJson(args: string): string;
+    shapeTextJson(args: string): string;
     snapshotJson(): string;
     startUpdateObservation(): void;
+    subtreeGlueJson(args: string): string;
     undoJson(): string;
     static version(): string;
     readonly clientId: number;
@@ -60,7 +66,10 @@ export interface InitOutput {
     readonly vsdxrenderer_new: () => number;
     readonly vsdxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly __wbg_vsdxdocument_free: (a: number, b: number) => void;
+    readonly vsdxdocument_addConnectorJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly vsdxdocument_addShapeTreeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly vsdxdocument_addShapeWithTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_canRedo: (a: number) => number;
     readonly vsdxdocument_canUndo: (a: number) => number;
@@ -81,8 +90,11 @@ export interface InitOutput {
     readonly vsdxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_save: (a: number) => [number, number, number, number];
     readonly vsdxdocument_setCellFormulaJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly vsdxdocument_setShapeTextJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly vsdxdocument_shapeTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_snapshotJson: (a: number) => [number, number, number, number];
     readonly vsdxdocument_startUpdateObservation: (a: number) => [number, number];
+    readonly vsdxdocument_subtreeGlueJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly vsdxdocument_version: () => [number, number];
     readonly __wbindgen_exn_store: (a: number) => void;
