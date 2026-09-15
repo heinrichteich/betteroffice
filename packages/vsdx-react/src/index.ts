@@ -11,6 +11,8 @@ export { RibbonCommandsContext, RibbonCommandsProvider, createRibbonCommands, fi
 export type { RibbonCommand, RibbonCommandId, RibbonCommands, RibbonCommandsProviderProps, ShapePlacement } from './components/ribbon/commands';
 export { ShapesPanel } from './components/shapes/ShapesPanel';
 export type { ShapesPanelProps } from './components/shapes/ShapesPanel';
+export { DrawingExplorer, MAX_EXPLORER_DEPTH, groupSectionRows, groupShapeCells, isOneDShape, shapeLabel } from './components/explorer/DrawingExplorer';
+export type { DrawingExplorerProps, ExplorerRow, ExplorerSection } from './components/explorer/DrawingExplorer';
 export { standardShapeById, standardShapes } from './components/shapes/shapeLibrary';
 export type { StandardShape } from './components/shapes/shapeLibrary';
 export { MAX_ZOOM, MIN_ZOOM, StatusBar, ZOOM_STOPS, clampZoom, sliderPositionForZoom, zoomForSliderPosition } from './components/statusbar';

@@ -28,6 +28,27 @@
     }
   },
   "contextMenu": { "label": "Shape actions" },
+  "explorer": {
+    "title": "Drawing Explorer",
+    "collapse": "Collapse Drawing Explorer",
+    "expand": "Expand Drawing Explorer",
+    "expandNode": "Expand {name}",
+    "collapseNode": "Collapse {name}",
+    "document": "Document",
+    "pages": "Pages",
+    "shapes": "Shapes",
+    "shapeSheet": "ShapeSheet",
+    "cells": "Cells",
+    "cell": "Cell",
+    "formula": "Formula",
+    "value": "Value",
+    "group": "Group",
+    "connector": "1-D",
+    "empty": "No pages",
+    "noShapes": "No shapes",
+    "noCells": "No cells",
+    "truncated": "Deeper levels omitted"
+  },
   "shapesPanel": {
     "title": "Shapes",
     "collapse": "Collapse Shapes",
