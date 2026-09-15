@@ -17,6 +17,7 @@ export { resolveDragGeometry };
 export type { DragStart };
 
 export interface VsdxShapeSelection { pageId: string; shapeId: string; hit: HitTestResult; }
+export interface DragPreview { point: ModelPoint; snap: boolean; }
 export interface VsdxEditorApi { handle: DiagramHandle; refresh: () => void; }
 /** Save edits before changing a session identity or seed, or remount for a new session. */
 export interface VsdxEditorCollaborationOptions {
@@ -77,7 +78,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
   const pointerRef = useRef<DragStart | null>(null);
-  const dragPreviewRef = useRef<ModelPoint | null>(null);
+  const dragPreviewRef = useRef<DragPreview | null>(null);
   const previewFrameRef = useRef<number | null>(null);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
@@ -209,7 +210,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     }
     const start = pointerRef.current; const release = dragPreviewRef.current;
     if (start && release) {
-      try { paintDragPreview(context, previewOutline(start, release, frame.paintTransform), dpr, zoom); } catch { void 0; }
+      try { paintDragPreview(context, previewOutline(start, release.point, frame.paintTransform, release.snap), dpr, zoom); } catch { void 0; }
     }
   }, [model.frame, model.snapshot, model.pageIndex, selection, zoom]);
 
@@ -334,8 +335,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (!frame) return;
     try {
       const point = canvasPointerPosition(event, frame);
-      const snap = event.shiftKey;
-      dragPreviewRef.current = point.model;
+      dragPreviewRef.current = { point: point.model, snap: event.shiftKey };
       if (previewFrameRef.current !== null) return;
       previewFrameRef.current = requestAnimationFrame(() => {
         previewFrameRef.current = null;
@@ -343,7 +343,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         if (!liveFrame || !liveStart || !release || !overlay) return;
         const context = overlay.getContext('2d'); if (!context) return;
         try {
-          const corners = previewOutline(liveStart, release, liveFrame.paintTransform, snap);
+          const corners = previewOutline(liveStart, release.point, liveFrame.paintTransform, release.snap);
           context.clearRect(0, 0, overlay.width, overlay.height);
           paintDragPreview(context, corners, window.devicePixelRatio || 1, zoomRef.current);
           paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current);
