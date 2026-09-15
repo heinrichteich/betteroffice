@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'bun:test';
 import type { DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
 import { createRibbonCommands, findShapePlacement, isFormulaDerived, isHandleResizeBlocked, locPinAxisFractional, locPinAxisUnmanaged, locPinSizeDriven, numericCellValue } from './commands';
+import { resolveDragGeometry } from '../../interactions';
 
 function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
   return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ['one', 'two', 'three'].map((id) => ({ id, sourceId: 1, name: id, children: [], cells: Object.entries(cells).map(([name, value]) => ({ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: value, value })) })) }] };
@@ -186,6 +187,23 @@ test('a non-proportional LocPin formula blocks handle resize instead of skewing 
   expect(locPinAxisFractional(heightScaled, 'LocPinY')).toBe(true);
   expect(locPinSizeDriven(heightScaled as never).y).toBe(true);
   expect(isHandleResizeBlocked(heightScaled)).toBe(false);
+});
+
+test('a guarded proportional LocPin allows handle resize and holds the anchored edge', () => {
+  const proportional = snapshot({ LocPinX: 'GUARD(Width*0.5)' }).pages[0].shapes[1];
+  expect(locPinAxisFractional(proportional, 'LocPinX')).toBe(true);
+  expect(locPinAxisUnmanaged(proportional, 'LocPinX')).toBe(false);
+  expect(locPinSizeDriven(proportional as never).x).toBe(true);
+  expect(isHandleResizeBlocked(proportional)).toBe(false);
+  const flags = locPinSizeDriven(proportional as never);
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, locPinFormula: flags, size: { width: 2, height: 1 } };
+  const grown = resolveDragGeometry(start, { x: 1, y: 0 });
+  expect(grown.width).toBeCloseTo(3, 10);
+  expect(grown.x - 0.5 * grown.width).toBeCloseTo(4, 10);
+  const guarded = snapshot({ LocPinX: 'GUARD(Width-1)' }).pages[0].shapes[1];
+  expect(locPinAxisFractional(guarded, 'LocPinX')).toBe(false);
+  expect(locPinAxisUnmanaged(guarded, 'LocPinX')).toBe(true);
+  expect(isHandleResizeBlocked(guarded)).toBe(true);
 });
 
 test('uses a shape root cell without confusing a same-named User cell', () => {

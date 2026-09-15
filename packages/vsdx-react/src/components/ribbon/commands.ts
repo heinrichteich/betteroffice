@@ -116,18 +116,52 @@ export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
 /** True when a stored formula is a relative reference rather than a fixed literal. */
 export function isFormulaDerived(formula: string | null | undefined): boolean {
   if (formula === null || formula === undefined) return false;
-  let text = formula.trim();
+  const text = unwrapGuardCall(formula);
   if (!text) return false;
-  const guard = text.match(/^GUARD\((.*)\)$/i);
-  if (guard) text = guard[1].trim();
   return !/^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(text);
+}
+
+function unwrapGuardCall(formula: string): string {
+  let text = formula.replace(/^=+/, '').trim();
+  for (;;) {
+    const head = /^GUARD\s*\(/i.exec(text);
+    if (!head) return text;
+    let depth = 0;
+    let quoted = false;
+    let end = -1;
+    for (let index = head[0].length - 1; index < text.length; index += 1) {
+      const char = text[index];
+      if (quoted) {
+        if (char === '"') {
+          if (text[index + 1] === '"') index += 1;
+          else quoted = false;
+        }
+        continue;
+      }
+      if (char === '"') {
+        quoted = true;
+        continue;
+      }
+      if (char === '(') depth += 1;
+      else if (char === ')') {
+        depth -= 1;
+        if (depth === 0) {
+          end = index;
+          break;
+        }
+      }
+    }
+    if (end < 0 || quoted) return text;
+    if (text.slice(end + 1).trim() !== '') return text;
+    text = text.slice(head[0].length, end).trim().replace(/^=+/, '').trim();
+  }
 }
 
 /** True when a LocPin formula scales proportionally with its own size cell. */
 export function locPinAxisFractional(shape: ShapeSnapshot | null, name: string): boolean {
   const cell = findCell(shape, name);
   if (!cell) return true;
-  const formula = (cell.formula ?? '').replace(/^=+/, '').trim();
+  const formula = unwrapGuardCall((cell.formula ?? '').replace(/^=+/, '').trim());
   if (formula === '') {
     const value = (cell.value ?? '').trim();
     return value === '' || !Number.isFinite(Number(value));
@@ -140,7 +174,7 @@ export function locPinAxisFractional(shape: ShapeSnapshot | null, name: string):
 export function locPinAxisUnmanaged(shape: ShapeSnapshot | null, name: string): boolean {
   const cell = findCell(shape, name);
   if (!cell) return false;
-  const formula = (cell.formula ?? '').replace(/^=+/, '').trim();
+  const formula = unwrapGuardCall((cell.formula ?? '').replace(/^=+/, '').trim());
   if (formula === '' || Number.isFinite(Number(formula))) return false;
   return !isProportionalLocPin(formula, locPinSizeCell(name));
 }
