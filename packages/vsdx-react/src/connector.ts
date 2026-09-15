@@ -420,7 +420,7 @@ export function quickShapePlacement(source: ShapeSnapshot, side: AutoConnectSide
   return placeQuickShape(from, orientDirection(shapeOrientation(source), AUTO_CONNECT_DIRS[side]), width, height, gap);
 }
 
-/** Insert geometry from a page-space edge; width and height are source-local and scaled to page space. Null when an ancestor has no bounds. */
+/** Insert geometry for a quick shape off one edge, in page inches. */
 export function globalQuickShapePlacement(source: ShapeSnapshot, ancestors: readonly ShapeSnapshot[], side: AutoConnectSide, width: number, height: number, gap = QUICK_SHAPE_GAP_INCHES): QuickShapePlacement | null {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
   const scene = sceneTransformForAncestors(ancestors);
@@ -714,7 +714,7 @@ function flattenConnectorShapes(shapes: readonly ShapeSnapshot[]): ShapeSnapshot
   return shapes.flatMap((shape) => [shape, ...flattenConnectorShapes(shape.children)]);
 }
 
-/** Whole-route recompute for connectors glued to a dragged shape, in model inches. */
+/** Routes for connectors glued to a dragged shape, in model inches. */
 export function reroutePreviewForMove(shapes: readonly ShapeSnapshot[], frame: PageDisplayList, sourcePartPath: string, dragged: ShapeSnapshot, geometry: MovedShapeGeometry): ModelPoint[][] {
   if (isConnectorShape(dragged)) return [];
   const ancestors = ancestorChain(shapes, dragged.id);
@@ -831,7 +831,7 @@ export function paintConnectorEndpoint(ctx: CanvasRenderingContext2D, at: ModelP
   else ring(ctx, at, 0.09, '#9aa5b4', 0.025);
 }
 
-/** Overlay chrome in model space; zoom applies once through the canvas transform. */
+/** Paints the connector overlay chrome. */
 export function paintConnectorOverlay(ctx: CanvasRenderingContext2D, frame: PageDisplayList, dpr: number, zoom: number, scene: ConnectorOverlayScene): void {
   applyModelTransform(ctx, frame, dpr, zoom);
   for (const connector of scene.connectors) {
