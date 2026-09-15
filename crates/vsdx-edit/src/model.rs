@@ -79,6 +79,12 @@ pub struct CellFormulaReceipt {
     pub after: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LocPinAtSize {
+    pub x: f64,
+    pub y: f64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeReceipt {

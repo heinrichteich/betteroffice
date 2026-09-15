@@ -1006,6 +1006,162 @@ mod tests {
         );
     }
 
+    fn loc_pin_shape(formulas: &[(&str, &str)]) -> DiagramSession {
+        let session = session();
+        for (name, formula) in formulas {
+            add_cell(&session, name, Some(formula), None);
+        }
+        session
+    }
+
+    fn loc_pin(session: &DiagramSession, width: f64, height: f64) -> (f64, f64) {
+        let result = session
+            .loc_pin_at_size("page:1", "page:1:shape:1", width, height)
+            .unwrap();
+        (result.x, result.y)
+    }
+
+    #[test]
+    fn loc_pin_at_size_evaluates_any_formula_against_the_proposed_size() {
+        for (formula, width, height, expected) in [
+            ("Width*0.5", 3.0, 1.0, 1.5),
+            ("Width-1", 3.0, 1.0, 2.0),
+            ("GUARD(Width*0.5)", 3.0, 1.0, 1.5),
+            ("GUARD(Width-1)", 3.0, 1.0, 2.0),
+            ("Height*0.5", 3.0, 2.0, 1.0),
+            ("Width+Height", 3.0, 2.0, 5.0),
+            ("MIN(Width*0.5,1)", 3.0, 1.0, 1.0),
+            ("=0.5*Width", 3.0, 1.0, 1.5),
+            ("1", 3.0, 1.0, 1.0),
+        ] {
+            let session = loc_pin_shape(&[
+                ("Width", "2"),
+                ("Height", "1"),
+                ("LocPinX", formula),
+                ("LocPinY", "0.5"),
+            ]);
+            let (x, _) = loc_pin(&session, width, height);
+            assert_eq!(x, expected, "{formula}");
+        }
+        let guarded_height = loc_pin_shape(&[
+            ("Width", "2"),
+            ("Height", "1"),
+            ("LocPinX", "1"),
+            ("LocPinY", "GUARD(Height*0.5)"),
+        ]);
+        assert_eq!(loc_pin(&guarded_height, 3.0, 4.0).1, 2.0);
+    }
+
+    #[test]
+    fn loc_pin_at_size_resolves_user_and_scratch_cells() {
+        let session = session();
+        for (name, formula) in [
+            ("Width", "4"),
+            ("Height", "1"),
+            ("LocPinX", "User.Foo*Width"),
+        ] {
+            add_cell(&session, name, Some(formula), None);
+        }
+        add_cell_at(
+            &session,
+            "Value",
+            Some("User"),
+            Some(CellRow::Name("Foo".to_owned())),
+            Some("0.25"),
+            None,
+        );
+        assert_eq!(loc_pin(&session, 8.0, 1.0).0, 2.0);
+    }
+
+    #[test]
+    fn loc_pin_at_size_holds_absolute_when_evaluation_fails_or_turns_circular() {
+        let session = session();
+        for (name, formula, value) in [
+            ("Width", "2", None),
+            ("Height", "1", None),
+            ("PinX", "5", None),
+            ("LocPinX", "PinX*0.5", None),
+            ("LocPinY", "Nope*2", Some("0.75")),
+        ] {
+            add_cell(&session, name, Some(formula), value);
+        }
+        let (x, y) = loc_pin(&session, 9.0, 7.0);
+        assert_eq!(x, 2.5);
+        assert_eq!(y, 0.75);
+        let missing = loc_pin_shape(&[("Width", "2"), ("Height", "1")]);
+        assert_eq!(loc_pin(&missing, 4.0, 6.0), (2.0, 3.0));
+    }
+
+    #[test]
+    fn loc_pin_at_size_matches_the_committed_snapshot() {
+        for formula in ["Width*0.5", "Width-1", "GUARD(Width*0.5)", "GUARD(Width-1)"] {
+            let session = loc_pin_shape(&[
+                ("Width", "2"),
+                ("Height", "1"),
+                ("PinX", "5"),
+                ("PinY", "2"),
+                ("LocPinX", formula),
+                ("LocPinY", "0.5"),
+            ]);
+            let before = session.snapshot().unwrap().pages[0].shapes[0]
+                .cells
+                .iter()
+                .find(|cell| cell.name == "LocPinX")
+                .unwrap()
+                .value
+                .as_deref()
+                .unwrap()
+                .parse::<f64>()
+                .unwrap();
+            let probed = loc_pin(&session, 3.0, 1.0).0;
+            let anchor = 5.0 - before;
+            session
+                .resize_shape(&EditCtx::local("a"), "page:1", "page:1:shape:1", "3", "1")
+                .unwrap();
+            session
+                .move_shape(
+                    &EditCtx::local("a"),
+                    "page:1",
+                    "page:1:shape:1",
+                    (anchor + probed).to_string(),
+                    "2",
+                )
+                .unwrap();
+            let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+            let value = |name: &str| {
+                cells
+                    .iter()
+                    .find(|cell| cell.name == name)
+                    .unwrap()
+                    .value
+                    .as_deref()
+                    .unwrap()
+                    .parse::<f64>()
+                    .unwrap()
+            };
+            assert_eq!(value("LocPinX"), probed, "{formula}");
+            assert_eq!(value("PinX") - value("LocPinX"), anchor, "{formula}");
+        }
+    }
+
+    #[test]
+    fn loc_pin_at_size_costs_far_less_than_a_frame_per_drag_move() {
+        let session = loc_pin_shape(&[
+            ("Width", "2"),
+            ("Height", "1"),
+            ("LocPinX", "Width*0.5"),
+            ("LocPinY", "GUARD(Height-0.25)"),
+        ]);
+        let start = std::time::Instant::now();
+        for index in 0..1000 {
+            let width = 2.0 + f64::from(index % 7) * 0.125;
+            session
+                .loc_pin_at_size("page:1", "page:1:shape:1", width, 1.0)
+                .unwrap();
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+
     #[test]
     fn guarded_section_row_cell_refuses_edits() {
         let session = session();

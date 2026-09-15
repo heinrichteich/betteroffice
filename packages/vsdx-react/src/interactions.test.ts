@@ -266,6 +266,42 @@ test('a literal off-centre LocPin previews exactly what the commit renders', () 
   expect(Math.min(...northCorners.map((corner) => corner.y))).toBeCloseTo(stretched.y - locPin.y, 10);
   expect(Math.max(...northCorners.map((corner) => corner.y))).toBeCloseTo(stretched.y - locPin.y + stretched.height, 10);
 });
+test('an evaluated LocPin holds the anchored edge for any formula shape', () => {
+  const east = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, locPinAtSize: (width: number) => ({ x: 0.5 * width, y: 0.5 }), size: { width: 2, height: 1 } };
+  const grown = resolveDragGeometry(east, { x: 1, y: 0 });
+  expect(grown.width).toBeCloseTo(3, 10);
+  expect(grown.x).toBeCloseTo(5.5, 10);
+  expect(grown.x - 0.5 * grown.width).toBeCloseTo(4, 10);
+  const corners = previewOutline(east, { x: 1, y: 0 }, identity);
+  expect(Math.min(...corners.map((corner) => corner.x))).toBeCloseTo(4, 10);
+  expect(Math.max(...corners.map((corner) => corner.x))).toBeCloseTo(7, 10);
+  const northWest = { ...east, handle: 'nw' as const };
+  const stretched = resolveDragGeometry(northWest, { x: -1, y: 1 });
+  expect(stretched.width).toBeCloseTo(3, 10);
+  expect(stretched.height).toBeCloseTo(2, 10);
+  expect(stretched.x - 0.5 * stretched.width + stretched.width).toBeCloseTo(6, 10);
+  const literal = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, size: { width: 2, height: 1 } };
+  const held = resolveDragGeometry(literal, { x: 1, y: 0 });
+  expect(held.width).toBeCloseTo(3, 10);
+  expect(held.x).toBeCloseTo(5, 10);
+});
+test('an offset LocPin formula holds the anchored edge instead of refusing the resize', () => {
+  const offset = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, locPinAtSize: (width: number) => ({ x: width - 1, y: 0.5 }), size: { width: 2, height: 1 } };
+  const grown = resolveDragGeometry(offset, { x: 1, y: 0 });
+  expect(grown.width).toBeCloseTo(3, 10);
+  expect(grown.x - (grown.width - 1)).toBeCloseTo(4, 10);
+  const corners = previewOutline(offset, { x: 1, y: 0 }, identity);
+  expect(Math.min(...corners.map((corner) => corner.x))).toBeCloseTo(4, 10);
+  expect(Math.max(...corners.map((corner) => corner.x))).toBeCloseTo(7, 10);
+  const crossAxis = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 0.5, y: 0.5 }, locPinAtSize: (_width: number, height: number) => ({ x: 0.5 * height, y: 0.5 }), size: { width: 2, height: 1 } };
+  const crossed = resolveDragGeometry(crossAxis, { x: 1, y: 0 });
+  expect(crossed.width).toBeCloseTo(3, 10);
+  expect(crossed.x - 0.5).toBeCloseTo(4.5, 10);
+  const failing = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, locPinAtSize: () => { throw new Error('gone'); }, size: { width: 2, height: 1 } };
+  const absolute = resolveDragGeometry(failing, { x: 1, y: 0 });
+  expect(absolute.width).toBeCloseTo(3, 10);
+  expect(absolute.x).toBeCloseTo(5, 10);
+});
 test('canvas keyboard maps history, delete and escape intents', () => {
   expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true }, 1)).toEqual({ kind: 'undo' });
   expect(canvasKeyboardIntent({ key: 'Z', metaKey: true, shiftKey: true }, 1)).toEqual({ kind: 'redo' });

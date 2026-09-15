@@ -195,6 +195,30 @@ describe('VSDX wasm boundary', () => {
     diagram.dispose();
   });
 
+  test('evaluates LocPin at a proposed size so preview and commit agree', () => {
+    const diagram = openDiagram(foundation, { clientId: 9031 });
+    const added = diagram.addShape('page:1', { cells: [
+      { locator: { cellName: 'PinX' }, formula: '5' },
+      { locator: { cellName: 'PinY' }, formula: '2' },
+      { locator: { cellName: 'Width' }, formula: '2' },
+      { locator: { cellName: 'Height' }, formula: '1' },
+      { locator: { cellName: 'LocPinX' }, formula: 'Width-1' },
+      { locator: { cellName: 'LocPinY' }, formula: 'Height*0.5' },
+    ] }).shapeId;
+    const probed = diagram.locPinAtSize('page:1', added, 3, 1);
+    expect(probed.x).toBeCloseTo(2, 10);
+    expect(probed.y).toBeCloseTo(0.5, 10);
+    const anchor = 5 - 1;
+    diagram.resizeShape('page:1', added, '3', '1');
+    diagram.moveShape('page:1', added, String(anchor + probed.x), '2');
+    const cells = diagram.snapshot().pages[0].shapes.find(shape => shape.id === added)!.cells;
+    const locPinX = Number(cells.find(cell => cell.name === 'LocPinX')?.value);
+    const pinX = Number(cells.find(cell => cell.name === 'PinX')?.value);
+    expect(locPinX).toBeCloseTo(probed.x, 10);
+    expect(pinX - locPinX).toBeCloseTo(anchor, 10);
+    diagram.dispose();
+  });
+
   test('persists an edit through save and reopen while preserving untouched parts', async () => {
     const pageId = 'page:1';
     const shapeId = 'page:1:shape:1';

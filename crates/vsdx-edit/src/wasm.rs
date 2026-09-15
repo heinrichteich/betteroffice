@@ -94,6 +94,15 @@ struct ResizeShapeArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct LocPinAtSizeArgs {
+    page_id: String,
+    shape_id: String,
+    width: f64,
+    height: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ReorderShapeArgs {
     page_id: String,
     shape_id: String,
@@ -320,6 +329,11 @@ impl VsdxDocument {
         self.resize_shape_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = locPinAtSizeJson)]
+    pub fn loc_pin_at_size_json(&self, args: &str) -> Result<String, JsValue> {
+        self.loc_pin_at_size_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = reorderShapeJson)]
     pub fn reorder_shape_json(&self, args: &str) -> Result<String, JsValue> {
         self.reorder_shape_json_inner(args).map_err(js_error)
@@ -498,6 +512,18 @@ impl VsdxDocument {
     fn resize_shape_json_inner(&self, args: &str) -> Result<String, String> {
         let args = parse_args_inner(args)?;
         self.resize_shape(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn loc_pin_at_size(&self, args: LocPinAtSizeArgs) -> crate::EditResult<crate::LocPinAtSize> {
+        self.session
+            .loc_pin_at_size(&args.page_id, &args.shape_id, args.width, args.height)
+    }
+
+    fn loc_pin_at_size_json_inner(&self, args: &str) -> Result<String, String> {
+        let args = parse_args_inner(args)?;
+        self.loc_pin_at_size(args)
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }
@@ -1118,6 +1144,82 @@ mod tests {
                 .media_bytes_inner("visio/media/missing.png")
                 .unwrap_err(),
             "invalid diagram state: media part was not found"
+        );
+    }
+
+    #[test]
+    fn loc_pin_at_size_json_evaluates_against_the_proposed_size() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/nested-groups.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        let snapshot = document.session().snapshot().unwrap();
+        fn sized(shapes: &[crate::ShapeSnapshot]) -> Option<&crate::ShapeSnapshot> {
+            shapes.iter().find_map(|shape| {
+                let numeric = |name: &str| {
+                    shape
+                        .cells
+                        .iter()
+                        .find(|cell| cell.name == name)?
+                        .value
+                        .as_deref()?
+                        .parse::<f64>()
+                        .ok()
+                };
+                if numeric("Width").is_some()
+                    && numeric("Height").is_some()
+                    && numeric("LocPinX").is_some()
+                {
+                    Some(shape)
+                } else {
+                    sized(&shape.children)
+                }
+            })
+        }
+        let shape = sized(&snapshot.pages[0].shapes).unwrap();
+        let number = |name: &str| {
+            shape
+                .cells
+                .iter()
+                .find(|cell| cell.name == name)
+                .unwrap()
+                .value
+                .as_deref()
+                .unwrap()
+                .parse::<f64>()
+                .unwrap()
+        };
+        let width = number("Width");
+        let height = number("Height");
+        let probed: serde_json::Value = serde_json::from_str(
+            &document
+                .loc_pin_at_size_json_inner(
+                    &serde_json::json!({
+                        "pageId": snapshot.pages[0].id,
+                        "shapeId": shape.id,
+                        "width": width * 2.0,
+                        "height": height,
+                    })
+                    .to_string(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let loc_pin = number("LocPinX");
+        let expected = if (loc_pin - width / 2.0).abs() < 1e-9 {
+            width
+        } else {
+            loc_pin
+        };
+        assert!((probed["x"].as_f64().unwrap() - expected).abs() < 1e-9);
+        assert_eq!(
+            document
+                .loc_pin_at_size_json_inner(
+                    r#"{"pageId":"page:1","shapeId":"missing","width":1,"height":1}"#
+                )
+                .unwrap_err(),
+            "page \"missing\" was not found"
         );
     }
 

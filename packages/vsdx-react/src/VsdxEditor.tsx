@@ -248,7 +248,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     }
   };
 
-  const dragStartForPlacement = (page: { shapes: readonly ShapeSnapshot[]; sourcePartPath: string }, shape: ShapeSnapshot, frame: PageDisplayList): Omit<DragStart, 'canvas' | 'model' | 'resize' | 'pointerId' | 'startX' | 'startY'> => {
+  const dragStartForPlacement = (page: { id: string; shapes: readonly ShapeSnapshot[]; sourcePartPath: string }, shape: ShapeSnapshot, frame: PageDisplayList, locPinAtSize?: (width: number, height: number) => { x: number; y: number }): Omit<DragStart, 'canvas' | 'model' | 'resize' | 'pointerId' | 'startX' | 'startY'> => {
     const width = numericCellValue(shape, 'Width');
     const height = numericCellValue(shape, 'Height');
     return {
@@ -258,6 +258,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       flipY: numericCellValue(shape, 'FlipY', 0) === 1,
       pin: { x: numericCellValue(shape, 'PinX'), y: numericCellValue(shape, 'PinY') },
       locPin: { x: numericCellValue(shape, 'LocPinX', width / 2), y: numericCellValue(shape, 'LocPinY', height / 2) },
+      locPinAtSize,
       size: { width, height },
     };
   };
@@ -283,7 +284,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
             reportError(new Error(target === 'rotate' ? 'Shape rotation is locked and cannot be changed with handles.' : 'Shape is locked and cannot be resized with handles.'));
             return;
           }
-          const base = dragStartForPlacement(page, placement.shape, frame);
+          const base = dragStartForPlacement(page, placement.shape, frame, (width, height) => handle.locPinAtSize(page.id, placement.shape.id, width, height));
           pointerRef.current = {
             ...point,
             ...base,
