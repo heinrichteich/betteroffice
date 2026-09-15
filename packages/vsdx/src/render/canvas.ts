@@ -18,13 +18,13 @@ export function effectiveDprForSurface(cssWidth: number, cssHeight: number, dpr:
   const byWidth = MAX_CANVAS_DIMENSION / cssWidth;
   const byHeight = MAX_CANVAS_DIMENSION / cssHeight;
   const byArea = Math.sqrt(MAX_CANVAS_AREA / (cssWidth * cssHeight));
-  return Math.max(1 / 4, Math.min(requested, byWidth, byHeight, byArea));
+  return Math.min(requested, byWidth, byHeight, byArea);
 }
 /** Size a canvas to a CSS surface, clamping its backing store. Returns the effective DPR. */
 export function sizeCanvasForSurface(canvas: PageCanvasLike, surfaceWidth: number, surfaceHeight: number, dpr: number): number {
   const effective = effectiveDprForSurface(surfaceWidth, surfaceHeight, dpr);
-  canvas.width = Math.max(1, Math.round(surfaceWidth * effective));
-  canvas.height = Math.max(1, Math.round(surfaceHeight * effective));
+  canvas.width = Math.max(1, Math.floor(surfaceWidth * effective));
+  canvas.height = Math.max(1, Math.floor(surfaceHeight * effective));
   canvas.style.width = `${surfaceWidth}px`;
   canvas.style.height = `${surfaceHeight}px`;
   return effective;

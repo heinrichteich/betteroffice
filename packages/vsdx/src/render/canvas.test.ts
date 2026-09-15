@@ -78,6 +78,19 @@ test('surface sizing covers the scrollable area and clamps the backing store', (
   expect(clampedDpr).toBeLessThan(2);
 });
 
+test('an enormous surface stays within the backing store caps', () => {
+  const surfaceWidth = 7500 * 4 + 2000 * 2;
+  const surfaceHeight = 7500 * 4 + 2000 * 2;
+  const effective = effectiveDprForSurface(surfaceWidth, surfaceHeight, 2);
+  expect(effective).toBeLessThan(0.25);
+  const canvas = { width: 0, height: 0, style: { width: '', height: '' } };
+  const applied = sizeCanvasForSurface(canvas, surfaceWidth, surfaceHeight, 2);
+  expect(applied).toBe(effective);
+  expect(canvas.width).toBeLessThanOrEqual(8192);
+  expect(canvas.height).toBeLessThanOrEqual(8192);
+  expect(canvas.width * canvas.height).toBeLessThanOrEqual(33554432);
+});
+
 test('surface paint translates page content by the pad origin', async () => {
   const log: string[] = [];
   const list: PageDisplayList = {

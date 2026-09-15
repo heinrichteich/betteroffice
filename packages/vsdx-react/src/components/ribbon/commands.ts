@@ -105,10 +105,11 @@ export function isDeleteBlocked(shape: ShapeSnapshot | null): boolean {
 
 export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'LockHeight', 'LockAspect'] as const;
 
-/** True when a handle resize would be refused by a lock or a GUARD on its pin or size. */
+/** True when a handle resize would be refused by a lock, a GUARD, or a non-proportional LocPin. */
 export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   if (HANDLE_RESIZE_LOCKS.some((lock) => lockCellEnabled(shape, lock))) return true;
+  if (locPinAxisUnmanaged(shape, 'LocPinX') || locPinAxisUnmanaged(shape, 'LocPinY')) return true;
   return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => cellIsGuarded(shape, cell));
 }
 
@@ -122,9 +123,43 @@ export function isFormulaDerived(formula: string | null | undefined): boolean {
   return !/^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(text);
 }
 
-/** Per-axis flags for LocPin cells whose stored formula re-evaluates on resize. */
+/** True when a LocPin formula scales proportionally with its own size cell. */
+export function locPinAxisFractional(shape: ShapeSnapshot | null, name: string): boolean {
+  const cell = findCell(shape, name);
+  if (!cell) return true;
+  const formula = (cell.formula ?? '').replace(/^=+/, '').trim();
+  if (formula === '') {
+    const value = (cell.value ?? '').trim();
+    return value === '' || !Number.isFinite(Number(value));
+  }
+  if (Number.isFinite(Number(formula))) return false;
+  return isProportionalLocPin(formula, locPinSizeCell(name));
+}
+
+/** True when a LocPin formula is neither a literal nor proportional to its size cell. */
+export function locPinAxisUnmanaged(shape: ShapeSnapshot | null, name: string): boolean {
+  const cell = findCell(shape, name);
+  if (!cell) return false;
+  const formula = (cell.formula ?? '').replace(/^=+/, '').trim();
+  if (formula === '' || Number.isFinite(Number(formula))) return false;
+  return !isProportionalLocPin(formula, locPinSizeCell(name));
+}
+
+function locPinSizeCell(name: string): string {
+  return name === 'LocPinY' ? 'Height' : 'Width';
+}
+
+function isProportionalLocPin(formula: string, sizeCell: string): boolean {
+  const text = formula.replace(/^=+/, '').trim().toUpperCase();
+  const number = '(?:\\d+(?:\\.\\d+)?|\\.\\d+)(?:[eE][+-]?\\d+)?';
+  const cell = sizeCell.toUpperCase();
+  return new RegExp(`^(?:${cell}\\s*\\*\\s*${number}|${number}\\s*\\*\\s*${cell}|${cell}\\s*/\\s*${number})$`).test(text);
+}
+
+/** Per-axis flags for LocPin cells that track their size proportionally on resize. */
 export function locPinSizeDriven(shape: ShapeSnapshot | null): { x: boolean; y: boolean } {
-  return { x: isFormulaDerived(cellFormula(shape, 'LocPinX')), y: isFormulaDerived(cellFormula(shape, 'LocPinY')) };
+  if (!shape) return { x: false, y: false };
+  return { x: locPinAxisFractional(shape, 'LocPinX'), y: locPinAxisFractional(shape, 'LocPinY') };
 }
 
 /** True when a single-cell write would be refused by a GUARD on that cell. */

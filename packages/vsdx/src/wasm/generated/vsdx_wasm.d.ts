@@ -22,6 +22,7 @@ export class VsdxDocument {
     moveShapeJson(args: string): string;
     static openCollaborative(bytes: Uint8Array, client_id: number): VsdxDocument;
     static openCollaborativeFromUpdate(update: Uint8Array, client_id: number): VsdxDocument;
+    placeShapeJson(args: string): string;
     redoJson(): string;
     reorderPageJson(args: string): string;
     reorderShapeJson(args: string): string;
@@ -75,6 +76,7 @@ export interface InitOutput {
     readonly vsdxdocument_moveShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
     readonly vsdxdocument_openCollaborativeFromUpdate: (a: number, b: number, c: number) => [number, number, number];
+    readonly vsdxdocument_placeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly vsdxdocument_reorderPageJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_reorderShapeJson: (a: number, b: number, c: number) => [number, number, number, number];

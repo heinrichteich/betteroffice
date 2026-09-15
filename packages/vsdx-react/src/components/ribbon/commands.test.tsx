@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 import type { DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
-import { createRibbonCommands, findShapePlacement, isFormulaDerived, locPinSizeDriven, numericCellValue } from './commands';
+import { createRibbonCommands, findShapePlacement, isFormulaDerived, isHandleResizeBlocked, locPinAxisFractional, locPinAxisUnmanaged, locPinSizeDriven, numericCellValue } from './commands';
 
 function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
   return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ['one', 'two', 'three'].map((id) => ({ id, sourceId: 1, name: id, children: [], cells: Object.entries(cells).map(([name, value]) => ({ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: value, value })) })) }] };
@@ -155,9 +155,37 @@ test('distinguishes formula-derived LocPin cells from fixed literals', () => {
   expect(isFormulaDerived('GUARD(Width*0.5)')).toBe(true);
   const shape = { id: 's', sourceId: 1, name: null, children: [], cells: cellsOf({ LocPinX: { formula: 'Width*0.5', value: '1' }, LocPinY: { formula: '0.5', value: '0.5' } }) };
   expect(locPinSizeDriven(shape as never)).toEqual({ x: true, y: false });
-  const literal = { ...shape, cells: cellsOf({ LocPinX: { formula: '1', value: '1' } }) };
+  const literal = { ...shape, cells: cellsOf({ LocPinX: { formula: '1', value: '1' }, LocPinY: { formula: '0.5', value: '0.5' } }) };
   expect(locPinSizeDriven(literal as never)).toEqual({ x: false, y: false });
   expect(locPinSizeDriven(null)).toEqual({ x: false, y: false });
+});
+
+test('a non-proportional LocPin formula blocks handle resize instead of skewing the pin', () => {
+  for (const formula of ['Width-1', 'Width*0.5+1', 'User.Foo', 'Height*0.5', 'MIN(Width*0.5,1)']) {
+    const shape = snapshot({ LocPinX: formula }).pages[0].shapes[1];
+    expect(locPinAxisFractional(shape, 'LocPinX')).toBe(false);
+    expect(locPinAxisUnmanaged(shape, 'LocPinX')).toBe(true);
+    expect(locPinSizeDriven(shape as never).x).toBe(false);
+    expect(isHandleResizeBlocked(shape)).toBe(true);
+  }
+  for (const formula of ['Height-1', 'Height*0.5+1', 'Width*0.5']) {
+    const shape = snapshot({ LocPinY: formula }).pages[0].shapes[1];
+    expect(locPinAxisFractional(shape, 'LocPinY')).toBe(false);
+    expect(locPinAxisUnmanaged(shape, 'LocPinY')).toBe(true);
+    expect(locPinSizeDriven(shape as never).y).toBe(false);
+    expect(isHandleResizeBlocked(shape)).toBe(true);
+  }
+  for (const formula of ['Width*0.5', '=0.5*Width', 'Width / 2', '=WIDTH*0.25']) {
+    const shape = snapshot({ LocPinX: formula }).pages[0].shapes[1];
+    expect(locPinAxisFractional(shape, 'LocPinX')).toBe(true);
+    expect(locPinAxisUnmanaged(shape, 'LocPinX')).toBe(false);
+    expect(locPinSizeDriven(shape as never).x).toBe(true);
+    expect(isHandleResizeBlocked(shape)).toBe(false);
+  }
+  const heightScaled = snapshot({ LocPinY: 'Height*0.5' }).pages[0].shapes[1];
+  expect(locPinAxisFractional(heightScaled, 'LocPinY')).toBe(true);
+  expect(locPinSizeDriven(heightScaled as never).y).toBe(true);
+  expect(isHandleResizeBlocked(heightScaled)).toBe(false);
 });
 
 test('uses a shape root cell without confusing a same-named User cell', () => {

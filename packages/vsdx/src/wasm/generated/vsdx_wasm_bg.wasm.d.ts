@@ -24,6 +24,7 @@ export const vsdxdocument_mediaBytes: (a: number, b: number, c: number) => [numb
 export const vsdxdocument_moveShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
 export const vsdxdocument_openCollaborativeFromUpdate: (a: number, b: number, c: number) => [number, number, number];
+export const vsdxdocument_placeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_redoJson: (a: number) => [number, number, number, number];
 export const vsdxdocument_reorderPageJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_reorderShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
