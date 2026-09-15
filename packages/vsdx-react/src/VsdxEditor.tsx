@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
-import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
+import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, isRotateBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
@@ -279,8 +279,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           if (!target) continue;
           const placement = findShapePlacement(page.shapes, active.shapeId);
           if (!placement) continue;
-          if (target !== 'rotate' && isHandleResizeBlocked(placement.shape)) {
-            reportError(new Error('Shape is locked and cannot be resized with handles.'));
+          if (target === 'rotate' ? isRotateBlocked(placement.shape) : isHandleResizeBlocked(placement.shape)) {
+            reportError(new Error(target === 'rotate' ? 'Shape rotation is locked and cannot be changed with handles.' : 'Shape is locked and cannot be resized with handles.'));
             return;
           }
           const base = dragStartForPlacement(page, placement.shape, frame);
@@ -332,10 +332,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           if (!corners) continue;
           const target = hitTestSelection(point.canvas, corners, zoomRef.current);
           if (!target) continue;
-          if (target !== 'rotate') {
-            const placement = findShapePlacement(page.shapes, active.shapeId);
-            if (placement && isHandleResizeBlocked(placement.shape)) continue;
-          }
+          const placement = findShapePlacement(page.shapes, active.shapeId);
+          if (placement && (target === 'rotate' ? isRotateBlocked(placement.shape) : isHandleResizeBlocked(placement.shape))) continue;
           event.currentTarget.style.cursor = target === 'rotate' ? 'grab' : resizeCursor(target);
           return;
         }
@@ -384,6 +382,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       if (!pointer.thresholdPassed && !hadPreview && pointer.startX !== undefined && pointer.startY !== undefined && !passedDragThreshold(pointer.startX, pointer.startY, event.clientX, event.clientY)) return;
       if (!pointer.thresholdPassed && !hadPreview && Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) return;
       if (pointer.rotate) {
+        const livePage = handle.snapshot().pages.find((page) => page.id === selected.pageId);
+        const livePlacement = livePage ? findShapePlacement(livePage.shapes, selected.shapeId) : null;
+        if (livePlacement && isRotateBlocked(livePlacement.shape)) throw new Error('Shape rotation is locked and cannot be changed with handles.');
         handle.setCellFormula(selected.pageId, selected.shapeId, { cellName: 'Angle' }, String(resolveRotationAngle(pointer, point.model, event.shiftKey)));
         refresh(undefined, true);
         return;

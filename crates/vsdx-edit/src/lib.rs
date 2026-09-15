@@ -950,6 +950,63 @@ mod tests {
     }
 
     #[test]
+    fn lock_rotate_refuses_angle_writes() {
+        let session = session();
+        add_cell(&session, "Angle", Some("0"), None);
+        add_cell(&session, "LockRotate", Some("1"), None);
+        let error = session
+            .set_cell_formula(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                "Angle",
+                "1",
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("LockRotate protects this rotate gesture")
+        );
+        let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+        assert_eq!(
+            cells
+                .iter()
+                .find(|cell| cell.name == "Angle")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn angle_writes_apply_without_lock_rotate() {
+        let session = session();
+        add_cell(&session, "Angle", Some("0"), None);
+        let receipt = session
+            .set_cell_formula(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                "Angle",
+                "1",
+            )
+            .unwrap();
+        assert_eq!(receipt.cell_name, "Angle");
+        let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+        assert_eq!(
+            cells
+                .iter()
+                .find(|cell| cell.name == "Angle")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
     fn guarded_section_row_cell_refuses_edits() {
         let session = session();
         let locator = CellLocator {

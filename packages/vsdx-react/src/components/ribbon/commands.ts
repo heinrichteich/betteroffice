@@ -122,6 +122,12 @@ export function isCellWriteBlocked(shape: ShapeSnapshot | null, cellName: string
   return cellIsGuarded(shape, cellName);
 }
 
+/** True when a rotation would be refused by LockRotate or a GUARD on Angle. */
+export function isRotateBlocked(shape: ShapeSnapshot | null): boolean {
+  if (!shape) return false;
+  return lockCellEnabled(shape, 'LockRotate') || cellIsGuarded(shape, 'Angle');
+}
+
 export function createRibbonCommands(
   handle: DiagramHandle | null,
   selection: readonly VsdxShapeSelection[],
@@ -174,8 +180,8 @@ export function createRibbonCommands(
     bringForward: { id: 'bringForward', enabled: single !== null && single.placement.index < topIndex, run: reorderTo((placement) => placement.index + 1, (placement) => placement.index < placement.siblings.length - 1) },
     sendBackward: { id: 'sendBackward', enabled: single !== null && single.placement.index > 0, run: reorderTo((placement) => placement.index - 1, (placement) => placement.index > 0) },
     sendToBack: { id: 'sendToBack', enabled: single !== null && single.placement.index > 0, run: reorderTo(() => 0, (placement) => placement.index > 0) },
-    rotateLeft: { id: 'rotateLeft', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'Angle')), run: setNumeric('Angle', (value) => String(value - Math.PI / 2)) },
-    rotateRight: { id: 'rotateRight', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'Angle')), run: setNumeric('Angle', (value) => String(value + Math.PI / 2)) },
+    rotateLeft: { id: 'rotateLeft', enabled: selected && placements.every((entry) => !isRotateBlocked(entry.placement.shape)), run: setNumeric('Angle', (value) => String(value - Math.PI / 2)) },
+    rotateRight: { id: 'rotateRight', enabled: selected && placements.every((entry) => !isRotateBlocked(entry.placement.shape)), run: setNumeric('Angle', (value) => String(value + Math.PI / 2)) },
     flipHorizontal: { id: 'flipHorizontal', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'FlipX')), active: numberValue(cellValue(shape, 'FlipX')) !== 0, run: setNumeric('FlipX', (value) => value === 0 ? '1' : '0') },
     flipVertical: { id: 'flipVertical', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'FlipY')), active: numberValue(cellValue(shape, 'FlipY')) !== 0, run: setNumeric('FlipY', (value) => value === 0 ? '1' : '0') },
     addShape: {

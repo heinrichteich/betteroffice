@@ -696,6 +696,19 @@ mod tests {
     }
 
     #[test]
+    fn set_cell_formula_json_inner_refuses_locked_rotation() {
+        let document = document();
+        add_cell(&document, "Angle", "Angle", "0");
+        add_cell(&document, "LockRotate", "LockRotate", "1");
+        assert_eq!(
+            document.set_cell_formula_json_inner(r#"{"pageId":"page:1","shapeId":"page:1:shape:1","locator":{"cellName":"Angle"},"formula":"1"}"#).unwrap_err(),
+            "invalid diagram state: LockRotate protects this rotate gesture"
+        );
+        let snapshot = document.snapshot_json().unwrap();
+        assert!(snapshot.contains(r#""name":"Angle","formula":"0""#));
+    }
+
+    #[test]
     fn wasm_setatref_redirects_and_reports_the_target() {
         let document = document();
         add_cell(&document, "Width", "Width", "SETATREF(Target)");

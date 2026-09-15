@@ -1258,6 +1258,7 @@ fn validate_new_cells(
                 "LockWidth",
                 "LockHeight",
                 "LockAspect",
+                "LockRotate",
                 "LockTextEdit",
                 "LockFormat",
                 "LockDelete",
@@ -1558,6 +1559,7 @@ fn protected_formulas(doc: &Doc) -> EditResult<std::collections::BTreeMap<String
                     "LockWidth",
                     "LockHeight",
                     "LockAspect",
+                    "LockRotate",
                     "LockTextEdit",
                     "LockFormat",
                     "LockDelete",
@@ -1604,6 +1606,7 @@ fn lock_target(lock: &str) -> Option<&str> {
         "LockWidth" => Some("Width"),
         "LockHeight" => Some("Height"),
         "LockAspect" => Some("Width"),
+        "LockRotate" => Some("Angle"),
         "LockTextEdit" => Some("Text"),
         "LockFormat" | "LockDelete" => None,
         _ => None,
@@ -2601,6 +2604,7 @@ fn gesture_for_cell(cell_name: &str) -> MutationGesture {
         "PinY" => MutationGesture::MoveY,
         "Width" => MutationGesture::ResizeWidth,
         "Height" => MutationGesture::ResizeHeight,
+        "Angle" => MutationGesture::Rotate,
         _ => MutationGesture::CellEdit,
     }
 }

@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 import type { DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
-import { createRibbonCommands, findShapePlacement, numericCellValue } from './commands';
+import { createRibbonCommands, findShapePlacement, isRotateBlocked, numericCellValue } from './commands';
 
 function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
   return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ['one', 'two', 'three'].map((id) => ({ id, sourceId: 1, name: id, children: [], cells: Object.entries(cells).map(([name, value]) => ({ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: value, value })) })) }] };
@@ -173,4 +173,16 @@ test('a locked member disables delete for the whole selection', () => {
   const both = [{ ...selected, shapeId: 'one', hit: { kind: 'shape' as const, shapeId: 'one' } }, { ...selected, shapeId: 'two', hit: { kind: 'shape' as const, shapeId: 'two' } }];
   const commands = createRibbonCommands(diagram, both, 'page', () => {}, () => {}, () => {});
   expect(commands.delete.enabled).toBe(false);
+});
+
+test('a rotation lock disables the rotate commands without touching the others', () => {
+  const state = snapshot({ Angle: '0', LockRotate: '1' });
+  const diagram = handle(state);
+  const commands = createRibbonCommands(diagram, [selected], 'page', () => {}, () => {}, () => {});
+  expect(commands.rotateLeft.enabled).toBe(false);
+  expect(commands.rotateRight.enabled).toBe(false);
+  expect(commands.flipHorizontal.enabled).toBe(true);
+  expect(commands.delete.enabled).toBe(true);
+  expect(isRotateBlocked(state.pages[0].shapes[1])).toBe(true);
+  expect(isRotateBlocked(snapshot({ Angle: '0' }).pages[0].shapes[1])).toBe(false);
 });
