@@ -27,6 +27,14 @@ export const AUTO_CONNECT_HIT_PX = 26;
 export const AUTO_CONNECT_HALO_PX = 40;
 /** Chevron fade on hover, in milliseconds. */
 export const AUTO_CONNECT_FADE_MS = 120;
+/** Edge proximity that reveals connection points with no tool armed, in screen pixels. */
+export const HOVER_PROXIMITY_PX = 12;
+/** Grab radius of one connection point, in screen pixels. */
+export const HOVER_POINT_HIT_PX = 10;
+/** Visio square size for one connection point, in screen pixels. */
+export const HOVER_POINT_SIZE_PX = 9;
+/** Minimum drag that creates a free-ended connector, in model inches. */
+export const HOVER_FREE_DRAG_INCHES = 0.05;
 /** Gap between a source shape and a Quick-Shape insert, in model inches. */
 export const QUICK_SHAPE_GAP_INCHES = 0.5;
 
@@ -347,6 +355,13 @@ export function nearestConnectionPointAnywhere(points: readonly ConnectionPoint[
   return best;
 }
 
+/** Nearest connection point inside a fixed screen-pixel grab radius. */
+export function hoverPointAt(points: readonly ConnectionPoint[], frame: PageDisplayList, zoom: number, at: ModelPoint, hitPx = HOVER_POINT_HIT_PX): ConnectionPoint | null {
+  if (!points.length) return null;
+  const metrics = autoConnectMetrics(frame, zoom);
+  return nearestConnectionPoint(points, at, Math.max(0, hitPx) * metrics.modelPerPixel);
+}
+
 /** Snap within threshold, else the nearest point of a shape containing the drop. */
 export function dropTargetForPoint(shapes: readonly ShapeSnapshot[], at: ModelPoint): { shapeId: string; point: ConnectionPoint } | null {
   let best: { shapeId: string; point: ConnectionPoint } | null = null;
@@ -525,6 +540,20 @@ function strokeRoute(ctx: CanvasRenderingContext2D, route: readonly ModelPoint[]
   ctx.stroke();
 }
 
+/** Green Visio square with a pale cross, at a fixed screen size. */
+function paintHoverPoint(ctx: CanvasRenderingContext2D, at: ModelPoint, half: number, color: string, width: number): void {
+  ctx.fillStyle = color;
+  ctx.fillRect(at.x - half, at.y - half, half * 2, half * 2);
+  ctx.beginPath();
+  ctx.moveTo(at.x - half, at.y - half);
+  ctx.lineTo(at.x + half, at.y + half);
+  ctx.moveTo(at.x + half, at.y - half);
+  ctx.lineTo(at.x - half, at.y + half);
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = width;
+  ctx.stroke();
+}
+
 /** Filled arrowhead in model inches, pointing along the final segment. */
 export function arrowheadPolygon(tip: ModelPoint, tail: ModelPoint, length = 0.15, halfWidth = 0.055): ModelPoint[] {
   const dx = tip.x - tail.x;
@@ -578,7 +607,8 @@ export function paintConnectorOverlay(ctx: CanvasRenderingContext2D, frame: Page
     ctx.fillStyle = '#2563eb';
     for (const midpoint of segmentMidpoints(connector.route)) ctx.fillRect(midpoint.x - 0.045, midpoint.y - 0.045, 0.09, 0.09);
   }
-  for (const point of scene.hoverPoints) dot(ctx, point, point.side === 'centre' ? 0.07 : 0.055, '#16a34a');
+  const hoverModelPerPixel = autoConnectMetrics(frame, zoom).modelPerPixel;
+  for (const point of scene.hoverPoints) paintHoverPoint(ctx, point, (HOVER_POINT_SIZE_PX / 2) * hoverModelPerPixel, '#16a34a', 1.25 * hoverModelPerPixel);
   if (scene.snapPoint) ring(ctx, scene.snapPoint, 0.1, '#ffffff', 0.025);
   if (scene.previewRoute && scene.previewRoute.length >= 2) {
     strokeRoute(ctx, scene.previewRoute, '#172033', 0.02);

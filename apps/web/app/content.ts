@@ -67,7 +67,7 @@ export const EDITORS = [
   {
     name: "Diagrams",
     format: "vsdx",
-    desc: "VSDX editor with a tabbed ribbon, a standard-shape gallery, a page tab strip and a zoom status bar, for moving, Shift-drag resizing, adding and deleting shapes, setting fill and line colour, drawing orthogonal connectors that glue to shapes, and saving diagrams. No resize-handle UI.",
+    desc: "VSDX editor with a tabbed ribbon, a standard-shape gallery, a page tab strip and a zoom status bar, for moving, Shift-drag resizing, adding and deleting shapes, setting fill and line colour, drawing orthogonal connectors that glue to shapes from the Insert tab or straight out of hover connection points, and saving diagrams. No resize-handle UI.",
     status: "source preview",
   },
 ];
@@ -112,7 +112,7 @@ export const PACKAGES = [
   {
     name: "@betteroffice/vsdx-react",
     sourceOnly: true,
-    desc: "The VSDX editor as a drop-in React component: a tabbed ribbon, a searchable standard-shape gallery, a page tab strip and a zoom status bar over move, resize with Shift-drag, add, delete, set fill or line colour, draw orthogonal connectors that glue to shapes, and save. No resize-handle UI.",
+    desc: "The VSDX editor as a drop-in React component: a tabbed ribbon, a searchable standard-shape gallery, a page tab strip and a zoom status bar over move, resize with Shift-drag, add, delete, set fill or line colour, draw orthogonal connectors that glue to shapes from the Insert tab or straight out of hover connection points, and save. No resize-handle UI.",
   },
 ];
 

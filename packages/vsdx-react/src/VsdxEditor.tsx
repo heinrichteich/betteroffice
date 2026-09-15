@@ -4,7 +4,7 @@ import { canvasPointToModel, initWasm, openDiagram, paintPage, sizeCanvasForPage
 import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent, ReactNode } from 'react';
-import { AUTO_CONNECT_FADE_MS, QUICK_SHAPE_IDS, autoConnectArrowAt, autoConnectArrowCss, autoConnectArrowsForShape, autoConnectHaloHit, connectionPointsForShape, connectorDraft, connectorEndpointGlue, connectorGlue, connectorRouteFromFrame, dropTargetForPoint, isConnectorShape, nearestConnectionPointAnywhere, paintAutoConnectOverlay, paintConnectorOverlay, quickShapePlacement, reroutePreviewForMove, routeConnector } from './connector';
+import { AUTO_CONNECT_FADE_MS, HOVER_FREE_DRAG_INCHES, HOVER_PROXIMITY_PX, QUICK_SHAPE_IDS, autoConnectArrowAt, autoConnectArrowCss, autoConnectArrowsForShape, autoConnectHaloHit, connectionPointsForShape, connectorDraft, connectorEndpointGlue, connectorGlue, connectorRouteFromFrame, dropTargetForPoint, hoverPointAt, isConnectorShape, nearestConnectionPointAnywhere, paintAutoConnectOverlay, paintConnectorOverlay, quickShapePlacement, reroutePreviewForMove, routeConnector } from './connector';
 import type { AutoConnectSide, ConnectionPoint, ConnectorOverlayRoute, ConnectorOverlayScene } from './connector';
 import { Ribbon } from './components/ribbon/Ribbon';
 import { RibbonCommandsProvider, findShapePlacement, numericCellValue } from './components/ribbon/commands';
@@ -82,6 +82,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const hoverShapeRef = useRef<string | null>(null);
   const connectorDragRef = useRef<{ pageId: string; from: { shapeId: string; point: ConnectionPoint }; current: ModelPoint; snap: { shapeId: string; point: ConnectionPoint } | null } | null>(null);
   const autoHoverRef = useRef<string | null>(null);
+  const pointHoverRef = useRef<string | null>(null);
+  const pointCursorRef = useRef(false);
   const autoArrowRef = useRef<{ shapeId: string; side: AutoConnectSide } | null>(null);
   const autoAlphaRef = useRef(0);
   const autoFadeStartRef = useRef(0);
@@ -142,6 +144,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (connectorModeRef.current && hoverShapeRef.current) {
       const placement = findShapePlacement(page.shapes, hoverShapeRef.current);
       if (placement && placement.siblings === page.shapes && !isConnectorShape(placement.shape)) hoverPoints = connectionPointsForShape(placement.shape);
+    } else if (!connectorModeRef.current && !connectorDragRef.current && pointHoverRef.current) {
+      const placement = findShapePlacement(page.shapes, pointHoverRef.current);
+      if (placement && placement.siblings === page.shapes && !isConnectorShape(placement.shape)) hoverPoints = connectionPointsForShape(placement.shape);
     }
     const drag = connectorDragRef.current;
     const end = drag?.snap?.point ?? drag?.current ?? null;
@@ -189,11 +194,40 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     autoHoverRef.current = null;
     autoArrowRef.current = null;
     autoAlphaRef.current = 0;
+    pointHoverRef.current = null;
+    pointCursorRef.current = false;
+    if (mainCanvasRef.current) mainCanvasRef.current.style.cursor = '';
     if (quickMenuRef.current) setQuickMenu(null);
     paintOverlayNow();
   }, [cancelAutoFade, paintOverlayNow]);
 
   useEffect(() => () => { if (autoFrameRef.current !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(autoFrameRef.current); }, []);
+
+  const setPointCursor = useCallback((canvas: HTMLCanvasElement | null, active: boolean) => {
+    if (!canvas || pointCursorRef.current === active) return;
+    pointCursorRef.current = active;
+    canvas.style.cursor = active ? 'crosshair' : '';
+  }, []);
+
+  const pointHoverShapeAt = useCallback((shapes: readonly ShapeSnapshot[], canvas: ModelPoint): string | null => {
+    const handle = handleRef.current;
+    if (!handle) return null;
+    const probe = (x: number, y: number): string | null => {
+      let hit: HitTestResult | null = null;
+      try { hit = handle.hitTest(x, y); } catch { hit = null; }
+      const placement = hit ? findShapePlacement(shapes, hit.shapeId) : null;
+      return placement && placement.siblings === shapes && !isConnectorShape(placement.shape) ? placement.shape.id : null;
+    };
+    const direct = probe(canvas.x, canvas.y);
+    if (direct) return direct;
+    const zoom = Number.isFinite(zoomRef.current) && zoomRef.current > 0 ? zoomRef.current : 1;
+    const radius = HOVER_PROXIMITY_PX / zoom;
+    for (const [dx, dy] of HOVER_PROBE_DIRS) {
+      const found = probe(canvas.x + dx * radius, canvas.y + dy * radius);
+      if (found) return found;
+    }
+    return null;
+  }, []);
 
   const setConnectorActive = useCallback((active: boolean) => {
     connectorDragRef.current = null;
@@ -203,6 +237,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     autoHoverRef.current = null;
     autoArrowRef.current = null;
     autoAlphaRef.current = 0;
+    pointHoverRef.current = null;
+    pointCursorRef.current = false;
+    if (mainCanvasRef.current) mainCanvasRef.current.style.cursor = '';
     if (quickMenuRef.current) setQuickMenu(null);
     setConnectorMode(active);
     paintOverlayNow();
@@ -333,10 +370,11 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (!handle || !frame || !page) return;
     const pointer = pointerRef.current;
     if (!connectorModeRef.current && pointer) {
-      if (autoHoverRef.current || autoArrowRef.current || quickMenuRef.current) {
+      if (autoHoverRef.current || autoArrowRef.current || quickMenuRef.current || pointHoverRef.current) {
         autoHoverRef.current = null;
         autoArrowRef.current = null;
         autoAlphaRef.current = 0;
+        pointHoverRef.current = null;
         if (quickMenuRef.current) setQuickMenu(null);
       }
       try {
@@ -379,23 +417,26 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
             } else if (quickMenuRef.current) setQuickMenu(null);
             paintOverlayNow();
           }
-          if (arrow) return;
+          if (arrow) { setPointCursor(event.currentTarget, false); return; }
         }
-        const hit = handle.hitTest(point.canvas.x, point.canvas.y);
-        const placement = hit ? findShapePlacement(page.shapes, hit.shapeId) : null;
-        const hovered = placement && placement.siblings === page.shapes && !isConnectorShape(placement.shape) ? placement.shape.id : null;
-        if (hovered !== autoHoverRef.current) {
-          if (!hovered && autoHoverRef.current) {
-            const kept = findShapePlacement(page.shapes, autoHoverRef.current);
-            if (kept && kept.siblings === page.shapes && !isConnectorShape(kept.shape) &&
-              autoConnectHaloHit(kept.shape, frame, zoomRef.current, point.canvas)) return;
-          }
+        let placement = pointHoverRef.current ? findShapePlacement(page.shapes, pointHoverRef.current) : null;
+        if (placement && (placement.siblings !== page.shapes || isConnectorShape(placement.shape))) placement = null;
+        if (placement && !autoConnectHaloHit(placement.shape, frame, zoomRef.current, point.canvas)) placement = null;
+        if (!placement) {
+          const probed = pointHoverShapeAt(page.shapes, point.canvas);
+          placement = probed ? findShapePlacement(page.shapes, probed) : null;
+          if (placement && (placement.siblings !== page.shapes || isConnectorShape(placement.shape))) placement = null;
+        }
+        const hovered = placement ? placement.shape.id : null;
+        if (hovered !== autoHoverRef.current || hovered !== pointHoverRef.current) {
           autoHoverRef.current = hovered;
+          pointHoverRef.current = hovered;
           autoArrowRef.current = null;
           if (quickMenuRef.current) setQuickMenu(null);
           if (hovered) startAutoFade();
           else { autoAlphaRef.current = 0; paintOverlayNow(); }
         }
+        setPointCursor(event.currentTarget, placement ? hoverPointAt(connectionPointsForShape(placement.shape), frame, zoomRef.current, point.model) !== null : false);
       } catch (value) { reportError(value); }
       return;
     }
@@ -418,7 +459,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (!connectorModeRef.current && !connectorDragRef.current) {
       const next = event.relatedTarget as Node | null;
       if (next && quickMenuNodeRef.current?.contains(next)) return;
-      if (autoHoverRef.current || autoArrowRef.current || quickMenuRef.current) hideAutoConnect();
+      setPointCursor(event.currentTarget, false);
+      if (autoHoverRef.current || autoArrowRef.current || quickMenuRef.current || pointHoverRef.current) hideAutoConnect();
       return;
     }
     if (!connectorModeRef.current || connectorDragRef.current) return;
@@ -448,6 +490,23 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     reroutePreviewRef.current = [];
     try {
       const point = canvasPointerPosition(event, frame);
+      const grabbedId = pointHoverRef.current ?? pointHoverShapeAt(page.shapes, point.canvas);
+      const grabbedPlacement = grabbedId ? findShapePlacement(page.shapes, grabbedId) : null;
+      const grabbedShape = grabbedPlacement && grabbedPlacement.siblings === page.shapes && !isConnectorShape(grabbedPlacement.shape) ? grabbedPlacement.shape : null;
+      const grabbed = grabbedShape ? hoverPointAt(connectionPointsForShape(grabbedShape), frame, zoomRef.current, point.model) : null;
+      if (grabbed && grabbedShape) {
+        pointHoverRef.current = grabbedShape.id;
+        autoHoverRef.current = null;
+        autoArrowRef.current = null;
+        autoAlphaRef.current = 0;
+        if (quickMenuRef.current) setQuickMenu(null);
+        connectorDragRef.current = { pageId: page.id, from: { shapeId: grabbedShape.id, point: grabbed }, current: point.model, snap: null };
+        setSelection({ pageId: page.id, shapeId: grabbedShape.id, hit: { kind: 'shape', shapeId: grabbedShape.id } });
+        setPointCursor(event.currentTarget, true);
+        capturePointer(event);
+        paintOverlayNow();
+        return;
+      }
       if (autoHoverRef.current) {
         const hoveredPlacement = findShapePlacement(page.shapes, autoHoverRef.current);
         const arrows = hoveredPlacement && hoveredPlacement.siblings === page.shapes && !isConnectorShape(hoveredPlacement.shape)
@@ -471,6 +530,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       autoHoverRef.current = null;
       autoArrowRef.current = null;
       autoAlphaRef.current = 0;
+      pointHoverRef.current = null;
+      setPointCursor(event.currentTarget, false);
       handle.layoutPage(modelRef.current.pageIndex);
       const hit = handle.hitTest(point.canvas.x, point.canvas.y);
       setSelection(hit ? { pageId: page.id, shapeId: hit.shapeId, hit } : null);
@@ -514,9 +575,27 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
             const receipt = handle.addConnector(drag.pageId, connectorDraft(drag.from.point, end.point), connectorGlue(drag.from.shapeId, drag.from.point), connectorGlue(end.shapeId, end.point));
             refresh(undefined, true);
             setSelection({ pageId: drag.pageId, shapeId: receipt.shapeId, hit: { kind: 'shape', shapeId: receipt.shapeId } });
+            pointHoverRef.current = end.shapeId;
+          }
+        } else if (drag && handle && !end && !connectorModeRef.current) {
+          const current = modelRef.current;
+          const frame = current.frame;
+          const page = current.snapshot?.pages[current.pageIndex];
+          if (frame && page && page.id === drag.pageId) {
+            let drop: ModelPoint | null = null;
+            try { drop = canvasPointerPosition(event, frame).model; } catch { drop = null; }
+            if (drop && Math.hypot(drop.x - drag.from.point.x, drop.y - drag.from.point.y) >= HOVER_FREE_DRAG_INCHES) {
+              try {
+                const receipt = handle.addShape(drag.pageId, connectorDraft(drag.from.point, drop));
+                refresh(undefined, true);
+                setSelection({ pageId: drag.pageId, shapeId: receipt.shapeId, hit: { kind: 'shape', shapeId: receipt.shapeId } });
+                pointHoverRef.current = drag.from.shapeId;
+              } catch (value) { reportError(value); }
+            }
           }
         }
       } catch (value) { reportError(value); }
+      setPointCursor(event.currentTarget, false);
       paintOverlayNow();
       return;
     }
@@ -591,7 +670,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
       <div style={styles.canvasFrame}>
-        <canvas ref={mainCanvasRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={onPointerLeave} onPointerUp={onPointerUp} onPointerCancel={() => { pointerRef.current = null; connectorDragRef.current = null; reroutePreviewRef.current = []; autoHoverRef.current = null; autoArrowRef.current = null; autoAlphaRef.current = 0; if (quickMenuRef.current) setQuickMenu(null); paintOverlayNow(); }} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={connectorMode ? { ...styles.canvas, cursor: 'crosshair' } : styles.canvas} />
+        <canvas ref={mainCanvasRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={onPointerLeave} onPointerUp={onPointerUp} onPointerCancel={() => { pointerRef.current = null; connectorDragRef.current = null; reroutePreviewRef.current = []; autoHoverRef.current = null; autoArrowRef.current = null; autoAlphaRef.current = 0; pointHoverRef.current = null; pointCursorRef.current = false; if (mainCanvasRef.current) mainCanvasRef.current.style.cursor = ''; if (quickMenuRef.current) setQuickMenu(null); paintOverlayNow(); }} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={connectorMode ? { ...styles.canvas, cursor: 'crosshair' } : styles.canvas} />
         <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
         {quickMenu && model.frame && (
           <div ref={quickMenuNodeRef} role="menu" aria-label={t('shapesPanel.quickShapes')} style={{ ...styles.quickMenu, left: Math.max(4, Math.min(quickMenu.x + 16, model.frame.width * zoom - 44)), top: Math.max(100, Math.min(quickMenu.y, model.frame.height * zoom - 100)) }} onMouseLeave={() => { autoArrowRef.current = null; setQuickMenu(null); paintOverlayNow(); }}>
@@ -616,6 +695,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
 
 const MIN_SHAPE_INCHES = 0.01;
 const WORKSPACE_MARGIN = 32;
+const HOVER_PROBE_DIRS: ReadonlyArray<readonly [number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
 
 export function canvasPointerPosition(event: PointerEvent<HTMLCanvasElement>, frame: PageDisplayList): { canvas: ModelPoint; model: ModelPoint } {
   const rect = event.currentTarget.getBoundingClientRect();

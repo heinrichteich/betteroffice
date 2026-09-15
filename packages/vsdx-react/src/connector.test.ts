@@ -1,6 +1,8 @@
 import { expect, test } from 'bun:test';
 import type { PageDisplayList, ShapeSnapshot } from '@betteroffice/vsdx';
 import {
+  HOVER_POINT_HIT_PX,
+  HOVER_POINT_SIZE_PX,
   arrowheadPolygon,
   autoConnectArrowAt,
   autoConnectArrowCenter,
@@ -16,6 +18,7 @@ import {
   connectorRouteFromFrame,
   dropTargetForPoint,
   formatInches,
+  hoverPointAt,
   isConnectorShape,
   modelToPage,
   movedShapePoints,
@@ -522,4 +525,46 @@ test('paints nothing without arrows or alpha', () => {
   expect(calls).toEqual([]);
   paintAutoConnectOverlay(ctx, frame, 1, 1, { arrows: autoConnectArrowsForShape(shape({ PinX: '2', PinY: '2', Width: '2', Height: '2' })), hovered: 'east', alpha: 1 });
   expect(calls.filter((name) => name === 'fill').length).toBe(4);
+});
+
+test('grabs a connection point inside a fixed screen-pixel radius', () => {
+  const points = connectionPointsForShape(shape({ PinX: '2', PinY: '2', Width: '2', Height: '2' }));
+  expect(hoverPointAt(points, frame, 1, { x: 3, y: 2 })?.side).toBe('east');
+  expect(hoverPointAt(points, frame, 1, { x: 2, y: 2 })?.side).toBe('centre');
+  expect(hoverPointAt(points, frame, 1, { x: 9, y: 9 })).toBeNull();
+  expect(hoverPointAt([], frame, 1, { x: 3, y: 2 })).toBeNull();
+  const near = { x: 3 + (HOVER_POINT_HIT_PX - 2) / 96, y: 2 };
+  const far = { x: 3 + (HOVER_POINT_HIT_PX + 2) / 96, y: 2 };
+  expect(hoverPointAt(points, frame, 1, near)?.side).toBe('east');
+  expect(hoverPointAt(points, frame, 1, far)).toBeNull();
+});
+
+test('holds the grab radius in screen pixels across zoom', () => {
+  const points = connectionPointsForShape(shape({ PinX: '2', PinY: '2', Width: '2', Height: '2' }));
+  const at = { x: 3.08, y: 2 };
+  expect(hoverPointAt(points, frame, 1, at)?.side).toBe('east');
+  expect(hoverPointAt(points, frame, 2, at)).toBeNull();
+});
+
+test('paints hover points as fixed-screen green squares with a pale cross', () => {
+  const rects: unknown[][] = [];
+  const strokes: unknown[] = [];
+  const store: Record<string, unknown> = {};
+  const ctx = new Proxy({}, {
+    get: (_target, name: string) => (...args: unknown[]) => {
+      if (name === 'fillRect') rects.push(args);
+      if (name === 'stroke') strokes.push(store['strokeStyle']);
+    },
+    set: (_target, name: string, value: unknown) => { store[name] = value; return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  const scene = { hoverPoints: [{ side: 'east' as const, x: 3, y: 2 }], snapPoint: null, previewRoute: null, reroutePreview: [], connectors: [] };
+  paintConnectorOverlay(ctx, frame, 1, 1, scene);
+  expect(rects).toHaveLength(1);
+  expect(rects[0][2]).toBeCloseTo(HOVER_POINT_SIZE_PX / 96, 10);
+  expect(rects[0][3]).toBeCloseTo(HOVER_POINT_SIZE_PX / 96, 10);
+  expect(strokes).toEqual(['#ffffff']);
+  rects.length = 0;
+  paintConnectorOverlay(ctx, frame, 1, 2, scene);
+  expect(rects).toHaveLength(1);
+  expect(rects[0][2]).toBeCloseTo(HOVER_POINT_SIZE_PX / 192, 10);
 });
