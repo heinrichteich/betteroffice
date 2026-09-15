@@ -19,9 +19,7 @@ const FONT_BYTES: &[u8] =
 const KNOWN_CELLS: [&str; 4] = ["PinX", "PinY", "Width", "Height"];
 const VISIBILITY_CONTROLS: [&str; 3] = ["NoFill", "NoLine", "NoShow"];
 const HISTOGRAM_CAP: usize = 20;
-/// Standard Visio ShapeSheet function vocabulary from the Microsoft
-/// Functions (Visio ShapeSheet Reference), plus the `No Formula` literal and
-/// the internal `_XFTRIGGER` call the harness must not bucket as author-defined.
+/// Standard Visio ShapeSheet function names; anything else buckets as unknown.
 const KNOWN_FUNCTIONS: [&str; 213] = [
     "ABS",
     "ACOS",
@@ -237,12 +235,7 @@ const KNOWN_FUNCTIONS: [&str; 213] = [
     "NO FORMULA",
     "_XFTRIGGER",
 ];
-/// Standard Visio Geometry-section row vocabulary from the Microsoft
-/// Row element (Geometry Section) (Visio XML) documentation, plus the absolute
-/// `CubBezTo` and `QuadBezTo` rows the ShapeSheet reference defines alongside
-/// their `Rel` forms. Deliberately independent of the resolver's match arms so
-/// unimplemented standard rows stay legible instead of collapsing into the
-/// author-defined bucket.
+/// Standard Visio Geometry row types; anything else buckets as unknown.
 const KNOWN_GEOMETRY_ROWS: [&str; 17] = [
     "ArcTo",
     "CubBezTo",
@@ -461,7 +454,7 @@ fn survey(bytes: &[u8], name: &str) -> FileSurvey {
     survey
 }
 
-/// Maps a parse failure to its error variant, dropping any embedded path or content.
+/// Parse failure kind; drops embedded paths and content.
 fn parse_error_kind(error: &VsdxError) -> String {
     match error {
         VsdxError::Container(_) => "container",
@@ -753,10 +746,7 @@ fn resolve_absent(package: &vsdx_parse::VsdxPackage) -> BTreeMap<String, usize> 
     absent
 }
 
-/// Counts page shapes that yield no primitive: deleted and NoShow subtrees plus the
-/// unvisited children of shapes the renderer placeholdered without descending into.
-/// Shapes on failed pages are skipped here; the render pass counts them as unrendered
-/// so the buckets stay disjoint.
+/// Hidden shapes on rendered pages; failed pages count as unrendered elsewhere.
 fn count_hidden(
     package: &vsdx_parse::VsdxPackage,
     placeholder_ids: &BTreeSet<String>,
@@ -814,7 +804,7 @@ fn shape_hidden(
         .is_ok_and(|resolved| is_hidden(&resolved))
 }
 
-/// Mirrors the renderer's early-out for deleted shapes and nonzero NoShow.
+/// Deleted or nonzero-NoShow shapes.
 fn is_hidden(resolved: &ResolvedShape) -> bool {
     if resolved.deleted {
         return true;
@@ -1044,8 +1034,7 @@ fn collect_unsupported(expression: &Expr, counts: &mut BTreeMap<String, usize>) 
     }
 }
 
-/// Folds cross-sheet call scopes into one bucket so per-shape references cannot fan out
-/// the histogram, and folds any other unrecognised function name into a fixed bucket.
+/// Cross-sheet calls fold to `<sheet-ref>`; unknown names to `<unknown-function>`.
 fn fold_call_name(name: &str) -> String {
     let upper = name.to_ascii_uppercase();
     let is_cross_sheet = upper.contains('!')
@@ -1064,7 +1053,7 @@ fn fold_call_name(name: &str) -> String {
     "<unknown-function>".to_owned()
 }
 
-/// Reduces an evaluator message to its error class, dropping any document-derived tail.
+/// Evaluator error class; drops document-derived tails.
 fn classify_error(message: &str) -> String {
     if let Some(name) = message.strip_prefix("unresolved reference ") {
         if name.starts_with("Sheet.")
@@ -1094,8 +1083,7 @@ fn classify_error(message: &str) -> String {
     "other".to_owned()
 }
 
-/// Reduces an evaluator unsupported reason to a bounded key, keeping only recognised
-/// function names and folding anything else into a fixed bucket.
+/// Unsupported-reason class; unknown functions fold to a fixed bucket.
 fn classify_unsupported(reason: &str) -> String {
     if is_static_unsupported_reason(reason) {
         return reason.to_owned();
@@ -1233,15 +1221,12 @@ struct RenderCounts {
     page_errors: usize,
 }
 
-/// Renders every page with default limits; shapes on failed pages are counted as
-/// unrendered so painted-only shapes, placeholder shapes, hidden and unrendered
-/// reconcile with the shape count on every input. A shape that emits both a
-/// painted and a placeholder primitive counts as a placeholder shape.
+/// Shape-level render buckets; failed pages count as unrendered.
 fn render_pages(package: &vsdx_parse::VsdxPackage) -> RenderCounts {
     render_pages_with_limits(package, RenderLimits::default())
 }
 
-/// Renders every page under the given limits, keeping the same reconciliation.
+/// Same buckets under custom limits.
 fn render_pages_with_limits(
     package: &vsdx_parse::VsdxPackage,
     limits: RenderLimits,
@@ -1297,7 +1282,7 @@ fn render_pages_with_limits(
     counts
 }
 
-/// Counts the shapes on one page, including nested children.
+/// Page shape count including nested children.
 fn page_shape_count(package: &vsdx_parse::VsdxPackage, page: &str) -> usize {
     package
         .page_contents
@@ -1306,11 +1291,7 @@ fn page_shape_count(package: &vsdx_parse::VsdxPackage, page: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// Tallies one display list at both levels: distinct shape ids per bucket for
-/// reconciliation, plus raw primitive counts for diagnostics. Text boxes share
-/// their shape's id but carry no geometry verdict, so they touch neither level.
-/// A mixed shape id lands in both id sets; the caller reports it once, as a
-/// placeholder shape.
+/// Per-bucket shape ids plus raw primitive counts; text boxes touch neither.
 fn tally_primitives(
     primitives: &[Primitive],
     painted: &mut usize,
@@ -1349,7 +1330,7 @@ fn tally_primitives(
     }
 }
 
-/// Reduces a renderer placeholder reason to its class, keeping only fixed-vocabulary tails.
+/// Placeholder-reason class; fixed vocabulary only.
 fn classify_placeholder_reason(reason: &str) -> String {
     if let Some(detail) = reason.strip_prefix("unsupported Geometry section controls") {
         return section_control_class(detail);
@@ -1398,7 +1379,7 @@ fn classify_placeholder_reason(reason: &str) -> String {
     "other placeholder".to_owned()
 }
 
-/// Keeps which of the fixed NoFill/NoLine/NoShow controls fired, dropping the section index.
+/// Fired visibility controls; drops the section index.
 fn section_control_class(detail: &str) -> String {
     let mut controls = VISIBILITY_CONTROLS
         .into_iter()
@@ -1414,7 +1395,7 @@ fn section_control_class(detail: &str) -> String {
     )
 }
 
-/// Folds a document-derived geometry row type into the resolver's fixed vocabulary.
+/// Known row types pass through; anything else folds to unknown.
 fn fold_row_type(row_type: &str) -> &str {
     if KNOWN_GEOMETRY_ROWS.contains(&row_type) {
         row_type
@@ -1423,8 +1404,7 @@ fn fold_row_type(row_type: &str) -> &str {
     }
 }
 
-/// Reduces renderer geometry issues to bounded buckets that keep the failure kind while
-/// dropping cell names and folding unknown row types into a fixed bucket.
+/// Geometry-issue buckets; keeps the kind, drops cell names.
 fn geometry_issue_buckets(detail: &str) -> Vec<String> {
     let mut buckets = BTreeSet::new();
     collect_row_type_buckets(detail, &mut buckets);
@@ -1439,7 +1419,7 @@ fn geometry_issue_buckets(detail: &str) -> Vec<String> {
     buckets.into_iter().collect()
 }
 
-/// Buckets each `UnsupportedRowType` by its whitelisted row type.
+/// `UnsupportedRowType` entries by whitelisted row type.
 fn collect_row_type_buckets(detail: &str, buckets: &mut BTreeSet<String>) {
     const MARKER: &str = "UnsupportedRowType(\"";
     let mut rest = detail;
@@ -1453,8 +1433,7 @@ fn collect_row_type_buckets(detail: &str, buckets: &mut BTreeSet<String>) {
     }
 }
 
-/// Buckets each `MissingCell`/`UnevaluatedCell` by kind and whitelisted row type,
-/// dropping the cell name.
+/// `MissingCell`/`UnevaluatedCell` entries by kind and row type.
 fn collect_geometry_cell_buckets(
     detail: &str,
     variant: &str,
@@ -1480,7 +1459,7 @@ fn collect_geometry_cell_buckets(
     }
 }
 
-/// Buckets each `UnsupportedSectionControl` by its whitelisted control name.
+/// `UnsupportedSectionControl` entries by whitelisted control.
 fn collect_geometry_control_buckets(detail: &str, buckets: &mut BTreeSet<String>) {
     const MARKER: &str = "UnsupportedSectionControl(\"";
     let mut rest = detail;
@@ -1586,7 +1565,7 @@ fn count_visibility(
     counts
 }
 
-/// Reads Geometry section controls from the resolved shape, after master inheritance.
+/// Geometry section controls after master inheritance.
 fn section_controls(resolved: &ResolvedShape) -> Vec<String> {
     let mut controls = Vec::new();
     for control in VISIBILITY_CONTROLS {
@@ -1608,8 +1587,9 @@ fn section_controls(resolved: &ResolvedShape) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_placeholder_reason, count_hidden, count_shapes, fold_call_name, fold_row_type,
-        measure_formulas, render_pages_with_limits, survey, tally_primitives,
+        classify_error, classify_placeholder_reason, classify_unsupported, collect_unsupported,
+        count_hidden, count_shapes, fold_call_name, fold_row_type, measure_formulas,
+        render_pages_with_limits, survey, tally_primitives,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use vsdx_render::{Affine, Primitive};
@@ -1768,6 +1748,35 @@ mod tests {
                 "unsupported geometry: [MissingCell { row_type: \"EVILTYPE\", cell: \"A\" }]"
             ),
             "unsupported geometry: missing cell in <unknown-row-type>"
+        );
+    }
+
+    #[test]
+    fn adversarial_names_fold_into_fixed_buckets() {
+        let expression = vsdx_eval::parse("EVILFUNC(1)", &vsdx_parse::ParseLimits::default())
+            .expect("parse author-defined call");
+        let mut counts = BTreeMap::new();
+        collect_unsupported(&expression, &mut counts);
+        assert_eq!(counts.keys().collect::<Vec<_>>(), ["<unknown-function>"]);
+        assert_eq!(
+            classify_unsupported("unsupported function EVILFUNC"),
+            "unsupported function <unknown-function>"
+        );
+        assert_eq!(
+            classify_unsupported("EVILFUNC is not implemented"),
+            "not implemented: <unknown-function>"
+        );
+        assert_eq!(
+            classify_unsupported("EVILFUNC is outside the phase-4 evaluator"),
+            "outside phase-4 evaluator: <unknown-function>"
+        );
+        assert_eq!(
+            classify_error("unresolved reference SecretCell"),
+            "unresolved cell reference"
+        );
+        assert_eq!(
+            classify_placeholder_reason("unsupported geometry: [UnsupportedRowType(\"EVILTYPE\")]"),
+            "unsupported geometry: unimplemented row type <unknown-row-type>"
         );
     }
 
