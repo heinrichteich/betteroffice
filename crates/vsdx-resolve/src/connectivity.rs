@@ -439,6 +439,24 @@ pub fn scene_transforms(
     transforms
 }
 
+pub fn scene_transforms_without_flips(
+    page: &vsdx_parse::Sheet,
+    shapes: &BTreeMap<u32, ResolvedShape>,
+    value: impl Fn(u32, &ResolvedShape, &str) -> Option<f64> + Copy,
+) -> BTreeMap<u32, SceneTransform> {
+    let mut transforms = BTreeMap::new();
+    for shape in page.shapes() {
+        add_scene_transforms_without_flips(
+            shape,
+            SceneAffine::identity(),
+            shapes,
+            value,
+            &mut transforms,
+        );
+    }
+    transforms
+}
+
 fn add_scene_transforms(
     shape: &Shape,
     parent: SceneAffine,
@@ -459,6 +477,29 @@ fn add_scene_transforms(
     transforms.insert(shape.id, SceneTransform { local, scene });
     for child in children {
         add_scene_transforms(child, scene, shapes, value, transforms);
+    }
+}
+
+fn add_scene_transforms_without_flips(
+    shape: &Shape,
+    parent: SceneAffine,
+    shapes: &BTreeMap<u32, ResolvedShape>,
+    value: impl Fn(u32, &ResolvedShape, &str) -> Option<f64> + Copy,
+    transforms: &mut BTreeMap<u32, SceneTransform>,
+) {
+    let Some(resolved) = shapes.get(&shape.id) else {
+        return;
+    };
+    let Some(bounds) = shape_bounds_without_flips(shape.id, resolved, value) else {
+        return;
+    };
+    let children = shape.shapes().collect::<Vec<_>>();
+    let extent = child_extent(&children, shapes, value);
+    let local = bounds_affine(bounds, extent);
+    let scene = parent.compose(local);
+    transforms.insert(shape.id, SceneTransform { local, scene });
+    for child in children {
+        add_scene_transforms_without_flips(child, scene, shapes, value, transforms);
     }
 }
 
@@ -509,6 +550,28 @@ fn shape_bounds(
         angle: value(id, shape, "Angle").unwrap_or(0.0),
         flip_x: value(id, shape, "FlipX").unwrap_or(0.0) != 0.0,
         flip_y: value(id, shape, "FlipY").unwrap_or(0.0) != 0.0,
+    })
+}
+
+fn shape_bounds_without_flips(
+    id: u32,
+    shape: &ResolvedShape,
+    value: impl Fn(u32, &ResolvedShape, &str) -> Option<f64>,
+) -> Option<ShapeBounds> {
+    let width = value(id, shape, "Width")?;
+    let height = value(id, shape, "Height")?;
+    let loc_pin_x = value(id, shape, "LocPinX").unwrap_or(width / 2.0);
+    let loc_pin_y = value(id, shape, "LocPinY").unwrap_or(height / 2.0);
+    Some(ShapeBounds {
+        x: value(id, shape, "PinX")? - loc_pin_x,
+        y: value(id, shape, "PinY")? - loc_pin_y,
+        width,
+        height,
+        loc_pin_x,
+        loc_pin_y,
+        angle: value(id, shape, "Angle").unwrap_or(0.0),
+        flip_x: false,
+        flip_y: false,
     })
 }
 
