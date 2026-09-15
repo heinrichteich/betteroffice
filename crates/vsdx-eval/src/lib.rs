@@ -483,10 +483,7 @@ fn map_shape_theme<'a>(
     let indexed = shape.theme_index().or_else(|| shape.color_scheme_index());
     match indexed {
         Some(0) => None,
-        Some(index) => themes
-            .get(&index)
-            .or_else(|| themes.get(&1))
-            .or_else(|| themes.values().next()),
+        Some(index) => themes.get(&index),
         None => themes.get(&1).or_else(|| themes.values().next()),
     }
 }
@@ -1765,6 +1762,74 @@ mod tests {
                 guarded: false
             })
         );
+    }
+
+    #[test]
+    fn missing_shape_theme_index_leaves_theme_unresolved() {
+        fn indexed_shape(name: &str, value: &str) -> ResolvedShape {
+            let mut shape = ResolvedShape::default();
+            shape.cells.insert(
+                name.into(),
+                Lookup::Found(vsdx_resolve::ResolvedCell {
+                    cell: vsdx_parse::Cell {
+                        name: name.into(),
+                        formula: None,
+                        value: Some(value.into()),
+                        unit: None,
+                        del: false,
+                        other_attrs: Vec::new(),
+                    },
+                    provenance: vsdx_resolve::Provenance::Local,
+                }),
+            );
+            shape
+        }
+        let mut theme = Theme::default();
+        theme.color_scheme.accent1 = "A0B0C0".into();
+        let themes = BTreeMap::from([(1, theme)]);
+        for shape in [
+            indexed_shape("ThemeIndex", "7"),
+            indexed_shape("ColorSchemeIndex", "7"),
+        ] {
+            assert!(matches!(
+                evaluate_with_shape_themes(
+                    "THEMEVAL(\"FillColor\")",
+                    &BTreeMap::new(),
+                    &limits(),
+                    &shape,
+                    &themes
+                ),
+                Evaluation::Unsupported(_)
+            ));
+            assert_eq!(
+                evaluate_with_shape_themes(
+                    "THEMEVAL(\"FillColor\",RGB(4,5,6))",
+                    &BTreeMap::new(),
+                    &limits(),
+                    &shape,
+                    &themes
+                ),
+                Evaluation::Evaluated(Evaluated {
+                    value: Value::Color(Color {
+                        red: 4,
+                        green: 5,
+                        blue: 6,
+                        alpha: None
+                    }),
+                    guarded: false
+                })
+            );
+        }
+        assert!(matches!(
+            evaluate_with_shape_themes(
+                "THEMEVAL(\"FillColor\")",
+                &BTreeMap::new(),
+                &limits(),
+                &ResolvedShape::default(),
+                &themes
+            ),
+            Evaluation::Evaluated(_)
+        ));
     }
 
     #[test]
