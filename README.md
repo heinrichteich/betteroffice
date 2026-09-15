@@ -51,7 +51,7 @@ DOCX layout omits hidden content by default. Set `showHiddenText: true` in `YrsR
 
 The browser React editor renders supported bitmap-only WMF wrappers. Custom browser image loaders can use `presentationImageBlob(bytes)` from `@betteroffice/pptx` for the same limited WMF support.
 
-The source-available VSDX editor offers a focusable canvas with keyboard undo and redo, Delete, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus.
+The source-available VSDX editor offers a tabbed ribbon with searchable standard-shape and arrow galleries across two switchable stencils, a page tab strip and a zoom status bar, over move, resize with handles and Shift-drag, add, delete, z-order arrange, fill and line colour, and save, with a focusable canvas offering keyboard undo and redo, Delete, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus.
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
