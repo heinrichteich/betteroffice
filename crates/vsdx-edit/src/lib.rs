@@ -985,6 +985,131 @@ mod tests {
     }
 
     #[test]
+    fn place_shape_commits_size_and_pin_in_a_single_update() {
+        use std::sync::{Arc, Mutex};
+        let session = session();
+        for name in ["Width", "Height", "PinX", "PinY"] {
+            add_cell(&session, name, Some("1"), None);
+        }
+        let updates = Arc::new(Mutex::new(0usize));
+        let observed = Arc::clone(&updates);
+        let _subscription = session
+            .observe_update_v1(move |_| {
+                *observed.lock().unwrap() += 1;
+            })
+            .unwrap();
+        let receipts = session
+            .place_shape(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                PlaceShapeFormulas {
+                    width: "2".to_owned(),
+                    height: "3".to_owned(),
+                    x: "4".to_owned(),
+                    y: "5".to_owned(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            receipts
+                .iter()
+                .map(|receipt| receipt.cell_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Width", "Height", "PinX", "PinY"]
+        );
+        assert_eq!(*updates.lock().unwrap(), 1);
+        let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+        for (name, formula) in [
+            ("Width", "2"),
+            ("Height", "3"),
+            ("PinX", "4"),
+            ("PinY", "5"),
+        ] {
+            assert_eq!(
+                cells
+                    .iter()
+                    .find(|cell| cell.name == name)
+                    .unwrap()
+                    .formula
+                    .as_deref(),
+                Some(formula)
+            );
+        }
+    }
+
+    #[test]
+    fn place_shape_undoes_size_and_pin_together() {
+        let session = session();
+        for name in ["Width", "Height", "PinX", "PinY"] {
+            add_cell(&session, name, Some("1"), None);
+        }
+        session
+            .place_shape(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                PlaceShapeFormulas {
+                    width: "2".to_owned(),
+                    height: "3".to_owned(),
+                    x: "4".to_owned(),
+                    y: "5".to_owned(),
+                },
+            )
+            .unwrap();
+        assert!(session.undo());
+        let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+        for name in ["Width", "Height", "PinX", "PinY"] {
+            assert_eq!(
+                cells
+                    .iter()
+                    .find(|cell| cell.name == name)
+                    .unwrap()
+                    .formula
+                    .as_deref(),
+                Some("1")
+            );
+        }
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn place_shape_refusal_leaves_all_four_cells_unchanged() {
+        let session = session();
+        for name in ["Width", "Height", "PinX", "PinY"] {
+            add_cell(&session, name, Some("1"), None);
+        }
+        add_cell(&session, "LockHeight", Some("1"), None);
+        assert!(
+            session
+                .place_shape(
+                    &EditCtx::local("a"),
+                    "page:1",
+                    "page:1:shape:1",
+                    PlaceShapeFormulas {
+                        width: "2".to_owned(),
+                        height: "3".to_owned(),
+                        x: "4".to_owned(),
+                        y: "5".to_owned(),
+                    },
+                )
+                .is_err()
+        );
+        let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+        for name in ["Width", "Height", "PinX", "PinY"] {
+            assert_eq!(
+                cells
+                    .iter()
+                    .find(|cell| cell.name == name)
+                    .unwrap()
+                    .formula
+                    .as_deref(),
+                Some("1")
+            );
+        }
+    }
+
+    #[test]
     fn guarded_section_row_cell_refuses_edits() {
         let session = session();
         let locator = CellLocator {

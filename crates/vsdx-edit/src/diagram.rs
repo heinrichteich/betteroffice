@@ -14,8 +14,8 @@ use yrs::{
 
 use crate::{
     CellFormulaReceipt, CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx, EditError,
-    EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES, ShapeDraft, ShapeReceipt,
-    ShapeSnapshot,
+    EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, PlaceShapeFormulas, SHEETS, STORIES,
+    ShapeDraft, ShapeReceipt, ShapeSnapshot,
 };
 
 const SCHEMA_VERSION: f64 = 1.0;
@@ -666,6 +666,26 @@ impl DiagramSession {
         )
     }
 
+    pub fn place_shape(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        formulas: PlaceShapeFormulas,
+    ) -> EditResult<[CellFormulaReceipt; 4]> {
+        self.set_cell_formula_group(
+            context,
+            page_id,
+            shape_id,
+            [
+                ("Width", formulas.width, MutationGesture::ResizeWidth),
+                ("Height", formulas.height, MutationGesture::ResizeHeight),
+                ("PinX", formulas.x, MutationGesture::MoveX),
+                ("PinY", formulas.y, MutationGesture::MoveY),
+            ],
+        )
+    }
+
     pub fn reorder_shape(
         &self,
         context: &EditCtx,
@@ -816,6 +836,18 @@ impl DiagramSession {
         first: (&str, String, MutationGesture),
         second: (&str, String, MutationGesture),
     ) -> EditResult<[CellFormulaReceipt; 2]> {
+        let [first, second] =
+            self.set_cell_formula_group(context, page_id, shape_id, [first, second])?;
+        Ok([first, second])
+    }
+
+    fn set_cell_formula_group<const N: usize>(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        cells: [(&str, String, MutationGesture); N],
+    ) -> EditResult<[CellFormulaReceipt; N]> {
         let mut txn = self.transact_for(context);
         let context_for_policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
         let decide =
@@ -838,30 +870,27 @@ impl DiagramSession {
                     Err(EditError::InvalidState(reason))
                 }
             };
-        let (first_target, first_formula) = decide(first)?;
-        let (second_target, second_formula) = decide(second)?;
-        let first_cell = cell_map(&mut txn, page_id, shape_id, &first_target)?;
-        let second_cell = cell_map(&mut txn, page_id, shape_id, &second_target)?;
-        let first_before = map_string(&first_cell, &txn, "formula");
-        let second_before = map_string(&second_cell, &txn, "formula");
-        first_cell.insert(&mut txn, "formula", first_formula.as_str());
-        second_cell.insert(&mut txn, "formula", second_formula.as_str());
-        Ok([
-            CellFormulaReceipt {
+        let decided = cells.map(decide);
+        let mut pending = Vec::with_capacity(N);
+        for entry in decided {
+            pending.push(entry?);
+        }
+        let mut receipts = Vec::with_capacity(N);
+        for (target, formula) in pending {
+            let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
+            let before = map_string(&cell, &txn, "formula");
+            cell.insert(&mut txn, "formula", formula.as_str());
+            receipts.push(CellFormulaReceipt {
                 page_id: page_id.to_owned(),
                 shape_id: shape_id.to_owned(),
-                cell_name: first_target.cell_name,
-                before: first_before,
-                after: first_formula,
-            },
-            CellFormulaReceipt {
-                page_id: page_id.to_owned(),
-                shape_id: shape_id.to_owned(),
-                cell_name: second_target.cell_name,
-                before: second_before,
-                after: second_formula,
-            },
-        ])
+                cell_name: target.cell_name,
+                before,
+                after: formula,
+            });
+        }
+        receipts.try_into().map_err(|_: Vec<CellFormulaReceipt>| {
+            EditError::InvalidState("cell group arity changed".to_owned())
+        })
     }
 }
 

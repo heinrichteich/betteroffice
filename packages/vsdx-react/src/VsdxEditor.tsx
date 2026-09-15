@@ -274,7 +274,6 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
               const placement = findShapePlacement(page.shapes, active.shapeId);
               if (placement) {
                 if (target === 'rotate' && isCellWriteBlocked(placement.shape, 'Angle')) {
-                  reportError(new Error('Shape rotation is guarded and cannot be changed with the grip.'));
                   return;
                 }
                 if (target !== 'rotate' && isHandleResizeBlocked(placement.shape)) {
@@ -385,14 +384,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         const livePage = handle.snapshot().pages.find((page) => page.id === selected.pageId);
         const livePlacement = livePage ? findShapePlacement(livePage.shapes, selected.shapeId) : null;
         if (livePlacement && isHandleResizeBlocked(livePlacement.shape)) throw new Error('Shape is locked and cannot be resized with handles.');
-        handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
-        try {
-          handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
-        } catch (moveError) {
-          try { if (handle.canUndo()) handle.undo(); } catch { void 0; }
-          try { refresh(undefined, false); } catch { void 0; }
-          throw moveError;
-        }
+        handle.placeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height), inchFormula(geometry.x), inchFormula(geometry.y));
       }
       else if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
       else handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));

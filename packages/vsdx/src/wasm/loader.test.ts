@@ -195,6 +195,33 @@ describe('VSDX wasm boundary', () => {
     diagram.dispose();
   });
 
+  test('places a shape with one atomic update covering size and pin', () => {
+    const diagram = openDiagram(foundation, { clientId: 9017 });
+    const added = diagram.addShape('page:1', { cells: [
+      { locator: { cellName: 'PinX' }, formula: '1' },
+      { locator: { cellName: 'PinY' }, formula: '1' },
+      { locator: { cellName: 'Width' }, formula: '1' },
+      { locator: { cellName: 'Height' }, formula: '1' },
+    ] }).shapeId;
+    const updates: string[] = [];
+    const stop = diagram.onUpdate((_update, origin) => { updates.push(origin); });
+    const receipts = diagram.placeShape('page:1', added, '2', '3', '4', '5');
+    expect(receipts.map(receipt => receipt.cellName)).toEqual(['Width', 'Height', 'PinX', 'PinY']);
+    expect(updates).toEqual(['local']);
+    stop();
+    const cells = diagram.snapshot().pages[0].shapes.find(shape => shape.id === added)!.cells;
+    expect(cells.find(cell => cell.name === 'Width')?.formula).toBe('2');
+    expect(cells.find(cell => cell.name === 'PinY')?.formula).toBe('5');
+    expect(diagram.undo().applied).toBe(true);
+    const undone = diagram.snapshot().pages[0].shapes.find(shape => shape.id === added)!.cells;
+    expect(undone.find(cell => cell.name === 'Width')?.formula).toBe('1');
+    expect(undone.find(cell => cell.name === 'PinY')?.formula).toBe('1');
+    expect(diagram.undo().applied).toBe(true);
+    expect(diagram.snapshot().pages[0].shapes.find(shape => shape.id === added)).toBeUndefined();
+    expect(diagram.canUndo()).toBe(false);
+    diagram.dispose();
+  });
+
   test('persists an edit through save and reopen while preserving untouched parts', async () => {
     const pageId = 'page:1';
     const shapeId = 'page:1:shape:1';
