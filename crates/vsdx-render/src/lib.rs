@@ -4664,6 +4664,51 @@ mod tests {
     }
 
     #[test]
+    fn explore_corpus_resolves_every_shape_transform() {
+        let Ok(directory) = std::env::var("VSDX_EXPLORE_DIR") else {
+            eprintln!("warning: skipping VSDX explore transform test; VSDX_EXPLORE_DIR is unset");
+            return;
+        };
+        let mut paths = std::fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "vsdx" || extension == "vstx")
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        assert!(!paths.is_empty(), "expected VSDX explore files");
+        let renderer = Renderer::default();
+        let mut unresolvable = 0usize;
+        for path in &paths {
+            let package = vsdx_parse::parse_vsdx(&std::fs::read(path).unwrap()).unwrap();
+            for page in &package.page_part_paths {
+                let list = renderer.layout_page(&package, page).unwrap();
+                unresolvable += unresolvable_transforms(&list.primitives);
+            }
+        }
+        eprintln!(
+            "VSDX explore transforms: files={} unresolvable={unresolvable}",
+            paths.len(),
+        );
+        assert_eq!(unresolvable, 0, "unresolvable transforms");
+    }
+
+    fn unresolvable_transforms(primitives: &[Primitive]) -> usize {
+        primitives
+            .iter()
+            .map(|primitive| match primitive {
+                Primitive::Placeholder { reason, .. } => {
+                    usize::from(reason == "unresolvable transform")
+                }
+                Primitive::Group { primitives, .. } => unresolvable_transforms(primitives),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    #[test]
     fn group_subshapes_render_master_geometry_and_text_with_page_formatting() {
         let package = vsdx_parse::parse_vsdx(include_bytes!(
             "../../vsdx-parse/tests/fixtures/group-master-shape.vsdx"
