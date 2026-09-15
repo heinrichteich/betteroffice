@@ -711,19 +711,26 @@ export function surfaceDpr(frame: Pick<PageDisplayList, 'width' | 'height'>, zoo
 /** Printable paper tile behind the page-break grid; absent on frames predating the print fields. */
 export interface PageBreakFrame { width: number; height: number; printWidth?: number; printHeight?: number; }
 
+/** Upper bound on page-break grid lines per axis; denser tiles are suppressed. */
+export const MAX_PAGE_BREAK_LINES = 1000;
+
+/** One axis of page-break grid lines, empty when the tile is degenerate or too dense to render. */
+function pageBreakAxis(step: number, pad: number, surfaceSize: number): number[] {
+  if (!Number.isFinite(step) || step <= 0) return [];
+  const lines: number[] = [];
+  for (let k = Math.ceil((0 - pad) / step); pad + k * step <= surfaceSize + 1e-6; k += 1) {
+    if (lines.length >= MAX_PAGE_BREAK_LINES) return [];
+    lines.push(pad + k * step);
+  }
+  return lines;
+}
+
 /** Page-break grid lines tiling the surface in CSS pixels from the page origin. */
 export function pageBreakLines(frameWidth: number, frameHeight: number, zoom: number, pad: number, surfaceWidth: number, surfaceHeight: number, tileWidth = frameWidth, tileHeight = frameHeight): { vertical: number[]; horizontal: number[] } {
-  const stepX = tileWidth * zoom;
-  const stepY = tileHeight * zoom;
-  const vertical: number[] = [];
-  const horizontal: number[] = [];
-  if (stepX > 0) {
-    for (let k = Math.ceil((0 - pad) / stepX); pad + k * stepX <= surfaceWidth + 1e-6; k += 1) vertical.push(pad + k * stepX);
-  }
-  if (stepY > 0) {
-    for (let k = Math.ceil((0 - pad) / stepY); pad + k * stepY <= surfaceHeight + 1e-6; k += 1) horizontal.push(pad + k * stepY);
-  }
-  return { vertical, horizontal };
+  return {
+    vertical: pageBreakAxis(tileWidth * zoom, pad, surfaceWidth),
+    horizontal: pageBreakAxis(tileHeight * zoom, pad, surfaceHeight),
+  };
 }
 
 /** Tiled printer-paper guides covering the scrollable surface. */

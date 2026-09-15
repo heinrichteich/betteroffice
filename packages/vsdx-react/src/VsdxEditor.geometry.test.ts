@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { anchoredZoomScroll, canvasPointerPosition, centredPageScroll, inchFormula, pageBreakLines, resolveDragGeometry, selectionCorners, stillSelectable, surfaceDpr, surfaceSize, viewportCentreKey, zoomForWheelDelta } from './VsdxEditor';
+import { MAX_PAGE_BREAK_LINES, anchoredZoomScroll, canvasPointerPosition, centredPageScroll, inchFormula, pageBreakLines, resolveDragGeometry, selectionCorners, stillSelectable, surfaceDpr, surfaceSize, viewportCentreKey, zoomForWheelDelta } from './VsdxEditor';
 import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
 
 const frame: PageDisplayList = {
@@ -251,6 +251,15 @@ test('page breaks tile the surface in printer-paper cells from the page origin',
   const zoomed = pageBreakLines(frame.width, frame.height, 1.5, pad, surface.width, surface.height, frame.printWidth, frame.printHeight);
   expect(zoomed.vertical).toContain(pad);
   expect(zoomed.horizontal).toContain(pad);
+});
+
+test('a degenerate print tile does not flood the surface with grid lines', () => {
+  const pad = 2000;
+  const surface = surfaceSize(frame.width, frame.height, 1, pad);
+  const lines = pageBreakLines(frame.width, frame.height, 1, pad, surface.width, surface.height, 1, 1);
+  expect(lines.vertical.length).toBeLessThanOrEqual(MAX_PAGE_BREAK_LINES);
+  expect(lines.horizontal.length).toBeLessThanOrEqual(MAX_PAGE_BREAK_LINES);
+  expect(lines.vertical.length + lines.horizontal.length).toBe(0);
 });
 
 test('page breaks fall back to the page extent without a print tile', () => {
