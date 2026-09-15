@@ -3269,6 +3269,140 @@ mod tests {
     }
 
     #[test]
+    fn seeded_package_glue_survives_group_copy() {
+        let session = grouped_glue_session();
+        let snapshot = session.snapshot().unwrap();
+        let connector = find_by_source(&snapshot.pages[0].shapes, 1).id.clone();
+        let group = find_by_source(&snapshot.pages[0].shapes, 10).id.clone();
+        nest_shape(&session, &group, &connector);
+        let target = find_by_source(&session.snapshot().unwrap().pages[0].shapes, 11)
+            .id
+            .clone();
+        let glue = session.subtree_glue("page:1", &group).unwrap();
+        assert_eq!(glue.len(), 1);
+        assert_eq!(glue[0].connector_source, connector);
+        assert_eq!(glue[0].endpoint, "begin");
+        assert_eq!(glue[0].target_source, target);
+        assert_eq!(glue[0].to_cell, "Connections.X1");
+        let snapshot = session.snapshot().unwrap();
+        let source = find_by_source(&snapshot.pages[0].shapes, 10).clone();
+        let draft = tree_draft(&session, "page:1", &source);
+        let receipt = session
+            .add_shape_tree(&EditCtx::local("paste"), "page:1", &draft)
+            .unwrap();
+        let resnapshot = session.snapshot().unwrap();
+        let pasted = resnapshot.pages[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == receipt.shape_id)
+            .unwrap();
+        assert_eq!(pasted.children.len(), 2);
+        let pasted_connector = pasted
+            .children
+            .iter()
+            .find(|child| child.copy_source_id == Some(1))
+            .unwrap();
+        let pasted_target = pasted
+            .children
+            .iter()
+            .find(|child| child.copy_source_id == Some(11))
+            .unwrap();
+        let package = session.package().unwrap();
+        let part = package.page_part_paths[0].clone();
+        let carried = package.page_contents[&part]
+            .connects()
+            .filter(|connect| connect.from_sheet == pasted_connector.source_id)
+            .collect::<Vec<_>>();
+        assert_eq!(carried.len(), 1);
+        assert_eq!(carried[0].from_cell.as_deref(), Some("BeginX"));
+        assert_eq!(carried[0].to_sheet, pasted_target.source_id);
+        assert_eq!(carried[0].to_cell.as_deref(), Some("Connections.X1"));
+        assert_eq!(
+            package.page_contents[&part]
+                .connects()
+                .filter(|connect| connect.from_sheet == 1)
+                .count(),
+            6
+        );
+    }
+
+    #[test]
+    fn pasted_shapes_keep_their_source_text_tokens() {
+        let session = DiagramSession::open(
+            include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx"),
+            915,
+        )
+        .unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let edited = find_by_source(&snapshot.pages[0].shapes, 3).id.clone();
+        session
+            .set_shape_text(&EditCtx::local("text"), "page:1", &edited, "edited")
+            .unwrap();
+        let mut pasted_sources = Vec::new();
+        for source_id in [1, 2, 3] {
+            let snapshot = session.snapshot().unwrap();
+            let source = find_by_source(&snapshot.pages[0].shapes, source_id).clone();
+            let draft = tree_draft(&session, "page:1", &source);
+            let receipt = session
+                .add_shape_tree(&EditCtx::local("paste"), "page:1", &draft)
+                .unwrap();
+            let resnapshot = session.snapshot().unwrap();
+            pasted_sources.push(
+                resnapshot.pages[0]
+                    .shapes
+                    .iter()
+                    .find(|shape| shape.id == receipt.shape_id)
+                    .unwrap()
+                    .source_id,
+            );
+        }
+        let package = session.package().unwrap();
+        let part = package.page_part_paths[0].clone();
+        let text_of = |source_id: u32| {
+            package.page_contents[&part]
+                .shapes()
+                .find(|shape| shape.id == source_id)
+                .unwrap()
+                .text()
+                .unwrap()
+                .to_vec()
+        };
+        assert_eq!(
+            text_of(pasted_sources[1]),
+            vec![vsdx_parse::TextToken::Field(0)]
+        );
+        assert_eq!(
+            text_of(pasted_sources[0]),
+            vec![
+                vsdx_parse::TextToken::CharacterRun(0),
+                vsdx_parse::TextToken::ParagraphRun(0),
+            ]
+        );
+        assert_eq!(
+            text_of(pasted_sources[2]),
+            vec![vsdx_parse::TextToken::Literal("edited".to_owned())]
+        );
+        let expected = pasted_sources
+            .iter()
+            .map(|source_id| text_of(*source_id))
+            .collect::<Vec<_>>();
+        let saved = session.save().unwrap();
+        let reopened = DiagramSession::open(&saved, 916).unwrap();
+        assert_reopened_projection_eq(&session, &reopened, "token-preserving paste");
+        let reopened_package = reopened.package().unwrap();
+        for (source_id, tokens) in pasted_sources.iter().zip(expected) {
+            let actual = reopened_package.page_contents[&part]
+                .shapes()
+                .find(|shape| shape.id == *source_id)
+                .unwrap()
+                .text()
+                .unwrap()
+                .to_vec();
+            assert_eq!(actual, tokens);
+        }
+    }
+
+    #[test]
     fn copies_of_copies_stay_self_referential() {
         for save_between in [false, true] {
             let session = grouped_glue_session();

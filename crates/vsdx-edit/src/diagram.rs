@@ -4,7 +4,7 @@ use std::sync::Arc;
 use vsdx_eval::{MutationContext, MutationOutcome, decide_mutation, evaluate};
 use vsdx_parse::{
     Cell, CellLocator, CellRow, CellSheet, Connect, ConnectsChild, MutationGesture, ParseLimits,
-    RowChild, SectionChild, Shape, ShapeChild, ShapesChild, SheetChild, StructuralEdit,
+    RowChild, SectionChild, Shape, ShapeChild, ShapesChild, SheetChild, StructuralEdit, TextToken,
 };
 use vsdx_resolve::{Lookup, Resolver};
 use yrs::{
@@ -24,6 +24,10 @@ type SectionRows<'a> = Vec<(
     (String, Option<u32>),
     Vec<(Option<CellRow>, Vec<&'a CellSnapshot>)>,
 )>;
+type StoryTexts = (
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, Vec<TextToken>>,
+);
 
 pub(crate) fn seed_doc(
     doc: &Doc,
@@ -53,7 +57,7 @@ pub(crate) fn seed_doc(
     let order = txn.get_or_insert_array(PAGE_ORDER);
     let pages = txn.get_or_insert_map(PAGES);
     let sheets = txn.get_or_insert_map(SHEETS);
-    txn.get_or_insert_map(CONNECTS);
+    let connects = txn.get_or_insert_map(CONNECTS);
     let stories = txn.get_or_insert_map(STORIES);
     for path in &package.page_part_paths {
         let Some(page_id) = package.page_part_ids.get(path) else {
@@ -79,6 +83,7 @@ pub(crate) fn seed_doc(
         let shape_order = page.insert(&mut txn, "shapes", ArrayPrelim::default());
         if let Some(sheet) = package.page_contents.get(path) {
             let resolver = Resolver::new(package);
+            let mut sources = std::collections::HashMap::new();
             for shape in sheet.shapes() {
                 let shape_id = format!("{id}:shape:{}", shape.id);
                 shape_order.push_back(&mut txn, shape_id.as_str());
@@ -86,10 +91,22 @@ pub(crate) fn seed_doc(
                     .resolve_shape(path, shape.id)
                     .map_err(|error| EditError::InvalidState(error.to_string()))?;
                 seed_shape(
-                    &sheets, &stories, &mut txn, &shape_id, &id, None, path, sheet, shape,
-                    &resolver, &resolved, 1,
+                    &sheets,
+                    &stories,
+                    &mut txn,
+                    &shape_id,
+                    &id,
+                    None,
+                    path,
+                    sheet,
+                    shape,
+                    &resolver,
+                    &resolved,
+                    1,
+                    &mut sources,
                 )?;
             }
+            seed_page_glue(&connects, &mut txn, &id, sheet, &sources);
         }
     }
     Ok(())
@@ -99,7 +116,7 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage>
     let mut package = original_package_from_doc(doc)?;
     let snapshot = snapshot_doc(doc)?;
     let glue = glue_records(&doc.transact())?;
-    let texts = edited_story_texts(doc, &snapshot, &package)?;
+    let (texts, verbatim) = edited_story_texts(doc, &snapshot, &package)?;
     materialize_snapshot(
         doc,
         &mut package,
@@ -107,6 +124,7 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage>
         &original_shape_ids(doc)?,
         &glue,
         &texts,
+        &verbatim,
     )?;
     package.page_part_paths = page_part_paths_for_snapshot(&package, &snapshot)?;
     Ok(package)
@@ -153,6 +171,7 @@ fn materialize_snapshot(
     original_shape_ids: &HashSet<String>,
     glue: &[GlueRecord],
     texts: &std::collections::BTreeMap<String, String>,
+    verbatim: &std::collections::BTreeMap<String, Vec<TextToken>>,
 ) -> EditResult<()> {
     for page in &snapshot.pages {
         let Some(sheet) = package.page_contents.get_mut(&page.source_part_path) else {
@@ -165,14 +184,14 @@ fn materialize_snapshot(
             original_shape_ids,
             &added_page_remaps(doc, page)?,
         )?;
-        materialize_page_text(sheet, page, texts);
+        materialize_page_text(sheet, page, texts, verbatim);
         let projected_shape_ids = sheet_shape_ids(sheet);
         let deleted = original_source_shape_ids
             .difference(&projected_shape_ids)
             .copied()
             .collect();
         vsdx_parse::remove_connects_referencing_shapes(sheet, &deleted);
-        materialize_page_glue(sheet, page, glue)?;
+        materialize_page_glue(sheet, page, glue, original_shape_ids)?;
     }
     Ok(())
 }
@@ -201,10 +220,20 @@ fn materialize_page_text(
     sheet: &mut vsdx_parse::Sheet,
     page: &PageSnapshot,
     texts: &std::collections::BTreeMap<String, String>,
+    verbatim: &std::collections::BTreeMap<String, Vec<TextToken>>,
 ) {
     let mut pending = page.shapes.iter().collect::<Vec<_>>();
     while let Some(shape) = pending.pop() {
-        if let Some(text) = texts.get(shape.id.as_str())
+        if let Some(tokens) = verbatim
+            .get(shape.id.as_str())
+            .filter(|tokens| !tokens.is_empty())
+            && let Some(target) = shape_by_source_mut(sheet, shape.source_id)
+        {
+            target
+                .children
+                .retain(|child| !matches!(child, ShapeChild::Text(_)));
+            target.children.push(ShapeChild::Text(tokens.clone()));
+        } else if let Some(text) = texts.get(shape.id.as_str())
             && let Some(target) = shape_by_source_mut(sheet, shape.source_id)
         {
             target
@@ -264,7 +293,7 @@ fn edited_story_texts(
     doc: &Doc,
     snapshot: &DiagramSnapshot,
     package: &vsdx_parse::VsdxPackage,
-) -> EditResult<std::collections::BTreeMap<String, String>> {
+) -> EditResult<StoryTexts> {
     let mut source_to_session = std::collections::BTreeMap::new();
     for page in &snapshot.pages {
         let Some(source_page_id) = page
@@ -290,6 +319,7 @@ fn edited_story_texts(
             texts.insert(session_id.clone(), edit.text);
         }
     }
+    let mut verbatim = std::collections::BTreeMap::new();
     let txn = doc.transact();
     let sheets = required_map(&txn, SHEETS)?;
     let stories = txn.get_map(STORIES);
@@ -307,10 +337,48 @@ fn edited_story_texts(
         };
         if !current.is_empty() {
             validate_story_text(&current)?;
-            texts.insert(shape_id.to_owned(), current);
+            texts.insert(shape_id.to_owned(), current.clone());
+        }
+        let page_id = map_string(&shape, &txn, "pageId").and_then(|page_id| {
+            page_id
+                .strip_prefix("page:")
+                .and_then(|value| value.parse::<u32>().ok())
+        });
+        let copy_source_id = map_u32(&shape, &txn, "copySourceId")?;
+        if let (Some(page_id), Some(copy_source_id)) = (page_id, copy_source_id)
+            && let Some(tokens) = verbatim_source_text(package, page_id, copy_source_id, &current)
+        {
+            verbatim.insert(shape_id.to_owned(), tokens);
         }
     }
-    Ok(texts)
+    Ok((texts, verbatim))
+}
+
+/// Verbatim `Text` tokens of the copied shape, when its story still matches.
+fn verbatim_source_text(
+    package: &vsdx_parse::VsdxPackage,
+    source_page_id: u32,
+    copy_source_id: u32,
+    story: &str,
+) -> Option<Vec<TextToken>> {
+    let path = package
+        .page_part_ids
+        .iter()
+        .find_map(|(path, id)| (*id == source_page_id).then(|| path.clone()))?;
+    let contents = package.page_contents.get(&path)?;
+    let original = find_shape_in(contents, copy_source_id)?;
+    let local = original.text().filter(|tokens| !tokens.is_empty())?;
+    let page_sheet = package
+        .page_part_ids
+        .get(&path)
+        .and_then(|id| package.page_sheets.get(id))
+        .unwrap_or(contents);
+    let resolver = Resolver::new(package);
+    let resolved = resolver.resolve_shape(&path, copy_source_id).ok()?;
+    let tokens = resolver
+        .resolve_text_in_context(original, page_sheet, &resolved)
+        .ok()?;
+    (plain_text(&tokens, &resolved) == story).then(|| local.to_vec())
 }
 
 struct GlueRecord {
@@ -378,6 +446,44 @@ fn glue_text_valid(value: &str) -> bool {
         && value
             .chars()
             .all(|c| matches!(c, '\t' | '\r' | '\n' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'))
+}
+
+/// Session glue for package connects the subtree copy path can carry.
+fn seed_page_glue(
+    connects: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    page_id: &str,
+    sheet: &vsdx_parse::Sheet,
+    sources: &std::collections::HashMap<u32, String>,
+) {
+    let mut seen = HashSet::new();
+    for connect in sheet.connects() {
+        let endpoint = match connect.from_cell.as_deref() {
+            Some("BeginX") => GlueEndpoint::Begin,
+            Some("EndX") => GlueEndpoint::End,
+            _ => continue,
+        };
+        let Some(to_cell) = normalized_glue_target(connect.to_cell.as_deref()) else {
+            continue;
+        };
+        let (Some(connector), Some(target)) = (
+            sources.get(&connect.from_sheet),
+            sources.get(&connect.to_sheet),
+        ) else {
+            continue;
+        };
+        if !seen.insert((connector.clone(), endpoint)) {
+            continue;
+        }
+        let key = glue_key(connector, endpoint);
+        let entry = connects.insert(txn, key.as_str(), MapPrelim::default());
+        entry.insert(txn, "id", key.as_str());
+        entry.insert(txn, "pageId", page_id);
+        entry.insert(txn, "connectorId", connector.as_str());
+        entry.insert(txn, "endpoint", endpoint.name());
+        entry.insert(txn, "targetId", target.as_str());
+        entry.insert(txn, "toCell", to_cell.as_str());
+    }
 }
 
 fn draft_is_one_d(draft: &ShapeDraft) -> bool {
@@ -467,10 +573,16 @@ fn materialize_page_glue(
     sheet: &mut vsdx_parse::Sheet,
     page: &PageSnapshot,
     glue: &[GlueRecord],
+    originals: &HashSet<String>,
 ) -> EditResult<()> {
     let sources = snapshot_shape_sources(page);
     let mut pending = Vec::new();
     for record in glue.iter().filter(|record| record.page_id == page.id) {
+        if originals.contains(record.connector_id.as_str())
+            && originals.contains(record.target_id.as_str())
+        {
+            continue;
+        }
         let (Some(connector), Some(target)) = (
             sources.get(record.connector_id.as_str()),
             sources.get(record.target_id.as_str()),
@@ -777,12 +889,14 @@ fn seed_shape(
     resolver: &Resolver<'_>,
     resolved: &vsdx_resolve::ResolvedShape,
     depth: usize,
+    sources: &mut std::collections::HashMap<u32, String>,
 ) -> EditResult<()> {
     if depth > MAX_SHAPE_NESTING {
         return Err(EditError::InvalidState(
             "shape nesting exceeds maximum depth".to_owned(),
         ));
     }
+    sources.insert(shape.id, id.to_owned());
     let map = sheets.insert(txn, id, MapPrelim::default());
     map.insert(txn, "id", id);
     map.insert(txn, "pageId", page_id);
@@ -874,6 +988,7 @@ fn seed_shape(
             resolver,
             &child_resolved,
             depth + 1,
+            sources,
         )?;
     }
     Ok(())
@@ -3572,6 +3687,7 @@ fn structural_edits(
                 continue;
             }
             let mut texts = std::collections::BTreeMap::new();
+            let mut verbatim = std::collections::BTreeMap::new();
             let mut pending = vec![*snapshot];
             while let Some(node) = pending.pop() {
                 let node_text =
@@ -3584,12 +3700,20 @@ fn structural_edits(
                 if let Some(node_text) = node_text.as_ref() {
                     validate_story_text(node_text)?;
                 }
-                texts.insert(node.id.as_str(), node_text.unwrap_or_default());
+                let node_text = node_text.unwrap_or_default();
+                texts.insert(node.id.as_str(), node_text.clone());
+                if let Some(copy_source_id) = node.copy_source_id
+                    && let Some(tokens) =
+                        verbatim_source_text(package, *page_id, copy_source_id, &node_text)
+                {
+                    verbatim.insert(node.id.as_str(), tokens);
+                }
                 pending.extend(node.children.iter());
             }
             edits.push(StructuralEdit::AddShape {
                 page_id: *page_id,
-                shape_xml: shape_xml(snapshot, &texts, remaps.get(shape.id.as_str())).into_bytes(),
+                shape_xml: shape_xml(snapshot, &texts, &verbatim, remaps.get(shape.id.as_str()))
+                    .into_bytes(),
             });
         }
         let by_id = desired
@@ -3627,6 +3751,10 @@ fn structural_edits(
             .map(|shape| (shape.id.as_str(), shape.source_id))
             .collect::<std::collections::BTreeMap<_, _>>();
         for record in glue.iter().filter(|record| record.page_id == page.id) {
+            let original = |id: &str| by_id.get(id).is_some_and(|entry| entry.is_original);
+            if original(record.connector_id.as_str()) && original(record.target_id.as_str()) {
+                continue;
+            }
             let (Some(connector), Some(target)) = (
                 sources.get(record.connector_id.as_str()),
                 sources.get(record.target_id.as_str()),
@@ -3888,6 +4016,7 @@ fn structural_container_edits(
 fn shape_xml(
     shape: &ShapeSnapshot,
     texts: &std::collections::BTreeMap<&str, String>,
+    verbatim: &std::collections::BTreeMap<&str, Vec<TextToken>>,
     remap: Option<&std::collections::BTreeMap<u32, u32>>,
 ) -> String {
     let mut output = format!(
@@ -3964,7 +4093,16 @@ fn shape_xml(
         }
         output.push_str("</Section>");
     }
-    if let Some(text) = texts.get(shape.id.as_str()).filter(|text| !text.is_empty()) {
+    if let Some(tokens) = verbatim
+        .get(shape.id.as_str())
+        .filter(|tokens| !tokens.is_empty())
+    {
+        output.push_str("<Text>");
+        for token in tokens {
+            text_token_xml(&mut output, token);
+        }
+        output.push_str("</Text>");
+    } else if let Some(text) = texts.get(shape.id.as_str()).filter(|text| !text.is_empty()) {
         output.push_str("<Text>");
         for character in text.chars() {
             match character {
@@ -3979,12 +4117,39 @@ fn shape_xml(
     if !shape.children.is_empty() {
         output.push_str("<Shapes>");
         for child in &shape.children {
-            output.push_str(&shape_xml(child, texts, remap));
+            output.push_str(&shape_xml(child, texts, verbatim, remap));
         }
         output.push_str("</Shapes>");
     }
     output.push_str("</Shape>");
     output
+}
+
+fn text_token_xml(output: &mut String, token: &TextToken) {
+    match token {
+        TextToken::Literal(value) => {
+            for character in value.chars() {
+                match character {
+                    '&' => output.push_str("&amp;"),
+                    '<' => output.push_str("&lt;"),
+                    '>' => output.push_str("&gt;"),
+                    _ => output.push(character),
+                }
+            }
+        }
+        TextToken::CharacterRun(ix) => {
+            output.push_str(&format!("<cp IX=\"{ix}\"></cp>"));
+        }
+        TextToken::ParagraphRun(ix) => {
+            output.push_str(&format!("<pp IX=\"{ix}\"></pp>"));
+        }
+        TextToken::Tab(ix) => {
+            output.push_str(&format!("<tp IX=\"{ix}\"></tp>"));
+        }
+        TextToken::Field(ix) => {
+            output.push_str(&format!("<fld IX=\"{ix}\"></fld>"));
+        }
+    }
 }
 
 fn cell_xml(
