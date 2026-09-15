@@ -65,6 +65,30 @@ test('does not reopen for inline fonts and a state-setting onReady callback', as
   canvasPrototype.getContext = getContext;
 });
 
+test('backs the page canvases by the page extent instead of the padded surface', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  let ready: { handle: DiagramHandle } | undefined;
+  const view = render(<VsdxEditor file={foundation} fonts={[]} onReady={(api) => { ready = api; }} onChange={() => {}} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const frame = ready!.handle.layoutPage(0);
+    const canvases = view.container.querySelectorAll('canvas');
+    expect(canvases.length).toBe(2);
+    await waitFor(() => expect(canvases[0].width).toBeGreaterThan(0));
+    for (const canvas of canvases) {
+      expect(canvas.width).toBeLessThanOrEqual(Math.ceil(frame.width) + 129);
+      expect(canvas.height).toBeLessThanOrEqual(Math.ceil(frame.height) + 129);
+      expect(canvas.width * canvas.height).toBeLessThan(2 * 1024 * 1024);
+      expect(Number.parseFloat(canvas.style.width)).toBeLessThan(frame.width + 129);
+    }
+  } finally {
+    cleanup();
+    canvasPrototype.getContext = getContext;
+  }
+});
+
 test('a parent re-rendering with a new inline onChange does not reopen the document', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
@@ -851,14 +875,14 @@ test('the overlay paints the selection frame at a zoom other than 1', async () =
     calls.length = 0;
     fireEvent.click(view.getByRole('button', { name: 'Zoom in' }));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
-    expect(calls.some((entry) => entry.startsWith('setTransform:1.5,0,0,1.5,2000,2000'))).toBe(true);
+    expect(calls.some((entry) => entry.startsWith('setTransform:1.5,0,0,1.5,64,64'))).toBe(true);
     expect(calls.some((entry) => entry.startsWith('fillRect:'))).toBe(false);
     expect(calls.some((entry) => entry.startsWith('strokeRect:'))).toBe(false);
     expect(calls.some((entry) => entry.startsWith('arc:'))).toBe(true);
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
-test('the drawable canvas covers the surface and page breaks tile it', async () => {
+test('the drawable canvas covers the page and page breaks tile the surface', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
   canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
@@ -874,10 +898,10 @@ test('the drawable canvas covers the surface and page breaks tile it', async () 
     const canvases = view.container.querySelectorAll('canvas');
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
-    expect(main.style.width).toBe('4960px');
-    expect(main.style.height).toBe('4720px');
-    expect(overlay.style.width).toBe('4960px');
-    expect(overlay.style.height).toBe('4720px');
+    expect(main.style.width).toBe('1088px');
+    expect(main.style.height).toBe('848px');
+    expect(overlay.style.width).toBe('1088px');
+    expect(overlay.style.height).toBe('848px');
     expect(view.container.querySelector('[data-testid="vsdx-page-breaks"]')).toBeNull();
     const { fireEvent } = await import('@testing-library/react');
     fireEvent.click(view.getByRole('tab', { name: 'View' }));
@@ -897,8 +921,8 @@ test('the drawable canvas covers the surface and page breaks tile it', async () 
     for (let i = 1; i < horizontal.length; i += 1) expect(horizontal[i] - horizontal[i - 1]).toBeCloseTo(720, 8);
     fireEvent.click(view.getByRole('button', { name: 'Zoom in' }));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
-    expect(main.style.width).toBe('5440px');
-    expect(main.style.height).toBe('5080px');
+    expect(main.style.width).toBe('1568px');
+    expect(main.style.height).toBe('1208px');
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 

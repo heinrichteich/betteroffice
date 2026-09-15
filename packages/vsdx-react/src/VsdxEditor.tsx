@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
-import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
+import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, mutationPolicyFor, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
@@ -186,13 +186,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const context = canvas.getContext('2d'); if (!context) return;
     const controller = new AbortController();
     const originHandle = handleRef.current;
-    const surfaceWidth = frame.width * zoom + SURFACE_PAD * 2;
-    const surfaceHeight = frame.height * zoom + SURFACE_PAD * 2;
-    const effective = sizeCanvasForSurface(canvas, surfaceWidth, surfaceHeight, window.devicePixelRatio || 1);
+    const canvasSize = pageCanvasSize(frame.width, frame.height, zoom);
+    const effective = sizeCanvasForSurface(canvas, canvasSize.width, canvasSize.height, window.devicePixelRatio || 1);
     void paintPage(context, frame, effective, zoom, {
       signal: controller.signal,
-      origin: SURFACE_ORIGIN,
-      surface: { width: surfaceWidth, height: surfaceHeight },
+      origin: PAGE_CANVAS_ORIGIN,
+      surface: canvasSize,
       resolveImage: async (assetId) => {
         if (controller.signal.aborted) return null;
         try { return await resolveImage(assetId, originHandle, imageCache, t('errors.decodePageImage')); }
@@ -206,9 +205,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const canvas = overlayCanvasRef.current; const frame = model.frame;
     if (!canvas || !frame) return;
     const context = canvas.getContext('2d'); if (!context) return;
-    const surfaceWidth = frame.width * zoom + SURFACE_PAD * 2;
-    const surfaceHeight = frame.height * zoom + SURFACE_PAD * 2;
-    const effective = sizeCanvasForSurface(canvas, surfaceWidth, surfaceHeight, window.devicePixelRatio || 1);
+    const canvasSize = pageCanvasSize(frame.width, frame.height, zoom);
+    const effective = sizeCanvasForSurface(canvas, canvasSize.width, canvasSize.height, window.devicePixelRatio || 1);
     context.setTransform(1, 0, 0, 1, 0, 0);
     context.clearRect(0, 0, canvas.width, canvas.height);
     const snapshot = model.snapshot;
@@ -217,13 +215,14 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       try {
         const corners = selectionCorners(page, frame, selection);
         const placement = findShapePlacement(page.shapes, selection.shapeId);
-        const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
-        if (corners) paintSelectionFrame(context, corners, effective, zoom, blocked ? [] : undefined, SURFACE_ORIGIN);
+        const policy = placement ? mutationPolicyFor(handleRef.current, page.id, selection.shapeId, placement.shape) : null;
+        const blocked = placement ? isHandleResizeBlocked(placement.shape, policy) : false;
+        if (corners) paintSelectionFrame(context, corners, effective, zoom, blocked ? [] : undefined, PAGE_CANVAS_ORIGIN);
       } catch { void 0; }
     }
     const start = pointerRef.current; const release = dragPreviewRef.current;
     if (start && release) {
-      try { paintDragPreview(context, previewOutline(start, release, frame.paintTransform), effective, zoom, SURFACE_ORIGIN); } catch { void 0; }
+      try { paintDragPreview(context, previewOutline(start, release, frame.paintTransform), effective, zoom, PAGE_CANVAS_ORIGIN); } catch { void 0; }
     }
   }, [model.frame, model.snapshot, model.pageIndex, selection, zoom]);
 
@@ -332,8 +331,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       try {
         const corners = selectionCorners(page, frame, currentSelection);
         const placement = findShapePlacement(page.shapes, currentSelection.shapeId);
-        const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
-        if (corners) paintSelectionFrame(context, corners, surfaceDpr(frame, zoomRef.current), zoomRef.current, blocked ? [] : undefined, SURFACE_ORIGIN);
+        const policy = placement ? mutationPolicyFor(handleRef.current, page.id, currentSelection.shapeId, placement.shape) : null;
+        const blocked = placement ? isHandleResizeBlocked(placement.shape, policy) : false;
+        if (corners) paintSelectionFrame(context, corners, pageCanvasDpr(frame, zoomRef.current), zoomRef.current, blocked ? [] : undefined, PAGE_CANVAS_ORIGIN);
       } catch { void 0; }
     }
   };
@@ -379,7 +379,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
             if (target) {
               const placement = findShapePlacement(page.shapes, active.shapeId);
               if (placement) {
-                if (target !== 'rotate' && isHandleResizeBlocked(placement.shape)) {
+                const policy = mutationPolicyFor(handle, page.id, active.shapeId, placement.shape);
+                if (target !== 'rotate' && isHandleResizeBlocked(placement.shape, policy)) {
                   reportError(new Error('Shape is locked and cannot be resized with handles.'));
                   return;
                 }
@@ -441,7 +442,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         const target = hitTestSelection(point.canvas, corners, zoomRef.current);
         if (target !== 'rotate' && target) {
           const placement = findShapePlacement(page.shapes, active.shapeId);
-          if (placement && isHandleResizeBlocked(placement.shape)) { event.currentTarget.style.cursor = ''; return; }
+          if (placement && isHandleResizeBlocked(placement.shape, mutationPolicyFor(handleRef.current, page.id, active.shapeId, placement.shape))) { event.currentTarget.style.cursor = ''; return; }
         }
         event.currentTarget.style.cursor = target === 'rotate' ? 'grab' : target ? resizeCursor(target) : '';
       } catch { void 0; }
@@ -468,9 +469,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           const corners = previewOutline(liveStart, release, liveFrame.paintTransform, snap);
           context.setTransform(1, 0, 0, 1, 0, 0);
           context.clearRect(0, 0, overlay.width, overlay.height);
-          const previewDpr = surfaceDpr(liveFrame, zoomRef.current);
-          paintDragPreview(context, corners, previewDpr, zoomRef.current, SURFACE_ORIGIN);
-          paintSelectionFrame(context, corners, previewDpr, zoomRef.current, undefined, SURFACE_ORIGIN);
+          const previewDpr = pageCanvasDpr(liveFrame, zoomRef.current);
+          paintDragPreview(context, corners, previewDpr, zoomRef.current, PAGE_CANVAS_ORIGIN);
+          paintSelectionFrame(context, corners, previewDpr, zoomRef.current, undefined, PAGE_CANVAS_ORIGIN);
         } catch (value) { reportError(value); }
       });
     } catch (value) { reportError(value); }
@@ -507,7 +508,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       if (pointer.handle) {
         const livePage = handle.snapshot().pages.find((page) => page.id === selected.pageId);
         const livePlacement = livePage ? findShapePlacement(livePage.shapes, selected.shapeId) : null;
-        if (livePlacement && isHandleResizeBlocked(livePlacement.shape)) throw new Error('Shape is locked and cannot be resized with handles.');
+        const policy = livePlacement ? mutationPolicyFor(handle, selected.pageId, selected.shapeId, livePlacement.shape) : null;
+        if (livePlacement && isHandleResizeBlocked(livePlacement.shape, policy)) throw new Error('Shape is locked and cannot be resized with handles.');
         handle.placeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height), inchFormula(geometry.x), inchFormula(geometry.y));
       }
       else if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
@@ -676,7 +678,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
       {model.frame && <div style={{ ...styles.surface, width: surfaceWidth, height: surfaceHeight }}>
-        <div style={{ ...styles.canvasFrame, left: 0, top: 0 }}>
+        <div style={{ ...styles.canvasFrame, left: SURFACE_PAD - PAGE_CANVAS_BLEED, top: SURFACE_PAD - PAGE_CANVAS_BLEED }}>
           <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onKeyUp={onCanvasKeyUp} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
           <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
         </div>
@@ -695,17 +697,25 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
 
 const WORKSPACE_MARGIN = 32;
 export const SURFACE_PAD = 2000;
-/** Surface origin of the page extent in CSS pixels. */
-export const SURFACE_ORIGIN: ModelPoint = { x: SURFACE_PAD, y: SURFACE_PAD };
+/** Page overflow kept inside the canvas backing store, in CSS pixels. */
+export const PAGE_CANVAS_BLEED = 64;
+/** Page origin inside its canvas, in CSS pixels. */
+export const PAGE_CANVAS_ORIGIN: ModelPoint = { x: PAGE_CANVAS_BLEED, y: PAGE_CANVAS_BLEED };
+
+/** CSS size of the page canvas for a page extent and zoom. */
+export function pageCanvasSize(frameWidth: number, frameHeight: number, zoom: number, bleed = PAGE_CANVAS_BLEED): { width: number; height: number } {
+  return { width: frameWidth * zoom + bleed * 2, height: frameHeight * zoom + bleed * 2 };
+}
+
+/** Effective DPR for a page canvas at the current device pixel ratio. */
+export function pageCanvasDpr(frame: Pick<PageDisplayList, 'width' | 'height'>, zoom: number, dpr: number = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1, bleed = PAGE_CANVAS_BLEED): number {
+  const canvas = pageCanvasSize(frame.width, frame.height, zoom, bleed);
+  return effectiveDprForSurface(canvas.width, canvas.height, dpr);
+}
 
 /** CSS size of the scrollable white surface for a page extent and zoom. */
 export function surfaceSize(frameWidth: number, frameHeight: number, zoom: number, pad = SURFACE_PAD): { width: number; height: number } {
   return { width: frameWidth * zoom + pad * 2, height: frameHeight * zoom + pad * 2 };
-}
-
-/** Effective DPR for a page extent at the current device pixel ratio. */
-export function surfaceDpr(frame: Pick<PageDisplayList, 'width' | 'height'>, zoom: number, dpr: number = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1, pad = SURFACE_PAD): number {
-  return effectiveDprForSurface(frame.width * zoom + pad * 2, frame.height * zoom + pad * 2, dpr);
 }
 
 /** Page-break grid lines tiling the surface in CSS pixels, aligned to the page origin. */

@@ -114,6 +114,16 @@ struct LocPinAtSizeArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ProbeCellWriteArgs {
+    page_id: String,
+    shape_id: String,
+    locator: CellLocatorArgs,
+    gesture: String,
+    formula: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ReorderShapeArgs {
     page_id: String,
     shape_id: String,
@@ -350,6 +360,11 @@ impl VsdxDocument {
         self.loc_pin_at_size_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = probeCellWriteJson)]
+    pub fn probe_cell_write_json(&self, args: &str) -> Result<String, JsValue> {
+        self.probe_cell_write_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = reorderShapeJson)]
     pub fn reorder_shape_json(&self, args: &str) -> Result<String, JsValue> {
         self.reorder_shape_json_inner(args).map_err(js_error)
@@ -567,6 +582,46 @@ impl VsdxDocument {
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }
+
+    fn probe_cell_write(
+        &self,
+        args: ProbeCellWriteArgs,
+    ) -> crate::EditResult<crate::CellWriteProbe> {
+        use vsdx_parse::MutationGesture;
+        let gesture = match args.gesture.as_str() {
+            "move-x" => MutationGesture::MoveX,
+            "move-y" => MutationGesture::MoveY,
+            "resize-width" => MutationGesture::ResizeWidth,
+            "resize-height" => MutationGesture::ResizeHeight,
+            "resize-aspect" => MutationGesture::ResizeAspect,
+            "text-edit" => MutationGesture::TextEdit,
+            "format" => MutationGesture::Format,
+            "delete" => MutationGesture::Delete,
+            "cell-edit" => MutationGesture::CellEdit,
+            _ => {
+                return Err(crate::EditError::InvalidState(format!(
+                    "unknown mutation gesture {}",
+                    args.gesture
+                )));
+            }
+        };
+        let locator = CellLocator::try_from(args.locator)
+            .map_err(|error| crate::EditError::InvalidState(error.to_owned()))?;
+        self.session.probe_cell_write(
+            &args.page_id,
+            &args.shape_id,
+            locator,
+            gesture,
+            args.formula,
+        )
+    }
+
+    fn probe_cell_write_json_inner(&self, args: &str) -> Result<String, String> {
+        let args = parse_args_inner(args)?;
+        self.probe_cell_write(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
 }
 
 fn local_context() -> EditCtx {
@@ -775,6 +830,32 @@ mod tests {
         let snapshot = document.snapshot_json().unwrap();
         assert!(snapshot.contains(r#""name":"Width","formula":"SETATREF(Target)""#));
         assert!(snapshot.contains(r#""name":"Target","formula":"2""#));
+    }
+
+    #[test]
+    fn probe_cell_write_json_inner_reports_the_policy_verdict() {
+        let document = document();
+        add_cell(&document, "Width", "Width", "User.GuardWidth");
+        assert_eq!(
+            document
+                .probe_cell_write_json_inner(r#"{"pageId":"page:1","shapeId":"page:1:shape:1","locator":{"cellName":"Width"},"gesture":"resize-width","formula":"User.GuardWidth"}"#)
+                .unwrap(),
+            r#"{"allowed":true,"reason":null}"#
+        );
+        add_cell(&document, "Target", "Target", "GUARD(1)");
+        add_cell(&document, "Height", "Height", "SETATREF(Target)");
+        assert_eq!(
+            document
+                .probe_cell_write_json_inner(r#"{"pageId":"page:1","shapeId":"page:1:shape:1","locator":{"cellName":"Height"},"gesture":"resize-height","formula":"2"}"#)
+                .unwrap(),
+            r#"{"allowed":false,"reason":"GUARD protects the requested cell"}"#
+        );
+        assert_eq!(
+            document
+                .probe_cell_write_json_inner(r#"{"pageId":"page:1","shapeId":"page:1:shape:1","locator":{"cellName":"Width"},"gesture":"stretch","formula":"2"}"#)
+                .unwrap_err(),
+            "invalid diagram state: unknown mutation gesture stretch"
+        );
     }
 
     #[test]

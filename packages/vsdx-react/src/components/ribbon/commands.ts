@@ -1,6 +1,6 @@
 import { createContext, createElement, useContext, useMemo } from 'react';
 import type { ReactNode } from 'react';
-import type { DiagramHandle, DiagramSnapshot, PageSnapshot, ShapeSnapshot } from '@betteroffice/vsdx';
+import type { DiagramHandle, DiagramSnapshot, MutationGesture, PageSnapshot, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { VsdxShapeSelection } from '../../VsdxEditor';
 import { standardShapeById } from '../shapes/shapeLibrary';
 
@@ -87,35 +87,90 @@ export function numericCellValue(shape: ShapeSnapshot, name: string, fallback?: 
   return parsed;
 }
 
+/** Engine verdict for a prospective cell write; true when the policy allows it. */
+export type MutationPolicy = (cellName: string, gesture: MutationGesture, formula: string) => boolean;
+
+/** Policy backed by the engine probe, with a snapshot fallback per cell when a probe fails. */
+export function mutationPolicyFor(handle: DiagramHandle | null, pageId: string, shapeId: string, shape: ShapeSnapshot | null): MutationPolicy | null {
+  if (!handle) return null;
+  return (cellName, gesture, formula) => {
+    try {
+      return handle.probeCellWrite(pageId, shapeId, { cellName }, gesture, formula).allowed;
+    } catch {
+      return snapshotAllowsWrite(shape, cellName, gesture);
+    }
+  };
+}
+
+/** Gesture the engine applies to a direct write of a cell. */
+export function gestureForCell(cellName: string): MutationGesture {
+  switch (cellName) {
+    case 'PinX': return 'move-x';
+    case 'PinY': return 'move-y';
+    case 'Width': return 'resize-width';
+    case 'Height': return 'resize-height';
+    default: return 'cell-edit';
+  }
+}
+
+function gestureLock(gesture: MutationGesture): string | null {
+  switch (gesture) {
+    case 'move-x': return 'LockMoveX';
+    case 'move-y': return 'LockMoveY';
+    case 'resize-width': return 'LockWidth';
+    case 'resize-height': return 'LockHeight';
+    case 'resize-aspect': return 'LockAspect';
+    case 'delete': return 'LockDelete';
+    default: return null;
+  }
+}
+
+/** Snapshot approximation of the engine policy, without SETATREF redirects. */
+export function snapshotAllowsWrite(shape: ShapeSnapshot | null, cellName: string, gesture: MutationGesture): boolean {
+  if (!shape) return true;
+  const lock = gestureLock(gesture);
+  if (lock && lockCellEnabled(shape, lock)) return false;
+  return !cellIsGuarded(shape, cellName);
+}
+
 /** True when a ShapeSheet lock cell evaluates to the enabled value 1. */
 export function lockCellEnabled(shape: ShapeSnapshot | null, name: string): boolean {
   return Number(cellValue(shape, name)) === 1;
 }
 
-/** True when the stored formula for a cell carries a GUARD interception. */
+const GUARD_CALL = /(^|[^A-Za-z0-9_.])GUARD\s*\(/i;
+
+/** True when the stored formula for a cell calls GUARD. */
 export function cellIsGuarded(shape: ShapeSnapshot | null, name: string): boolean {
-  return (cellFormula(shape, name) ?? '').toUpperCase().includes('GUARD');
+  return GUARD_CALL.test(cellFormula(shape, name) ?? '');
+}
+
+export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'LockHeight'] as const;
+
+const HANDLE_RESIZE_CELLS = [['PinX', 'move-x'], ['PinY', 'move-y'], ['Width', 'resize-width'], ['Height', 'resize-height']] as const;
+
+/** True when a handle resize would be refused by a lock or a GUARD. */
+export function isHandleResizeBlocked(shape: ShapeSnapshot | null, policy: MutationPolicy | null = null): boolean {
+  if (!shape) return false;
+  return HANDLE_RESIZE_CELLS.some(([cell, gesture]) => {
+    const formula = cellFormula(shape, cell) ?? '';
+    return policy ? !policy(cell, gesture, formula) : !snapshotAllowsWrite(shape, cell, gesture);
+  });
 }
 
 /** True when a delete would be refused by LockDelete or a GUARD on it. */
-export function isDeleteBlocked(shape: ShapeSnapshot | null): boolean {
+export function isDeleteBlocked(shape: ShapeSnapshot | null, policy: MutationPolicy | null = null): boolean {
   if (!shape) return false;
-  return lockCellEnabled(shape, 'LockDelete') || cellIsGuarded(shape, 'LockDelete');
-}
-
-export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'LockHeight', 'LockAspect'] as const;
-
-/** True when a handle resize would be refused by a lock or a GUARD. */
-export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
-  if (!shape) return false;
-  if (HANDLE_RESIZE_LOCKS.some((lock) => lockCellEnabled(shape, lock))) return true;
-  return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => cellIsGuarded(shape, cell));
+  const formula = cellFormula(shape, 'LockDelete') ?? '';
+  return policy ? !policy('LockDelete', 'delete', formula) : !snapshotAllowsWrite(shape, 'LockDelete', 'delete');
 }
 
 /** True when a single-cell write would be refused by a GUARD on that cell. */
-export function isCellWriteBlocked(shape: ShapeSnapshot | null, cellName: string): boolean {
+export function isCellWriteBlocked(shape: ShapeSnapshot | null, cellName: string, policy: MutationPolicy | null = null): boolean {
   if (!shape) return false;
-  return cellIsGuarded(shape, cellName);
+  const gesture = gestureForCell(cellName);
+  const formula = cellFormula(shape, cellName) ?? '';
+  return policy ? !policy(cellName, gesture, formula) : !snapshotAllowsWrite(shape, cellName, gesture);
 }
 
 export function createRibbonCommands(
@@ -134,6 +189,7 @@ export function createRibbonCommands(
   const current = placementIn(pages, selection);
   const shape = current?.shape ?? null;
   const selected = Boolean(current && selection);
+  const policy = handle && selection && shape ? mutationPolicyFor(handle, selection.pageId, selection.shapeId, shape) : null;
   const topIndex = current ? current.siblings.length - 1 : 0;
   const livePlacement = (currentHandle: DiagramHandle, currentSelection: VsdxShapeSelection | null) => placementIn(currentHandle.snapshot().pages, currentSelection);
   const formula = (cellName: string, value: string) => execute((currentHandle, currentSelection) => {
@@ -151,7 +207,7 @@ export function createRibbonCommands(
   const commands = {
     undo: { id: 'undo', enabled: Boolean(handle?.canUndo()), run: execute((currentHandle) => { currentHandle.undo(); }) },
     redo: { id: 'redo', enabled: Boolean(handle?.canRedo()), run: execute((currentHandle) => { currentHandle.redo(); }) },
-    delete: { id: 'delete', enabled: selected && !isDeleteBlocked(shape), run: execute((currentHandle, currentSelection) => { currentHandle.deleteShape(currentSelection!.pageId, currentSelection!.shapeId); }, true) },
+    delete: { id: 'delete', enabled: selected && !isDeleteBlocked(shape, policy), run: execute((currentHandle, currentSelection) => { currentHandle.deleteShape(currentSelection!.pageId, currentSelection!.shapeId); }, true) },
     fillColor: { id: 'fillColor', enabled: selected, value: color(cellValue(shape, 'FillForegnd'), '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
     lineColor: { id: 'lineColor', enabled: selected, value: color(cellValue(shape, 'LineColor'), '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },
     lineWeight: { id: 'lineWeight', enabled: selected, value: cellFormula(shape, 'LineWeight'), run: (value?: string) => { if (value) formula('LineWeight', value)(); } },
@@ -160,10 +216,10 @@ export function createRibbonCommands(
     bringForward: { id: 'bringForward', enabled: selected && current!.index < topIndex, run: reorderTo((placement) => placement.index + 1, (placement) => placement.index < placement.siblings.length - 1) },
     sendBackward: { id: 'sendBackward', enabled: selected && current!.index > 0, run: reorderTo((placement) => placement.index - 1, (placement) => placement.index > 0) },
     sendToBack: { id: 'sendToBack', enabled: selected && current!.index > 0, run: reorderTo(() => 0, (placement) => placement.index > 0) },
-    rotateLeft: { id: 'rotateLeft', enabled: selected && !isCellWriteBlocked(shape, 'Angle'), run: setNumeric('Angle', (value) => String(value - Math.PI / 2)) },
-    rotateRight: { id: 'rotateRight', enabled: selected && !isCellWriteBlocked(shape, 'Angle'), run: setNumeric('Angle', (value) => String(value + Math.PI / 2)) },
-    flipHorizontal: { id: 'flipHorizontal', enabled: selected && !isCellWriteBlocked(shape, 'FlipX'), active: numberValue(cellValue(shape, 'FlipX')) !== 0, run: setNumeric('FlipX', (value) => value === 0 ? '1' : '0') },
-    flipVertical: { id: 'flipVertical', enabled: selected && !isCellWriteBlocked(shape, 'FlipY'), active: numberValue(cellValue(shape, 'FlipY')) !== 0, run: setNumeric('FlipY', (value) => value === 0 ? '1' : '0') },
+    rotateLeft: { id: 'rotateLeft', enabled: selected && !isCellWriteBlocked(shape, 'Angle', policy), run: setNumeric('Angle', (value) => String(value - Math.PI / 2)) },
+    rotateRight: { id: 'rotateRight', enabled: selected && !isCellWriteBlocked(shape, 'Angle', policy), run: setNumeric('Angle', (value) => String(value + Math.PI / 2)) },
+    flipHorizontal: { id: 'flipHorizontal', enabled: selected && !isCellWriteBlocked(shape, 'FlipX', policy), active: numberValue(cellValue(shape, 'FlipX')) !== 0, run: setNumeric('FlipX', (value) => value === 0 ? '1' : '0') },
+    flipVertical: { id: 'flipVertical', enabled: selected && !isCellWriteBlocked(shape, 'FlipY', policy), active: numberValue(cellValue(shape, 'FlipY')) !== 0, run: setNumeric('FlipY', (value) => value === 0 ? '1' : '0') },
     addShape: {
       id: 'addShape',
       enabled: Boolean(pageById(pages, pageId)),

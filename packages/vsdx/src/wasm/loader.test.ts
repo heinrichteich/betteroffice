@@ -195,6 +195,16 @@ describe('VSDX wasm boundary', () => {
     diagram.dispose();
   });
 
+  test('probes the mutation policy without writing', () => {
+    const diagram = openDiagram(foundation, { clientId: 9007 });
+    diagram.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'FOnly' }, 'User.GuardWidth');
+    expect(diagram.probeCellWrite('page:1', 'page:1:shape:1', { cellName: 'FOnly' }, 'cell-edit', 'User.GuardWidth')).toEqual({ allowed: true, reason: null });
+    diagram.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'FOnly' }, 'GUARD(1)');
+    expect(diagram.probeCellWrite('page:1', 'page:1:shape:1', { cellName: 'FOnly' }, 'cell-edit', '2')).toEqual({ allowed: false, reason: 'GUARD protects the requested cell' });
+    expect(diagram.snapshot().pages[0].shapes[0].cells.find((cell) => cell.name === 'FOnly')?.formula).toBe('GUARD(1)');
+    diagram.dispose();
+  });
+
   test('places a shape with one atomic update covering size and pin', () => {
     const diagram = openDiagram(foundation, { clientId: 9017 });
     const added = diagram.addShape('page:1', { cells: [

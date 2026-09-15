@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 import type { DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
-import { createRibbonCommands, findShapePlacement, isHandleResizeBlocked, numericCellValue } from './commands';
+import { createRibbonCommands, findShapePlacement, isDeleteBlocked, isHandleResizeBlocked, mutationPolicyFor, numericCellValue } from './commands';
 import { resolveDragGeometry } from '../../interactions';
 
 function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
@@ -151,9 +151,50 @@ test('no LocPin formula blocks handle resize; only locks and cell guards do', ()
   for (const formula of ['Height*0.5', 'Height-1', 'Width*0.5', 'GUARD(Height-1)']) {
     expect(isHandleResizeBlocked(snapshot({ LocPinY: formula }).pages[0].shapes[1])).toBe(false);
   }
+  expect(isHandleResizeBlocked(snapshot({ Width: 'User.GuardWidth' }).pages[0].shapes[1])).toBe(false);
   expect(isHandleResizeBlocked(snapshot({ LockWidth: '1' }).pages[0].shapes[1])).toBe(true);
   expect(isHandleResizeBlocked(snapshot({ PinX: 'GUARD(1)' }).pages[0].shapes[1])).toBe(true);
   expect(isHandleResizeBlocked(null)).toBe(false);
+});
+
+function probeHandle(allowed: boolean | ((cellName: string) => boolean)) {
+  const diagram = handle(snapshot());
+  const probeCellWrite = mock((_pageId: string, _shapeId: string, locator: { cellName: string }) => ({
+    allowed: typeof allowed === 'function' ? allowed(locator.cellName) : allowed,
+    reason: null,
+  }));
+  return { ...diagram, probeCellWrite } as unknown as DiagramHandle;
+}
+
+test('engine policy decides handle blocking instead of formula text', () => {
+  const mentioned = snapshot({ Width: 'User.GuardWidth' }).pages[0].shapes[1];
+  expect(isHandleResizeBlocked(mentioned)).toBe(false);
+  const plain = snapshot({ Width: '2', Height: '2' }).pages[0].shapes[1];
+  expect(isHandleResizeBlocked(plain)).toBe(false);
+  const allow = mutationPolicyFor(probeHandle(true), 'page', 'two', mentioned);
+  expect(isHandleResizeBlocked(mentioned, allow)).toBe(false);
+  const deny = mutationPolicyFor(probeHandle(false), 'page', 'two', plain);
+  expect(isHandleResizeBlocked(plain, deny)).toBe(true);
+});
+
+test('a redirect to a guarded target blocks handles through the engine policy', () => {
+  const shape = snapshot({ Width: 'SETATREF(Target)', Target: 'GUARD(1)' }).pages[0].shapes[1];
+  expect(isHandleResizeBlocked(shape)).toBe(false);
+  const redirect = mutationPolicyFor(probeHandle((cell) => cell !== 'Width'), 'page', 'two', shape);
+  expect(isHandleResizeBlocked(shape, redirect)).toBe(true);
+});
+
+test('ribbon enablement follows the engine probe', () => {
+  const state = snapshot({ LockDelete: 'User.GuardDelete', Angle: 'User.GuardAngle' });
+  const permissive = { ...handle(state), probeCellWrite: mock(() => ({ allowed: true, reason: null })) } as unknown as DiagramHandle;
+  const commands = createRibbonCommands(permissive, selected, 'page', () => {}, () => {}, () => {});
+  expect(commands.delete.enabled).toBe(true);
+  expect(commands.rotateRight.enabled).toBe(true);
+  const refusing = { ...handle(state), probeCellWrite: mock(() => ({ allowed: false, reason: 'GUARD protects the requested cell' })) } as unknown as DiagramHandle;
+  const blocked = createRibbonCommands(refusing, selected, 'page', () => {}, () => {}, () => {});
+  expect(blocked.delete.enabled).toBe(false);
+  expect(blocked.rotateRight.enabled).toBe(false);
+  expect(isDeleteBlocked(state.pages[0].shapes[1])).toBe(false);
 });
 
 test('an evaluated LocPin holds the anchored edge for proportional and offset formulas', () => {

@@ -8,6 +8,8 @@ export interface ShapeSnapshot { id: string; sourceId: number; name: string | nu
 export interface PageSnapshot { id: string; sourcePartPath: string; name: string | null; shapes: ShapeSnapshot[]; }
 export interface DiagramSnapshot { pages: PageSnapshot[]; }
 export interface CellFormulaReceipt { pageId: string; shapeId: string; cellName: string; before: string | null; after: string; }
+export type MutationGesture = 'move-x' | 'move-y' | 'resize-width' | 'resize-height' | 'resize-aspect' | 'text-edit' | 'format' | 'delete' | 'cell-edit';
+export interface CellWriteProbe { allowed: boolean; reason: string | null; }
 export interface ShapeReceipt { pageId: string; shapeId: string; fromIndex: number | null; toIndex: number | null; }
 export interface FormulaShapeDraft { name?: string; cells: Array<{ locator: CellLocator & { rowType?: string }; name?: string; formula?: string }> }
 export interface VsdxFontFace { family: string; bold?: boolean; italic?: boolean; bytes: Uint8Array; }

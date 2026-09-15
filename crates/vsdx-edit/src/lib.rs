@@ -1074,12 +1074,126 @@ mod tests {
         }
     }
 
+    #[test]
+    fn place_shape_refuses_redirects_that_collide_on_one_target() {
+        let session = session();
+        add_cell(&session, "Width", Some("SETATREF(Shared)"), None);
+        add_cell(&session, "Height", Some("SETATREF(Shared)"), None);
+        add_cell(&session, "PinX", Some("1"), None);
+        add_cell(&session, "PinY", Some("1"), None);
+        add_cell(&session, "Shared", Some("1"), None);
+        let error = session
+            .place_shape(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                PlaceShapeFormulas {
+                    width: "2".to_owned(),
+                    height: "3".to_owned(),
+                    x: "4".to_owned(),
+                    y: "5".to_owned(),
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("Shared"));
+        let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+        for (name, formula) in [
+            ("Width", "SETATREF(Shared)"),
+            ("Height", "SETATREF(Shared)"),
+            ("PinX", "1"),
+            ("PinY", "1"),
+            ("Shared", "1"),
+        ] {
+            assert_eq!(
+                cells
+                    .iter()
+                    .find(|cell| cell.name == name)
+                    .unwrap()
+                    .formula
+                    .as_deref(),
+                Some(formula),
+                "{name}"
+            );
+        }
+    }
+
     fn loc_pin_shape(formulas: &[(&str, &str)]) -> DiagramSession {
         let session = session();
         for (name, formula) in formulas {
             add_cell(&session, name, Some(formula), None);
         }
         session
+    }
+
+    fn probe(
+        session: &DiagramSession,
+        name: &str,
+        gesture: vsdx_parse::MutationGesture,
+        formula: &str,
+    ) -> CellWriteProbe {
+        session
+            .probe_cell_write(
+                "page:1",
+                "page:1:shape:1",
+                CellLocator {
+                    sheet: CellSheet::Page(0),
+                    shape_id: None,
+                    section: None,
+                    section_index: None,
+                    row: None,
+                    cell_name: name.to_owned(),
+                },
+                gesture,
+                formula,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn probe_permits_a_reference_that_only_mentions_guard() {
+        use vsdx_parse::MutationGesture;
+        let session = session();
+        add_cell(&session, "Width", Some("User.GuardWidth"), None);
+        let verdict = probe(
+            &session,
+            "Width",
+            MutationGesture::ResizeWidth,
+            "User.GuardWidth",
+        );
+        assert!(verdict.allowed);
+        assert_eq!(verdict.reason, None);
+    }
+
+    #[test]
+    fn probe_follows_setatref_to_a_guarded_target() {
+        use vsdx_parse::MutationGesture;
+        let session = session();
+        add_cell(&session, "Width", Some("SETATREF(Target)"), None);
+        add_cell(&session, "Target", Some("GUARD(1)"), None);
+        let verdict = probe(&session, "Width", MutationGesture::ResizeWidth, "2");
+        assert!(!verdict.allowed);
+        assert!(verdict.reason.unwrap().contains("GUARD"));
+    }
+
+    #[test]
+    fn probe_honors_locks_without_writing() {
+        use vsdx_parse::MutationGesture;
+        let session = session();
+        add_cell(&session, "Width", Some("1"), None);
+        add_cell(&session, "LockWidth", Some("1"), None);
+        let verdict = probe(&session, "Width", MutationGesture::ResizeWidth, "2");
+        assert!(!verdict.allowed);
+        assert!(verdict.reason.unwrap().contains("LockWidth"));
+        let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+        assert_eq!(
+            cells
+                .iter()
+                .find(|cell| cell.name == "Width")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("1")
+        );
     }
 
     fn loc_pin(session: &DiagramSession, width: f64, height: f64) -> (f64, f64) {

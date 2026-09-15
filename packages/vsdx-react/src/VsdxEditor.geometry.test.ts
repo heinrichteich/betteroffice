@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { anchoredZoomScroll, canvasPointerPosition, centredPageScroll, inchFormula, pageBreakLines, resolveDragGeometry, selectionCorners, stillSelectable, surfaceDpr, surfaceSize, viewportCentreKey, zoomForWheelDelta } from './VsdxEditor';
+import { anchoredZoomScroll, canvasPointerPosition, centredPageScroll, inchFormula, pageBreakLines, pageCanvasDpr, pageCanvasSize, resolveDragGeometry, selectionCorners, stillSelectable, surfaceSize, viewportCentreKey, zoomForWheelDelta } from './VsdxEditor';
 import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
 
 const frame: PageDisplayList = {
@@ -251,15 +251,24 @@ test('page breaks tile the surface in page-sized cells aligned to the page origi
   expect(zoomed.horizontal).toContain(pad);
 });
 
-test('the surface DPR clamps large backing stores instead of exceeding browser limits', () => {
-  expect(surfaceDpr(frame, 1, 1)).toBe(1);
-  const clamped = surfaceDpr(frame, 1, 2);
-  expect(clamped).toBeLessThan(2);
-  expect(clamped).toBeGreaterThanOrEqual(1 / 4);
+test('the page canvas covers the page plus bleed instead of the padded surface', () => {
+  const canvas = pageCanvasSize(frame.width, frame.height, 1);
+  expect(canvas.width).toBeCloseTo(frame.width + 128, 8);
+  expect(canvas.height).toBeCloseTo(frame.height + 128, 8);
   const surface = surfaceSize(frame.width, frame.height, 1);
-  expect(surface.width * clamped).toBeLessThanOrEqual(8192 + 1);
-  expect(surface.height * clamped).toBeLessThanOrEqual(8192 + 1);
-  expect(surface.width * surface.height * clamped * clamped).toBeLessThanOrEqual(33554432 + 1);
+  expect(canvas.width * canvas.height).toBeLessThan(surface.width * surface.height / 10);
+  expect(canvas.width * canvas.height).toBeLessThan(2 * 1024 * 1024);
+});
+
+test('the page canvas DPR clamps large backing stores instead of exceeding browser limits', () => {
+  expect(pageCanvasDpr(frame, 1, 1)).toBe(1);
+  const clamped = pageCanvasDpr(frame, 1, 2);
+  expect(clamped).toBeLessThanOrEqual(2);
+  expect(clamped).toBeGreaterThanOrEqual(1 / 4);
+  const canvas = pageCanvasSize(frame.width, frame.height, 1);
+  expect(canvas.width * clamped).toBeLessThanOrEqual(8192 + 1);
+  expect(canvas.height * clamped).toBeLessThanOrEqual(8192 + 1);
+  expect(canvas.width * canvas.height * clamped * clamped).toBeLessThanOrEqual(33554432 + 1);
 });
 
 test('ctrl+wheel steps the zoom multiplicatively in both directions', () => {

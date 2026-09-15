@@ -79,6 +79,13 @@ pub struct CellFormulaReceipt {
     pub after: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellWriteProbe {
+    pub allowed: bool,
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlaceShapeFormulas {
     pub width: String,

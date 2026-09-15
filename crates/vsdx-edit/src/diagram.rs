@@ -16,9 +16,9 @@ use yrs::{
 };
 
 use crate::{
-    CellFormulaReceipt, CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx, EditError,
-    EditResult, LocPinAtSize, META, PAGE_ORDER, PAGES, PageSnapshot, PlaceShapeFormulas, SHEETS,
-    STORIES, ShapeDraft, ShapeReceipt, ShapeSnapshot,
+    CellFormulaReceipt, CellSnapshot, CellWriteProbe, DiagramSession, DiagramSnapshot, EditCtx,
+    EditError, EditResult, LocPinAtSize, META, PAGE_ORDER, PAGES, PageSnapshot, PlaceShapeFormulas,
+    SHEETS, STORIES, ShapeDraft, ShapeReceipt, ShapeSnapshot,
 };
 
 const SCHEMA_VERSION: f64 = 1.0;
@@ -622,6 +622,38 @@ impl DiagramSession {
         })
     }
 
+    /// Runs the mutation policy for a write without storing anything.
+    pub fn probe_cell_write(
+        &self,
+        page_id: &str,
+        shape_id: &str,
+        locator: CellLocator,
+        gesture: MutationGesture,
+        formula: impl Into<String>,
+    ) -> EditResult<CellWriteProbe> {
+        let txn = self.doc.transact();
+        let context_for_policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
+        let locator = context_for_policy.locator(locator);
+        match decide_mutation(
+            &context_for_policy,
+            locator,
+            gesture,
+            formula.into(),
+            &ParseLimits::default(),
+        ) {
+            MutationOutcome::Allowed { .. } => Ok(CellWriteProbe {
+                allowed: true,
+                reason: None,
+            }),
+            MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                Ok(CellWriteProbe {
+                    allowed: false,
+                    reason: Some(reason),
+                })
+            }
+        }
+    }
+
     pub fn move_shape(
         &self,
         context: &EditCtx,
@@ -905,6 +937,16 @@ impl DiagramSession {
         let mut pending = Vec::with_capacity(N);
         for entry in decided {
             pending.push(entry?);
+        }
+        let mut seen = Vec::with_capacity(N);
+        for (target, _) in &pending {
+            if seen.contains(target) {
+                return Err(EditError::InvalidState(format!(
+                    "grouped edit writes {} more than once",
+                    target.cell_name
+                )));
+            }
+            seen.push(target.clone());
         }
         let mut receipts = Vec::with_capacity(N);
         for (target, formula) in pending {
