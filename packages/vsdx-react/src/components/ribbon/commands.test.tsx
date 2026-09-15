@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 import type { DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
-import { createRibbonCommands, findShapePlacement, numericCellValue } from './commands';
+import { createRibbonCommands, cellIsGuarded, findShapePlacement, isCellWriteBlocked, isDeleteBlocked, isHandleResizeBlocked, numericCellValue } from './commands';
 
 function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
   return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ['one', 'two', 'three'].map((id) => ({ id, sourceId: 1, name: id, children: [], cells: Object.entries(cells).map(([name, value]) => ({ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: value, value })) })) }] };
@@ -55,6 +55,32 @@ test('locks and guards disable the operations the mutation policy would refuse',
   expect(commands.flipVertical.enabled).toBe(true);
   expect(commands.bringForward.enabled).toBe(true);
   expect(commands.sendBackward.enabled).toBe(true);
+});
+
+test('only treats a parsed GUARD call as a guard', () => {
+  const guarded = snapshot({ LockDelete: 'GUARD(1)', Angle: '=guard(1)', FlipX: 'IF(1,GUARD(1),0)', Width: 'GUARD (1)' });
+  const shape = guarded.pages[0].shapes[1];
+  expect(cellIsGuarded(shape, 'LockDelete')).toBe(true);
+  expect(cellIsGuarded(shape, 'Angle')).toBe(true);
+  expect(cellIsGuarded(shape, 'FlipX')).toBe(true);
+  expect(cellIsGuarded(shape, 'Width')).toBe(true);
+  expect(isDeleteBlocked(shape)).toBe(true);
+  expect(isCellWriteBlocked(shape, 'Angle')).toBe(true);
+  const unguarded = snapshot({ LockDelete: 'THEMEGUARD(1)', Angle: '"GUARD(1)"', FlipX: 'GUARDX+1', Width: 'Sheet.1!GUARDX' });
+  const plain = unguarded.pages[0].shapes[1];
+  expect(cellIsGuarded(plain, 'LockDelete')).toBe(false);
+  expect(cellIsGuarded(plain, 'Angle')).toBe(false);
+  expect(cellIsGuarded(plain, 'FlipX')).toBe(false);
+  expect(cellIsGuarded(plain, 'Width')).toBe(false);
+  expect(isDeleteBlocked(plain)).toBe(false);
+  expect(isCellWriteBlocked(plain, 'Angle')).toBe(false);
+  expect(isCellWriteBlocked(plain, 'FlipX')).toBe(false);
+  expect(isHandleResizeBlocked(plain)).toBe(false);
+  const diagram = handle(unguarded);
+  const commands = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {});
+  expect(commands.delete.enabled).toBe(true);
+  expect(commands.rotateLeft.enabled).toBe(true);
+  expect(commands.flipHorizontal.enabled).toBe(true);
 });
 
 test('does not reorder forward past the topmost shape', () => {
