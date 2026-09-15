@@ -1023,7 +1023,7 @@ test('a handle resize on a move-locked shape commits neither size nor pin', asyn
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
-test('the canvas is focusable and ArrowUp nudges PinY by one screen pixel', async () => {
+test('the canvas is focusable and ArrowUp nudges PinY by the coarse step', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
   canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
@@ -1061,7 +1061,7 @@ test('the canvas is focusable and ArrowUp nudges PinY by one screen pixel', asyn
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(moves).toHaveLength(1);
     expect(Number(moves[0][3])).toBeGreaterThan(pinY);
-    expect(Number(moves[0][3])).toBeCloseTo(pinY + 1 / 96, 6);
+    expect(Number(moves[0][3])).toBeCloseTo(pinY + 10 / 96, 6);
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 

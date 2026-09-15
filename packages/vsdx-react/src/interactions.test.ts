@@ -318,18 +318,28 @@ test('canvas keyboard maps history, delete and escape intents', () => {
   expect(canvasKeyboardIntent({ key: 'Delete', ctrlKey: true }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'Escape', ctrlKey: true }, 1)).toBeNull();
 });
-test('canvas keyboard nudges one screen pixel with Y up and ten with shift', () => {
+test('canvas keyboard nudges ten screen pixels and one with shift for fine step', () => {
   expect(keyboardNudgeStep(1)).toBeCloseTo(1 / 96, 10);
   expect(keyboardNudgeStep(2)).toBeCloseTo(1 / 192, 10);
-  expect(canvasKeyboardIntent({ key: 'ArrowUp' }, 1)).toEqual({ kind: 'nudge', dx: 0, dy: 1 / 96 });
-  expect(canvasKeyboardIntent({ key: 'ArrowDown' }, 1)).toEqual({ kind: 'nudge', dx: 0, dy: -1 / 96 });
-  expect(canvasKeyboardIntent({ key: 'ArrowLeft' }, 2)).toEqual({ kind: 'nudge', dx: -1 / 192, dy: 0 });
+  const plainUp = canvasKeyboardIntent({ key: 'ArrowUp' }, 1);
+  expect(plainUp?.kind).toBe('nudge');
+  if (plainUp?.kind === 'nudge') { expect(plainUp.dy).toBeCloseTo(10 / 96, 10); expect(plainUp.dx).toBe(0); }
+  const plainDown = canvasKeyboardIntent({ key: 'ArrowDown' }, 1);
+  expect(plainDown?.kind).toBe('nudge');
+  if (plainDown?.kind === 'nudge') { expect(plainDown.dy).toBeCloseTo(-10 / 96, 10); expect(plainDown.dx).toBe(0); }
+  const plainLeft = canvasKeyboardIntent({ key: 'ArrowLeft' }, 2);
+  expect(plainLeft?.kind).toBe('nudge');
+  if (plainLeft?.kind === 'nudge') { expect(plainLeft.dx).toBeCloseTo(-10 / 192, 10); expect(plainLeft.dy).toBe(0); }
   const right = canvasKeyboardIntent({ key: 'ArrowRight', shiftKey: true }, 1);
   expect(right?.kind).toBe('nudge');
-  if (right?.kind === 'nudge') { expect(right.dx).toBeCloseTo(10 / 96, 10); expect(right.dy).toBe(0); }
+  if (right?.kind === 'nudge') { expect(right.dx).toBeCloseTo(1 / 96, 10); expect(right.dy).toBe(0); }
   const up = canvasKeyboardIntent({ key: 'ArrowUp', shiftKey: true }, 2);
   expect(up?.kind).toBe('nudge');
-  if (up?.kind === 'nudge') { expect(up.dy).toBeCloseTo(10 / 192, 10); expect(up.dx).toBe(0); }
+  if (up?.kind === 'nudge') { expect(up.dy).toBeCloseTo(1 / 192, 10); expect(up.dx).toBe(0); }
+  const plain = canvasKeyboardIntent({ key: 'ArrowRight' }, 1);
+  const fine = canvasKeyboardIntent({ key: 'ArrowRight', shiftKey: true }, 1);
+  if (plain?.kind === 'nudge' && fine?.kind === 'nudge') { expect(plain.dx).toBeCloseTo(fine.dx * 10, 10); }
+  else throw new Error('nudge intents missing');
   expect(canvasKeyboardIntent({ key: 'ArrowUp', ctrlKey: true }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'ArrowUp', altKey: true }, 1)).toBeNull();
 });

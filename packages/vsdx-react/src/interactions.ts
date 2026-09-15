@@ -58,7 +58,7 @@ export const canvasKeyboardIntent = (event: CanvasKeyboardEventLike, zoom: numbe
   }
   if (mod || alt) return null;
   if (key === 'Delete' || key === 'Backspace') return { kind: 'delete' };
-  const step = keyboardNudgeStep(zoom) * (shift ? CANVAS_KEYBOARD_NUDGE_MULTIPLIER : 1);
+  const step = keyboardNudgeStep(zoom) * (shift ? 1 : CANVAS_KEYBOARD_NUDGE_MULTIPLIER);
   if (key === 'ArrowLeft') return { kind: 'nudge', dx: -step, dy: 0 };
   if (key === 'ArrowRight') return { kind: 'nudge', dx: step, dy: 0 };
   if (key === 'ArrowUp') return { kind: 'nudge', dx: 0, dy: step };
