@@ -43,10 +43,13 @@ export class VsdxDocument {
 export class VsdxRenderer {
     free(): void;
     [Symbol.dispose](): void;
+    clearLayerVisibility(): void;
     hitTestJson(x: number, y: number): string;
     layoutPageJson(document: VsdxDocument, page_index: number): string;
     constructor();
+    pageLayersJson(document: VsdxDocument, page_index: number): string;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
+    setLayerVisible(page_part: string, index: number, visible: boolean): void;
 }
 
 export function parseVsdxJson(data: Uint8Array): string;
@@ -60,10 +63,13 @@ export interface InitOutput {
     readonly __wbg_vsdxrenderer_free: (a: number, b: number) => void;
     readonly parseVsdxJson: (a: number, b: number) => [number, number, number, number];
     readonly rendererVersion: () => [number, number];
+    readonly vsdxrenderer_clearLayerVisibility: (a: number) => void;
     readonly vsdxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxrenderer_layoutPageJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxrenderer_new: () => number;
+    readonly vsdxrenderer_pageLayersJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly vsdxrenderer_setLayerVisible: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly __wbg_vsdxdocument_free: (a: number, b: number) => void;
     readonly vsdxdocument_addConnectorJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];

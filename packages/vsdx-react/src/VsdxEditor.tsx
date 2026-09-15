@@ -1,7 +1,7 @@
 import { createT, deepMerge, diagnosticMessage, en } from '@betteroffice/vsdx-i18n';
 import type { Translations } from '@betteroffice/vsdx-i18n';
 import { canvasPointToModel, initWasm, openDiagram, paintPage, sizeCanvasForPage, modelPointToCanvas } from '@betteroffice/vsdx';
-import type { Affine, CellLocator, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeDataRow, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
+import type { Affine, CellLocator, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeDataRow, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence, PageLayer } from '@betteroffice/vsdx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
@@ -11,6 +11,7 @@ import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, nume
 import type { RibbonCommands } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { ShapeDataPanel } from './components/shapeData/ShapeDataPanel';
+import { LayersPanel } from './components/layers/LayersPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
 import { StatusBar, clampZoom } from './components/statusbar';
@@ -43,7 +44,7 @@ export interface VsdxEditorProps {
   statusBar?: ReactNode;
 }
 
-interface EditorModel { snapshot: DiagramSnapshot | null; pageIndex: number; frame: PageDisplayList | null; }
+interface EditorModel { snapshot: DiagramSnapshot | null; pageIndex: number; frame: PageDisplayList | null; layers: PageLayer[]; }
 
 export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, className, onReady, onChange, onError, leftPanel, rightPanel, statusBar }: VsdxEditorProps) {
   const strings = useMemo(() => deepMerge(en, i18n) as typeof en, [i18n]);
@@ -66,7 +67,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const requestedClientId = collaboration?.clientId ?? clientId;
   const requestedInitialUpdate = useStableInitialUpdate(collaboration?.initialUpdate);
   const sessionRef = useRef({ file, clientId: requestedClientId, initialUpdate: requestedInitialUpdate });
-  const [model, setModel] = useState<EditorModel>({ snapshot: null, pageIndex: 0, frame: null });
+  const [model, setModel] = useState<EditorModel>({ snapshot: null, pageIndex: 0, frame: null, layers: [] });
   const modelRef = useRef(model);
   const [selection, setSelection] = useState<VsdxShapeSelection | null>(null);
   const selectionRef = useRef(selection);
@@ -87,6 +88,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const initialUpdate = sessionSwitchBlocked ? sessionRef.current.initialUpdate : requestedInitialUpdate;
   const [zoom, setZoom] = useState(1);
   const [shapesCollapsed, setShapesCollapsed] = useState(false);
+  const [layersCollapsed, setLayersCollapsed] = useState(false);
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ top: number; left: number; kind: 'shape' | 'canvas' } | null>(null);
@@ -129,10 +131,11 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       const retainedIndex = current.pages.findIndex((page) => page.id === activeId);
       const pageIndex = Math.max(0, Math.min(requestedPage ?? (retainedIndex >= 0 ? retainedIndex : previous.pageIndex), Math.max(0, current.pages.length - 1)));
       const frame = current.pages.length ? handle.layoutPage(pageIndex) : null;
-      modelRef.current = { snapshot: current, pageIndex, frame };
+      const layers = current.pages.length ? readPageLayers(handle, pageIndex) : [];
+      modelRef.current = { snapshot: current, pageIndex, frame, layers };
       setModel(modelRef.current);
       setDiagnostics(frame ? collectDiagnostics(frame) : []);
-      setSelection((existing) => existing && stillSelectable(current, pageIndex, existing) ? existing : null);
+      setSelection((existing) => existing && stillSelectable(current, pageIndex, existing, layers) ? existing : null);
       const open = editingRef.current;
       if (open) {
         const committed = handle.shapeText(open.pageId, open.shapeId);
@@ -265,7 +268,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const dpr = window.devicePixelRatio || 1; sizeCanvasForPage(canvas, frame, dpr, zoom); context.clearRect(0, 0, canvas.width, canvas.height);
     const snapshot = model.snapshot;
     const page = snapshot?.pages[model.pageIndex];
-    if (selection && page) {
+    if (selection && page && !selectionHiddenByLayers(page, model.layers, selection)) {
       try {
         const corners = selectionCorners(page, frame, selection);
         const placement = findShapePlacement(page.shapes, selection.shapeId);
@@ -325,7 +328,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const currentSelection = selectionRef.current;
     const page = current.snapshot?.pages[current.pageIndex];
     context.clearRect(0, 0, overlay.width, overlay.height);
-    if (currentSelection && page) {
+    if (currentSelection && page && !selectionHiddenByLayers(page, current.layers, currentSelection)) {
       try {
         const corners = selectionCorners(page, frame, currentSelection);
         const placement = findShapePlacement(page.shapes, currentSelection.shapeId);
@@ -345,7 +348,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     try {
       const point = canvasPointerPosition(event, frame);
       const active = selectionRef.current;
-      if (active && active.pageId === page.id) {
+      if (active && active.pageId === page.id && !selectionHiddenByLayers(page, modelRef.current.layers, active)) {
         try {
           const placement = findShapePlacement(page.shapes, active.shapeId);
           if (placement) {
@@ -421,7 +424,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         const current = modelRef.current; const frame = current.frame;
         const page = current.snapshot?.pages[current.pageIndex];
         const active = selectionRef.current;
-        if (!frame || !page || !active || active.pageId !== page.id) { event.currentTarget.style.cursor = ''; return; }
+        if (!frame || !page || !active || active.pageId !== page.id || selectionHiddenByLayers(page, current.layers, active)) { event.currentTarget.style.cursor = ''; return; }
         const point = canvasPointerPosition(event, frame);
         const placement = findShapePlacement(page.shapes, active.shapeId);
         if (placement) {
@@ -651,6 +654,13 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (!page || !selection || selection.pageId !== page.id) return null;
     return findShapePlacement(page.shapes, selection.shapeId)?.shape ?? null;
   })();
+
+  const toggleLayerVisible = useCallback((index: number, visible: boolean) => {
+    const handle = handleRef.current; const current = modelRef.current;
+    const page = current.snapshot?.pages[current.pageIndex];
+    if (!handle || !page) return;
+    try { handle.setLayerVisible(page.sourcePartPath, index, visible); refresh(); } catch (value) { reportError(value); }
+  }, [refresh, reportError]);
   const fitToWindow = useCallback(() => {
     const frame = modelRef.current.frame; const workspace = workspaceRef.current;
     if (!frame || !workspace || frame.width <= 0 || frame.height <= 0) return;
@@ -667,7 +677,14 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     <RibbonCommandsBridge target={commandsRef} />
     <Ribbon t={t} hasSelection={selection !== null} />
     <div style={styles.contentRow}>
-    {leftPanel === undefined ? <ShapesPanel shapes={standardShapes} collapsed={shapesCollapsed} onToggleCollapsed={() => setShapesCollapsed((value) => !value)} onInsert={insertShape} t={t} /> : leftPanel}
+    {leftPanel === undefined ? (
+      <div style={styles.leftColumn}>
+        <div style={styles.shapesWrap}>
+          <ShapesPanel shapes={standardShapes} collapsed={shapesCollapsed} onToggleCollapsed={() => setShapesCollapsed((value) => !value)} onInsert={insertShape} t={t} />
+        </div>
+        <LayersPanel layers={model.layers} collapsed={layersCollapsed} onToggleCollapsed={() => setLayersCollapsed((value) => !value)} onToggleLayer={toggleLayerVisible} t={t} />
+      </div>
+    ) : leftPanel}
     <main ref={workspaceRef} style={styles.workspace}>
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
@@ -710,6 +727,15 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
 
 const WORKSPACE_MARGIN = 32;
 
+/** Page layers for the panel; empty when the handle predates layer support. */
+function readPageLayers(handle: DiagramHandle, pageIndex: number): PageLayer[] {
+  try {
+    return typeof handle.pageLayers === 'function' ? handle.pageLayers(pageIndex) : [];
+  } catch {
+    return [];
+  }
+}
+
 export function canvasPointerPosition(event: PointerEvent<HTMLCanvasElement> | MouseEvent<HTMLCanvasElement>, frame: PageDisplayList): { canvas: ModelPoint; model: ModelPoint } {
   const rect = event.currentTarget.getBoundingClientRect();
   const canvas = {
@@ -751,8 +777,37 @@ function textPrimitiveId(snapshot: DiagramSnapshot, pageIndex: number, pageId: s
 }
 
 export function stillSelectable(snapshot: DiagramSnapshot, pageIndex: number, selection: VsdxShapeSelection): boolean {
+
+export function stillSelectable(snapshot: DiagramSnapshot, pageIndex: number, selection: VsdxShapeSelection, layers?: readonly PageLayer[]): boolean {
   const page = snapshot.pages[pageIndex];
-  return Boolean(page && page.id === selection.pageId && findShapePlacement(page.shapes, selection.shapeId));
+  if (!page || page.id !== selection.pageId || !findShapePlacement(page.shapes, selection.shapeId)) return false;
+  return !layers || !selectionHiddenByLayers(page, layers, selection);
+}
+
+export function selectionHiddenByLayers(page: PageSnapshot, layers: readonly PageLayer[], selection: VsdxShapeSelection): boolean {
+  return shapeSubtreeHidden(page.shapes, layers, selection.shapeId, false) ?? false;
+}
+
+function shapeSubtreeHidden(shapes: readonly ShapeSnapshot[], layers: readonly PageLayer[], shapeId: string, ancestorHidden: boolean): boolean | null {
+  for (const shape of shapes) {
+    const hiddenHere = ancestorHidden || shapeHiddenByLayers(shape, layers);
+    if (shape.id === shapeId) return hiddenHere;
+    const nested = shapeSubtreeHidden(shape.children, layers, shapeId, hiddenHere);
+    if (nested !== null) return nested;
+  }
+  return null;
+}
+
+function shapeHiddenByLayers(shape: ShapeSnapshot, layers: readonly PageLayer[]): boolean {
+  const indices = layerMemberIndices(shape);
+  return indices.length > 0 && indices.every((index) => layers.some((layer) => layer.index === index && !layer.visible));
+}
+
+function layerMemberIndices(shape: ShapeSnapshot): number[] {
+  const cell = shape.cells.find((entry) => entry.name === 'LayerMember');
+  const raw = cell?.value ?? cell?.formula ?? '';
+  const indices = raw.split(';').map((part) => part.trim()).filter((part) => /^\+?\d+$/.test(part)).map((part) => Number(part)).filter((index) => index <= 4294967295);
+  return [...new Set(indices)].sort((left, right) => left - right);
 }
 
 function shapeDragStart(page: { id: string; shapes: readonly ShapeSnapshot[]; sourcePartPath: string }, shape: ShapeSnapshot, frame: PageDisplayList, handle?: DiagramHandle): Omit<DragStart, 'canvas' | 'model' | 'resize' | 'pointerId' | 'startX' | 'startY'> {
@@ -820,3 +875,5 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean { return left 
 function resolveImage(assetId: string, handle: DiagramHandle | null, cache: { current: Map<string, Promise<CanvasImageSource | null>> }, message: string): Promise<CanvasImageSource | null> { const existing = cache.current.get(assetId); if (existing) return existing; const pending = decodeImage(handle?.mediaBytes(assetId), message); cache.current.set(assetId, pending); return pending; }
 async function decodeImage(bytes: Uint8Array | undefined, message: string): Promise<CanvasImageSource | null> { if (!bytes) return null; const blob = new Blob([bytes.slice()]); if (typeof createImageBitmap === 'function') return createImageBitmap(blob); const url = URL.createObjectURL(blob); try { return await new Promise<HTMLImageElement>((resolve, reject) => { const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(new Error(message)); image.src = url; }); } finally { URL.revokeObjectURL(url); } }
 const styles: Record<string, CSSProperties> = { root: { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 480, color: '#172033', background: '#f3f5f8', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }, titleBar: { display: 'flex', alignItems: 'center', gap: 12, minHeight: 32, padding: '0 14px', background: '#f8fafc', borderBottom: '1px solid #d8dee9', fontSize: 13 }, contentRow: { display: 'flex', flex: 1, minHeight: 0 }, workspace: { position: 'relative', display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', overflow: 'auto' }, canvasFrame: { position: 'relative', flex: '0 0 auto' }, canvas: { display: 'block', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' }, overlay: { position: 'absolute', inset: 0, pointerEvents: 'none' }, textEditWrap: { position: 'absolute', left: 0, top: 0, transformOrigin: '0 0', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'visible', background: 'transparent', border: '1px dotted #1d4ed8', zIndex: 2 }, textEditBox: { width: '100%', background: 'transparent', border: 'none', outline: 'none', resize: 'none', overflow: 'visible', textAlign: 'center', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', wordBreak: 'break-word', lineHeight: 1.2, padding: 0, margin: 0 }, integrity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 12, color: '#7f1d1d', background: '#fef2f2', border: '1px solid #fca5a5' }, fidelity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 8, color: '#475569', background: '#fff', fontSize: 12 }, error: { position: 'absolute', left: 14, right: 14, bottom: 14, padding: 10, color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0' } };
+
+const styles: Record<string, CSSProperties> = { root: { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 480, color: '#172033', background: '#f3f5f8', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }, titleBar: { display: 'flex', alignItems: 'center', gap: 12, minHeight: 32, padding: '0 14px', background: '#f8fafc', borderBottom: '1px solid #d8dee9', fontSize: 13 }, contentRow: { display: 'flex', flex: 1, minHeight: 0 }, leftColumn: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }, shapesWrap: { display: 'flex', flex: '1 1 auto', minHeight: 0 }, workspace: { position: 'relative', display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', overflow: 'auto' }, canvasFrame: { position: 'relative', flex: '0 0 auto' }, canvas: { display: 'block', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' }, overlay: { position: 'absolute', inset: 0, pointerEvents: 'none' }, integrity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 12, color: '#7f1d1d', background: '#fef2f2', border: '1px solid #fca5a5' }, fidelity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 8, color: '#475569', background: '#fff', fontSize: 12 }, error: { position: 'absolute', left: 14, right: 14, bottom: 14, padding: 10, color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0' } };
