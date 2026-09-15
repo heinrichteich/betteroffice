@@ -595,7 +595,6 @@ impl VsdxDocument {
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }
-
     fn save_inner(&self) -> Result<Vec<u8>, String> {
         self.session.save().map_err(|error| error.to_string())
     }

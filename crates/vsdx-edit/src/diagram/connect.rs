@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, HashSet};
 
 use vsdx_parse::{Connect, ConnectsChild, ShapesChild, SheetChild};
-use vsdx_resolve::Resolver;
+use vsdx_resolve::{ConnectorEndpoint, Resolver};
 use yrs::{Doc, Map, MapPrelim, Out, ReadTxn, Transact, WriteTxn};
 
 use super::{
-    ShapeOrigin, insert_shape, largest_shape_id, map_ref, map_string, materialize_shape,
-    required_map, required_string, shape_from_snapshot, shape_origin, validate_shape_draft,
+    ShapeOrigin, connection_point_exists, glue_text_valid, insert_shape, largest_shape_id,
+    map_ref, map_string, materialize_shape, required_map, required_string, shape_from_snapshot,
+    shape_origin, valid_glue_target, validate_shape_draft,
 };
 use crate::{
     CONNECTS, ConnectorGlue, DiagramSession, EditCtx, EditError, EditResult, PAGES, PageSnapshot,
@@ -84,6 +85,7 @@ impl DiagramSession {
     ) -> EditResult<ShapeReceipt> {
         validate_shape_draft(draft)?;
         let glue = [(GlueEndpoint::Begin, from), (GlueEndpoint::End, to)];
+        self.validate_session_glue_targets(page_id, &glue)?;
         self.validate_connector(page_id, draft, &glue)?;
         let mut txn = self.transact_for(context);
         let receipt = insert_shape(&mut txn, self.client_id, page_id, draft)?;
@@ -103,6 +105,44 @@ impl DiagramSession {
             );
         }
         Ok(receipt)
+    }
+
+    /// Glue targets are validated against the session so implied points only
+    /// need a resolvable extent; the resolver additionally needs a transform
+    /// to position them, which validation must not require.
+    fn validate_session_glue_targets(
+        &self,
+        page_id: &str,
+        glue: &[(GlueEndpoint, &ConnectorGlue); 2],
+    ) -> EditResult<()> {
+        let txn = self.doc.transact();
+        let sheets = required_map(&txn, SHEETS)?;
+        for (_, target) in glue {
+            let shape = match sheets.get(&txn, target.shape_id.as_str()) {
+                Some(Out::YMap(shape)) => shape,
+                _ => return Err(EditError::ShapeNotFound(target.shape_id.clone())),
+            };
+            if map_string(&shape, &txn, "pageId").as_deref() != Some(page_id) {
+                return Err(EditError::ShapeNotFound(target.shape_id.clone()));
+            }
+            let cell = target.to_cell.as_deref().unwrap_or("PinX");
+            if !valid_glue_target(cell) {
+                return Err(EditError::InvalidState(
+                    "connector glue needs a valid target cell".to_owned(),
+                ));
+            }
+            if !glue_text_valid(cell) {
+                return Err(EditError::InvalidState(
+                    "connector glue contains invalid XML attribute text".to_owned(),
+                ));
+            }
+            if !connection_point_exists(&sheets, &txn, &target.shape_id, cell) {
+                return Err(EditError::InvalidState(
+                    "connector glue references a missing connection point".to_owned(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn validate_connector(
@@ -175,22 +215,101 @@ impl DiagramSession {
                 "connector draft must describe a 1D shape".to_owned(),
             ));
         }
-        if connector.glue.iter().any(|glue| {
-            glue.to
-                .as_ref()
-                .and_then(|target| target.connection_point.as_ref())
-                .is_none()
-        }) {
+        let sheet = package
+            .page_contents
+            .get(&page.source_part_path)
+            .ok_or_else(|| {
+                EditError::InvalidState("connector page part does not exist".to_owned())
+            })?;
+        for (endpoint, target) in glue {
+            let wanted = match endpoint {
+                GlueEndpoint::Begin => ConnectorEndpoint::Begin,
+                GlueEndpoint::End => ConnectorEndpoint::End,
+            };
+            let resolved = connector
+                .glue
+                .iter()
+                .find(|glue| glue.endpoint == wanted)
+                .and_then(|glue| glue.to.as_ref())
+                .and_then(|to| to.connection_point.as_ref())
+                .is_some();
+            if resolved
+                || implied_point_without_transform(sheet, &sources, target)
+            {
+                continue;
+            }
             return Err(EditError::InvalidState(
-                "connector glue must resolve to a connection point".to_owned(),
+                "connector glue references a missing connection point".to_owned(),
             ));
         }
         Ok(())
     }
 }
 
-pub(super) fn glue_records<T: ReadTxn>(txn: &T) -> EditResult<Vec<GlueRecord>> {
-    let Some(connects) = txn.get_map(CONNECTS) else {
+/// Implied N/E/S/W points the resolver cannot position: sectionless targets
+/// only need a resolvable extent, matching session validation. Explicit
+/// `Connection` rows must resolve through the resolver above.
+fn implied_point_without_transform(
+    sheet: &vsdx_parse::Sheet,
+    sources: &BTreeMap<&str, u32>,
+    target: &ConnectorGlue,
+) -> bool {
+    let cell = target.to_cell.as_deref().unwrap_or("PinX");
+    if matches!(cell, "PinX" | "PinY") {
+        return true;
+    }
+    let Some(row) = cell
+        .strip_prefix("Connections.X")
+        .and_then(|ordinal| ordinal.parse::<u32>().ok())
+        .and_then(|ordinal| ordinal.checked_sub(1))
+    else {
+        return false;
+    };
+    if row >= 4 {
+        return false;
+    }
+    let Some(source) = sources.get(target.shape_id.as_str()) else {
+        return false;
+    };
+    let Some(shape) = sheet.shapes().find(|shape| shape.id == *source) else {
+        return false;
+    };
+    if shape.sections().any(|section| section.name == "Connection") {
+        return false;
+    }
+    ["Width", "Height"]
+        .into_iter()
+        .all(|name| package_cell_number(shape, name).is_some_and(f64::is_finite))
+}
+
+const EXTENT_LIMITS: vsdx_formula::Limits = vsdx_formula::Limits {
+    max_depth: 64,
+    max_nodes: 1_024,
+    max_tokens: 1_024,
+};
+
+/// Mirrors the resolver's formula-first number precedence on package cells.
+fn package_cell_number(shape: &vsdx_parse::Shape, name: &str) -> Option<f64> {
+    let cell = shape.cells().find(|cell| cell.name == name && !cell.del)?;
+    if let Some(number) = cell.formula.as_deref().and_then(|formula| {
+        vsdx_formula::evaluate_number(formula, EXTENT_LIMITS, &mut |reference| {
+            let sibling = shape
+                .cells()
+                .find(|cell| cell.name == reference.trim() && !cell.del)?;
+            sibling.formula.clone().or_else(|| sibling.value.clone())
+        })
+    }) {
+        return Some(number);
+    }
+    cell.value
+        .as_deref()?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
+pub(super) fn glue_records<T: ReadTxn>(txn: &T) -> EditResult<Vec<GlueRecord>> {    let Some(connects) = txn.get_map(CONNECTS) else {
         return Ok(Vec::new());
     };
     let pages = required_map(txn, PAGES)?;

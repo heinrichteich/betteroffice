@@ -28,7 +28,7 @@ impl DiagramUndoManager {
             ];
             (order, roots)
         };
-        if roots.iter().any(Option::is_none) {
+        if roots[..3].iter().any(Option::is_none) || roots[4].is_none() {
             return Err(EditError::InvalidState("missing diagram root".to_owned()));
         }
         let options = yrs::undo::Options {

@@ -1507,7 +1507,12 @@ fn add_shape(
                 offset: end - 2,
                 length: 2,
             },
-            [b">".as_slice(), new_shape.as_slice(), b"</Shapes>"].concat(),
+            [
+                b">".as_slice(),
+                new_shape.as_slice(),
+                format!("</{}>", shapes.name).as_bytes(),
+            ]
+            .concat(),
         )
     } else {
         let close = part.bytes[..end]
@@ -1587,34 +1592,14 @@ fn add_connect(
             message: "Connect ToCell must be PinX, PinY, or Connections.XN".to_owned(),
         });
     }
-    let connects = direct_child(part, "Connects", None);
-    let contents = part
-        .spans
-        .iter()
-        .find(|span| local_name(&span.name) == "PageContents")
-        .ok_or_else(|| VsdxError::InvalidCellEdit {
-            part: part.path.clone(),
-            message: "page has no PageContents container".to_owned(),
-        })?;
-    let owner = connects.unwrap_or(contents);
-    let prefix = owner.name.rsplit_once(':').map_or("", |(prefix, _)| prefix);
-    let qualify = |name: &str| {
-        if prefix.is_empty() {
-            name.to_owned()
-        } else {
-            format!("{prefix}:{name}")
-        }
-    };
-    let mut fragment = format!("<{} FromSheet=\"", qualify("Connect")).into_bytes();
-    fragment.extend_from_slice(from_sheet.to_string().as_bytes());
-    fragment.extend_from_slice(b"\" FromCell=\"");
-    push_quoted_fragment(&mut fragment, from_cell)?;
-    fragment.extend_from_slice(b"\" ToSheet=\"");
-    fragment.extend_from_slice(to_sheet.to_string().as_bytes());
-    fragment.extend_from_slice(b"\" ToCell=\"");
-    push_quoted_fragment(&mut fragment, to_cell)?;
-    fragment.extend_from_slice(b"\"/>");
-    if let Some(connects) = connects {
+    if let Some(connects) = direct_child(part, "Connects", None) {
+        let fragment = connect_fragment(
+            from_sheet,
+            from_cell,
+            to_sheet,
+            to_cell,
+            &prefixed_name(&connects.name, "Connect"),
+        )?;
         let end = connects.span.end().ok_or(VsdxError::InvalidSpan)?;
         if end >= 2 && part.bytes[end - 2..end] == *b"/>" {
             let mut replacement = Vec::from(b">".as_slice());
@@ -1640,15 +1625,43 @@ fn add_connect(
             replacement: fragment,
         }]);
     }
+    let contents = part
+        .spans
+        .iter()
+        .find(|span| local_name(&span.name) == "PageContents")
+        .ok_or_else(|| VsdxError::InvalidCellEdit {
+            part: part.path.clone(),
+            message: "page has no PageContents container".to_owned(),
+        })?;
+    let connects_name = prefixed_name(&contents.name, "Connects");
+    let fragment = connect_fragment(
+        from_sheet,
+        from_cell,
+        to_sheet,
+        to_cell,
+        &prefixed_name(&contents.name, "Connect"),
+    )?;
     let end = contents.span.end().ok_or(VsdxError::InvalidSpan)?;
+    if end >= 2 && part.bytes[end - 2..end] == *b"/>" {
+        let mut replacement = Vec::from(b">".as_slice());
+        replacement.extend_from_slice(format!("<{connects_name}>").as_bytes());
+        replacement.extend_from_slice(&fragment);
+        replacement.extend_from_slice(format!("</{connects_name}></{}>", contents.name).as_bytes());
+        return Ok(vec![SpanEdit {
+            span: crate::SourceSpan {
+                offset: end - 2,
+                length: 2,
+            },
+            replacement,
+        }]);
+    }
     let close = part.bytes[..end]
         .iter()
         .rposition(|byte| *byte == b'<')
         .ok_or(VsdxError::InvalidSpan)?;
-    let container = qualify("Connects");
-    let mut replacement = format!("<{container}>").into_bytes();
+    let mut replacement = format!("<{connects_name}>").into_bytes();
     replacement.extend_from_slice(&fragment);
-    replacement.extend_from_slice(format!("</{container}>").as_bytes());
+    replacement.extend_from_slice(format!("</{connects_name}>").as_bytes());
     Ok(vec![SpanEdit {
         span: crate::SourceSpan {
             offset: close,
@@ -1656,6 +1669,25 @@ fn add_connect(
         },
         replacement,
     }])
+}
+
+fn connect_fragment(
+    from_sheet: u32,
+    from_cell: &str,
+    to_sheet: u32,
+    to_cell: &str,
+    connect_name: &str,
+) -> Result<Vec<u8>, VsdxError> {
+    let mut fragment = format!("<{connect_name} FromSheet=\"").into_bytes();
+    fragment.extend_from_slice(from_sheet.to_string().as_bytes());
+    fragment.extend_from_slice(b"\" FromCell=\"");
+    push_quoted_fragment(&mut fragment, from_cell)?;
+    fragment.extend_from_slice(b"\" ToSheet=\"");
+    fragment.extend_from_slice(to_sheet.to_string().as_bytes());
+    fragment.extend_from_slice(b"\" ToCell=\"");
+    push_quoted_fragment(&mut fragment, to_cell)?;
+    fragment.extend_from_slice(b"\"/>");
+    Ok(fragment)
 }
 
 fn valid_glue_target(cell: &str) -> bool {
@@ -2184,6 +2216,14 @@ fn tag_close(source: &[u8], start: usize, end: usize) -> Option<usize> {
         index += 1;
     }
     None
+}
+
+/// Qualifies `local` with the prefix of `source`, when it has one.
+fn prefixed_name(source: &str, local: &str) -> String {
+    source.rsplit_once(':').map_or_else(
+        || local.to_owned(),
+        |(prefix, _)| format!("{prefix}:{local}"),
+    )
 }
 
 fn contains(parent: crate::SourceSpan, child: crate::SourceSpan) -> bool {
@@ -2890,6 +2930,132 @@ mod tests {
             assert_eq!(reparsed.page_contents[&path].connects().count(), 1);
             validate_structure(&reparsed).unwrap();
         }
+    }
+
+    /// Prefixed containers keep their qualified closing tag.
+    #[test]
+    fn add_connect_preserves_prefixed_container_names() {
+        let source = b"<v:PageContents xmlns:v='urn:visio' xmlns='urn:visio'><v:Shapes><v:Shape ID='1'/><v:Shape ID='2'/></v:Shapes><v:Connects/></v:PageContents>";
+        let (package, path) = package_with_page_xml(source);
+        let page_id = package.page_part_ids[&path];
+        let saved = save_structural_edits(
+            &package,
+            &[StructuralEdit::AddConnect {
+                page_id,
+                from_sheet: 2,
+                from_cell: "BeginX".to_owned(),
+                to_sheet: 1,
+                to_cell: "PinX".to_owned(),
+            }],
+        )
+        .unwrap();
+        let reparsed = parse_vsdx(&saved).unwrap();
+        let after = reparsed.part_bytes(&path).unwrap();
+        assert!(
+            after
+                .windows(b"</v:Connects>".len())
+                .any(|window| window == b"</v:Connects>")
+        );
+        assert!(
+            !after
+                .windows(b"</Connects>".len())
+                .any(|window| window == b"</Connects>")
+        );
+        assert!(
+            after
+                .windows(b"<v:Connect FromSheet=\"2\"".len())
+                .any(|window| window == b"<v:Connect FromSheet=\"2\"")
+        );
+        assert!(
+            !after
+                .windows(b"<Connect ".len())
+                .any(|window| window == b"<Connect ")
+        );
+        validate_structure(&reparsed).unwrap();
+        assert_eq!(reparsed.page_contents[&path].connects().count(), 1);
+    }
+
+    /// A missing prefixed container is created with its page prefix.
+    #[test]
+    fn add_connect_creates_prefixed_container_with_page_prefix() {
+        let source = b"<v:PageContents xmlns:v='urn:visio' xmlns='urn:visio'><v:Shapes><v:Shape ID='1'/><v:Shape ID='2'/></v:Shapes></v:PageContents>";
+        let (package, path) = package_with_page_xml(source);
+        let page_id = package.page_part_ids[&path];
+        let saved = save_structural_edits(
+            &package,
+            &[StructuralEdit::AddConnect {
+                page_id,
+                from_sheet: 2,
+                from_cell: "EndX".to_owned(),
+                to_sheet: 1,
+                to_cell: "PinX".to_owned(),
+            }],
+        )
+        .unwrap();
+        let reparsed = parse_vsdx(&saved).unwrap();
+        let after = reparsed.part_bytes(&path).unwrap();
+        assert!(
+            after
+                .windows(b"<v:Connects>".len())
+                .any(|window| window == b"<v:Connects>")
+        );
+        assert!(
+            after
+                .windows(b"</v:Connects>".len())
+                .any(|window| window == b"</v:Connects>")
+        );
+        assert!(
+            after
+                .windows(b"<v:Connect FromSheet=\"2\"".len())
+                .any(|window| window == b"<v:Connect FromSheet=\"2\"")
+        );
+        assert!(
+            !after
+                .windows(b"<Connect ".len())
+                .any(|window| window == b"<Connect ")
+        );
+        assert!(
+            after
+                .windows(b"</v:PageContents>".len())
+                .any(|window| window == b"</v:PageContents>")
+        );
+        validate_structure(&reparsed).unwrap();
+    }
+
+    #[test]
+    fn add_connect_to_prefixed_fixture_reparses() {
+        let package =
+            parse_vsdx(include_bytes!("../tests/fixtures/prefixed-connects.vsdx")).unwrap();
+        let path = package.page_part_paths[0].clone();
+        let page_id = package.page_part_ids[&path];
+        let saved = save_structural_edits(
+            &package,
+            &[StructuralEdit::AddConnect {
+                page_id,
+                from_sheet: 1,
+                from_cell: "EndX".to_owned(),
+                to_sheet: 1,
+                to_cell: "PinY".to_owned(),
+            }],
+        )
+        .unwrap();
+        let reparsed = parse_vsdx(&saved).unwrap();
+        validate_structure(&reparsed).unwrap();
+        assert_eq!(
+            reparsed.page_contents[&path].connects().count(),
+            package.page_contents[&path].connects().count() + 1
+        );
+        let after = reparsed.part_bytes(&path).unwrap();
+        assert!(
+            after
+                .windows(b"<v:Connect FromSheet=\"1\" FromCell=\"EndX\"".len())
+                .any(|window| window == b"<v:Connect FromSheet=\"1\" FromCell=\"EndX\"")
+        );
+        assert!(
+            !after
+                .windows(b"<Connect ".len())
+                .any(|window| window == b"<Connect ")
+        );
     }
 
     #[test]

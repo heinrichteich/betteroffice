@@ -402,22 +402,51 @@ fn connection_point(
     row: u32,
     transform: Option<SceneAffine>,
 ) -> Option<ConnectionPoint> {
-    let section = shape.sections.get("Connection")?;
-    let resolved_row = section.rows.get(&format!("IX:{row}"))?;
-    if resolved_row.deleted {
+    if let Some(section) = shape.sections.get("Connection") {
+        let resolved_row = section.rows.get(&format!("IX:{row}"))?;
+        if resolved_row.deleted {
+            return None;
+        }
+        let value = |name: &str| match resolved_row.cells.get(name)? {
+            Lookup::Found(cell) => number_from_cell(shape, &cell.cell),
+            _ => None,
+        };
+        let (x, x_provenance) = value("X")?;
+        let (y, y_provenance) = value("Y")?;
+        return Some(ConnectionPoint {
+            row,
+            position: transform?.apply_point(x, y),
+            x_provenance,
+            y_provenance,
+        });
+    }
+    implied_connection_point(shape, row, transform)
+}
+
+/// Synthesised N/E/S/W for sectionless shapes, matching the editor hover points.
+fn implied_connection_point(
+    shape: &ResolvedShape,
+    row: u32,
+    transform: Option<SceneAffine>,
+) -> Option<ConnectionPoint> {
+    let (fx, fy) = match row {
+        0 => (0.5, 1.0),
+        1 => (1.0, 0.5),
+        2 => (0.5, 0.0),
+        3 => (0.0, 0.5),
+        _ => return None,
+    };
+    let width = number(shape, "Width")?;
+    let height = number(shape, "Height")?;
+    let (x, y) = (width * fx, height * fy);
+    if !x.is_finite() || !y.is_finite() {
         return None;
     }
-    let value = |name: &str| match resolved_row.cells.get(name)? {
-        Lookup::Found(cell) => number_from_cell(shape, &cell.cell),
-        _ => None,
-    };
-    let (x, x_provenance) = value("X")?;
-    let (y, y_provenance) = value("Y")?;
     Some(ConnectionPoint {
         row,
         position: transform?.apply_point(x, y),
-        x_provenance,
-        y_provenance,
+        x_provenance: NumericProvenance::Formula,
+        y_provenance: NumericProvenance::Formula,
     })
 }
 
