@@ -2879,6 +2879,37 @@ mod tests {
         assert_eq!(session.save().unwrap(), before);
     }
 
+    /// A sectionless target still offers the four implied N/E/S/W points.
+    #[test]
+    fn implied_connection_points_are_accepted() {
+        let (session, from_id, to_id, _) = glued_fixture();
+        let part = page_part(&session);
+        let glue = session.package().unwrap().page_contents[&part]
+            .connects()
+            .count();
+        session
+            .add_connector(
+                &EditCtx::local("implied-row"),
+                "page:1",
+                &connector_draft(),
+                &ConnectorGlue {
+                    shape_id: from_id.clone(),
+                    to_cell: Some("Connections.X2".to_owned()),
+                },
+                &ConnectorGlue {
+                    shape_id: to_id.clone(),
+                    to_cell: None,
+                },
+            )
+            .expect("glue to an implied point is accepted");
+        assert!(
+            session.package().unwrap().page_contents[&part]
+                .connects()
+                .count()
+                > glue
+        );
+    }
+
     /// A remote glue record naming a connection row the target lacks is rejected.
     #[test]
     fn remote_glue_to_a_missing_connection_point_is_rejected() {

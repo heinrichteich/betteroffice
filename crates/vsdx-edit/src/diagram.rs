@@ -219,7 +219,7 @@ fn valid_glue_target(cell: &str) -> bool {
         .is_some_and(|ordinal| ordinal >= 1)
 }
 
-/// Reports whether `to_cell` names a connection row present on the target.
+/// Usable glue target: explicit `Connection` row, or implied N/E/S/W when sectionless.
 fn connection_point_exists<T: ReadTxn>(
     sheets: &yrs::MapRef,
     txn: &T,
@@ -239,6 +239,7 @@ fn connection_point_exists<T: ReadTxn>(
     let Ok(cells) = map_map(&shape, txn, "cells") else {
         return false;
     };
+    let mut has_section = false;
     for (_, value) in cells.iter(txn) {
         let yrs::Out::YMap(cell) = value else {
             continue;
@@ -246,11 +247,12 @@ fn connection_point_exists<T: ReadTxn>(
         if map_string(&cell, txn, "section").as_deref() != Some("Connection") {
             continue;
         }
+        has_section = true;
         if map_u32(&cell, txn, "rowIndex").ok().flatten() == Some(row) {
             return true;
         }
     }
-    false
+    !has_section && row < 4
 }
 
 fn glue_text_valid(value: &str) -> bool {
