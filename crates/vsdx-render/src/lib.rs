@@ -858,8 +858,22 @@ impl Renderer {
         });
         let text_scene = unflipped
             .get(&shape.id)
-            .map(|entry| entry.scene)
-            .unwrap_or(transform.local);
+            .map(|entry| {
+                let scene = affine(entry.scene);
+                let anchor = (bounds.loc_pin_x as f32, bounds.loc_pin_y as f32);
+                let (flipped_x, flipped_y) =
+                    affine(transform.scene).apply_point(anchor.0, anchor.1);
+                let (plain_x, plain_y) = scene.apply_point(anchor.0, anchor.1);
+                Affine {
+                    a: scene.a,
+                    b: scene.b,
+                    c: scene.c,
+                    d: scene.d,
+                    e: scene.e + flipped_x - plain_x,
+                    f: scene.f + flipped_y - plain_y,
+                }
+            })
+            .unwrap_or(affine(transform.local));
         self.text(
             package,
             resolver,
@@ -869,7 +883,7 @@ impl Renderer {
             resolved,
             id,
             bounds,
-            affine(text_scene).compose(Affine {
+            text_scene.compose(Affine {
                 a: 1.0,
                 b: 0.0,
                 c: 0.0,
@@ -3447,6 +3461,67 @@ mod tests {
     }
 
     #[test]
+    fn flipped_group_keeps_child_text_over_child_shape() {
+        for ((flip_x, flip_y), expected) in [
+            ((1, 0), (2.5, 4.0)),
+            ((0, 1), (3.5, 3.0)),
+            ((1, 1), (2.5, 3.0)),
+        ] {
+            let mut child = shape(2, 1.0, 0.5);
+            with_cell(&mut child, "LocPinX", "0.5");
+            with_cell(&mut child, "LocPinY", "0.5");
+            child
+                .children
+                .push(ShapeChild::Text(vec![TextToken::Literal("ab".into())]));
+            let mut group = group(1, 4.0, 4.0, vec![child]);
+            with_cell(&mut group, "FlipX", &flip_x.to_string());
+            with_cell(&mut group, "FlipY", &flip_y.to_string());
+            let list = render(vec![group]);
+            let Primitive::Group { primitives, .. } = &list.primitives[0] else {
+                unreachable!()
+            };
+            let Primitive::Shape { path, .. } = &primitives[0] else {
+                unreachable!()
+            };
+            let (min_x, max_x, min_y, max_y) = path.iter().fold(
+                (
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                ),
+                |(min_x, max_x, min_y, max_y), command| {
+                    let (x, y) = match *command {
+                        GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
+                            (x as f32, y as f32)
+                        }
+                        _ => return (min_x, max_x, min_y, max_y),
+                    };
+                    (min_x.min(x), max_x.max(x), min_y.min(y), max_y.max(y))
+                },
+            );
+            let Primitive::TextBox {
+                lines, transform, ..
+            } = &primitives[1]
+            else {
+                unreachable!()
+            };
+            assert_point_close((transform.a, transform.b), (1.0, 0.0));
+            assert_point_close((transform.c, transform.d), (0.0, 1.0));
+            assert_point_close((transform.e, transform.f), expected);
+            let interior = transform.apply_point(lines[0].x + 0.25, lines[0].y + 0.05);
+            assert!(
+                interior.0 > min_x
+                    && interior.0 < max_x
+                    && interior.1 > min_y
+                    && interior.1 < max_y,
+                "{interior:?} is outside the flipped child geometry \
+                 ({min_x},{min_y})-({max_x},{max_y}) for flip ({flip_x},{flip_y})"
+            );
+        }
+    }
+
+    #[test]
     fn forty_five_degree_group_preserves_image_orientation_and_all_corners() {
         let mut image = shape(2, 1.0, 2.0);
         image.children.push(ShapeChild::ForeignData(ForeignData {
@@ -4300,14 +4375,14 @@ mod tests {
         assert_point_close((*width, *height), (1.0, 1.0));
         assert_point_close((transform.a, transform.b), (1.5075876, 0.21720883));
         assert_point_close((transform.c, transform.d), (1.1773777, 1.4962559));
-        assert_point_close((transform.e, transform.f), (8.433663, 8.884547));
+        assert_point_close((transform.e, transform.f), (9.487798, 10.472947));
         assert_point_close(
             transform.apply_point(lines[0].x, lines[0].y),
-            (8.433663, 8.884547),
+            (9.487798, 10.472947),
         );
         assert_point_close(
             transform.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
-            (8.559296, 8.902648),
+            (9.61343, 10.491048),
         );
         let Primitive::Image {
             x,
@@ -4345,10 +4420,10 @@ mod tests {
         let z_orders = inner.iter().map(z_order).collect::<Vec<_>>();
         assert_eq!(z_orders, vec![2, 3, 4, 5]);
         assert_eq!(
-            hit_test(&list, 8.433663 * 96.0, (11.0 - 8.884547) * 96.0),
+            hit_test(&list, 10.830281 * 96.0, (11.0 - 11.329679) * 96.0),
             Some(HitTestResult::Text {
                 shape_id: "visio/pages/page1.xml:3".into(),
-                position: 0,
+                position: 11,
             })
         );
     }
