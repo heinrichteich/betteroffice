@@ -1093,6 +1093,30 @@ mod tests {
     }
 
     #[test]
+    fn loc_pin_at_size_holds_when_pin_flows_through_an_intermediate_cell() {
+        let session = session();
+        for (name, formula, value) in [
+            ("Width", "2", None),
+            ("Height", "1", None),
+            ("PinX", "5", None),
+            ("LocPinX", "User.Offset*Width", None),
+            ("LocPinY", "0.5", None),
+        ] {
+            add_cell(&session, name, Some(formula), value);
+        }
+        add_cell_at(
+            &session,
+            "Value",
+            Some("User"),
+            Some(CellRow::Name("Offset".to_owned())),
+            Some("PinX*0.5"),
+            None,
+        );
+        let (x, _) = loc_pin(&session, 9.0, 1.0);
+        assert_eq!(x, 5.0);
+    }
+
+    #[test]
     fn loc_pin_at_size_matches_the_committed_snapshot() {
         for formula in ["Width*0.5", "Width-1", "GUARD(Width*0.5)", "GUARD(Width-1)"] {
             let session = loc_pin_shape(&[

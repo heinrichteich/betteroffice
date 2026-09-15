@@ -2052,17 +2052,44 @@ fn numeric_reference(references: &impl References, name: &str) -> Option<f64> {
     }
 }
 
-fn references_pin(expression: &Expr) -> bool {
+fn expression_references_pin(
+    expression: &Expr,
+    base: &vsdx_resolve::ResolvedShape,
+    visited: &mut HashSet<String>,
+    depth: u8,
+) -> bool {
     match expression {
         Expr::Reference(name) => {
-            !name.contains('!') && {
-                let cell = name.rsplit('.').next().unwrap_or(name);
-                cell.eq_ignore_ascii_case("PinX") || cell.eq_ignore_ascii_case("PinY")
+            if name.contains('!') {
+                return false;
+            }
+            let cell = name.rsplit('.').next().unwrap_or(name);
+            if cell.eq_ignore_ascii_case("PinX") || cell.eq_ignore_ascii_case("PinY") {
+                return true;
+            }
+            if depth >= 32 || !visited.insert(name.to_ascii_uppercase()) {
+                return false;
+            }
+            let Some(formula) = base.formula(name) else {
+                return false;
+            };
+            let trimmed = formula.trim_start_matches('=').trim();
+            if trimmed.is_empty() {
+                return false;
+            }
+            match vsdx_eval::parse(trimmed, &ParseLimits::default()) {
+                Ok(nested) => expression_references_pin(&nested, base, visited, depth + 1),
+                Err(_) => false,
             }
         }
-        Expr::Unary(inner) => references_pin(inner),
-        Expr::Binary(left, _, right) => references_pin(left) || references_pin(right),
-        Expr::Call(_, arguments) => arguments.iter().any(references_pin),
+        Expr::Unary(inner) => expression_references_pin(inner, base, visited, depth),
+        Expr::Binary(left, _, right) => {
+            expression_references_pin(left, base, visited, depth)
+                || expression_references_pin(right, base, visited, depth)
+        }
+        Expr::Call(_, arguments) => arguments
+            .iter()
+            .any(|argument| expression_references_pin(argument, base, visited, depth)),
         Expr::Number(_, _) | Expr::String(_) => false,
     }
 }
@@ -2087,7 +2114,9 @@ fn loc_pin_component(
         return current;
     }
     match vsdx_eval::parse(trimmed, &ParseLimits::default()) {
-        Ok(expression) if references_pin(&expression) => current,
+        Ok(expression) if expression_references_pin(&expression, base, &mut HashSet::new(), 0) => {
+            current
+        }
         Ok(_) => match evaluate(trimmed, overrides, &ParseLimits::default()) {
             Evaluation::Evaluated(result) => match result.value {
                 Value::Number(number) => number.number,
