@@ -607,11 +607,7 @@ pub(crate) fn preserve_attribute(
     is_relationship: bool,
 ) -> bool {
     let local = attribute_local(key);
-    if element.eq_ignore_ascii_case("Rel")
-        && local.eq_ignore_ascii_case("id")
-        && is_relationship
-        && is_rel_id(value)
-    {
+    if local.eq_ignore_ascii_case("id") && is_relationship && is_rel_id(value) {
         return true;
     }
     if local.eq_ignore_ascii_case("ID") || local.eq_ignore_ascii_case("IX") {

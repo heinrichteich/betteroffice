@@ -2793,6 +2793,27 @@ fn vsdx_relationship_references_reject_author_text() {
 }
 
 #[test]
+fn vsdx_element_level_relationship_references_survive() {
+    let input = "<Pages xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><Page ID=\"1\" NameU=\"Page-1\" r:id=\"rId1\"/><Page ID=\"2\" NameU=\"Page-2\" r:id=\"rIdSECRETLEAK\"/></Pages>";
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/pages/pages.xml",
+        input.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        text.contains("r:id=\"rId1\""),
+        "element-level relationship reference lost: {text}"
+    );
+    assert!(
+        !text.contains("SECRETLEAK"),
+        "author text in an element-level reference survived: {text}"
+    );
+}
+
+#[test]
 fn vsdx_typed_attributes_keep_valid_values() {
     let input = "<Comments xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Comment Author=\"SENTINELCOMMENTAUTHOR\" Date=\"2026-01-02T03:04:05Z\">SENTINELCOMMENTBODY</Comment></Comments>";
     let output = xml::redact_xml(
