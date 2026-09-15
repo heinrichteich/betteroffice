@@ -7,8 +7,14 @@ export interface VsdxClipboardEntry { pageId: string; name?: string; cells: Clip
 export const PASTE_OFFSET = { x: 0.25, y: -0.25 } as const;
 export const DUPLICATE_OFFSET = { x: -0.25, y: 0.25 } as const;
 
+/** Leaf shapes copy losslessly; groups carry children a flat draft cannot preserve. */
+export function canCopyShape(shape: ShapeSnapshot): boolean {
+  return shape.children.length === 0;
+}
+
 /** Snapshot a shape into an in-app clipboard entry, preserving every cell formula. */
 export function buildClipboardEntry(pageId: string, shape: ShapeSnapshot, text: string): VsdxClipboardEntry {
+  if (!canCopyShape(shape)) throw new Error(`vsdx group copy is not supported for shape ${shape.id}`);
   const cells: ClipboardCell[] = shape.cells
     .filter((cell) => cell.locator.cellName.length > 0)
     .map((cell) => {

@@ -113,3 +113,24 @@ test('paste stays disabled without a clipboard entry', () => {
   commands.paste.run();
   expect(diagram.addShapeWithText).not.toHaveBeenCalled();
 });
+
+test('disables cut, copy and duplicate for groups and reports the refusal', () => {
+  const state = snapshot();
+  const child = { ...state.pages[0].shapes[0], id: 'inner' };
+  state.pages[0].shapes = [{ ...state.pages[0].shapes[0], id: 'group', children: [child] }];
+  const diagram = handle(state);
+  const errors: unknown[] = [];
+  let clipboard: unknown = 'untouched';
+  const grouped = { pageId: 'page', shapeId: 'group', hit: { kind: 'shape' as const, shapeId: 'group' } };
+  const commands = createRibbonCommands(diagram, grouped, 'page', () => {}, (error) => errors.push(error), () => {}, null, (next) => { clipboard = next; });
+  expect(commands.copy.enabled).toBe(false);
+  expect(commands.cut.enabled).toBe(false);
+  expect(commands.duplicate.enabled).toBe(false);
+  commands.copy.run();
+  expect(clipboard).toBe('untouched');
+  expect(errors).toHaveLength(1);
+  commands.cut.run();
+  expect(diagram.deleteShape).not.toHaveBeenCalled();
+  commands.duplicate.run();
+  expect(diagram.addShapeWithText).not.toHaveBeenCalled();
+});

@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import type { DiagramHandle, DiagramSnapshot, FormulaShapeDraft, PageSnapshot, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { VsdxShapeSelection } from '../../VsdxEditor';
 import { standardShapeById } from '../shapes/shapeLibrary';
-import { DUPLICATE_OFFSET, PASTE_OFFSET, buildClipboardEntry, draftForPaste } from './clipboard';
+import { DUPLICATE_OFFSET, PASTE_OFFSET, buildClipboardEntry, canCopyShape, draftForPaste } from './clipboard';
 import type { VsdxClipboardEntry } from './clipboard';
 
 export type RibbonCommandId =
@@ -140,6 +140,7 @@ export function createRibbonCommands(
   const current = placementIn(pages, selection);
   const shape = current?.shape ?? null;
   const selected = Boolean(current && selection);
+  const copyable = Boolean(current && selection && canCopyShape(current.shape));
   const topIndex = current ? current.siblings.length - 1 : 0;
   const livePlacement = (currentHandle: DiagramHandle, currentSelection: VsdxShapeSelection | null) => placementIn(currentHandle.snapshot().pages, currentSelection);
   const formula = (cellName: string, value: string) => execute((currentHandle, currentSelection) => {
@@ -183,7 +184,7 @@ export function createRibbonCommands(
     },
     cut: {
       id: 'cut',
-      enabled: selected,
+      enabled: copyable,
       run: () => {
         if (!handle || !selection) return;
         try {
@@ -195,7 +196,7 @@ export function createRibbonCommands(
     },
     copy: {
       id: 'copy',
-      enabled: selected,
+      enabled: copyable,
       run: () => {
         if (!handle || !selection) return;
         try { onClipboardChange(copySelection(handle, selection)); } catch (error) { onError(error); }
@@ -218,7 +219,7 @@ export function createRibbonCommands(
     },
     duplicate: {
       id: 'duplicate',
-      enabled: selected,
+      enabled: copyable,
       run: () => {
         if (!handle || !selection) return;
         try {

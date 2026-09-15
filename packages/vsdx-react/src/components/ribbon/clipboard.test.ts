@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { ShapeSnapshot } from '@betteroffice/vsdx';
-import { DUPLICATE_OFFSET, PASTE_OFFSET, buildClipboardEntry, draftForPaste, resolvedNumeric, toFormula } from './clipboard';
+import { DUPLICATE_OFFSET, PASTE_OFFSET, buildClipboardEntry, canCopyShape, draftForPaste, resolvedNumeric, toFormula } from './clipboard';
 
 function shape(cells: Array<{ name: string; formula?: string | null; value?: string | null; section?: string | null; row?: { index: number } | { name: string } | null }>): ShapeSnapshot {
   return {
@@ -87,4 +87,12 @@ test('resolves non-literal pins through their cached value', () => {
   expect(resolvedNumeric(source, 'PinX')).toBe(3.5);
   expect(resolvedNumeric(source, 'Missing')).toBeNull();
   expect(toFormula(-0)).toBe('0');
+});
+
+test('refuses groups so a copy never flattens children', () => {
+  const child = shape([{ name: 'PinX', formula: '1', value: '1' }]);
+  const group: ShapeSnapshot = { id: 'group:1', sourceId: 1, name: 'Group', children: [child], cells: [] };
+  expect(canCopyShape(child)).toBe(true);
+  expect(canCopyShape(group)).toBe(false);
+  expect(() => buildClipboardEntry('page:1', group, '')).toThrow('vsdx group copy is not supported');
 });
