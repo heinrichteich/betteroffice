@@ -1,7 +1,7 @@
 use ooxml_drawingml::GeometryPathCommand;
 use serde::{Deserialize, Serialize};
 
-pub const CONTRACT_VERSION: u32 = 4;
+pub const CONTRACT_VERSION: u32 = 5;
 
 /// Replay primitives in ascending `z_order` (back-to-front); hit test in descending order.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -141,8 +141,14 @@ impl Affine {
     rename_all_fields = "camelCase"
 )]
 pub enum Paint {
-    Solid { color: String },
-    Gradient { stops: Vec<GradientStop> },
+    Solid {
+        color: String,
+    },
+    Gradient {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        angle_deg: Option<f32>,
+        stops: Vec<GradientStop>,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -301,6 +307,7 @@ impl DiagnosticCategory {
             | "unresolvable-character-pos"
             | "unresolvable-character-case"
             | "unresolvable-fill-colour"
+            | "unresolvable-fill-gradient"
             | "unresolvable-stroke-colour"
             | "unresolvable-stroke-width" => Self::Fidelity,
             _ => Self::Integrity,

@@ -38,9 +38,9 @@ describe('VSDX wasm boundary', () => {
     expect(() => diagram.snapshot()).toThrow('diagram handle is disposed');
   });
 
-  test('accepts only v4 display lists', () => {
+  test('accepts only v5 display lists', () => {
     const diagram = openDiagram(foundation, { clientId: 9002 });
-    expect(diagram.layoutPage(0).contractVersion).toBe(4);
+    expect(diagram.layoutPage(0).contractVersion).toBe(5);
 
     const layoutPageJson = VsdxRenderer.prototype.layoutPageJson;
     VsdxRenderer.prototype.layoutPageJson = () => JSON.stringify({ contractVersion: 2 });

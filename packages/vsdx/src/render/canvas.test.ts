@@ -19,7 +19,7 @@ const transform = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 test('replays primitives in z order and paints placeholders', async () => {
   const log: string[] = [];
   const list: PageDisplayList = {
-    contractVersion: 4, width: 100, height: 100, paintTransform: transform,
+    contractVersion: 5, width: 100, height: 100, paintTransform: transform,
     primitives: [
       { kind: 'placeholder', id: 'late', zOrder: 2, x: 10, y: 10, width: 20, height: 20, reason: 'missing image' },
       { kind: 'shape', id: 'early', zOrder: 1, path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 1, y: 1 }], fill: { kind: 'solid', color: '#000' } },
@@ -31,14 +31,14 @@ test('replays primitives in z order and paints placeholders', async () => {
   expect(log.some(entry => entry.startsWith('fillText:missing image'))).toBe(true);
 });
 
-test('rejects display-list versions other than v4', async () => {
+test('rejects display-list versions other than v5', async () => {
   await expect(paintPage(context([]), { contractVersion: 2, width: 1, height: 1, paintTransform: transform, primitives: [] } as unknown as PageDisplayList)).rejects.toThrow('unsupported VSDX display-list contract version 2');
 });
 
 test('replays positioned text runs at their line caret positions', async () => {
   const log: string[] = [];
   const list: PageDisplayList = {
-    contractVersion: 4, width: 100, height: 100, paintTransform: transform,
+    contractVersion: 5, width: 100, height: 100, paintTransform: transform,
     primitives: [{
       kind: 'textBox', id: 'text', zOrder: 1, x: 1, y: 2, width: 90, height: 80,
       paragraphs: [
@@ -102,7 +102,7 @@ test('a delayed image cannot overwrite a newer page or disturb its canvas state'
   const log: string[] = [];
   const ctx = context(log);
   let finish: (image: CanvasImageSource) => void = () => {};
-  const oldPage: PageDisplayList = { contractVersion: 4, width: 100, height: 100, paintTransform: transform, primitives: [{ kind: 'image', id: 'old', zOrder: 0, assetId: 'slow', x: 0, y: 0, width: 1, height: 1 }] };
+  const oldPage: PageDisplayList = { contractVersion: 5, width: 100, height: 100, paintTransform: transform, primitives: [{ kind: 'image', id: 'old', zOrder: 0, assetId: 'slow', x: 0, y: 0, width: 1, height: 1 }] };
   const oldPaint = paintPage(ctx, oldPage, 1, 1, { resolveImage: () => new Promise(resolve => { finish = resolve; }) });
   expect(log).toEqual([]);
   await paintPage(ctx, { ...oldPage, primitives: [] });
@@ -116,7 +116,7 @@ test('an aborted page never touches the canvas after its images load', async () 
   const log: string[] = [];
   const controller = new AbortController();
   controller.abort();
-  await paintPage(context(log), { contractVersion: 4, width: 1, height: 1, paintTransform: transform, primitives: [] }, 1, 1, { signal: controller.signal });
+  await paintPage(context(log), { contractVersion: 5, width: 1, height: 1, paintTransform: transform, primitives: [] }, 1, 1, { signal: controller.signal });
   expect(log).toEqual([]);
 });
 
@@ -139,7 +139,60 @@ test('places the top of an image above its bottom in a Y-up diagram', async () =
       bottom = (y + height) * yScale + yOffset;
     },
   } as unknown as CanvasRenderingContext2D;
-  await paintPage(ctx, { contractVersion: 4, width: 192, height: 192, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 192 }, primitives: [{ kind: 'image', id: 'picture', assetId: 'picture', zOrder: 0, x: 0, y: 0, width: 2, height: 2 }] }, 1, 1, { resolveImage: () => ({} as CanvasImageSource) });
+  await paintPage(ctx, { contractVersion: 5, width: 192, height: 192, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 192 }, primitives: [{ kind: 'image', id: 'picture', assetId: 'picture', zOrder: 0, x: 0, y: 0, width: 2, height: 2 }] }, 1, 1, { resolveImage: () => ({} as CanvasImageSource) });
   expect(top).toBe(0);
   expect(bottom).toBe(192);
+});
+
+test('paints a linear gradient across the shape box along its angle', async () => {
+  const gradients: Array<{ args: number[]; stops: Array<[number, string]> }> = [];
+  const painted: unknown[] = [];
+  let fillStyle: unknown;
+  const ctx = {
+    save: () => {}, restore: () => {}, setTransform: () => {}, clearRect: () => {}, beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, closePath: () => {}, fill: () => {},
+    transform: () => {},
+    createLinearGradient: (...args: number[]) => {
+      const entry = { args, stops: [] as Array<[number, string]> };
+      gradients.push(entry);
+      const gradient = { addColorStop: (position: number, color: string) => { entry.stops.push([position, color]); } };
+      painted.push(gradient);
+      return gradient;
+    },
+    set fillStyle(value: unknown) { fillStyle = value; },
+    get fillStyle() { return fillStyle; },
+  } as unknown as CanvasRenderingContext2D;
+  const list: PageDisplayList = {
+    contractVersion: 5, width: 100, height: 100, paintTransform: transform,
+    primitives: [{
+      kind: 'shape', id: 'graded', zOrder: 0,
+      path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 2, y: 0 }, { type: 'line', x: 2, y: 1 }, { type: 'close' }],
+      fill: { kind: 'gradient', angleDeg: 0, stops: [{ position: 0, color: '#ff0000' }, { position: 1, color: '#0000ff' }] },
+    }],
+  };
+  await paintPage(ctx, list);
+  expect(gradients).toHaveLength(1);
+  const radius = Math.hypot(2, 1) / 2;
+  expect(gradients[0].args).toEqual([1 - radius, 0.5, 1 + radius, 0.5]);
+  expect(gradients[0].stops).toEqual([[0, '#ff0000'], [1, '#0000ff']]);
+  expect(fillStyle).toBe(painted[0]);
+});
+
+test('a degenerate gradient box falls back to its first stop', async () => {
+  let fillStyle: unknown;
+  const ctx = {
+    save: () => {}, restore: () => {}, setTransform: () => {}, clearRect: () => {}, beginPath: () => {}, moveTo: () => {}, fill: () => {},
+    transform: () => {},
+    createLinearGradient: () => { throw new Error('must not create a gradient for a point box'); },
+    set fillStyle(value: unknown) { fillStyle = value; },
+    get fillStyle() { return fillStyle; },
+  } as unknown as CanvasRenderingContext2D;
+  await paintPage(ctx, {
+    contractVersion: 5, width: 100, height: 100, paintTransform: transform,
+    primitives: [{
+      kind: 'shape', id: 'point', zOrder: 0,
+      path: [{ type: 'move', x: 3, y: 4 }],
+      fill: { kind: 'gradient', angleDeg: 90, stops: [{ position: 0, color: '#112233' }, { position: 1, color: '#445566' }] },
+    }],
+  });
+  expect(fillStyle).toBe('#112233');
 });
