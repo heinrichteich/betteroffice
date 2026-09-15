@@ -1434,16 +1434,14 @@ fn add_connect(
             message: "Connect ToCell must be PinX, PinY, or Connections.XN".to_owned(),
         });
     }
-    let mut fragment = Vec::from(b"<Connect FromSheet=\"".as_slice());
-    fragment.extend_from_slice(from_sheet.to_string().as_bytes());
-    fragment.extend_from_slice(b"\" FromCell=\"");
-    push_quoted_fragment(&mut fragment, from_cell)?;
-    fragment.extend_from_slice(b"\" ToSheet=\"");
-    fragment.extend_from_slice(to_sheet.to_string().as_bytes());
-    fragment.extend_from_slice(b"\" ToCell=\"");
-    push_quoted_fragment(&mut fragment, to_cell)?;
-    fragment.extend_from_slice(b"\"/>");
     if let Some(connects) = direct_child(part, "Connects", None) {
+        let fragment = connect_fragment(
+            from_sheet,
+            from_cell,
+            to_sheet,
+            to_cell,
+            &prefixed_name(&connects.name, "Connect"),
+        )?;
         let end = connects.span.end().ok_or(VsdxError::InvalidSpan)?;
         if end >= 2 && part.bytes[end - 2..end] == *b"/>" {
             let mut replacement = Vec::from(b">".as_slice());
@@ -1478,6 +1476,13 @@ fn add_connect(
             message: "page has no PageContents container".to_owned(),
         })?;
     let connects_name = prefixed_name(&contents.name, "Connects");
+    let fragment = connect_fragment(
+        from_sheet,
+        from_cell,
+        to_sheet,
+        to_cell,
+        &prefixed_name(&contents.name, "Connect"),
+    )?;
     let end = contents.span.end().ok_or(VsdxError::InvalidSpan)?;
     if end >= 2 && part.bytes[end - 2..end] == *b"/>" {
         let mut replacement = Vec::from(b">".as_slice());
@@ -1506,6 +1511,25 @@ fn add_connect(
         },
         replacement,
     }])
+}
+
+fn connect_fragment(
+    from_sheet: u32,
+    from_cell: &str,
+    to_sheet: u32,
+    to_cell: &str,
+    connect_name: &str,
+) -> Result<Vec<u8>, VsdxError> {
+    let mut fragment = format!("<{connect_name} FromSheet=\"").into_bytes();
+    fragment.extend_from_slice(from_sheet.to_string().as_bytes());
+    fragment.extend_from_slice(b"\" FromCell=\"");
+    push_quoted_fragment(&mut fragment, from_cell)?;
+    fragment.extend_from_slice(b"\" ToSheet=\"");
+    fragment.extend_from_slice(to_sheet.to_string().as_bytes());
+    fragment.extend_from_slice(b"\" ToCell=\"");
+    push_quoted_fragment(&mut fragment, to_cell)?;
+    fragment.extend_from_slice(b"\"/>");
+    Ok(fragment)
 }
 
 fn valid_glue_target(cell: &str) -> bool {
@@ -2732,6 +2756,16 @@ mod tests {
                 .windows(b"</Connects>".len())
                 .any(|window| window == b"</Connects>")
         );
+        assert!(
+            after
+                .windows(b"<v:Connect FromSheet=\"2\"".len())
+                .any(|window| window == b"<v:Connect FromSheet=\"2\"")
+        );
+        assert!(
+            !after
+                .windows(b"<Connect ".len())
+                .any(|window| window == b"<Connect ")
+        );
         validate_structure(&reparsed).unwrap();
         assert_eq!(reparsed.page_contents[&path].connects().count(), 1);
     }
@@ -2767,6 +2801,16 @@ mod tests {
         );
         assert!(
             after
+                .windows(b"<v:Connect FromSheet=\"2\"".len())
+                .any(|window| window == b"<v:Connect FromSheet=\"2\"")
+        );
+        assert!(
+            !after
+                .windows(b"<Connect ".len())
+                .any(|window| window == b"<Connect ")
+        );
+        assert!(
+            after
                 .windows(b"</v:PageContents>".len())
                 .any(|window| window == b"</v:PageContents>")
         );
@@ -2795,6 +2839,17 @@ mod tests {
         assert_eq!(
             reparsed.page_contents[&path].connects().count(),
             package.page_contents[&path].connects().count() + 1
+        );
+        let after = reparsed.part_bytes(&path).unwrap();
+        assert!(
+            after
+                .windows(b"<v:Connect FromSheet=\"1\" FromCell=\"EndX\"".len())
+                .any(|window| window == b"<v:Connect FromSheet=\"1\" FromCell=\"EndX\"")
+        );
+        assert!(
+            !after
+                .windows(b"<Connect ".len())
+                .any(|window| window == b"<Connect ")
         );
     }
 

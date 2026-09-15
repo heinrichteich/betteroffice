@@ -262,7 +262,7 @@ fn glue_text_valid(value: &str) -> bool {
             .all(|c| matches!(c, '\t' | '\r' | '\n' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'))
 }
 
-/// Explicit numeric `OneD` decides alone, matching the resolver.
+/// Evaluated `OneD` decides alone, matching the resolver.
 fn draft_is_one_d(draft: &ShapeDraft) -> bool {
     let mut endpoints = HashSet::new();
     for cell in &draft.cells {
@@ -272,9 +272,15 @@ fn draft_is_one_d(draft: &ShapeDraft) -> bool {
         match cell.name.as_str() {
             "OneD" => {
                 let formula = cell.formula.as_deref().unwrap_or_default();
-                match formula.trim_start_matches('=').trim().parse::<f64>() {
-                    Ok(value) => return value != 0.0,
-                    Err(_) => return true,
+                if let vsdx_eval::Evaluation::Evaluated(result) = evaluate(
+                    formula.trim_start_matches('='),
+                    &draft_formulas(draft),
+                    &ParseLimits::default(),
+                ) {
+                    match result.value {
+                        vsdx_eval::Value::Number(number) => return number.number != 0.0,
+                        vsdx_eval::Value::Color(_) => {}
+                    }
                 }
             }
             "BeginX" | "BeginY" | "EndX" | "EndY" => {
@@ -286,6 +292,19 @@ fn draft_is_one_d(draft: &ShapeDraft) -> bool {
     ["BeginX", "BeginY", "EndX", "EndY"]
         .into_iter()
         .all(|name| endpoints.contains(name))
+}
+
+fn draft_formulas(draft: &ShapeDraft) -> std::collections::BTreeMap<String, String> {
+    draft
+        .cells
+        .iter()
+        .filter(|cell| cell.locator.section.is_none())
+        .filter_map(|cell| {
+            cell.formula
+                .as_deref()
+                .map(|formula| (cell.name.clone(), formula.to_owned()))
+        })
+        .collect()
 }
 
 fn glue_records<T: ReadTxn>(txn: &T) -> EditResult<Vec<GlueRecord>> {
@@ -1669,7 +1688,7 @@ fn validate_remote_glue(
             }
         }
     }
-    for (key, (_, connector, _, _, _)) in after_glue
+    for (key, (_, connector, _, target, to_cell)) in after_glue
         .iter()
         .filter(|(key, _)| !before_glue.contains_key(*key))
     {
@@ -1679,6 +1698,13 @@ fn validate_remote_glue(
         if origin != Some("added") {
             return Err(EditError::InvalidState(format!(
                 "remote update adds connector glue {key} without a session connector"
+            )));
+        }
+        let staged_txn = staged.transact();
+        let staged_sheets = required_map(&staged_txn, SHEETS)?;
+        if !connection_point_exists(&staged_sheets, &staged_txn, target, to_cell) {
+            return Err(EditError::InvalidState(format!(
+                "remote update adds connector glue {key} referencing a missing connection point"
             )));
         }
     }
