@@ -287,6 +287,51 @@ describe('VSDX wasm boundary', () => {
     await expectUntouchedParts(foundation, saved, editedPart);
   });
 
+  test('inserts a connected shape with its connector as one undoable receipt', async () => {
+    const pageId = 'page:1';
+    const editedPart = 'visio/pages/page1.xml';
+    const diagram = openDiagram(foundation, { clientId: 9030 });
+    const connectionCells = (rowIndex: number): FormulaShapeDraft['cells'] => ([
+      { locator: { section: 'Connection', rowIndex, rowType: 'Connection', cellName: 'X' }, formula: 'Width*0.5' },
+      { locator: { section: 'Connection', rowIndex, rowType: 'Connection', cellName: 'Y' }, formula: 'Height*1' },
+    ]);
+    const rect = (pinX: string): FormulaShapeDraft => ({ name: 'Rect', cells: [
+      { locator: { cellName: 'Width' }, formula: '1' },
+      { locator: { cellName: 'Height' }, formula: '1' },
+      { locator: { cellName: 'PinX' }, formula: pinX },
+      { locator: { cellName: 'PinY' }, formula: '1' },
+      { locator: { cellName: 'LocPinX' }, formula: '0' },
+      { locator: { cellName: 'LocPinY' }, formula: '0' },
+      ...connectionCells(0),
+    ] });
+    const from = diagram.addShape(pageId, rect('1'));
+    const receipt = diagram.addConnectedShape(pageId, rect('5'), { name: 'Connector', cells: [
+      { locator: { cellName: 'OneD' }, formula: '1' },
+      { locator: { cellName: 'BeginX' }, formula: '1' },
+      { locator: { cellName: 'BeginY' }, formula: '1' },
+      { locator: { cellName: 'EndX' }, formula: '5' },
+      { locator: { cellName: 'EndY' }, formula: '1' },
+    ] }, { shapeId: from.shapeId, toCell: 'Connections.X1' }, 'Connections.X1');
+    const live = diagram.snapshot();
+    expect(live.pages[0].shapes.find(shape => shape.id === receipt.shape.shapeId)).toBeDefined();
+    const connector = live.pages[0].shapes.find(shape => shape.id === receipt.connector.shapeId)!;
+    expect(connector).toEqual(expect.objectContaining({ name: 'Connector' }));
+    const laid = diagram.layoutPage(0);
+    expect(laid.primitives.find(item => item.id === `${live.pages[0].sourcePartPath}:${connector.sourceId}`)).toEqual(expect.objectContaining({ kind: 'shape' }));
+    const beforeUndo = live.pages[0].shapes.length;
+    diagram.undo();
+    expect(diagram.snapshot().pages[0].shapes.length).toBe(beforeUndo - 2);
+    diagram.redo();
+    expect(diagram.snapshot().pages[0].shapes.length).toBe(beforeUndo);
+    const saved = diagram.save();
+    diagram.dispose();
+
+    const reopened = openDiagram(saved, { clientId: 9031 });
+    expect(reopened.layoutPage(0)).toEqual(laid);
+    reopened.dispose();
+    await expectUntouchedParts(foundation, saved, editedPart);
+  });
+
   test('persists deletion and removes dependent Connect records through deleteShapeJson', async () => {
     const pageId = 'page:1';
     const shapeId = 'page:1:shape:1';

@@ -10,7 +10,7 @@ export type AutoConnectSide = Exclude<ConnectorSide, 'centre'>;
 export const AUTO_CONNECT_SIDES: readonly AutoConnectSide[] = ['north', 'east', 'south', 'west'];
 
 /** A hover chevron outside one shape edge, glued to that edge's connection point. */
-export interface AutoConnectArrow { side: AutoConnectSide; point: ConnectionPoint; }
+export interface AutoConnectArrow { side: AutoConnectSide; point: ConnectionPoint; dir?: ModelPoint; }
 
 /** Paint and hit state for the hover chevrons of one shape. */
 export interface AutoConnectOverlayState {
@@ -101,27 +101,92 @@ function shapeBounds(shape: ShapeSnapshot): { left: number; bottom: number; righ
   return { left, bottom, right: left + width, top: bottom + height, centre };
 }
 
+/** Local rotation and mirrors in model inches; mirrors the engine scene rule. */
+interface ShapeOrientation { angle: number; flipX: boolean; flipY: boolean; }
+
+function shapeOrientation(shape: ShapeSnapshot): ShapeOrientation {
+  return {
+    angle: cellNumber(shape, 'Angle') ?? 0,
+    flipX: (cellNumber(shape, 'FlipX') ?? 0) !== 0,
+    flipY: (cellNumber(shape, 'FlipY') ?? 0) !== 0,
+  };
+}
+
+function orientPoint(orientation: ShapeOrientation, pin: ModelPoint, point: ModelPoint): ModelPoint {
+  if (orientation.angle === 0 && !orientation.flipX && !orientation.flipY) return { x: point.x, y: point.y };
+  const cos = Math.cos(orientation.angle);
+  const sin = Math.sin(orientation.angle);
+  const sx = orientation.flipX ? -1 : 1;
+  const sy = orientation.flipY ? -1 : 1;
+  const dx = point.x - pin.x;
+  const dy = point.y - pin.y;
+  return {
+    x: pin.x + cos * sx * dx - sin * sy * dy,
+    y: pin.y + sin * sx * dx + cos * sy * dy,
+  };
+}
+
+function orientDirection(orientation: ShapeOrientation, dir: ModelPoint): ModelPoint {
+  if (orientation.angle === 0 && !orientation.flipX && !orientation.flipY) return { ...dir };
+  const cos = Math.cos(orientation.angle);
+  const sin = Math.sin(orientation.angle);
+  const sx = orientation.flipX ? -1 : 1;
+  const sy = orientation.flipY ? -1 : 1;
+  return { x: cos * sx * dir.x - sin * sy * dir.y, y: sin * sx * dir.x + cos * sy * dir.y };
+}
+
+const CONNECTION_ROWS: Record<AutoConnectSide, { row: number; toCell: string }> = {
+  north: { row: 0, toCell: 'Connections.X1' },
+  east: { row: 1, toCell: 'Connections.X2' },
+  south: { row: 2, toCell: 'Connections.X3' },
+  west: { row: 3, toCell: 'Connections.X4' },
+};
+
+/** True when both X and Y cells of one Connection row survived into the snapshot. */
+function connectionRowExists(shape: ShapeSnapshot, rowIndex: number): boolean {
+  let hasX = false;
+  let hasY = false;
+  for (const cell of shape.cells) {
+    if (cell.locator.section !== 'Connection') continue;
+    const row = cell.locator.row;
+    const index = row !== null && typeof row === 'object' && 'index' in row ? row.index : undefined;
+    if (index !== rowIndex) continue;
+    if (cell.name === 'X') hasX = true;
+    if (cell.name === 'Y') hasY = true;
+  }
+  return hasX && hasY;
+}
+
 /** Five snap targets in model inches: outline midpoints plus the dynamic centre. */
 export function connectionPointsForShape(shape: ShapeSnapshot): ConnectionPoint[] {
   const bounds = shapeBounds(shape);
   if (!bounds) return [];
+  const pin = { x: bounds.centre.x, y: bounds.centre.y };
+  const orientation = shapeOrientation(shape);
   const centreX = (bounds.left + bounds.right) / 2;
   const centreY = (bounds.bottom + bounds.top) / 2;
+  const outline = (side: AutoConnectSide, x: number, y: number): ConnectionPoint => {
+    const moved = orientPoint(orientation, pin, { x, y });
+    const row = CONNECTION_ROWS[side];
+    return connectionRowExists(shape, row.row) ? { side, ...moved, toCell: row.toCell } : { side, ...moved };
+  };
   return [
-    { side: 'north', x: centreX, y: bounds.top, toCell: 'Connections.X1' },
-    { side: 'east', x: bounds.right, y: centreY, toCell: 'Connections.X2' },
-    { side: 'south', x: centreX, y: bounds.bottom, toCell: 'Connections.X3' },
-    { side: 'west', x: bounds.left, y: centreY, toCell: 'Connections.X4' },
-    { side: 'centre', x: bounds.centre.x, y: bounds.centre.y },
+    outline('north', centreX, bounds.top),
+    outline('east', bounds.right, centreY),
+    outline('south', centreX, bounds.bottom),
+    outline('west', bounds.left, centreY),
+    { side: 'centre', x: pin.x, y: pin.y },
   ];
 }
 
 /** Edge midpoints as AutoConnect arrows; connectors and boundless shapes offer none. */
 export function autoConnectArrowsForShape(shape: ShapeSnapshot): AutoConnectArrow[] {
   if (isConnectorShape(shape)) return [];
+  const orientation = shapeOrientation(shape);
   const arrows: AutoConnectArrow[] = [];
   for (const point of connectionPointsForShape(shape)) {
-    if (point.side !== 'centre') arrows.push({ side: point.side, point });
+    if (point.side === 'centre') continue;
+    arrows.push({ side: point.side, point, dir: orientDirection(orientation, AUTO_CONNECT_DIRS[point.side]) });
   }
   return arrows;
 }
@@ -132,10 +197,6 @@ const AUTO_CONNECT_DIRS: Record<AutoConnectSide, ModelPoint> = {
   south: { x: 0, y: -1 },
   west: { x: -1, y: 0 },
 };
-
-function oppositeSide(side: AutoConnectSide): AutoConnectSide {
-  return side === 'north' ? 'south' : side === 'south' ? 'north' : side === 'east' ? 'west' : 'east';
-}
 
 /** Screen-pixel density of one model inch; chevron geometry derives from it. */
 export function autoConnectMetrics(frame: PageDisplayList, zoom: number): { pagePerModel: number; pixelsPerInch: number; modelPerPixel: number } {
@@ -148,7 +209,7 @@ export function autoConnectMetrics(frame: PageDisplayList, zoom: number): { page
 /** Chevron centre in model inches, held a fixed screen-pixel gap outside the edge. */
 export function autoConnectArrowCenter(arrow: AutoConnectArrow, frame: PageDisplayList, zoom: number): ModelPoint {
   const metrics = autoConnectMetrics(frame, zoom);
-  const dir = AUTO_CONNECT_DIRS[arrow.side];
+  const dir = arrow.dir ?? AUTO_CONNECT_DIRS[arrow.side];
   const offset = (AUTO_CONNECT_GAP_PX + AUTO_CONNECT_SIZE_PX / 2) * metrics.modelPerPixel;
   return { x: arrow.point.x + dir.x * offset, y: arrow.point.y + dir.y * offset };
 }
@@ -176,15 +237,10 @@ export function autoConnectArrowCss(arrow: AutoConnectArrow, frame: PageDisplayL
 
 /** True while a canvas point stays near a hovered shape, in screen pixels. */
 export function autoConnectHaloHit(shape: ShapeSnapshot, frame: PageDisplayList, zoom: number, canvas: ModelPoint): boolean {
-  const points = connectionPointsForShape(shape);
-  if (!points.length || isConnectorShape(shape)) return false;
-  const north = points.find((point) => point.side === 'north');
-  const east = points.find((point) => point.side === 'east');
-  const south = points.find((point) => point.side === 'south');
-  const west = points.find((point) => point.side === 'west');
-  if (!north || !east || !south || !west) return false;
-  const topLeft = modelToPage(frame, { x: west.x, y: north.y });
-  const bottomRight = modelToPage(frame, { x: east.x, y: south.y });
+  const outline = connectionPointsForShape(shape).filter((point) => point.side !== 'centre');
+  if (outline.length !== 4 || isConnectorShape(shape)) return false;
+  const topLeft = modelToPage(frame, { x: Math.min(...outline.map((point) => point.x)), y: Math.max(...outline.map((point) => point.y)) });
+  const bottomRight = modelToPage(frame, { x: Math.max(...outline.map((point) => point.x)), y: Math.min(...outline.map((point) => point.y)) });
   const halo = AUTO_CONNECT_HALO_PX / (Number.isFinite(zoom) && zoom > 0 ? zoom : 1);
   const left = Math.min(topLeft.x, bottomRight.x) - halo;
   const right = Math.max(topLeft.x, bottomRight.x) + halo;
@@ -199,21 +255,18 @@ export function quickShapePlacement(source: ShapeSnapshot, side: AutoConnectSide
   const points = connectionPointsForShape(source);
   const from = points.find((point) => point.side === side);
   if (!from) return null;
-  const toCell = `Connections.X${AUTO_CONNECT_SIDES.indexOf(oppositeSide(side)) + 1}`;
-  if (side === 'east') {
-    const left = from.x + gap;
-    return { x: left + width / 2, y: from.y, width, height, from, to: { side: oppositeSide(side), x: left, y: from.y, toCell } };
-  }
-  if (side === 'west') {
-    const right = from.x - gap;
-    return { x: right - width / 2, y: from.y, width, height, from, to: { side: oppositeSide(side), x: right, y: from.y, toCell } };
-  }
-  if (side === 'north') {
-    const bottom = from.y + gap;
-    return { x: from.x, y: bottom + height / 2, width, height, from, to: { side: oppositeSide(side), x: from.x, y: bottom, toCell } };
-  }
-  const top = from.y - gap;
-  return { x: from.x, y: top - height / 2, width, height, from, to: { side: oppositeSide(side), x: from.x, y: top, toCell } };
+  const dir = orientDirection(shapeOrientation(source), AUTO_CONNECT_DIRS[side]);
+  const facing: AutoConnectSide = Math.abs(dir.x) >= Math.abs(dir.y) ? (dir.x > 0 ? 'west' : 'east') : (dir.y > 0 ? 'south' : 'north');
+  const toCell = `Connections.X${AUTO_CONNECT_SIDES.indexOf(facing) + 1}`;
+  const half = Math.abs(dir.x) >= Math.abs(dir.y) ? width / 2 : height / 2;
+  return {
+    x: from.x + dir.x * (gap + half),
+    y: from.y + dir.y * (gap + half),
+    width,
+    height,
+    from,
+    to: { side: facing, x: from.x + dir.x * gap, y: from.y + dir.y * gap, toCell },
+  };
 }
 
 /** Matches the engine RoutStyle rule: nonzero style bends horizontal-first. */
@@ -300,10 +353,14 @@ export function dropTargetForPoint(shapes: readonly ShapeSnapshot[], at: ModelPo
   let fallbackDistance = Number.POSITIVE_INFINITY;
   for (const shape of shapes) {
     if (isConnectorShape(shape)) continue;
-    const bounds = shapeBounds(shape);
-    if (!bounds) continue;
-    if (at.x < bounds.left - CONNECTOR_SNAP_INCHES || at.x > bounds.right + CONNECTOR_SNAP_INCHES) continue;
-    if (at.y < bounds.bottom - CONNECTOR_SNAP_INCHES || at.y > bounds.top + CONNECTOR_SNAP_INCHES) continue;
+    const targets = connectionPointsForShape(shape).filter((point) => point.side !== 'centre');
+    if (!targets.length) continue;
+    const left = Math.min(...targets.map((point) => point.x));
+    const right = Math.max(...targets.map((point) => point.x));
+    const bottom = Math.min(...targets.map((point) => point.y));
+    const top = Math.max(...targets.map((point) => point.y));
+    if (at.x < left - CONNECTOR_SNAP_INCHES || at.x > right + CONNECTOR_SNAP_INCHES) continue;
+    if (at.y < bottom - CONNECTOR_SNAP_INCHES || at.y > top + CONNECTOR_SNAP_INCHES) continue;
     const point = nearestConnectionPointAnywhere(connectionPointsForShape(shape), at);
     if (!point) continue;
     const distance = Math.hypot(point.x - at.x, point.y - at.y);
@@ -539,7 +596,7 @@ export function paintAutoConnectOverlay(ctx: CanvasRenderingContext2D, frame: Pa
   ctx.lineCap = 'round';
   for (const arrow of state.arrows) {
     const center = autoConnectArrowCenter(arrow, frame, zoom);
-    const dir = AUTO_CONNECT_DIRS[arrow.side];
+    const dir = arrow.dir ?? AUTO_CONNECT_DIRS[arrow.side];
     const tip = { x: center.x + dir.x * half, y: center.y + dir.y * half };
     const base = { x: center.x - dir.x * half, y: center.y - dir.y * half };
     const first = { x: base.x - dir.y * half * 0.9, y: base.y + dir.x * half * 0.9 };

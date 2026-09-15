@@ -52,8 +52,24 @@ const frame: PageDisplayList = {
   primitives: [],
 };
 
+function connectedShape(cells: Record<string, string>): ShapeSnapshot {
+  const base = shape(cells);
+  const rows: ShapeSnapshot['cells'] = [];
+  for (let index = 0; index < 4; index++) {
+    for (const name of ['X', 'Y']) {
+      rows.push({
+        locator: { sheet: { page: 1 }, shapeId: 1, section: 'Connection', row: { index }, cellName: name },
+        name,
+        formula: '0',
+        value: '0',
+      });
+    }
+  }
+  return { ...base, cells: [...base.cells, ...rows] };
+}
+
 test('paints four outline points plus the dynamic centre in model inches', () => {
-  const points = connectionPointsForShape(shape({ PinX: '2', PinY: '3', Width: '4', Height: '2', LocPinX: '2', LocPinY: '1' }));
+  const points = connectionPointsForShape(connectedShape({ PinX: '2', PinY: '3', Width: '4', Height: '2', LocPinX: '2', LocPinY: '1' }));
   expect(points).toEqual([
     { side: 'north', x: 2, y: 4, toCell: 'Connections.X1' },
     { side: 'east', x: 4, y: 3, toCell: 'Connections.X2' },
@@ -66,7 +82,7 @@ test('paints four outline points plus the dynamic centre in model inches', () =>
 test('centres the pin when LocPin cells are absent', () => {
   const points = connectionPointsForShape(shape({ PinX: '5', PinY: '6', Width: '2', Height: '2' }));
   expect(points.find((point) => point.side === 'centre')).toEqual({ side: 'centre', x: 5, y: 6 });
-  expect(points.find((point) => point.side === 'north')).toEqual({ side: 'north', x: 5, y: 7, toCell: 'Connections.X1' });
+  expect(points.find((point) => point.side === 'north')).toEqual({ side: 'north', x: 5, y: 7 });
 });
 
 test('offers no points without resolvable bounds', () => {
@@ -88,7 +104,7 @@ test('routes horizontal-first like the engine RoutStyle rule', () => {
 });
 
 test('glues the centre dynamically and pins outline points to Connection rows', () => {
-  const points = connectionPointsForShape(shape({ PinX: '2', PinY: '3', Width: '4', Height: '2', LocPinX: '2', LocPinY: '1' }));
+  const points = connectionPointsForShape(connectedShape({ PinX: '2', PinY: '3', Width: '4', Height: '2', LocPinX: '2', LocPinY: '1' }));
   expect(connectorGlue('a', points[4])).toEqual({ shapeId: 'a' });
   expect(connectorGlue('a', points[0])).toEqual({ shapeId: 'a', toCell: 'Connections.X1' });
   expect(connectorGlue('a', points[3])).toEqual({ shapeId: 'a', toCell: 'Connections.X4' });
@@ -328,7 +344,7 @@ test('prefers the threshold snap over an interior fallback', () => {
 });
 
 test('offers one autoconnect arrow per edge and none for connectors', () => {
-  const target = shape({ PinX: '2', PinY: '3', Width: '4', Height: '2', LocPinX: '2', LocPinY: '1' });
+  const target = connectedShape({ PinX: '2', PinY: '3', Width: '4', Height: '2', LocPinX: '2', LocPinY: '1' });
   const arrows = autoConnectArrowsForShape(target);
   expect(arrows.map((arrow) => arrow.side)).toEqual(['north', 'east', 'south', 'west']);
   expect(arrows.map((arrow) => arrow.point.toCell)).toEqual(['Connections.X1', 'Connections.X2', 'Connections.X3', 'Connections.X4']);
@@ -396,6 +412,90 @@ test('offsets a quick-shape insert past the source edge with opposing glue', () 
   expect(west.to).toEqual(expect.objectContaining({ side: 'east', toCell: 'Connections.X2' }));
   expect(quickShapePlacement(target, 'east', 0, 1)).toBeNull();
   expect(quickShapePlacement(shape({ PinX: '1' }), 'east', 1, 1)).toBeNull();
+});
+
+test('leaves outline points unpinned when Connection rows are absent', () => {
+  const points = connectionPointsForShape(shape({ PinX: '2', PinY: '3', Width: '4', Height: '2', LocPinX: '2', LocPinY: '1' }));
+  expect(points.filter((point) => point.side !== 'centre').map((point) => point.toCell)).toEqual([undefined, undefined, undefined, undefined]);
+  expect(connectorGlue('a', points[0])).toEqual({ shapeId: 'a' });
+  expect(points.find((point) => point.side === 'centre')).toEqual({ side: 'centre', x: 2, y: 3 });
+});
+
+test('pins only the outline sides whose Connection row exists', () => {
+  const base = shape({ PinX: '2', PinY: '3', Width: '4', Height: '2', LocPinX: '2', LocPinY: '1' });
+  const north: ShapeSnapshot['cells'] = ['X', 'Y'].map((name) => ({
+    locator: { sheet: { page: 1 }, shapeId: 1, section: 'Connection', row: { index: 0 }, cellName: name },
+    name,
+    formula: '0',
+    value: '0',
+  }));
+  const points = connectionPointsForShape({ ...base, cells: [...base.cells, ...north] });
+  expect(points.find((point) => point.side === 'north')).toEqual({ side: 'north', x: 2, y: 4, toCell: 'Connections.X1' });
+  expect(points.find((point) => point.side === 'east')?.toCell).toBeUndefined();
+  expect(connectorGlue('a', points.find((point) => point.side === 'east')!)).toEqual({ shapeId: 'a' });
+});
+
+test('rotates outline points about the pin with the shape Angle', () => {
+  const target = connectedShape({ PinX: '2', PinY: '3', Width: '4', Height: '2', LocPinX: '2', LocPinY: '1', Angle: String(Math.PI / 2) });
+  const points = connectionPointsForShape(target);
+  const at = (side: string) => points.find((point) => point.side === side)!;
+  expect(at('north').x).toBeCloseTo(1, 10);
+  expect(at('north').y).toBeCloseTo(3, 10);
+  expect(at('east').x).toBeCloseTo(2, 10);
+  expect(at('east').y).toBeCloseTo(5, 10);
+  expect(at('south').x).toBeCloseTo(3, 10);
+  expect(at('south').y).toBeCloseTo(3, 10);
+  expect(at('west').x).toBeCloseTo(2, 10);
+  expect(at('west').y).toBeCloseTo(1, 10);
+  expect(at('centre')).toEqual({ side: 'centre', x: 2, y: 3 });
+  expect(classifyConnectorEndpoint({ x: 2, y: 5 }, [target])).toBe('point');
+  expect(classifyConnectorEndpoint({ x: 4, y: 3 }, [target])).toBe('unglued');
+});
+
+test('mirrors outline points with FlipX and FlipY', () => {
+  const flipped = connectedShape({ PinX: '2', PinY: '3', Width: '4', Height: '2', LocPinX: '2', LocPinY: '1', FlipX: '1' });
+  const points = connectionPointsForShape(flipped);
+  expect(points.find((point) => point.side === 'east')).toEqual({ side: 'east', x: 0, y: 3, toCell: 'Connections.X2' });
+  expect(points.find((point) => point.side === 'west')).toEqual({ side: 'west', x: 4, y: 3, toCell: 'Connections.X4' });
+  const vertical = connectedShape({ PinX: '2', PinY: '3', Width: '4', Height: '2', LocPinX: '2', LocPinY: '1', FlipY: '1' });
+  const raised = connectionPointsForShape(vertical);
+  expect(raised.find((point) => point.side === 'north')).toEqual({ side: 'north', x: 2, y: 2, toCell: 'Connections.X1' });
+  expect(raised.find((point) => point.side === 'south')).toEqual({ side: 'south', x: 2, y: 4, toCell: 'Connections.X3' });
+});
+
+test('faces chevrons along the rotated edge normal', () => {
+  const target = connectedShape({ PinX: '2', PinY: '2', Width: '2', Height: '2', Angle: String(Math.PI / 2) });
+  const east = autoConnectArrowsForShape(target).find((arrow) => arrow.side === 'east')!;
+  expect(east.dir!.x).toBeCloseTo(0, 10);
+  expect(east.dir!.y).toBeCloseTo(1, 10);
+  const centre = autoConnectArrowCenter(east, frame, 1);
+  expect(centre.x).toBeCloseTo(east.point.x, 10);
+  expect(centre.y).toBeGreaterThan(east.point.y);
+});
+
+test('places quick shapes along the rotated edge normal with opposing glue', () => {
+  const target = connectedShape({ PinX: '2', PinY: '2', Width: '2', Height: '2', Angle: String(Math.PI / 2) });
+  const placed = quickShapePlacement(target, 'east', 2, 2)!;
+  expect(placed.x).toBeCloseTo(2, 10);
+  expect(placed.y).toBeCloseTo(4.5, 10);
+  expect(placed.to.side).toBe('south');
+  expect(placed.to.toCell).toBe('Connections.X3');
+  expect(placed.to.x).toBeCloseTo(2, 10);
+  expect(placed.to.y).toBeCloseTo(3.5, 10);
+});
+
+test('holds the hover halo over the rotated bounds', () => {
+  const target = connectedShape({ PinX: '2', PinY: '2', Width: '4', Height: '2', Angle: String(Math.PI / 2) });
+  expect(autoConnectHaloHit(target, frame, 1, { x: 192, y: 672 })).toBe(true);
+  expect(autoConnectHaloHit(target, frame, 1, { x: 0, y: 0 })).toBe(false);
+});
+
+test('shifts rotated connection points rigidly on a move', () => {
+  const target = connectedShape({ PinX: '2', PinY: '3', Width: '4', Height: '2', LocPinX: '2', LocPinY: '1', Angle: String(Math.PI / 2) });
+  const after = movedShapePoints(target, { x: 5, y: 6, width: 4, height: 2 }, false);
+  const east = after.find((point) => point.side === 'east')!;
+  expect(east.x).toBeCloseTo(5, 10);
+  expect(east.y).toBeCloseTo(8, 10);
 });
 
 test('paints nothing without arrows or alpha', () => {

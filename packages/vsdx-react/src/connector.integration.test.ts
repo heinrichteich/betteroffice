@@ -113,6 +113,38 @@ describe('connector glue through the UI draft helpers', () => {
     }));
   });
 
+  test('an outline drop on a row-less imported shape still draws through dynamic glue', () => {
+    const diagram = openDiagram(foundation, { clientId: 7107 });
+    try {
+      const plain = diagram.addShape('page:1', { name: 'Imported', cells: [
+        { locator: { cellName: 'Width' }, formula: '2' },
+        { locator: { cellName: 'Height' }, formula: '1' },
+        { locator: { cellName: 'PinX' }, formula: '2' },
+        { locator: { cellName: 'PinY' }, formula: '2' },
+        { locator: { cellName: 'LocPinX' }, formula: 'Width*0.5' },
+        { locator: { cellName: 'LocPinY' }, formula: 'Height*0.5' },
+      ] });
+      const imported = diagram.snapshot().pages[0].shapes.find((shape) => shape.id === plain.shapeId)!;
+      const east = connectionPointsForShape(imported).find((point) => point.side === 'east')!;
+      expect(east.toCell).toBeUndefined();
+      const rectangle = standardShapeById('rectangle')!;
+      const to = diagram.addShape('page:1', rectangle.draft(5, 2, 1, 1));
+      const shapes = diagram.snapshot().pages[0].shapes;
+      const target = shapes.find((shape) => shape.id === to.shapeId)!;
+      const south = connectionPointsForShape(target).find((point) => point.side === 'south')!;
+      expect(south.toCell).toBe('Connections.X3');
+      const receipt = diagram.addConnector('page:1', connectorDraft(east, south), connectorGlue(imported.id, east), connectorGlue(to.shapeId, south));
+      const part = diagram.snapshot().pages[0].sourcePartPath;
+      const connector = diagram.snapshot().pages[0].shapes.find((shape) => shape.id === receipt.shapeId)!;
+      const live = diagram.layoutPage(0);
+      expect(live.primitives.find((item) => item.id === `${part}:${connector.sourceId}`)?.kind).toBe('shape');
+      const route = connectorRouteFromFrame(live, part, connector.sourceId)!;
+      expect(route).not.toBeNull();
+      expect(route.length).toBeGreaterThanOrEqual(2);
+      expect(route[route.length - 1]).toEqual({ x: south.x, y: south.y });
+    } finally { diagram.dispose(); }
+  });
+
   test('deleting a glued shape leaves no dangling glue behind', async () => {
     const diagram = openDiagram(foundation, { clientId: 7105 });
     const rectangle = standardShapeById('rectangle')!;
