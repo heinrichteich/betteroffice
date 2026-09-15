@@ -19,6 +19,7 @@ export interface DiagramHandle {
   reorderPage(pageId: string, toIndex: number): ShapeReceipt;
   addShape(pageId: string, draft: FormulaShapeDraft): ShapeReceipt;
   addConnector(pageId: string, draft: FormulaShapeDraft, from: ConnectorGlue, to: ConnectorGlue): ShapeReceipt;
+  addFreeConnector(pageId: string, draft: FormulaShapeDraft, from: ConnectorGlue): ShapeReceipt;
   addConnectedShape(pageId: string, shapeDraft: FormulaShapeDraft, connectorDraft: FormulaShapeDraft, from: ConnectorGlue, toCell?: string): ConnectedShapeReceipt;
   deleteShape(pageId: string, shapeId: string): ShapeReceipt;
   save(): Uint8Array;
@@ -130,6 +131,7 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     reorderPage: (pageId, toIndex) => json(() => doc.reorderPageJson(JSON.stringify({ pageId, toIndex })), true),
     addShape: (pageId, draft) => json(() => doc.addShapeJson(JSON.stringify({ pageId, draft })), true),
     addConnector: (pageId, draft, from, to) => json(() => doc.addConnectorJson(JSON.stringify({ pageId, draft, from, to })), true),
+    addFreeConnector: (pageId, draft, from) => json(() => doc.addFreeConnectorJson(JSON.stringify({ pageId, draft, from })), true),
     addConnectedShape: (pageId, shapeDraft, connectorDraft, from, toCell) => json(() => doc.addConnectedShapeJson(JSON.stringify({ pageId, shapeDraft, connectorDraft, from, toCell })), true),
     deleteShape: (pageId, shapeId) => json(() => doc.deleteShapeJson(JSON.stringify({ pageId, shapeId })), true),
     save: () => wasm(() => doc.save().slice()),

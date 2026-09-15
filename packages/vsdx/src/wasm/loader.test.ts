@@ -287,6 +287,44 @@ describe('VSDX wasm boundary', () => {
     await expectUntouchedParts(foundation, saved, editedPart);
   });
 
+  test('a free-ended connector follows its source and keeps a free end', async () => {
+    const pageId = 'page:1';
+    const editedPart = 'visio/pages/page1.xml';
+    const diagram = openDiagram(foundation, { clientId: 9019 });
+    const rect = (pinX: string) => ({ name: 'Rect', cells: [
+      { locator: { cellName: 'Width' }, formula: '1' },
+      { locator: { cellName: 'Height' }, formula: '1' },
+      { locator: { cellName: 'PinX' }, formula: pinX },
+      { locator: { cellName: 'PinY' }, formula: '1' },
+      { locator: { cellName: 'LocPinX' }, formula: '0' },
+      { locator: { cellName: 'LocPinY' }, formula: '0' },
+    ] });
+    const from = diagram.addShape(pageId, rect('1'));
+    const receipt = diagram.addFreeConnector(pageId, { name: 'Connector', cells: [
+      { locator: { cellName: 'OneD' }, formula: '1' },
+      { locator: { cellName: 'BeginX' }, formula: '1' },
+      { locator: { cellName: 'BeginY' }, formula: '1' },
+      { locator: { cellName: 'EndX' }, formula: '7' },
+      { locator: { cellName: 'EndY' }, formula: '4' },
+    ] }, { shapeId: from.shapeId });
+    const part = diagram.snapshot().pages[0].sourcePartPath;
+    const connector = diagram.snapshot().pages[0].shapes.find(shape => shape.id === receipt.shapeId)!;
+    const before = diagram.layoutPage(0);
+    expect(before.primitives).toContainEqual(expect.objectContaining({ id: `${part}:${connector.sourceId}`, kind: 'shape' }));
+    diagram.moveShape(pageId, from.shapeId, '3', '5');
+    const after = diagram.layoutPage(0);
+    expect(after).not.toEqual(before);
+    const saved = diagram.save();
+    diagram.dispose();
+
+    const reopened = openDiagram(saved, { clientId: 9020 });
+    expect(reopened.layoutPage(0)).toEqual(after);
+    const kept = reopened.snapshot().pages[0].shapes.find(shape => shape.name === 'Connector')!;
+    expect(kept.id).not.toBe(receipt.shapeId);
+    reopened.dispose();
+    await expectUntouchedParts(foundation, saved, editedPart);
+  });
+
   test('inserts a connected shape with its connector as one undoable receipt', async () => {
     const pageId = 'page:1';
     const editedPart = 'visio/pages/page1.xml';

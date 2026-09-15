@@ -1091,6 +1091,98 @@ impl DiagramSession {
         })
     }
 
+    /// Adds a 1D connector glued at Begin, with a free End, in one transaction.
+    pub fn add_free_connector(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        draft: &ShapeDraft,
+        from: &ConnectorGlue,
+    ) -> EditResult<ShapeReceipt> {
+        validate_shape_draft(draft)?;
+        if !draft_is_one_d(draft) {
+            return Err(EditError::InvalidState(
+                "connector draft must describe a 1D shape".to_owned(),
+            ));
+        }
+        let from_cell = normalized_glue_target(from.to_cell.as_deref()).ok_or_else(|| {
+            EditError::InvalidState("connector glue needs a valid target cell".to_owned())
+        })?;
+        if !glue_text_valid(&from_cell) {
+            return Err(EditError::InvalidState(
+                "connector glue contains invalid XML attribute text".to_owned(),
+            ));
+        }
+        let mut txn = self.transact_for(context);
+        let pages = txn
+            .get_map(PAGES)
+            .ok_or_else(|| EditError::InvalidState("missing pages map".to_owned()))?;
+        let page = map_ref(&pages, &txn, page_id)?;
+        let order = map_array(&page, &txn, "shapes")?;
+        let index = order.len(&txn);
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
+        let source = match sheets.get(&txn, from.shape_id.as_str()) {
+            Some(Out::YMap(shape)) => shape,
+            _ => return Err(EditError::ShapeNotFound(from.shape_id.clone())),
+        };
+        if map_string(&source, &txn, "pageId").as_deref() != Some(page_id) {
+            return Err(EditError::ShapeNotFound(from.shape_id.clone()));
+        }
+        let id_prefix = format!("{page_id}:shape:added:{}:", self.client_id);
+        if sheets.len(&txn) as usize >= ParseLimits::default().max_shapes {
+            return Err(EditError::InvalidState(
+                "shape count exceeds maximum".to_owned(),
+            ));
+        }
+        let source_bound = map_u32(&page, &txn, "maxSourceId")?
+            .ok_or_else(|| EditError::InvalidState("missing page source ID bound".to_owned()))?;
+        let allocated = materialized_source_ids(&sheets, &txn, &order, source_bound)?;
+        let largest = allocated.values().copied().max().unwrap_or(source_bound);
+        largest.checked_add(1).ok_or_else(|| {
+            EditError::InvalidState("cannot allocate a materialized source ID".to_owned())
+        })?;
+        let sequence = txn.state_vector().get(&yrs::ClientID::new(self.client_id));
+        let id = format!("{id_prefix}{sequence}");
+        let shape = sheets.insert(&mut txn, id.as_str(), MapPrelim::default());
+        shape.insert(&mut txn, "id", id.as_str());
+        shape.insert(&mut txn, "pageId", page_id);
+        shape.insert(&mut txn, "sourceId", 0.0);
+        shape.insert(&mut txn, "origin", "added");
+        if let Some(name) = &draft.name {
+            shape.insert(&mut txn, "name", name.as_str());
+        }
+        let cells = shape.insert(&mut txn, "cells", MapPrelim::default());
+        shape.insert(&mut txn, "shapes", ArrayPrelim::default());
+        for cell in &draft.cells {
+            seed_cell(
+                &cells,
+                &mut txn,
+                &cell.locator,
+                cell.formula.as_deref(),
+                cell.value.as_deref(),
+                cell.row_type.as_deref(),
+            );
+        }
+        order.push_back(&mut txn, id.as_str());
+        let connects = txn.get_or_insert_map(CONNECTS);
+        let key = glue_key(&id, GlueEndpoint::Begin);
+        let entry = connects.insert(&mut txn, key.as_str(), MapPrelim::default());
+        entry.insert(&mut txn, "id", key.as_str());
+        entry.insert(&mut txn, "pageId", page_id);
+        entry.insert(&mut txn, "connectorId", id.as_str());
+        entry.insert(&mut txn, "endpoint", GlueEndpoint::Begin.name());
+        entry.insert(&mut txn, "targetId", from.shape_id.as_str());
+        entry.insert(&mut txn, "toCell", from_cell.as_str());
+        Ok(ShapeReceipt {
+            page_id: page_id.to_owned(),
+            shape_id: id,
+            from_index: None,
+            to_index: Some(index),
+        })
+    }
+
     /// Inserts a shape with its connector glued to it in one atomic transaction.
     pub fn add_connected_shape(
         &self,

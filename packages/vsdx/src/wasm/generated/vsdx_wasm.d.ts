@@ -7,6 +7,7 @@ export class VsdxDocument {
     [Symbol.dispose](): void;
     addConnectedShapeJson(args: string): string;
     addConnectorJson(args: string): string;
+    addFreeConnectorJson(args: string): string;
     addShapeJson(args: string): string;
     applyUpdateJson(update: Uint8Array): string;
     canRedo(): boolean;
@@ -64,6 +65,7 @@ export interface InitOutput {
     readonly __wbg_vsdxdocument_free: (a: number, b: number) => void;
     readonly vsdxdocument_addConnectedShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_addConnectorJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly vsdxdocument_addFreeConnectorJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_canRedo: (a: number) => number;

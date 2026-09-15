@@ -1,4 +1,4 @@
-import type { ConnectorGlue, FormulaShapeDraft, PageDisplayList, PagePrimitive, ShapeSnapshot } from '@betteroffice/vsdx';
+import type { Affine, ConnectorGlue, FormulaShapeDraft, PageDisplayList, PagePrimitive, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { ModelPoint } from '@betteroffice/vsdx';
 import { cellValue } from './components/ribbon/commands';
 
@@ -143,6 +143,155 @@ function orientDirection(orientation: ShapeOrientation, dir: ModelPoint): ModelP
   return { x: cos * sx * dir.x - sin * sy * dir.y, y: sin * sx * dir.x + cos * sy * dir.y };
 }
 
+/** One shape's frame in its parent frame; mirrors the engine scene rule. */
+export interface SceneBounds { x: number; y: number; width: number; height: number; locPinX: number; locPinY: number; angle: number; flipX: boolean; flipY: boolean; }
+
+export interface ChildExtent { x: number; y: number; width: number; height: number; }
+
+function sceneNumber(shape: ShapeSnapshot, name: string): number | undefined {
+  const raw = cellValue(shape, name);
+  if (raw === undefined) return undefined;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+export function sceneBoundsOf(shape: ShapeSnapshot): SceneBounds | null {
+  const pinX = sceneNumber(shape, 'PinX');
+  const pinY = sceneNumber(shape, 'PinY');
+  const width = sceneNumber(shape, 'Width');
+  const height = sceneNumber(shape, 'Height');
+  if (pinX === undefined || pinY === undefined || width === undefined || height === undefined) return null;
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
+  return {
+    x: pinX - (sceneNumber(shape, 'LocPinX') ?? width / 2),
+    y: pinY - (sceneNumber(shape, 'LocPinY') ?? height / 2),
+    width,
+    height,
+    locPinX: sceneNumber(shape, 'LocPinX') ?? width / 2,
+    locPinY: sceneNumber(shape, 'LocPinY') ?? height / 2,
+    angle: sceneNumber(shape, 'Angle') ?? 0,
+    flipX: (sceneNumber(shape, 'FlipX') ?? 0) !== 0,
+    flipY: (sceneNumber(shape, 'FlipY') ?? 0) !== 0,
+  };
+}
+
+function childExtentOf(group: ShapeSnapshot): ChildExtent | null {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  let found = false;
+  for (const child of group.children) {
+    const bounds = sceneBoundsOf(child);
+    if (!bounds) continue;
+    found = true;
+    minX = Math.min(minX, bounds.x);
+    minY = Math.min(minY, bounds.y);
+    maxX = Math.max(maxX, bounds.x + bounds.width);
+    maxY = Math.max(maxY, bounds.y + bounds.height);
+  }
+  if (!found) return null;
+  const width = maxX - minX;
+  const height = maxY - minY;
+  return width > 0 && height > 0 ? { x: minX, y: minY, width, height } : null;
+}
+
+/** Local-to-parent matrix of one group level; mirrors the engine group rule. */
+export function boundsAffine(bounds: SceneBounds, extent: ChildExtent | null): Affine {
+  const originX = extent?.x ?? 0;
+  const originY = extent?.y ?? 0;
+  const scaleX = extent ? bounds.width / extent.width : 1;
+  const scaleY = extent ? bounds.height / extent.height : 1;
+  const sin = Math.sin(bounds.angle);
+  const cos = Math.cos(bounds.angle);
+  const sx = scaleX * (bounds.flipX ? -1 : 1);
+  const sy = scaleY * (bounds.flipY ? -1 : 1);
+  const fx = bounds.flipX ? -1 : 1;
+  const fy = bounds.flipY ? -1 : 1;
+  const pinX = bounds.x + bounds.locPinX;
+  const pinY = bounds.y + bounds.locPinY;
+  return {
+    a: cos * sx,
+    b: sin * sx,
+    c: -sin * sy,
+    d: cos * sy,
+    e: pinX - cos * (sx * originX + fx * bounds.locPinX) + sin * (sy * originY + fy * bounds.locPinY),
+    f: pinY - sin * (sx * originX + fx * bounds.locPinX) - cos * (sy * originY + fy * bounds.locPinY),
+  };
+}
+
+export function composeAffine(parent: Affine, child: Affine): Affine {
+  return {
+    a: parent.a * child.a + parent.c * child.b,
+    b: parent.b * child.a + parent.d * child.b,
+    c: parent.a * child.c + parent.c * child.d,
+    d: parent.b * child.c + parent.d * child.d,
+    e: parent.a * child.e + parent.c * child.f + parent.e,
+    f: parent.b * child.e + parent.d * child.f + parent.f,
+  };
+}
+
+export function applyAffineToPoint(transform: Affine, point: ModelPoint): ModelPoint {
+  return { x: transform.a * point.x + transform.c * point.y + transform.e, y: transform.b * point.x + transform.d * point.y + transform.f };
+}
+
+function applyAffineToDirection(transform: Affine, dir: ModelPoint): ModelPoint {
+  return { x: transform.a * dir.x + transform.c * dir.y, y: transform.b * dir.x + transform.d * dir.y };
+}
+
+/** Ancestor shapes from the page root down to the direct parent. */
+export function ancestorChain(shapes: readonly ShapeSnapshot[], shapeId: string): ShapeSnapshot[] | null {
+  for (const shape of shapes) {
+    if (shape.id === shapeId) return [];
+    const nested = ancestorChain(shape.children, shapeId);
+    if (nested) return [shape, ...nested];
+  }
+  return null;
+}
+
+const IDENTITY_AFFINE: Affine = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+
+/** Page-space matrix of one placement; null when an ancestor has no bounds. */
+export function sceneTransformForAncestors(ancestors: readonly ShapeSnapshot[]): Affine | null {
+  let scene = IDENTITY_AFFINE;
+  for (const ancestor of ancestors) {
+    const bounds = sceneBoundsOf(ancestor);
+    if (!bounds) return null;
+    scene = composeAffine(scene, boundsAffine(bounds, childExtentOf(ancestor)));
+  }
+  return scene;
+}
+
+/** Connection points in page inches; null when an ancestor has no bounds. */
+export function globalConnectionPoints(shape: ShapeSnapshot, ancestors: readonly ShapeSnapshot[]): ConnectionPoint[] | null {
+  const scene = sceneTransformForAncestors(ancestors);
+  if (!scene) return null;
+  return connectionPointsForShape(shape).map((point) => ({ ...point, ...applyAffineToPoint(scene, point) }));
+}
+
+/** AutoConnect arrows in page inches; null when an ancestor has no bounds. */
+export function globalAutoConnectArrows(shape: ShapeSnapshot, ancestors: readonly ShapeSnapshot[]): AutoConnectArrow[] | null {
+  if (isConnectorShape(shape)) return [];
+  const scene = sceneTransformForAncestors(ancestors);
+  if (!scene) return null;
+  const orientation = shapeOrientation(shape);
+  return connectionPointsForShape(shape)
+    .filter((point) => point.side !== 'centre')
+    .map((point) => ({
+      side: point.side as AutoConnectSide,
+      point: { ...point, ...applyAffineToPoint(scene, point) },
+      dir: applyAffineToDirection(scene, orientDirection(orientation, AUTO_CONNECT_DIRS[point.side as AutoConnectSide])),
+    }));
+}
+
+/** Page-space halo hit; false for connectors and unresolvable nests. */
+export function globalAutoConnectHaloHit(shape: ShapeSnapshot, ancestors: readonly ShapeSnapshot[], frame: PageDisplayList, zoom: number, canvas: ModelPoint): boolean {
+  if (isConnectorShape(shape)) return false;
+  const points = globalConnectionPoints(shape, ancestors);
+  if (!points) return false;
+  return haloHitForOutline(points.filter((point) => point.side !== 'centre'), frame, zoom, canvas);
+}
+
 const CONNECTION_ROWS: Record<AutoConnectSide, { row: number; toCell: string }> = {
   north: { row: 0, toCell: 'Connections.X1' },
   east: { row: 1, toCell: 'Connections.X2' },
@@ -243,10 +392,9 @@ export function autoConnectArrowCss(arrow: AutoConnectArrow, frame: PageDisplayL
   return { x: page.x * zoom, y: page.y * zoom };
 }
 
-/** True while a canvas point stays near a hovered shape, in screen pixels. */
-export function autoConnectHaloHit(shape: ShapeSnapshot, frame: PageDisplayList, zoom: number, canvas: ModelPoint): boolean {
-  const outline = connectionPointsForShape(shape).filter((point) => point.side !== 'centre');
-  if (outline.length !== 4 || isConnectorShape(shape)) return false;
+/** True while a canvas point stays near an outline, in screen pixels. */
+function haloHitForOutline(outline: readonly ConnectionPoint[], frame: PageDisplayList, zoom: number, canvas: ModelPoint): boolean {
+  if (outline.length !== 4) return false;
   const topLeft = modelToPage(frame, { x: Math.min(...outline.map((point) => point.x)), y: Math.max(...outline.map((point) => point.y)) });
   const bottomRight = modelToPage(frame, { x: Math.max(...outline.map((point) => point.x)), y: Math.min(...outline.map((point) => point.y)) });
   const halo = AUTO_CONNECT_HALO_PX / (Number.isFinite(zoom) && zoom > 0 ? zoom : 1);
@@ -257,13 +405,32 @@ export function autoConnectHaloHit(shape: ShapeSnapshot, frame: PageDisplayList,
   return canvas.x >= left && canvas.x <= right && canvas.y >= top && canvas.y <= bottom;
 }
 
+/** True while a canvas point stays near a hovered shape, in screen pixels. */
+export function autoConnectHaloHit(shape: ShapeSnapshot, frame: PageDisplayList, zoom: number, canvas: ModelPoint): boolean {
+  if (isConnectorShape(shape)) return false;
+  return haloHitForOutline(connectionPointsForShape(shape).filter((point) => point.side !== 'centre'), frame, zoom, canvas);
+}
+
 /** Insert geometry for a Quick-Shape dropped from one source edge, in model inches. */
 export function quickShapePlacement(source: ShapeSnapshot, side: AutoConnectSide, width: number, height: number, gap = QUICK_SHAPE_GAP_INCHES): QuickShapePlacement | null {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
   const points = connectionPointsForShape(source);
   const from = points.find((point) => point.side === side);
   if (!from) return null;
-  const dir = orientDirection(shapeOrientation(source), AUTO_CONNECT_DIRS[side]);
+  return placeQuickShape(from, orientDirection(shapeOrientation(source), AUTO_CONNECT_DIRS[side]), width, height, gap);
+}
+
+/** Insert geometry from a page-space edge; null when an ancestor has no bounds. */
+export function globalQuickShapePlacement(source: ShapeSnapshot, ancestors: readonly ShapeSnapshot[], side: AutoConnectSide, width: number, height: number, gap = QUICK_SHAPE_GAP_INCHES): QuickShapePlacement | null {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  const scene = sceneTransformForAncestors(ancestors);
+  if (!scene) return null;
+  const from = globalConnectionPoints(source, ancestors)?.find((point) => point.side === side);
+  if (!from) return null;
+  return placeQuickShape(from, applyAffineToDirection(scene, orientDirection(shapeOrientation(source), AUTO_CONNECT_DIRS[side])), width, height, gap);
+}
+
+function placeQuickShape(from: ConnectionPoint, dir: ModelPoint, width: number, height: number, gap: number): QuickShapePlacement | null {
   const facing: AutoConnectSide = Math.abs(dir.x) >= Math.abs(dir.y) ? (dir.x > 0 ? 'west' : 'east') : (dir.y > 0 ? 'south' : 'north');
   const toCell = `Connections.X${AUTO_CONNECT_SIDES.indexOf(facing) + 1}`;
   const length = Math.hypot(dir.x, dir.y) || 1;
@@ -394,6 +561,53 @@ export function dropTargetForPoint(shapes: readonly ShapeSnapshot[], at: ModelPo
   return fallback;
 }
 
+/** One gluable shape with its points in page inches. */
+export interface PlacedPointTarget { shapeId: string; points: ConnectionPoint[]; }
+
+/** Every gluable shape with page-space points; skips degenerate nests. */
+export function placedPointTargets(shapes: readonly ShapeSnapshot[]): PlacedPointTarget[] {
+  const targets: PlacedPointTarget[] = [];
+  const visit = (shape: ShapeSnapshot, ancestors: readonly ShapeSnapshot[]) => {
+    if (!isConnectorShape(shape)) {
+      const points = globalConnectionPoints(shape, ancestors);
+      if (points) targets.push({ shapeId: shape.id, points });
+    }
+    for (const child of shape.children) visit(child, [...ancestors, shape]);
+  };
+  for (const shape of shapes) visit(shape, []);
+  return targets;
+}
+
+/** Snap within threshold, else the nearest point of a shape containing the drop. */
+export function dropTargetForPlacedPoints(targets: readonly PlacedPointTarget[], at: ModelPoint): { shapeId: string; point: ConnectionPoint } | null {
+  let best: { shapeId: string; point: ConnectionPoint } | null = null;
+  let bestDistance = CONNECTOR_SNAP_INCHES;
+  for (const target of targets) {
+    const point = nearestConnectionPoint(target.points, at, bestDistance);
+    if (!point) continue;
+    bestDistance = Math.hypot(point.x - at.x, point.y - at.y);
+    best = { shapeId: target.shapeId, point };
+  }
+  if (best) return best;
+  let fallback: { shapeId: string; point: ConnectionPoint } | null = null;
+  let fallbackDistance = Number.POSITIVE_INFINITY;
+  for (const target of targets) {
+    const outline = target.points.filter((point) => point.side !== 'centre');
+    if (!outline.length) continue;
+    const left = Math.min(...outline.map((point) => point.x));
+    const right = Math.max(...outline.map((point) => point.x));
+    const bottom = Math.min(...outline.map((point) => point.y));
+    const top = Math.max(...outline.map((point) => point.y));
+    if (at.x < left - CONNECTOR_SNAP_INCHES || at.x > right + CONNECTOR_SNAP_INCHES) continue;
+    if (at.y < bottom - CONNECTOR_SNAP_INCHES || at.y > top + CONNECTOR_SNAP_INCHES) continue;
+    const point = nearestConnectionPointAnywhere(target.points, at);
+    if (!point) continue;
+    const distance = Math.hypot(point.x - at.x, point.y - at.y);
+    if (distance < fallbackDistance) { fallbackDistance = distance; fallback = { shapeId: target.shapeId, point }; }
+  }
+  return fallback;
+}
+
 function findPrimitive(primitives: readonly PagePrimitive[], id: string, depth = 0): PagePrimitive | null {
   if (depth >= 256) return null;
   for (const primitive of primitives) {
@@ -439,6 +653,25 @@ export function connectorEndpointGlue(route: readonly ModelPoint[], shapes: read
   return [classifyConnectorEndpoint(route[0], shapes), classifyConnectorEndpoint(route[route.length - 1], shapes)];
 }
 
+/** Glue states for both route ends against page-space targets. */
+export function connectorEndpointGlueForPlacedPoints(route: readonly ModelPoint[], targets: readonly PlacedPointTarget[]): [ConnectorEndpointGlue, ConnectorEndpointGlue] {
+  if (route.length < 2) return ['unglued', 'unglued'];
+  return [classifyPlacedEndpoint(route[0], targets), classifyPlacedEndpoint(route[route.length - 1], targets)];
+}
+
+/** Point-glued outline match wins over a coincident centre; otherwise unglued. */
+function classifyPlacedEndpoint(at: ModelPoint, targets: readonly PlacedPointTarget[], tolerance = CONNECTOR_GLUE_MATCH_INCHES): ConnectorEndpointGlue {
+  let dynamic = false;
+  for (const target of targets) {
+    for (const point of target.points) {
+      if (Math.hypot(point.x - at.x, point.y - at.y) > tolerance) continue;
+      if (point.side !== 'centre') return 'point';
+      dynamic = true;
+    }
+  }
+  return dynamic ? 'dynamic' : 'unglued';
+}
+
 export interface MovedShapeGeometry { x: number; y: number; width: number; height: number; }
 
 /** Connection points of a dragged shape at its preview geometry, in model inches. */
@@ -480,13 +713,18 @@ function flattenConnectorShapes(shapes: readonly ShapeSnapshot[]): ShapeSnapshot
 
 /** Whole-route recompute for connectors glued to a dragged shape, in model inches. */
 export function reroutePreviewForMove(shapes: readonly ShapeSnapshot[], frame: PageDisplayList, sourcePartPath: string, dragged: ShapeSnapshot, geometry: MovedShapeGeometry): ModelPoint[][] {
-  if (isConnectorShape(dragged) || !shapes.some((shape) => shape.id === dragged.id)) return [];
-  const before = connectionPointsForShape(dragged);
+  if (isConnectorShape(dragged)) return [];
+  const ancestors = ancestorChain(shapes, dragged.id);
+  if (!ancestors) return [];
+  const scene = sceneTransformForAncestors(ancestors);
+  if (!scene) return [];
+  const place = (point: ConnectionPoint): ConnectionPoint => ({ ...point, ...applyAffineToPoint(scene, point) });
+  const before = connectionPointsForShape(dragged).map(place);
   if (!before.length) return [];
   const width = cellNumber(dragged, 'Width');
   const height = cellNumber(dragged, 'Height');
   const resize = width !== undefined && height !== undefined && (geometry.width !== width || geometry.height !== height);
-  const after = movedShapePoints(dragged, geometry, resize);
+  const after = movedShapePoints(dragged, geometry, resize).map(place);
   if (after.length !== before.length) return [];
   const previews: ModelPoint[][] = [];
   for (const shape of flattenConnectorShapes(shapes)) {

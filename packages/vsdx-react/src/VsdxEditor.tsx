@@ -4,10 +4,11 @@ import { canvasPointToModel, initWasm, openDiagram, paintPage, sizeCanvasForPage
 import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent, ReactNode } from 'react';
-import { AUTO_CONNECT_FADE_MS, HOVER_FREE_DRAG_INCHES, HOVER_PROXIMITY_PX, QUICK_SHAPE_IDS, autoConnectArrowAt, autoConnectArrowCss, autoConnectArrowsForShape, autoConnectHaloHit, connectionPointsForShape, connectorDraft, connectorEndpointGlue, connectorGlue, connectorRouteFromFrame, dropTargetForPoint, hoverPointAt, isConnectorShape, nearestConnectionPointAnywhere, paintAutoConnectOverlay, paintConnectorOverlay, quickShapePlacement, reroutePreviewForMove, routeConnector } from './connector';
-import type { AutoConnectSide, ConnectionPoint, ConnectorOverlayRoute, ConnectorOverlayScene } from './connector';
+import { AUTO_CONNECT_FADE_MS, HOVER_FREE_DRAG_INCHES, HOVER_PROXIMITY_PX, QUICK_SHAPE_IDS, ancestorChain, autoConnectArrowAt, autoConnectArrowCss, connectorDraft, connectorEndpointGlueForPlacedPoints, connectorGlue, connectorRouteFromFrame, dropTargetForPlacedPoints, globalAutoConnectArrows, globalAutoConnectHaloHit, globalConnectionPoints, globalQuickShapePlacement, hoverPointAt, isConnectorShape, nearestConnectionPointAnywhere, paintAutoConnectOverlay, paintConnectorOverlay, placedPointTargets, reroutePreviewForMove, routeConnector } from './connector';
+import type { AutoConnectArrow, AutoConnectSide, ConnectionPoint, ConnectorOverlayRoute, ConnectorOverlayScene } from './connector';
 import { Ribbon } from './components/ribbon/Ribbon';
 import { RibbonCommandsProvider, findShapePlacement, numericCellValue } from './components/ribbon/commands';
+import type { ShapePlacement } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapeById, standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
@@ -133,20 +134,21 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     context.clearRect(0, 0, canvas.width, canvas.height);
     const selection = selectionRef.current;
     const connectors: ConnectorOverlayRoute[] = [];
+    const glueTargets = placedPointTargets(page.shapes);
     for (const shape of flattenEditorShapes(page.shapes)) {
       if (!isConnectorShape(shape)) continue;
       const route = connectorRouteFromFrame(frame, page.sourcePartPath, shape.sourceId);
       if (!route) continue;
-      const [beginGlue, endGlue] = connectorEndpointGlue(route, page.shapes);
+      const [beginGlue, endGlue] = connectorEndpointGlueForPlacedPoints(route, glueTargets);
       connectors.push({ route, selected: selection?.shapeId === shape.id, beginGlue, endGlue });
     }
     let hoverPoints: ConnectionPoint[] = [];
     if (connectorModeRef.current && hoverShapeRef.current) {
       const placement = findShapePlacement(page.shapes, hoverShapeRef.current);
-      if (placement && placement.siblings === page.shapes && !isConnectorShape(placement.shape)) hoverPoints = connectionPointsForShape(placement.shape);
+      if (placement) hoverPoints = placementConnectionPoints(page.shapes, placement) ?? [];
     } else if (!connectorModeRef.current && !connectorDragRef.current && pointHoverRef.current) {
       const placement = findShapePlacement(page.shapes, pointHoverRef.current);
-      if (placement && placement.siblings === page.shapes && !isConnectorShape(placement.shape)) hoverPoints = connectionPointsForShape(placement.shape);
+      if (placement) hoverPoints = placementConnectionPoints(page.shapes, placement) ?? [];
     }
     const drag = connectorDragRef.current;
     const end = drag?.snap?.point ?? drag?.current ?? null;
@@ -161,9 +163,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     paintConnectorOverlay(context, frame, dpr, zoomRef.current, scene);
     if (!connectorModeRef.current && !connectorDragRef.current && autoHoverRef.current) {
       const placement = findShapePlacement(page.shapes, autoHoverRef.current);
-      if (placement && placement.siblings === page.shapes && !isConnectorShape(placement.shape)) {
+      if (placement && !isConnectorShape(placement.shape)) {
         paintAutoConnectOverlay(context, frame, dpr, zoomRef.current, {
-          arrows: autoConnectArrowsForShape(placement.shape),
+          arrows: placementArrows(page.shapes, placement),
           hovered: autoArrowRef.current?.shapeId === placement.shape.id ? autoArrowRef.current.side : null,
           alpha: autoAlphaRef.current,
         });
@@ -216,7 +218,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       let hit: HitTestResult | null = null;
       try { hit = handle.hitTest(x, y); } catch { hit = null; }
       const placement = hit ? findShapePlacement(shapes, hit.shapeId) : null;
-      return placement && placement.siblings === shapes && !isConnectorShape(placement.shape) ? placement.shape.id : null;
+      return placement && !isConnectorShape(placement.shape) ? placement.shape.id : null;
     };
     const direct = probe(canvas.x, canvas.y);
     if (direct) return direct;
@@ -380,7 +382,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       try {
         const selected = selectionRef.current;
         const placement = selected && selected.pageId === page.id ? findShapePlacement(page.shapes, selected.shapeId) : null;
-        if (!placement || placement.siblings !== page.shapes || isConnectorShape(placement.shape)) {
+        if (!placement || isConnectorShape(placement.shape)) {
           if (reroutePreviewRef.current.length) { reroutePreviewRef.current = []; paintOverlayNow(); }
           return;
         }
@@ -403,9 +405,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         }
         if (autoHoverRef.current) {
           const hoveredPlacement = findShapePlacement(page.shapes, autoHoverRef.current);
-          const arrows = hoveredPlacement && hoveredPlacement.siblings === page.shapes && !isConnectorShape(hoveredPlacement.shape)
-            ? autoConnectArrowsForShape(hoveredPlacement.shape)
-            : [];
+          const arrows = hoveredPlacement ? placementArrows(page.shapes, hoveredPlacement) : [];
           const arrow = autoConnectArrowAt(arrows, frame, zoomRef.current, point.canvas);
           const next = arrow ? { shapeId: autoHoverRef.current, side: arrow.side } : null;
           const previous = autoArrowRef.current;
@@ -420,12 +420,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           if (arrow) { setPointCursor(event.currentTarget, false); return; }
         }
         let placement = pointHoverRef.current ? findShapePlacement(page.shapes, pointHoverRef.current) : null;
-        if (placement && (placement.siblings !== page.shapes || isConnectorShape(placement.shape))) placement = null;
-        if (placement && !autoConnectHaloHit(placement.shape, frame, zoomRef.current, point.canvas)) placement = null;
+        if (placement && isConnectorShape(placement.shape)) placement = null;
+        if (placement && !placementHaloHit(page.shapes, placement, frame, zoomRef.current, point.canvas)) placement = null;
         if (!placement) {
           const probed = pointHoverShapeAt(page.shapes, point.canvas);
           placement = probed ? findShapePlacement(page.shapes, probed) : null;
-          if (placement && (placement.siblings !== page.shapes || isConnectorShape(placement.shape))) placement = null;
+          if (placement && isConnectorShape(placement.shape)) placement = null;
         }
         const hovered = placement ? placement.shape.id : null;
         if (hovered !== autoHoverRef.current || hovered !== pointHoverRef.current) {
@@ -436,7 +436,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           if (hovered) startAutoFade();
           else { autoAlphaRef.current = 0; paintOverlayNow(); }
         }
-        setPointCursor(event.currentTarget, placement ? hoverPointAt(connectionPointsForShape(placement.shape), frame, zoomRef.current, point.model) !== null : false);
+        setPointCursor(event.currentTarget, placement ? hoverPointAt(placementConnectionPoints(page.shapes, placement) ?? [], frame, zoomRef.current, point.model) !== null : false);
       } catch (value) { reportError(value); }
       return;
     }
@@ -451,7 +451,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       }
       const hit = handle.hitTest(point.canvas.x, point.canvas.y);
       const placement = hit ? findShapePlacement(page.shapes, hit.shapeId) : null;
-      const hovered = placement && placement.siblings === page.shapes && !isConnectorShape(placement.shape) ? placement.shape.id : null;
+      const hovered = placement && !isConnectorShape(placement.shape) ? placement.shape.id : null;
       if (hovered !== hoverShapeRef.current) { hoverShapeRef.current = hovered; paintOverlayNow(); }
     } catch (value) { reportError(value); }
   };
@@ -492,8 +492,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       const point = canvasPointerPosition(event, frame);
       const grabbedId = pointHoverRef.current ?? pointHoverShapeAt(page.shapes, point.canvas);
       const grabbedPlacement = grabbedId ? findShapePlacement(page.shapes, grabbedId) : null;
-      const grabbedShape = grabbedPlacement && grabbedPlacement.siblings === page.shapes && !isConnectorShape(grabbedPlacement.shape) ? grabbedPlacement.shape : null;
-      const grabbed = grabbedShape ? hoverPointAt(connectionPointsForShape(grabbedShape), frame, zoomRef.current, point.model) : null;
+      const grabbedPoints = grabbedPlacement ? placementConnectionPoints(page.shapes, grabbedPlacement) ?? [] : [];
+      const grabbedShape = grabbedPlacement && !isConnectorShape(grabbedPlacement.shape) ? grabbedPlacement.shape : null;
+      const grabbed = grabbedShape ? hoverPointAt(grabbedPoints, frame, zoomRef.current, point.model) : null;
       if (grabbed && grabbedShape) {
         pointHoverRef.current = grabbedShape.id;
         autoHoverRef.current = null;
@@ -509,9 +510,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       }
       if (autoHoverRef.current) {
         const hoveredPlacement = findShapePlacement(page.shapes, autoHoverRef.current);
-        const arrows = hoveredPlacement && hoveredPlacement.siblings === page.shapes && !isConnectorShape(hoveredPlacement.shape)
-          ? autoConnectArrowsForShape(hoveredPlacement.shape)
-          : [];
+        const arrows = hoveredPlacement ? placementArrows(page.shapes, hoveredPlacement) : [];
         const arrow = autoConnectArrowAt(arrows, frame, zoomRef.current, point.canvas);
         if (arrow) {
           const sourceId = autoHoverRef.current;
@@ -586,7 +585,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
             try { drop = canvasPointerPosition(event, frame).model; } catch { drop = null; }
             if (drop && Math.hypot(drop.x - drag.from.point.x, drop.y - drag.from.point.y) >= HOVER_FREE_DRAG_INCHES) {
               try {
-                const receipt = handle.addShape(drag.pageId, connectorDraft(drag.from.point, drop));
+                const receipt = handle.addFreeConnector(drag.pageId, connectorDraft(drag.from.point, drop), connectorGlue(drag.from.shapeId, drag.from.point));
                 refresh(undefined, true);
                 setSelection({ pageId: drag.pageId, shapeId: receipt.shapeId, hit: { kind: 'shape', shapeId: receipt.shapeId } });
                 pointHoverRef.current = drag.from.shapeId;
@@ -631,9 +630,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       const live = handle.snapshot();
       const livePage = live.pages.find((item) => item.id === page.id);
       const placement = livePage ? findShapePlacement(livePage.shapes, sourceId) : null;
-      if (!livePage || !placement || placement.siblings !== livePage.shapes || isConnectorShape(placement.shape)) return;
+      if (!livePage || !placement || isConnectorShape(placement.shape)) return;
       const source = placement.shape;
-      const layout = quickShapePlacement(source, side, Math.max(0.25, numericCellValue(source, 'Width', 1)), Math.max(0.25, numericCellValue(source, 'Height', 1)));
+      const ancestors = ancestorChain(livePage.shapes, source.id) ?? [];
+      const layout = globalQuickShapePlacement(source, ancestors, side, Math.max(0.25, numericCellValue(source, 'Width', 1)), Math.max(0.25, numericCellValue(source, 'Height', 1)));
       if (!layout) return;
       const receipt = handle.addConnectedShape(page.id, shape.draft(layout.x, layout.y, layout.width, layout.height), connectorDraft(layout.from, layout.to), connectorGlue(source.id, layout.from), layout.to.toCell);
       refresh(undefined, true);
@@ -751,16 +751,39 @@ function flattenEditorShapes(shapes: readonly ShapeSnapshot[]): ShapeSnapshot[] 
   return shapes.flatMap((shape) => [shape, ...flattenEditorShapes(shape.children)]);
 }
 
+/** Page-space connection points of one placement; null for connectors and degenerate nests. */
+export function placementConnectionPoints(shapes: readonly ShapeSnapshot[], placement: ShapePlacement): ConnectionPoint[] | null {
+  if (isConnectorShape(placement.shape)) return null;
+  const ancestors = ancestorChain(shapes, placement.shape.id);
+  if (!ancestors) return null;
+  return globalConnectionPoints(placement.shape, ancestors);
+}
+
+function placementArrows(shapes: readonly ShapeSnapshot[], placement: ShapePlacement): AutoConnectArrow[] {
+  if (isConnectorShape(placement.shape)) return [];
+  const ancestors = ancestorChain(shapes, placement.shape.id);
+  if (!ancestors) return [];
+  return globalAutoConnectArrows(placement.shape, ancestors) ?? [];
+}
+
+function placementHaloHit(shapes: readonly ShapeSnapshot[], placement: ShapePlacement, frame: PageDisplayList, zoom: number, canvas: ModelPoint): boolean {
+  const ancestors = ancestorChain(shapes, placement.shape.id);
+  if (!ancestors) return false;
+  return globalAutoConnectHaloHit(placement.shape, ancestors, frame, zoom, canvas);
+}
+
 /** Nearest point on a known shape, in model inches. */
 export function nearestPointOnShape(shapes: readonly ShapeSnapshot[], shapeId: string, at: ModelPoint): ConnectionPoint | null {
   const placement = findShapePlacement(shapes, shapeId);
   if (!placement || isConnectorShape(placement.shape)) return null;
-  return nearestConnectionPointAnywhere(connectionPointsForShape(placement.shape), at);
+  const points = placementConnectionPoints(shapes, placement);
+  if (!points) return null;
+  return nearestConnectionPointAnywhere(points, at);
 }
 
 /** Drop target forgiving of interior drops; falls back to the hit-tested shape. */
 export function connectorTargetForPoint(shapes: readonly ShapeSnapshot[], handle: DiagramHandle, canvas: ModelPoint, at: ModelPoint): { shapeId: string; point: ConnectionPoint } | null {
-  const direct = dropTargetForPoint(shapes, at);
+  const direct = dropTargetForPlacedPoints(placedPointTargets(shapes), at);
   if (direct) return direct;
   let shapeId: string | null = null;
   try { shapeId = handle.hitTest(canvas.x, canvas.y)?.shapeId ?? null; } catch { shapeId = null; }

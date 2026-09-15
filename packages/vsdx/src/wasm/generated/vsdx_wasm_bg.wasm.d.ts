@@ -11,6 +11,7 @@ export const vsdxrenderer_registerFont: (a: number, b: number, c: number, d: num
 export const __wbg_vsdxdocument_free: (a: number, b: number) => void;
 export const vsdxdocument_addConnectedShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_addConnectorJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const vsdxdocument_addFreeConnectorJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_canRedo: (a: number) => number;
