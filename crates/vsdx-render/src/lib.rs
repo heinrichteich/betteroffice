@@ -1607,7 +1607,7 @@ struct Bounds {
     loc_pin_y: f64,
     angle: f64,
 }
-/// Straight and center-to-center styles run directly, vertical starters bend vertical-first, other right-angle styles bend horizontal-first.
+/// No style, straight and center-to-center run directly, vertical starters bend vertical-first, other right-angle styles bend horizontal-first.
 fn connector_route(
     begin: ScenePoint,
     end: ScenePoint,
@@ -1618,7 +1618,7 @@ fn connector_route(
         x: begin.x,
         y: begin.y,
     }];
-    let straight = route_style == 2.0 || route_style == 16.0;
+    let straight = route_style == 0.0 || route_style == 2.0 || route_style == 16.0;
     if !straight && begin.x != end.x && begin.y != end.y {
         if matches!(route_style as i64, 3 | 5 | 7 | 10 | 12 | 14 | 17 | 19 | 22) {
             path.push(Line {
@@ -1635,7 +1635,7 @@ fn connector_route(
     path.push(Line { x: end.x, y: end.y });
     path
 }
-/// Per-shape ShapeRouteStyle wins, zero means the page RouteStyle, absent page means right angle.
+/// Per-shape ShapeRouteStyle wins, zero means the page RouteStyle, absent page means no routing intent.
 fn connector_route_style(
     package: &VsdxPackage,
     resolver: &Resolver<'_>,
@@ -4070,13 +4070,13 @@ mod tests {
             Line { x: 4.0, y: 3.0 },
         ];
         let direct = vec![Move { x: 1.0, y: 1.0 }, Line { x: 4.0, y: 3.0 }];
-        for style in [0.0, 1.0, 4.0, 6.0, 8.0, 9.0, 21.0] {
+        for style in [1.0, 4.0, 6.0, 8.0, 9.0, 21.0] {
             assert_eq!(connector_route(begin, end, style), horizontal);
         }
         for style in [3.0, 5.0, 7.0, 10.0, 12.0, 14.0, 17.0, 19.0, 22.0] {
             assert_eq!(connector_route(begin, end, style), vertical);
         }
-        for style in [2.0, 16.0] {
+        for style in [0.0, 2.0, 16.0] {
             assert_eq!(connector_route(begin, end, style), direct);
         }
         for style in [-1.0, 23.0, 1e30, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
@@ -4154,6 +4154,16 @@ mod tests {
                 Line { x: 1.0, y: 3.0 },
                 Line { x: 4.0, y: 3.0 },
             ]
+        );
+    }
+
+    #[test]
+    fn one_d_shape_without_any_route_style_runs_straight() {
+        use GeometryPathCommand::{Line, Move};
+        let package = package(vec![unglued_connector(None)]);
+        assert_eq!(
+            connector_path(&package, "page"),
+            vec![Move { x: 1.0, y: 1.0 }, Line { x: 4.0, y: 3.0 }]
         );
     }
 

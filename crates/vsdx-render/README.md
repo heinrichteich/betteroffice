@@ -4,8 +4,10 @@ Dynamic connectors resolve their ShapeSheet endpoint values and page glue record
 The routing policy is deterministic: a single-subpath filed `Geometry` supplies the waypoints,
 anchored to the resolved endpoints, otherwise the shape's `ShapeRouteStyle` — or the page's
 `RouteStyle` — selects a direct run or one horizontal-first or vertical-first orthogonal bend.
-It does not emulate Visio obstacle avoidance or line jumps; an unresolved route becomes a
-placeholder instead of a guessed line.
+Every 1-D shape takes this path, plain lines included, so a shape that carries no route style at
+all runs straight rather than assuming a connector's right angle. It does not emulate Visio
+obstacle avoidance or line jumps; an unresolved route becomes a placeholder instead of a guessed
+line.
 
 VSDX resolved-scene to display-list compiler and hit tester.
 
