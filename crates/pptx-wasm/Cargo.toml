@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 wasm-opt = ["-O3"]
 
 [dependencies]
+ooxml-drawingml = { workspace = true, features = ["tiff"] }
 pptx-edit = { workspace = true, features = ["wasm"] }
 pptx-parse.workspace = true
 pptx-render.workspace = true

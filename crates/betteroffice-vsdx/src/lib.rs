@@ -12,6 +12,7 @@ use vsdx_resolve::{PageConnectivity, PageContainers, ResolveError, ResolvedShape
 pub enum Error {
     Parse(VsdxError),
     Resolve(ResolveError),
+    Render(String),
     Policy(String),
 }
 
@@ -45,6 +46,12 @@ impl Diagram {
     }
     pub fn package(&self) -> &VsdxPackage {
         &self.package
+    }
+    /// Renders every diagram page to a vector PDF with selectable text.
+    pub fn export_pdf(&self) -> Result<Vec<u8>> {
+        vsdx_render::Renderer::default()
+            .export_pdf(&self.package)
+            .map_err(|error| Error::Render(error.to_string()))
     }
     /// Applies formula edits sequentially, recomputing caches and enforcing current locks.
     pub fn save_cell_edits(&self, edits: &[SemanticCellEdit]) -> Result<Vec<u8>> {
@@ -351,6 +358,7 @@ impl MutationContext for PackageMutationContext<'_> {
                 Error::Policy(reason) => format!("cannot evaluate {lock}: {reason}"),
                 Error::Parse(error) => error.to_string(),
                 Error::Resolve(error) => error.to_string(),
+                Error::Render(reason) => reason,
             })?
             .ok_or_else(|| {
                 format!("cannot evaluate {lock}: it is outside the display evaluation profile")

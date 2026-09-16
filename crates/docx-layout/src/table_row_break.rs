@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use crate::cell_layout::{cell_vertical_offset, layout_cell_content};
+use crate::cell_layout::{cell_vertical_offset, layout_cell_content, nested_table_float_offset};
 use crate::table_grid::resolve_cell_grid;
 use crate::types::{BlockExtent, LayoutBlock, TableBlock, TableExtent};
 
@@ -63,6 +63,13 @@ fn cell_unbreakable_ranges(
         };
         if let Some(height) = height {
             y += previous_after;
+            if let Some(LayoutBlock::Table(table)) = block
+                && let Some(offset) = nested_table_float_offset(table.floating.as_ref())
+            {
+                ranges.push((y + offset, y + offset + height));
+                previous_after = 0.0;
+                continue;
+            }
             let top = y;
             y += height;
             ranges.push((top, y));
@@ -171,9 +178,12 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
         }
         offsets.retain(|offset| {
             *offset == row_height
-                || !unbreakable_ranges
+                || (unbreakable_ranges
                     .iter()
-                    .any(|(top, bottom)| *offset > *top && *offset < *bottom)
+                    .any(|(_, bottom)| *bottom > *offset)
+                    && !unbreakable_ranges
+                        .iter()
+                        .any(|(top, bottom)| *offset > *top && *offset < *bottom))
         });
         offsets.sort_by(f64::total_cmp);
         break_offsets.push(offsets);
@@ -183,6 +193,52 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
         row_tops,
         break_offsets,
     }
+}
+
+pub(crate) fn minimum_row_slice(
+    block: &TableBlock,
+    measure: &TableExtent,
+    info: &TableRowBreakInfo,
+    row: usize,
+    consumed: f64,
+) -> f64 {
+    let remaining = measure.rows[row].height - consumed;
+    if consumed == 0.0
+        && block
+            .rows
+            .get(row)
+            .is_some_and(|row| row.cant_split.unwrap_or(false))
+    {
+        return remaining;
+    }
+    info.break_offsets[row]
+        .iter()
+        .copied()
+        .find(|offset| *offset > consumed)
+        .map_or(remaining, |offset| offset - consumed)
+}
+
+pub(crate) fn first_table_fragment_height(
+    block: &TableBlock,
+    measure: &TableExtent,
+    info: &TableRowBreakInfo,
+) -> f64 {
+    let headers = block
+        .rows
+        .iter()
+        .take_while(|row| row.is_header.unwrap_or(false))
+        .count()
+        .min(measure.rows.len());
+    if headers == 0 {
+        return measure.rows.first().map_or(0.0, |row| row.height);
+    }
+    let header_height: f64 = measure.rows[..headers].iter().map(|row| row.height).sum();
+    header_height
+        + if headers < measure.rows.len() {
+            minimum_row_slice(block, measure, info, headers, 0.0)
+        } else {
+            0.0
+        }
 }
 
 /// Given a row and how much of it has already been placed (`from_offset`),
@@ -367,6 +423,31 @@ mod tests {
         };
         assert_eq!(snap_row_break(&info, 0, 0.0, 100.0), 0.0);
         assert_eq!(snap_row_break(&info, 5, 0.0, 100.0), 0.0);
+    }
+
+    #[test]
+    fn keeps_the_last_line_with_trailing_cell_padding_and_paragraph_spacing() {
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0,
+            "rows": [{ "id": 0, "cells": [{
+                "id": 0,
+                "padding": { "top": 5, "bottom": 5, "left": 0, "right": 0 },
+                "blocks": [para_with_spacing(0.0, 3.0)]
+            }] }],
+            "columnWidths": [100],
+        }))
+        .unwrap();
+        let measure: TableExtent = serde_json::from_value(json!({
+            "rows": [{ "height": 53, "cells": [{
+                "blocks": [para_measure(2)], "width": 100, "height": 53
+            }] }],
+            "columnWidths": [100], "totalWidth": 100, "totalHeight": 53,
+        }))
+        .unwrap();
+        let info = build_table_row_break_info(&block, &measure);
+        assert_eq!(snap_row_break(&info, 0, 0.0, 50.0), 25.0);
+        assert_eq!(snap_row_break(&info, 0, 25.0, 27.0), 0.0);
+        assert_eq!(snap_row_break(&info, 0, 25.0, 28.0), 28.0);
     }
 
     #[test]
