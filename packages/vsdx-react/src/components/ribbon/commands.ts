@@ -74,9 +74,6 @@ function colorFormula(value = '#000000'): string {
   return `RGB(${[0, 2, 4].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16)).join(',')})`;
 }
 
-/** Matches a GUARD function call without matching reference names containing guard. */
-const GUARD_CALL = /(^|[^A-Z0-9_.])GUARD\s*\(/i;
-
 export function numberValue(value: string | undefined): number {
   const result = Number(value ?? '0');
   return Number.isFinite(result) ? result : 0;
@@ -97,7 +94,40 @@ export function lockCellEnabled(shape: ShapeSnapshot | null, name: string): bool
 
 /** True when the stored formula for a cell carries a GUARD interception. */
 export function cellIsGuarded(shape: ShapeSnapshot | null, name: string): boolean {
-  return GUARD_CALL.test(cellFormula(shape, name) ?? '');
+  return hasGuardCall(cellFormula(shape, name) ?? '');
+}
+
+function hasGuardCall(formula: string): boolean {
+  let index = 0;
+  while (index < formula.length && formula[index] === '=') index += 1;
+  const isIdentChar = (char: string) => /[A-Za-z0-9_.!]/.test(char);
+  while (index < formula.length) {
+    const char = formula[index];
+    if (char === '"') {
+      index += 1;
+      while (index < formula.length) {
+        if (formula[index] === '"') {
+          if (formula[index + 1] === '"') { index += 2; continue; }
+          index += 1;
+          break;
+        }
+        index += 1;
+      }
+      continue;
+    }
+    if (/[A-Za-z_]/.test(char)) {
+      let end = index + 1;
+      while (end < formula.length && isIdentChar(formula[end])) end += 1;
+      const candidate = formula.slice(index, end);
+      let cursor = end;
+      while (cursor < formula.length && /\s/.test(formula[cursor])) cursor += 1;
+      if (cursor < formula.length && formula[cursor] === '(' && candidate.toUpperCase() === 'GUARD') return true;
+      index = end;
+      continue;
+    }
+    index += 1;
+  }
+  return false;
 }
 
 /** True when a delete would be refused by LockDelete or a GUARD on it. */
