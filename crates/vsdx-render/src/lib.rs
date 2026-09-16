@@ -960,8 +960,10 @@ impl Renderer {
             Err(reason) => return self.placeholder(page_part, shape, state, &reason),
         };
         let style = connector_route_style(package, resolver, page_part, resolved);
-        let path = connector_geometry(package, references, resolved, shape.id, transforms)
-            .unwrap_or_else(|| connector_route(begin, end, style));
+        let path = connector_geometry(
+            package, references, resolved, shape.id, transforms, begin, end,
+        )
+        .unwrap_or_else(|| connector_route(begin, end, style));
         state.primitives.push(Primitive::Shape {
             id,
             z_order,
@@ -1626,6 +1628,8 @@ fn connector_geometry(
     resolved: &ResolvedShape,
     shape_id: u32,
     transforms: &BTreeMap<u32, SceneTransform>,
+    begin: ScenePoint,
+    end: ScenePoint,
 ) -> Option<Vec<ooxml_drawingml::GeometryPathCommand>> {
     let transform = transforms.get(&shape_id)?;
     let size = bounds(package, references, resolved, shape_id)?;
@@ -1652,7 +1656,17 @@ fn connector_geometry(
         geometry.commands.extend(realized.commands);
         geometry.issues.extend(realized.issues);
     }
-    if geometry.commands.is_empty() || !geometry.issues.is_empty() {
+    if geometry.commands.is_empty()
+        || !geometry.issues.is_empty()
+        || geometry
+            .commands
+            .iter()
+            .all(|command| matches!(command, ooxml_drawingml::GeometryPathCommand::Move { .. }))
+        || geometry
+            .commands
+            .iter()
+            .any(|command| matches!(command, ooxml_drawingml::GeometryPathCommand::Close))
+    {
         return None;
     }
     if !matches!(
@@ -1668,7 +1682,26 @@ fn connector_geometry(
     for command in &mut geometry.commands {
         transform_affine(command, matrix);
     }
-    Some(geometry.commands)
+    if !geometry.commands.iter().all(command_finite) {
+        return None;
+    }
+    let mut path = Vec::with_capacity(geometry.commands.len() + 1);
+    for (index, command) in geometry.commands.into_iter().enumerate() {
+        match command {
+            ooxml_drawingml::GeometryPathCommand::Move { .. } if index == 0 => {
+                path.push(ooxml_drawingml::GeometryPathCommand::Move {
+                    x: begin.x,
+                    y: begin.y,
+                });
+            }
+            ooxml_drawingml::GeometryPathCommand::Move { x, y } => {
+                path.push(ooxml_drawingml::GeometryPathCommand::Line { x, y });
+            }
+            command => path.push(command),
+        }
+    }
+    path.push(ooxml_drawingml::GeometryPathCommand::Line { x: end.x, y: end.y });
+    Some(path)
 }
 fn bounds_finite(bounds: Bounds) -> bool {
     [
@@ -4078,6 +4111,35 @@ mod tests {
                 Move { x: 1.0, y: 1.0 },
                 Line { x: 1.5, y: 1.0 },
                 Line { x: 1.5, y: 3.0 },
+                Line { x: 4.0, y: 3.0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn filed_connector_geometry_without_segments_falls_back_to_synthesized_route() {
+        use GeometryPathCommand::{Line, Move};
+        let mut connector = unglued_connector(Some("1"));
+        connector.children.push(ShapeChild::Section(Section {
+            name: "Geometry".into(),
+            index: None,
+            del: false,
+            children: vec![row(0, "MoveTo", vec![cell("X", "0"), cell("Y", "0")])]
+                .into_iter()
+                .map(SectionChild::Row)
+                .collect(),
+            other_attrs: vec![],
+        }));
+        let list = render(vec![connector]);
+        let Primitive::Shape { path, .. } = shape_primitive(&list, 1) else {
+            unreachable!()
+        };
+        assert_eq!(
+            *path,
+            vec![
+                Move { x: 1.0, y: 1.0 },
+                Line { x: 4.0, y: 1.0 },
+                Line { x: 4.0, y: 3.0 },
             ]
         );
     }
