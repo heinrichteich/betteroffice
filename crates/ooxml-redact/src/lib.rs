@@ -79,7 +79,9 @@ pub enum RedactError {
     Container(String),
     #[error("could not detect DOCX, XLSX, PPTX, VSDX, or VSTX content")]
     UnknownFormat,
-    #[error("Visio redaction is not supported; no safe redacted package can be produced")]
+    #[error(
+        "unsupported or ambiguous Visio format; only VSDX drawings and VSTX templates can be redacted"
+    )]
     UnsupportedVisio,
     #[error("cannot safely redact Visio part {part}: {message}")]
     AmbiguousVisio { part: String, message: String },
@@ -155,7 +157,7 @@ pub fn redact_with_report_and_options(
     };
     media_parts::convert_wdp_parts(&mut parts)?;
     if visio::is_visio(detected) {
-        visio::normalize_relationships(&mut parts)?;
+        report.attributes += visio::normalize_relationships(&mut parts)?;
     }
     let collect_styles = |name: &str| {
         parts

@@ -9,7 +9,9 @@ use crate::scrub::normalize_part_name;
 
 type IdMap = BTreeMap<String, String>;
 
-pub(crate) fn normalize_relationships(parts: &mut [(String, Vec<u8>)]) -> Result<(), RedactError> {
+pub(crate) fn normalize_relationships(
+    parts: &mut [(String, Vec<u8>)],
+) -> Result<usize, RedactError> {
     let mut relationships = BTreeMap::new();
     for (path, bytes) in parts.iter() {
         let path = normalize_part_name(path);
@@ -37,6 +39,7 @@ pub(crate) fn normalize_relationships(parts: &mut [(String, Vec<u8>)]) -> Result
         }
     }
     let mut rows = IdMap::new();
+    let mut changed = 0;
     for (path, bytes) in parts {
         let path = normalize_part_name(path);
         if !crate::is_xml_part(&path) {
@@ -48,20 +51,23 @@ pub(crate) fn normalize_relationships(parts: &mut [(String, Vec<u8>)]) -> Result
             let declaration = owner.is_some() && element == "Relationship" && key == "Id";
             let reference = namespace.is_some_and(super::relationship_namespace);
             if declaration || reference {
-                return ids
+                let replacement = ids
                     .and_then(|ids| ids.get(value))
                     .cloned()
-                    .map(Some)
-                    .ok_or_else(|| super::ambiguous(&path, "unresolved relationship reference"));
+                    .ok_or_else(|| super::ambiguous(&path, "unresolved relationship reference"))?;
+                changed += usize::from(replacement != value);
+                return Ok(Some(replacement));
             }
             if element == "Row" && key == "N" && namespace.is_none() {
                 let next = format!("Row{}", rows.len() + 1);
-                return Ok(Some(rows.entry(value.to_owned()).or_insert(next).clone()));
+                let replacement = rows.entry(value.to_owned()).or_insert(next).clone();
+                changed += usize::from(replacement != value);
+                return Ok(Some(replacement));
             }
             Ok(None)
         })?;
     }
-    Ok(())
+    Ok(changed)
 }
 
 fn relationship_owner(path: &str) -> Option<String> {

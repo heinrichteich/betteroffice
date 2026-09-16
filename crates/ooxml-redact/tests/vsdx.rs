@@ -83,6 +83,17 @@ mod tests {
     }
 
     #[test]
+    fn report_counts_renamed_relationship_ids() {
+        let (_, baseline) = ooxml_redact::redact_with_report(FOUNDATION, Format::Auto).unwrap();
+        let mut parts = source_parts();
+        rewrite(&mut parts, "_rels/.rels", "rId1", SECRET);
+        let source = ooxml_opc::rezip_parts(&parts).unwrap();
+        let (output, report) = ooxml_redact::redact_with_report(&source, Format::Auto).unwrap();
+        assert_eq!(report.attributes, baseline.attributes + 1);
+        assert_no_secret(&output);
+    }
+
+    #[test]
     fn standard_curve_row_types_survive() {
         let mut parts = source_parts();
         rewrite(
