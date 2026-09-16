@@ -2,7 +2,7 @@ import { beforeAll, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm, openDiagram } from '@betteroffice/vsdx';
-import { buildClipboardEntry, draftForPaste } from './clipboard';
+import { buildClipboardEntry, draftForPaste, draftTreeForPaste } from './clipboard';
 import { PASTE_OFFSET } from './clipboard';
 
 const root = resolve(import.meta.dir, '../../../../..');
@@ -90,6 +90,43 @@ test('paste preserves formula-less cells parsed from a real file', async () => {
     const reopened = openDiagram(saved, { clientId: 7105 });
     try {
       expect(reopened.snapshot().pages[0].shapes.some((shape) => shape.id === placement.id)).toBe(true);
+    } finally {
+      reopened.dispose();
+    }
+  } finally {
+    handle.dispose();
+  }
+});
+
+test('group paste reproduces children with remapped glue as one undo step', async () => {
+  const bytes = await readFile(resolve(root, 'crates/vsdx-parse/tests/fixtures/grouped-glue.vsdx'));
+  const handle = openDiagram(bytes, { clientId: 7120 });
+  try {
+    const pageId = handle.snapshot().pages[0].id;
+    const source = handle.snapshot().pages[0].shapes.find((shape) => shape.children.length > 0)!;
+    const textFor = (shape: { id: string }): string => {
+      try { return handle.shapeText(pageId, shape.id); }
+      catch { return ''; }
+    };
+    const glue = handle.subtreeGlue(pageId, source.id);
+    const entry = buildClipboardEntry(pageId, source, handle.shapeText(pageId, source.id), { textFor, glue });
+    expect(entry.children.length).toBeGreaterThan(0);
+    const before = handle.snapshot().pages[0].shapes.length;
+    const receipt = handle.addShapeTree(pageId, draftTreeForPaste(entry, PASTE_OFFSET.x, PASTE_OFFSET.y));
+    expect(handle.snapshot().pages[0].shapes.length).toBe(before + 1);
+    const pasted = handle.snapshot().pages[0].shapes.find((shape) => shape.id === receipt.shapeId)!;
+    expect(pasted.children.length).toBe(source.children.length);
+    expect(pasted.sourceId).not.toBe(source.sourceId);
+    handle.undo();
+    expect(handle.snapshot().pages[0].shapes.length).toBe(before);
+    handle.redo();
+    expect(handle.snapshot().pages[0].shapes.length).toBe(before + 1);
+    const saved = handle.save();
+    const reopened = openDiagram(saved, { clientId: 7121 });
+    try {
+      const page = reopened.snapshot().pages[0];
+      const survived = page.shapes.find((shape) => shape.sourceId === pasted.sourceId)!;
+      expect(survived.children.length).toBe(source.children.length);
     } finally {
       reopened.dispose();
     }

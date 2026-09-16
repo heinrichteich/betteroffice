@@ -7,10 +7,10 @@ import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent
 import { Ribbon } from './components/ribbon/Ribbon';
 import { CanvasContextMenu } from './components/ribbon/CanvasContextMenu';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
-import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands, addShapeWithText, copySelection, pasteEntry } from './components/ribbon/commands';
+import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands, copySelection, pasteEntry, duplicateEntry } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
 import type { VsdxClipboardEntry } from './components/ribbon/clipboard';
-import { DUPLICATE_OFFSET, PASTE_OFFSET, draftForPaste } from './components/ribbon/clipboard';
+import { DUPLICATE_OFFSET, PASTE_OFFSET } from './components/ribbon/clipboard';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { ShapeDataPanel } from './components/shapeData/ShapeDataPanel';
 import { LayersPanel } from './components/layers/LayersPanel';
@@ -530,7 +530,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (!handle || !selection) return;
     try {
       const entry = copySelection(handle, selection);
-      const receipt = addShapeWithText(handle, selection.pageId, draftForPaste(entry, DUPLICATE_OFFSET.x, DUPLICATE_OFFSET.y), entry.text);
+      const receipt = duplicateEntry(handle, selection.pageId, entry, DUPLICATE_OFFSET.x, DUPLICATE_OFFSET.y);
       setSelection({ pageId: selection.pageId, shapeId: receipt.shapeId, hit: { kind: 'shape', shapeId: receipt.shapeId } });
       refresh(undefined, true);
     } catch (value) { reportError(value); }

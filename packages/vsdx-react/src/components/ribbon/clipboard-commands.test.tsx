@@ -36,6 +36,8 @@ function handle(state: DiagramSnapshot) {
     setShapeText: mock(() => ({})),
     addShape: mock(() => ({ shapeId: 'new' })),
     addShapeWithText: mock((pageId: string, _draft: unknown, text: string) => ({ pageId, shapeId: 'new', text })),
+    addShapeTree: mock((pageId: string, _draft: unknown) => ({ pageId, shapeId: 'new-tree' })),
+    subtreeGlue: mock(() => []),
   };
   return value as unknown as DiagramHandle & typeof value;
 }
@@ -114,10 +116,35 @@ test('paste stays disabled without a clipboard entry', () => {
   expect(diagram.addShapeWithText).not.toHaveBeenCalled();
 });
 
-test('disables cut, copy and duplicate for groups and reports the refusal', () => {
+test('enables cut, copy and duplicate for groups and pastes the whole tree', () => {
   const state = snapshot();
   const child = { ...state.pages[0].shapes[0], id: 'inner' };
   state.pages[0].shapes = [{ ...state.pages[0].shapes[0], id: 'group', children: [child] }];
+  const diagram = handle(state);
+  const errors: unknown[] = [];
+  let clipboard: VsdxClipboardEntry | null = null;
+  const grouped = { pageId: 'page', shapeId: 'group', hit: { kind: 'shape' as const, shapeId: 'group' } };
+  const commands = createRibbonCommands(diagram, grouped, 'page', () => {}, (error) => errors.push(error), () => {}, null, (next) => { clipboard = next; });
+  expect(commands.copy.enabled).toBe(true);
+  expect(commands.cut.enabled).toBe(true);
+  expect(commands.duplicate.enabled).toBe(true);
+  commands.copy.run();
+  expect(errors).toEqual([]);
+  expect((clipboard as VsdxClipboardEntry | null)?.children).toHaveLength(1);
+  const stored = clipboard as VsdxClipboardEntry | null;
+  const refresh = mock(() => {});
+  const seen: unknown[] = [];
+  const second = createRibbonCommands(diagram, grouped, 'page', refresh, (error) => errors.push(error), () => {}, stored, (next) => { clipboard = next; }, (next) => seen.push(next));
+  second.paste.run();
+  expect(errors).toEqual([]);
+  expect(diagram.addShapeTree).toHaveBeenCalledTimes(1);
+  expect(seen).toEqual([{ pageId: 'page', shapeId: 'new-tree', hit: { kind: 'shape', shapeId: 'new-tree' } }]);
+});
+
+test('disables cut, copy and duplicate only for unportable content', () => {
+  const state = snapshot();
+  const child = { ...state.pages[0].shapes[0], id: 'inner' };
+  state.pages[0].shapes = [{ ...state.pages[0].shapes[0], id: 'group', copyRefusal: 'embedded media', children: [child] }];
   const diagram = handle(state);
   const errors: unknown[] = [];
   let clipboard: unknown = 'untouched';
@@ -133,4 +160,5 @@ test('disables cut, copy and duplicate for groups and reports the refusal', () =
   expect(diagram.deleteShape).not.toHaveBeenCalled();
   commands.duplicate.run();
   expect(diagram.addShapeWithText).not.toHaveBeenCalled();
+  expect(diagram.addShapeTree).not.toHaveBeenCalled();
 });

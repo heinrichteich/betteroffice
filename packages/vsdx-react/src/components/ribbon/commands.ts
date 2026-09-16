@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import type { DiagramHandle, DiagramSnapshot, FormulaShapeDraft, PageSnapshot, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { VsdxShapeSelection } from '../../VsdxEditor';
 import { standardShapeById } from '../shapes/shapeLibrary';
-import { DUPLICATE_OFFSET, PASTE_OFFSET, buildClipboardEntry, canCopyShape, draftForPaste } from './clipboard';
+import { DUPLICATE_OFFSET, PASTE_OFFSET, buildClipboardEntry, canCopyShape, draftForPaste, draftTreeForPaste, isTreeEntry } from './clipboard';
 import type { VsdxClipboardEntry } from './clipboard';
 
 export type RibbonCommandId =
@@ -127,23 +127,52 @@ export function isCellWriteBlocked(shape: ShapeSnapshot | null, cellName: string
   return cellIsGuarded(shape, cellName);
 }
 
-/** Snapshot the selection into an in-app clipboard entry. */
+/** Snapshot the selection into an in-app clipboard entry, carrying the whole subtree. */
 export function copySelection(handle: DiagramHandle, selection: VsdxShapeSelection): VsdxClipboardEntry {
   const placement = placementIn(handle.snapshot().pages, selection);
   if (!placement) throw new Error(`vsdx shape ${selection.shapeId} is no longer part of the diagram`);
   let text = '';
   try { text = handle.shapeText(selection.pageId, selection.shapeId); }
   catch { text = ''; }
-  return buildClipboardEntry(selection.pageId, placement.shape, text);
+  const textFor = (shape: ShapeSnapshot): string => {
+    try { return handle.shapeText(selection.pageId, shape.id); }
+    catch { return ''; }
+  };
+  const glue = subtreeGlueOf(handle, selection.pageId, selection.shapeId);
+  return buildClipboardEntry(selection.pageId, placement.shape, text, { textFor, glue });
+}
+
+function subtreeGlueOf(handle: DiagramHandle, pageId: string, shapeId: string): VsdxClipboardEntry['glue'] {
+  const subtree = (handle as unknown as { subtreeGlue?: (pageId: string, shapeId: string) => Array<{ connectorSource: string; endpoint: string; targetSource: string; toCell: string }> }).subtreeGlue;
+  if (typeof subtree !== 'function') return [];
+  return subtree.call(handle, pageId, shapeId).map((glue) => ({ connectorSource: glue.connectorSource, endpoint: glue.endpoint, targetSource: glue.targetSource, toCell: glue.toCell }));
 }
 
 /** Paste a clipboard entry with a model-space offset as one atomic shape addition. */
 export function pasteEntry(handle: DiagramHandle, targetPageId: string, entry: VsdxClipboardEntry, dx: number, dy: number): { receipt: { shapeId: string }; entry: VsdxClipboardEntry } {
   const page = pageById(handle.snapshot().pages, targetPageId);
   if (!page) throw new Error(`vsdx page ${targetPageId} is no longer part of the diagram`);
+  if (isTreeEntry(entry)) {
+    const addTree = (handle as unknown as { addShapeTree?: (pageId: string, draft: unknown) => { shapeId: string } }).addShapeTree;
+    if (typeof addTree !== 'function') throw new Error('vsdx group paste needs a diagram handle with addShapeTree');
+    const receipt = addTree.call(handle, page.id, draftTreeForPaste(entry, dx, dy));
+    return { receipt, entry: { ...entry, pasteCount: entry.pasteCount + 1 } };
+  }
   const draft = draftForPaste(entry, dx, dy);
   const receipt = addShapeWithText(handle, page.id, draft, entry.text);
   return { receipt, entry: { ...entry, pasteCount: entry.pasteCount + 1 } };
+}
+
+/** Duplicate a clipboard entry without touching the clipboard, as one atomic addition. */
+export function duplicateEntry(handle: DiagramHandle, targetPageId: string, entry: VsdxClipboardEntry, dx: number, dy: number): { shapeId: string } {
+  const page = pageById(handle.snapshot().pages, targetPageId);
+  if (!page) throw new Error(`vsdx page ${targetPageId} is no longer part of the diagram`);
+  if (isTreeEntry(entry)) {
+    const addTree = (handle as unknown as { addShapeTree?: (pageId: string, draft: unknown) => { shapeId: string } }).addShapeTree;
+    if (typeof addTree !== 'function') throw new Error('vsdx group duplicate needs a diagram handle with addShapeTree');
+    return addTree.call(handle, page.id, draftTreeForPaste(entry, dx, dy));
+  }
+  return addShapeWithText(handle, page.id, draftForPaste(entry, dx, dy), entry.text);
 }
 
 export function addShapeWithText(handle: DiagramHandle, pageId: string, draft: FormulaShapeDraft, text: string): { shapeId: string } {
@@ -258,8 +287,7 @@ export function createRibbonCommands(
         if (!handle || !selection) return;
         try {
           const entry = copySelection(handle, selection);
-          const draft = draftForPaste(entry, DUPLICATE_OFFSET.x, DUPLICATE_OFFSET.y);
-          const receipt = addShapeWithText(handle, selection.pageId, draft, entry.text);
+          const receipt = duplicateEntry(handle, selection.pageId, entry, DUPLICATE_OFFSET.x, DUPLICATE_OFFSET.y);
           onSelectShape({ pageId: selection.pageId, shapeId: receipt.shapeId, hit: { kind: 'shape', shapeId: receipt.shapeId } });
           onMutation();
         } catch (error) { onError(error); }

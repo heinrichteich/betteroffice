@@ -52,6 +52,10 @@ pub struct ShapeSnapshot {
     pub name: Option<String>,
     pub cells: Vec<CellSnapshot>,
     pub children: Vec<ShapeSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_source_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_refusal: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -103,6 +107,38 @@ pub struct TextReceipt {
 pub struct ShapeDraft {
     pub name: Option<String>,
     pub cells: Vec<CellSnapshot>,
+}
+
+/// A pasted group subtree; every node names its live copy source.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeTreeDraft {
+    pub name: Option<String>,
+    pub cells: Vec<CellSnapshot>,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub copy_source_id: Option<u32>,
+    #[serde(default)]
+    pub source_shape_id: Option<String>,
+    #[serde(default)]
+    pub source_id: Option<u32>,
+    #[serde(default)]
+    pub copy_refusal: Option<String>,
+    #[serde(default)]
+    pub glue: Vec<ShapeTreeGlue>,
+    #[serde(default)]
+    pub children: Vec<ShapeTreeDraft>,
+}
+
+/// One internal glue record of a copied subtree, addressed by copy sources.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeTreeGlue {
+    pub connector_source: String,
+    pub endpoint: String,
+    pub target_source: String,
+    pub to_cell: String,
 }
 
 /// One glued connector endpoint; `to_cell` defaults to `PinX` when absent.

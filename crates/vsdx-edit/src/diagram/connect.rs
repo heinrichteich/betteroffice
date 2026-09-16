@@ -16,29 +16,29 @@ use crate::{
 
 #[derive(PartialEq, Eq)]
 pub(super) struct GlueRecord {
-    id: String,
-    page_id: String,
-    connector_id: String,
-    endpoint: GlueEndpoint,
-    target_id: String,
-    to_cell: String,
+    pub(super) id: String,
+    pub(super) page_id: String,
+    pub(super) connector_id: String,
+    pub(super) endpoint: GlueEndpoint,
+    pub(super) target_id: String,
+    pub(super) to_cell: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum GlueEndpoint {
+pub(super) enum GlueEndpoint {
     Begin,
     End,
 }
 
 impl GlueEndpoint {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Begin => "begin",
             Self::End => "end",
         }
     }
 
-    fn endpoint_cell(self) -> &'static str {
+    pub(super) fn endpoint_cell(self) -> &'static str {
         match self {
             Self::Begin => "BeginX",
             Self::End => "EndX",
@@ -174,9 +174,11 @@ impl DiagramSession {
             name: draft.name.clone(),
             cells: draft.cells.clone(),
             children: Vec::new(),
+            copy_source_id: None,
+            copy_refusal: None,
         };
         let mut shape = shape_from_snapshot(&candidate);
-        materialize_shape(&mut shape, &candidate, &HashSet::new(), 1)?;
+        materialize_shape(&mut shape, &candidate, &HashSet::new(), 1, &Default::default())?;
         let Some(SheetChild::Shapes(shapes)) = sheet
             .children
             .iter_mut()
@@ -309,7 +311,8 @@ fn package_cell_number(shape: &vsdx_parse::Shape, name: &str) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
-pub(super) fn glue_records<T: ReadTxn>(txn: &T) -> EditResult<Vec<GlueRecord>> {    let Some(connects) = txn.get_map(CONNECTS) else {
+pub(super) fn glue_records<T: ReadTxn>(txn: &T) -> EditResult<Vec<GlueRecord>> {
+    let Some(connects) = txn.get_map(CONNECTS) else {
         return Ok(Vec::new());
     };
     let pages = required_map(txn, PAGES)?;
@@ -344,11 +347,6 @@ pub(super) fn glue_records<T: ReadTxn>(txn: &T) -> EditResult<Vec<GlueRecord>> {
                         "connector glue crosses pages".to_owned(),
                     ));
                 }
-                if id == &record.connector_id && shape_origin(&shape, txn)? != ShapeOrigin::Added {
-                    return Err(EditError::InvalidState(
-                        "connector glue needs a session connector".to_owned(),
-                    ));
-                }
             }
         }
         records.push(record);
@@ -380,8 +378,19 @@ pub(super) fn materialize_page_glue(
     sheet: &mut vsdx_parse::Sheet,
     page: &PageSnapshot,
     glue: &[GlueRecord],
+    originals: &HashSet<String>,
 ) {
-    let pending = page_glue(page, glue);
+    // Package glue whose endpoints both survive is already in the file.
+    let sources = snapshot_shape_sources(page);
+    let pending: Vec<PageGlue> = glue
+        .iter()
+        .filter(|record| record.page_id == page.id)
+        .filter(|record| {
+            !(originals.contains(record.connector_id.as_str())
+                && originals.contains(record.target_id.as_str()))
+        })
+        .filter_map(|record| record.project(&sources))
+        .collect();
     if pending.is_empty() {
         return;
     }
@@ -932,7 +941,7 @@ mod tests {
             entry.insert(&mut txn, "connectorId", "page:1:shape:1");
             entry.insert(&mut txn, "endpoint", "begin");
             entry.insert(&mut txn, "targetId", "page:1:shape:1");
-            entry.insert(&mut txn, "toCell", "PinX");
+            entry.insert(&mut txn, "toCell", "PinY");
         }
         let update = peer
             .encode_diff_v1(&session.encode_state_vector_v1())

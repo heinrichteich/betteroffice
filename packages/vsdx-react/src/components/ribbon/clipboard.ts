@@ -1,20 +1,38 @@
-import type { FormulaShapeDraft, ShapeSnapshot } from '@betteroffice/vsdx';
+import type { FormulaShapeDraft, FormulaShapeTreeDraft, ShapeSnapshot } from '@betteroffice/vsdx';
 
 export interface ClipboardCellLocator { cellName: string; section?: string; sectionIndex?: number; rowIndex?: number; rowName?: string; rowType?: string; }
 export interface ClipboardCell { locator: ClipboardCellLocator; name: string; formula?: string; value?: string; rowType?: string; }
-export interface VsdxClipboardEntry { pageId: string; name?: string; cells: ClipboardCell[]; text: string; pinX: number | null; pinY: number | null; pasteCount: number; }
+export interface VsdxClipboardGlue { connectorSource: string; endpoint: string; targetSource: string; toCell: string; }
+export interface VsdxClipboardEntry { pageId: string; name?: string; cells: ClipboardCell[]; text: string; pinX: number | null; pinY: number | null; pasteCount: number; sourceShapeId?: string; sourceId?: number; copySourceId?: number; copyRefusal?: string; children: VsdxClipboardEntry[]; glue: VsdxClipboardGlue[]; }
 
 export const PASTE_OFFSET = { x: 0.25, y: -0.25 } as const;
 export const DUPLICATE_OFFSET = { x: -0.25, y: 0.25 } as const;
 
-/** Leaf shapes copy losslessly; groups carry children a flat draft cannot preserve. */
+/** Every shape copies unless its subtree carries unportable content. */
 export function canCopyShape(shape: ShapeSnapshot): boolean {
-  return shape.children.length === 0;
+  return copyRefusalReason(shape) == null;
+}
+
+/** First unportable reason in the subtree, or null when the tree copies losslessly. */
+export function copyRefusalReason(shape: ShapeSnapshot): string | null {
+  if (shape.copyRefusal != null) return shape.copyRefusal;
+  for (const child of shape.children) {
+    const reason = copyRefusalReason(child);
+    if (reason != null) return reason;
+  }
+  return null;
 }
 
 /** Snapshot a shape into an in-app clipboard entry, preserving every cell formula. */
-export function buildClipboardEntry(pageId: string, shape: ShapeSnapshot, text: string): VsdxClipboardEntry {
-  if (!canCopyShape(shape)) throw new Error(`vsdx group copy is not supported for shape ${shape.id}`);
+export function buildClipboardEntry(pageId: string, shape: ShapeSnapshot, text: string, options?: { textFor?: (shape: ShapeSnapshot) => string; glue?: VsdxClipboardGlue[] }): VsdxClipboardEntry {
+  const reason = copyRefusalReason(shape);
+  if (reason != null) throw new Error(`vsdx copy is not supported for shape ${shape.id} with ${reason}`);
+  const textFor = options?.textFor ?? (() => '');
+  const node = buildNode(shape, text, textFor);
+  return { pageId, name: node.name, cells: node.cells, text: node.text, pinX: resolvedNumeric(shape, 'PinX'), pinY: resolvedNumeric(shape, 'PinY'), pasteCount: 0, sourceShapeId: shape.id, sourceId: shape.sourceId, ...(shape.copySourceId != null ? { copySourceId: shape.copySourceId } : {}), ...(shape.copyRefusal != null ? { copyRefusal: shape.copyRefusal } : {}), children: node.children, glue: options?.glue ?? [] };
+}
+
+function buildNode(shape: ShapeSnapshot, text: string, textFor: (shape: ShapeSnapshot) => string): { name?: string; cells: ClipboardCell[]; text: string; children: VsdxClipboardEntry[] } {
   const cells: ClipboardCell[] = shape.cells
     .filter((cell) => cell.locator.cellName.length > 0)
     .map((cell) => {
@@ -31,7 +49,20 @@ export function buildClipboardEntry(pageId: string, shape: ShapeSnapshot, text: 
       if (cell.rowType != null) entry.rowType = cell.rowType;
       return entry;
     });
-  return { pageId, name: shape.name ?? undefined, cells, text, pinX: resolvedNumeric(shape, 'PinX'), pinY: resolvedNumeric(shape, 'PinY'), pasteCount: 0 };
+  return {
+    ...(shape.name != null ? { name: shape.name } : {}),
+    cells,
+    text,
+    children: shape.children.map((child) => {
+      const node = buildNode(child, textFor(child), textFor);
+      return { pageId: '', name: node.name, cells: node.cells, text: node.text, pinX: null, pinY: null, pasteCount: 0, sourceShapeId: child.id, sourceId: child.sourceId, ...(child.copySourceId != null ? { copySourceId: child.copySourceId } : {}), ...(child.copyRefusal != null ? { copyRefusal: child.copyRefusal } : {}), children: node.children, glue: [] };
+    }),
+  };
+}
+
+/** A clipboard entry needs the tree paste path when it carries children or glue. */
+export function isTreeEntry(entry: VsdxClipboardEntry): boolean {
+  return entry.children.length > 0 || entry.glue.length > 0;
 }
 
 /** Draft a pasted shape, offsetting PinX/PinY so the copy lands visibly apart. */
@@ -45,6 +76,35 @@ export function draftForPaste(entry: VsdxClipboardEntry, dx: number, dy: number)
   applyPinOffset(cells, 'PinX', entry.pinX, dx);
   applyPinOffset(cells, 'PinY', entry.pinY, dy);
   return { ...(entry.name !== undefined ? { name: entry.name } : {}), cells };
+}
+
+/** Draft a pasted group subtree, offsetting only the root so children keep relative positions. */
+export function draftTreeForPaste(entry: VsdxClipboardEntry, dx: number, dy: number): FormulaShapeTreeDraft {
+  return toTreeDraft(entry, dx, dy, true);
+}
+
+function toTreeDraft(entry: VsdxClipboardEntry, dx: number, dy: number, isRoot: boolean): FormulaShapeTreeDraft {
+  const cells = entry.cells.map((cell) => ({
+    locator: toDraftLocator(cell),
+    name: cell.name,
+    ...(cell.formula !== undefined ? { formula: cell.formula } : {}),
+    ...(cell.value !== undefined ? { value: cell.value } : {}),
+  }));
+  if (isRoot) {
+    applyPinOffset(cells, 'PinX', entry.pinX, dx);
+    applyPinOffset(cells, 'PinY', entry.pinY, dy);
+  }
+  return {
+    ...(entry.name !== undefined ? { name: entry.name } : {}),
+    cells,
+    text: entry.text,
+    ...(entry.copySourceId !== undefined ? { copySourceId: entry.copySourceId } : {}),
+    ...(entry.sourceShapeId !== undefined ? { sourceShapeId: entry.sourceShapeId } : {}),
+    ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
+    ...(entry.copyRefusal !== undefined ? { copyRefusal: entry.copyRefusal } : {}),
+    ...(isRoot && entry.glue.length > 0 ? { glue: entry.glue.map((glue) => ({ ...glue })) } : {}),
+    ...(entry.children.length > 0 ? { children: entry.children.map((child) => toTreeDraft(child, 0, 0, false)) } : {}),
+  };
 }
 
 /** Resolved numeric value of a root cell, or null when absent or non-numeric. */
