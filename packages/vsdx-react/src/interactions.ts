@@ -399,13 +399,21 @@ const controlAxisLocked = (behavior: number): boolean => Number.isFinite(behavio
 export const controlHandleLockedX = (handle: Pick<ControlHandle, 'xCon'>): boolean => controlAxisLocked(handle.xCon);
 /** A handle pins an axis when its behaviour cell selects a locked variant. */
 export const controlHandleLockedY = (handle: Pick<ControlHandle, 'yCon'>): boolean => controlAxisLocked(handle.yCon);
+const sectionCell = (shape: ShapeSnapshot, section: string, row: string, cell: string) =>
+  shape.cells.find((entry) => entry.locator.section === section && typeof entry.locator.row === 'object' && entry.locator.row !== null && 'name' in entry.locator.row && (entry.locator.row as { name: string }).name === row && (entry.locator.cellName === cell || entry.name === cell));
 const sectionNumber = (shape: ShapeSnapshot, section: string, row: string, cell: string): number | undefined => {
-  const found = shape.cells.find((entry) => entry.locator.section === section && typeof entry.locator.row === 'object' && entry.locator.row !== null && 'name' in entry.locator.row && (entry.locator.row as { name: string }).name === row && (entry.locator.cellName === cell || entry.name === cell));
+  const found = sectionCell(shape, section, row, cell);
   if (!found) return undefined;
   const raw = (found.value ?? found.formula ?? '').trim();
   if (!raw) return undefined;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : undefined;
+};
+/** True when a Control X/Y write would be refused by a GUARD or SETATREF formula. */
+export const controlCellWriteBlocked = (shape: ShapeSnapshot, row: string, cell: 'X' | 'Y'): boolean => {
+  const found = sectionCell(shape, 'Control', row, cell);
+  const formula = (found?.formula ?? found?.value ?? '').toUpperCase();
+  return formula.includes('GUARD') || formula.includes('SETATREF');
 };
 /** Resolves the draggable control handles of a shape from its snapshot cells. */
 export const controlHandlesForShape = (shape: ShapeSnapshot): ControlHandle[] => {
