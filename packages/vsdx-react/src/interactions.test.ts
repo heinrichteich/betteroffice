@@ -287,18 +287,20 @@ test('resolveNudgeGeometry turns a screen nudge into the parent-local pin delta'
   const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, parentTransforms: [{ a: 0, b: 1, c: -1, d: 0, e: 0, f: 0 }] };
   expect(resolveNudgeGeometry(start, 1, 0)).toEqual({ x: 2, y: 2, width: 4, height: 5 });
 });
-test('canvas keyboard nudges one screen pixel with Y up and ten with shift', () => {
+test('canvas keyboard nudges a coarse model step with Y up and a fine step with shift', () => {
   expect(keyboardNudgeStep(1)).toBeCloseTo(1 / 96, 10);
-  expect(keyboardNudgeStep(2)).toBeCloseTo(1 / 192, 10);
-  expect(canvasKeyboardIntent({ key: 'ArrowUp' }, 1)).toEqual({ kind: 'nudge', dx: 0, dy: 1 / 96 });
-  expect(canvasKeyboardIntent({ key: 'ArrowDown' }, 1)).toEqual({ kind: 'nudge', dx: 0, dy: -1 / 96 });
-  expect(canvasKeyboardIntent({ key: 'ArrowLeft' }, 2)).toEqual({ kind: 'nudge', dx: -1 / 192, dy: 0 });
+  expect(keyboardNudgeStep(2)).toBeCloseTo(1 / 96, 10);
+  expect(canvasKeyboardIntent({ key: 'ArrowUp' }, 1)).toMatchObject({ kind: 'nudge', dx: 0 });
+  expect((canvasKeyboardIntent({ key: 'ArrowUp' }, 1) as { dy: number }).dy).toBeCloseTo(10 / 96, 10);
+  expect((canvasKeyboardIntent({ key: 'ArrowDown' }, 1) as { dy: number }).dy).toBeCloseTo(-10 / 96, 10);
+  expect((canvasKeyboardIntent({ key: 'ArrowLeft' }, 2) as { dx: number }).dx).toBeCloseTo(-10 / 96, 10);
+  expect((canvasKeyboardIntent({ key: 'ArrowUp' }, 2) as { dy: number }).dy).toBeCloseTo(10 / 96, 10);
   const right = canvasKeyboardIntent({ key: 'ArrowRight', shiftKey: true }, 1);
   expect(right?.kind).toBe('nudge');
-  if (right?.kind === 'nudge') { expect(right.dx).toBeCloseTo(10 / 96, 10); expect(right.dy).toBe(0); }
+  if (right?.kind === 'nudge') { expect(right.dx).toBeCloseTo(1 / 96, 10); expect(right.dy).toBe(0); }
   const up = canvasKeyboardIntent({ key: 'ArrowUp', shiftKey: true }, 2);
   expect(up?.kind).toBe('nudge');
-  if (up?.kind === 'nudge') { expect(up.dy).toBeCloseTo(10 / 192, 10); expect(up.dx).toBe(0); }
+  if (up?.kind === 'nudge') { expect(up.dy).toBeCloseTo(1 / 96, 10); expect(up.dx).toBe(0); }
   expect(canvasKeyboardIntent({ key: 'ArrowUp', ctrlKey: true }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'ArrowUp', altKey: true }, 1)).toBeNull();
 });

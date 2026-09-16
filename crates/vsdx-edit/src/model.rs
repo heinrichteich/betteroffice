@@ -63,10 +63,19 @@ pub struct PageSnapshot {
     pub shapes: Vec<ShapeSnapshot>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaletteEntry {
+    pub index: i64,
+    pub color: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagramSnapshot {
     pub pages: Vec<PageSnapshot>,
+    #[serde(default)]
+    pub palette: Vec<PaletteEntry>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

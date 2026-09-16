@@ -94,11 +94,11 @@ test('an arrow-key nudge moves the selected group in page space', async () => {
     const groupBefore = pin(handle, GROUP_ID, 'PinY');
     const childBefore = pin(handle, CHILD_ID, 'PinY');
     await act(async () => { fireEvent.keyDown(main, { key: 'ArrowUp' }); });
-    expect(pin(handle, GROUP_ID, 'PinY') - groupBefore).toBeCloseTo(1 / 96, 6);
+    expect(pin(handle, GROUP_ID, 'PinY') - groupBefore).toBeCloseTo(10 / 96, 6);
     expect(pin(handle, CHILD_ID, 'PinY')).toBe(childBefore);
     const moved = bounds(childPoints(handle.layoutPage(0).primitives));
     expect(moved.left).toBeCloseTo(child.left, 3);
-    expect(moved.top).toBeCloseTo(child.top - 1, 3);
+    expect(moved.top).toBeCloseTo(child.top - 10, 3);
   } finally { restore(); }
 });
 

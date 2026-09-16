@@ -162,3 +162,68 @@ test('uses a shape root cell without confusing a same-named User cell', () => {
   shape.cells.pop();
   expect(() => numericCellValue(shape, 'PinX')).toThrow('Shape cell PinX has no resolved numeric value.');
 });
+
+test('reports renderer-resolved colours for palette-indexed fills and lines', () => {
+  const state: DiagramSnapshot = {
+    palette: [{ index: 1, color: '#112233' }, { index: 2, color: '#445566' }],
+    pages: [{
+      id: 'page',
+      sourcePartPath: 'visio/pages/page1.xml',
+      name: 'Page',
+      shapes: [{
+        id: 'two',
+        sourceId: 7,
+        name: 'two',
+        children: [],
+        cells: [
+          { locator: { sheet: { page: 1 }, shapeId: 7, section: null, row: null, cellName: 'FillForegnd' }, name: 'FillForegnd', formula: null, value: '1' },
+          { locator: { sheet: { page: 1 }, shapeId: 7, section: null, row: null, cellName: 'LineColor' }, name: 'LineColor', formula: null, value: '2' },
+        ],
+      }],
+    }],
+  };
+  const diagram = handle(state);
+  const indexed = createRibbonCommands(diagram, { pageId: 'page', shapeId: 'two', hit: { kind: 'shape', shapeId: 'two' } }, 'page', () => {}, () => {}, () => {});
+  expect(indexed.fillColor.value).toBe('#112233');
+  expect(indexed.lineColor.value).toBe('#445566');
+  const frame = {
+    contractVersion: 5 as const,
+    width: 8,
+    height: 11,
+    paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 },
+    primitives: [{
+      kind: 'shape' as const,
+      id: 'visio/pages/page1.xml:7',
+      zOrder: 0,
+      path: [],
+      fill: { kind: 'solid' as const, color: '#112233' },
+      stroke: { color: '#445566', width: 0.02 },
+    }],
+  };
+  const resolved = createRibbonCommands(diagram, { pageId: 'page', shapeId: 'two', hit: { kind: 'shape', shapeId: 'two' } }, 'page', () => {}, () => {}, () => {}, frame);
+  expect(resolved.fillColor.value).toBe('#112233');
+  expect(resolved.lineColor.value).toBe('#445566');
+});
+
+test('falls back to black for palette indices missing from the document table', () => {
+  const state: DiagramSnapshot = {
+    palette: [{ index: 1, color: '#112233' }],
+    pages: [{
+      id: 'page',
+      sourcePartPath: 'visio/pages/page1.xml',
+      name: 'Page',
+      shapes: [{
+        id: 'two',
+        sourceId: 7,
+        name: 'two',
+        children: [],
+        cells: [
+          { locator: { sheet: { page: 1 }, shapeId: 7, section: null, row: null, cellName: 'FillForegnd' }, name: 'FillForegnd', formula: '9', value: '9' },
+        ],
+      }],
+    }],
+  };
+  const diagram = handle(state);
+  const commands = createRibbonCommands(diagram, { pageId: 'page', shapeId: 'two', hit: { kind: 'shape', shapeId: 'two' } }, 'page', () => {}, () => {}, () => {});
+  expect(commands.fillColor.value).toBe('#000000');
+});
