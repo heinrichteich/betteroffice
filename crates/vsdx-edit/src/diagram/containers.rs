@@ -5,8 +5,8 @@ use vsdx_resolve::dependson_refs;
 use yrs::{Map, Out, ReadTxn, TransactionMut};
 
 use super::{
-    CrdtMutationContext, EditCtx, SHEETS, cell_map, evaluate_cached_formula, local_references,
-    map_map, map_number, map_ref, map_string, required_map,
+    CrdtMutationContext, EditCtx, SHEETS, cell_map, evaluate_cached_formula, loc_pin_at_size,
+    local_references, map_map, map_number, map_ref, map_string, required_map,
 };
 use crate::{CellFormulaReceipt, DiagramSession, EditError, EditResult};
 
@@ -154,7 +154,6 @@ pub(crate) fn autofit_container(
         return Ok(Vec::new());
     }
     let grown = BTreeMap::new();
-    let current = shape_bounds(&txn, &membership, container, &grown)?;
     let margin = margin(&txn, &membership, container);
     let mut required: Option<Bounds> = None;
     if let Some(direct) = membership.containers.get(&container) {
@@ -166,10 +165,7 @@ pub(crate) fn autofit_container(
     let Some(required) = required else {
         return Ok(Vec::new());
     };
-    if current.contains(required.expanded(margin)) {
-        return Ok(Vec::new());
-    }
-    let outer = current.union(required.expanded(margin));
+    let outer = required.expanded(margin);
     let planned = resize_plan(&txn, &membership, container, outer)?;
     apply(&mut txn, page_id, &planned)
 }
@@ -341,14 +337,16 @@ fn shape_bounds<T: ReadTxn>(
             "cannot evaluate Width/Height for autofit".to_owned(),
         ));
     };
-    let loc_pin_x = entry_number(txn, shape, "LocPinX").unwrap_or(width / 2.0);
-    let loc_pin_y = entry_number(txn, shape, "LocPinY").unwrap_or(height / 2.0);
-    Ok(Bounds {
-        x0: pin.0 - loc_pin_x,
-        y0: pin.1 - loc_pin_y,
-        x1: pin.0 - loc_pin_x + width,
-        y1: pin.1 - loc_pin_y + height,
-    })
+    let (loc_pin_x, loc_pin_y) = loc_pin_at_size(txn, shape, width, height)?;
+    bounds_at(
+        pin.0,
+        pin.1,
+        width,
+        height,
+        loc_pin_x,
+        loc_pin_y,
+        entry_number(txn, shape, "Angle").unwrap_or(0.0),
+    )
 }
 
 fn moved_bounds<T: ReadTxn>(
@@ -411,12 +409,15 @@ fn moved_bounds<T: ReadTxn>(
     };
     let loc_pin_x = number("LocPinX").unwrap_or(width / 2.0);
     let loc_pin_y = number("LocPinY").unwrap_or(height / 2.0);
-    Ok(Bounds {
-        x0: x - loc_pin_x,
-        y0: y - loc_pin_y,
-        x1: x - loc_pin_x + width,
-        y1: y - loc_pin_y + height,
-    })
+    bounds_at(
+        x,
+        y,
+        width,
+        height,
+        loc_pin_x,
+        loc_pin_y,
+        number("Angle").unwrap_or(0.0),
+    )
 }
 
 fn margin<T: ReadTxn>(txn: &T, membership: &Membership, container: u32) -> f64 {
@@ -435,15 +436,9 @@ fn resize_plan<T: ReadTxn>(
     outer: Bounds,
 ) -> EditResult<Vec<(String, &'static str, MutationGesture, String)>> {
     let shape = membership.by_source[&container].clone();
-    let width = entry_number(txn, &shape, "Width");
-    let height = entry_number(txn, &shape, "Height");
-    let (Some(width), Some(height)) = (width, height) else {
-        return Err(EditError::InvalidState(
-            "cannot evaluate Width/Height for autofit".to_owned(),
-        ));
-    };
-    let loc_pin_x = entry_number(txn, &shape, "LocPinX").unwrap_or(width / 2.0);
-    let loc_pin_y = entry_number(txn, &shape, "LocPinY").unwrap_or(height / 2.0);
+    let width = outer.x1 - outer.x0;
+    let height = outer.y1 - outer.y0;
+    let (loc_pin_x, loc_pin_y) = loc_pin_at_size(txn, &shape, width, height)?;
     Ok(vec![
         (
             shape.clone(),
@@ -470,6 +465,48 @@ fn resize_plan<T: ReadTxn>(
             format_number(outer.y1 - outer.y0),
         ),
     ])
+}
+
+fn bounds_at(
+    pin_x: f64,
+    pin_y: f64,
+    width: f64,
+    height: f64,
+    loc_pin_x: f64,
+    loc_pin_y: f64,
+    angle: f64,
+) -> EditResult<Bounds> {
+    let (sin, cos) = angle.sin_cos();
+    let mut bounds = Bounds {
+        x0: f64::INFINITY,
+        y0: f64::INFINITY,
+        x1: f64::NEG_INFINITY,
+        y1: f64::NEG_INFINITY,
+    };
+    for (x, y) in [
+        (-loc_pin_x, -loc_pin_y),
+        (width - loc_pin_x, -loc_pin_y),
+        (-loc_pin_x, height - loc_pin_y),
+        (width - loc_pin_x, height - loc_pin_y),
+    ] {
+        let rotated_x = pin_x + x * cos - y * sin;
+        let rotated_y = pin_y + x * sin + y * cos;
+        bounds.x0 = bounds.x0.min(rotated_x);
+        bounds.y0 = bounds.y0.min(rotated_y);
+        bounds.x1 = bounds.x1.max(rotated_x);
+        bounds.y1 = bounds.y1.max(rotated_y);
+    }
+    if bounds.x0.is_finite()
+        && bounds.y0.is_finite()
+        && bounds.x1.is_finite()
+        && bounds.y1.is_finite()
+    {
+        Ok(bounds)
+    } else {
+        Err(EditError::InvalidState(
+            "cannot evaluate member bounds for autofit".to_owned(),
+        ))
+    }
 }
 
 fn format_number(value: f64) -> String {

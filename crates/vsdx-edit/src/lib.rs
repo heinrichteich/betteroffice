@@ -1097,6 +1097,102 @@ mod tests {
     }
 
     #[test]
+    fn autofit_container_shrinks_to_member_extent_with_margin() {
+        let session = container_pair();
+        session
+            .autofit_container(&EditCtx::local("a"), "page:1", "page:1:shape:1")
+            .unwrap();
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Width").as_deref(),
+            Some("1.5")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Height").as_deref(),
+            Some("1.5")
+        );
+    }
+
+    #[test]
+    fn autofit_container_uses_formula_loc_pin_at_the_requested_size() {
+        let session = container_pair();
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "LocPinX",
+            None,
+            None,
+            Some("Width*0.5"),
+            None,
+        );
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "LocPinY",
+            None,
+            None,
+            Some("Height*0.5"),
+            None,
+        );
+        session
+            .autofit_container(&EditCtx::local("a"), "page:1", "page:1:shape:1")
+            .unwrap();
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "PinX").as_deref(),
+            Some("5")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "PinY").as_deref(),
+            Some("4")
+        );
+    }
+
+    #[test]
+    fn rotated_members_are_enclosed_by_autofit_and_move() {
+        let session = container_pair();
+        add_shape_cell(
+            &session,
+            "page:1:shape:2",
+            "Angle",
+            None,
+            None,
+            Some("0.7853981633974483"),
+            None,
+        );
+        session
+            .autofit_container(&EditCtx::local("a"), "page:1", "page:1:shape:1")
+            .unwrap();
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Width").as_deref(),
+            Some("1.9142135623730958"),
+        );
+
+        let session = container_pair();
+        add_shape_cell(
+            &session,
+            "page:1:shape:2",
+            "Angle",
+            None,
+            None,
+            Some("0.7853981633974483"),
+            None,
+        );
+        session
+            .move_container_member(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:2",
+                "8".to_owned(),
+                "4".to_owned(),
+            )
+            .unwrap();
+        let width = shape_formula(&session, "page:1:shape:1", "Width")
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        assert!(width > 5.9);
+    }
+
+    #[test]
     fn resize_refusal_leaves_both_axes_unchanged() {
         let session = session();
         add_cell(&session, "Width", Some("1"), None);

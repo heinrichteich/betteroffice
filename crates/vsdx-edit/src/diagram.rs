@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use vsdx_eval::{MutationContext, MutationOutcome, decide_mutation, evaluate};
+use vsdx_eval::{
+    Evaluation, Expr, MutationContext, MutationOutcome, References, Value, decide_mutation,
+    evaluate,
+};
 use vsdx_parse::{
     Cell, CellLocator, CellRow, CellSheet, MutationGesture, ParseLimits, RowChild, SectionChild,
     Shape, ShapeChild, ShapesChild, SheetChild, StructuralEdit,
@@ -1911,6 +1914,173 @@ fn evaluate_cached_formula(
             vsdx_eval::Value::Color(_) => None,
         },
         _ => None,
+    }
+}
+
+pub(crate) fn loc_pin_at_size<T: ReadTxn>(
+    txn: &T,
+    shape_id: &str,
+    width: f64,
+    height: f64,
+) -> EditResult<(f64, f64)> {
+    let sheets = required_map(txn, SHEETS)?;
+    let shape = map_ref(&sheets, txn, shape_id)?;
+    let cells = map_map(&shape, txn, "cells")?;
+    let base = local_references(&cells, txn)?;
+    let overrides = SizeOverrideRefs {
+        base: &base,
+        width: width.to_string(),
+        height: height.to_string(),
+    };
+    Ok((
+        loc_pin_component(&base, &overrides, "LocPinX", width),
+        loc_pin_component(&base, &overrides, "LocPinY", height),
+    ))
+}
+
+struct SizeOverrideRefs<'a> {
+    base: &'a vsdx_resolve::ResolvedShape,
+    width: String,
+    height: String,
+}
+
+impl References for SizeOverrideRefs<'_> {
+    fn formula(&self, name: &str) -> Option<&str> {
+        if is_size_cell(name) {
+            None
+        } else {
+            self.base.formula(name)
+        }
+    }
+
+    fn value(&self, name: &str) -> Option<(&str, Option<&str>)> {
+        self.size_value(name).or_else(|| self.base.value(name))
+    }
+
+    fn formula_in(&self, sheet: Option<u32>, name: &str) -> Option<&str> {
+        if sheet.is_none() && is_size_cell(name) {
+            None
+        } else {
+            self.base.formula_in(sheet, name)
+        }
+    }
+
+    fn value_in(&self, sheet: Option<u32>, name: &str) -> Option<(&str, Option<&str>)> {
+        if sheet.is_none() {
+            self.size_value(name)
+                .or_else(|| self.base.value_in(sheet, name))
+        } else {
+            self.base.value_in(sheet, name)
+        }
+    }
+
+    fn formula_in_scoped(
+        &self,
+        sheet: Option<u32>,
+        scope: Option<&str>,
+        name: &str,
+    ) -> Option<&str> {
+        if sheet.is_none() && scope.is_none() && is_size_cell(name) {
+            None
+        } else {
+            self.base.formula_in_scoped(sheet, scope, name)
+        }
+    }
+
+    fn value_in_scoped(
+        &self,
+        sheet: Option<u32>,
+        scope: Option<&str>,
+        name: &str,
+    ) -> Option<(&str, Option<&str>)> {
+        if sheet.is_none() && scope.is_none() {
+            self.size_value(name)
+                .or_else(|| self.base.value_in_scoped(sheet, scope, name))
+        } else {
+            self.base.value_in_scoped(sheet, scope, name)
+        }
+    }
+
+    fn reference_key(&self, sheet: Option<u32>, name: &str) -> String {
+        self.base.reference_key(sheet, name)
+    }
+}
+
+impl SizeOverrideRefs<'_> {
+    fn size_value(&self, name: &str) -> Option<(&str, Option<&str>)> {
+        if name.eq_ignore_ascii_case("Width") {
+            Some((&self.width, None))
+        } else if name.eq_ignore_ascii_case("Height") {
+            Some((&self.height, None))
+        } else {
+            None
+        }
+    }
+}
+
+fn is_size_cell(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Width") || name.eq_ignore_ascii_case("Height")
+}
+
+fn numeric_reference(references: &impl References, name: &str) -> Option<f64> {
+    let formula = references.formula(name)?;
+    match evaluate(
+        formula.trim_start_matches('='),
+        references,
+        &ParseLimits::default(),
+    ) {
+        Evaluation::Evaluated(result) => match result.value {
+            Value::Number(number) => Some(number.number),
+            Value::Color(_) => None,
+        },
+        _ => None,
+    }
+}
+
+fn references_pin(expression: &Expr) -> bool {
+    match expression {
+        Expr::Reference(name) => {
+            !name.contains('!') && {
+                let cell = name.rsplit('.').next().unwrap_or(name);
+                cell.eq_ignore_ascii_case("PinX") || cell.eq_ignore_ascii_case("PinY")
+            }
+        }
+        Expr::Unary(inner) => references_pin(inner),
+        Expr::Binary(left, _, right) => references_pin(left) || references_pin(right),
+        Expr::Call(_, arguments) => arguments.iter().any(references_pin),
+        Expr::Number(_, _) | Expr::String(_) => false,
+    }
+}
+
+fn loc_pin_component(
+    base: &vsdx_resolve::ResolvedShape,
+    overrides: &SizeOverrideRefs<'_>,
+    name: &str,
+    proposed_size: f64,
+) -> f64 {
+    let current = numeric_reference(base, name)
+        .or_else(|| {
+            base.value(name)
+                .and_then(|(value, _)| value.parse::<f64>().ok())
+        })
+        .unwrap_or(proposed_size / 2.0);
+    let Some(formula) = base.formula(name) else {
+        return current;
+    };
+    let trimmed = formula.trim_start_matches('=').trim();
+    if trimmed.is_empty() {
+        return current;
+    }
+    match vsdx_eval::parse(trimmed, &ParseLimits::default()) {
+        Ok(expression) if references_pin(&expression) => current,
+        Ok(_) => match evaluate(trimmed, overrides, &ParseLimits::default()) {
+            Evaluation::Evaluated(result) => match result.value {
+                Value::Number(number) => number.number,
+                Value::Color(_) => current,
+            },
+            _ => current,
+        },
+        Err(_) => current,
     }
 }
 
