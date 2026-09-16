@@ -161,6 +161,8 @@ struct AddConnectorArgs {
 #[serde(deny_unknown_fields)]
 struct FormulaShapeDraft {
     name: Option<String>,
+    #[serde(default)]
+    master: Option<u32>,
     cells: Vec<serde_json::Value>,
 }
 
@@ -194,6 +196,7 @@ impl TryFrom<FormulaShapeDraft> for ShapeDraft {
         }
         Ok(Self {
             name: value.name,
+            master: value.master,
             cells,
         })
     }
@@ -239,6 +242,19 @@ impl VsdxDocument {
     #[wasm_bindgen(js_name = snapshotJson)]
     pub fn snapshot_json(&self) -> Result<String, JsValue> {
         json(self.session.snapshot().map_err(js_error)?)
+    }
+
+    #[wasm_bindgen(js_name = mastersJson)]
+    pub fn masters_json(&self) -> Result<String, JsValue> {
+        let package = self.session.package().map_err(js_error)?;
+        let masters = package
+            .master_sheets
+            .keys()
+            .map(|id| {
+                serde_json::json!({ "id": id, "name": package.master_names.get(id) })
+            })
+            .collect::<Vec<_>>();
+        json(masters)
     }
 
     #[wasm_bindgen(js_name = mediaBytes)]

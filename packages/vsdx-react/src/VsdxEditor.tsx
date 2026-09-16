@@ -1,7 +1,7 @@
 import { createT, deepMerge, diagnosticMessage, en } from '@betteroffice/vsdx-i18n';
 import type { Translations } from '@betteroffice/vsdx-i18n';
 import { canvasPointToModel, initWasm, openDiagram, paintPage, sizeCanvasForPage, modelPointToCanvas } from '@betteroffice/vsdx';
-import type { Affine, CellLocator, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeDataRow, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence, PageLayer } from '@betteroffice/vsdx';
+import type { Affine, CellLocator, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, DocumentMaster, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeDataRow, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence, PageLayer } from '@betteroffice/vsdx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
@@ -14,8 +14,9 @@ import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { RulerLeft, RulerTop, RULER_SIZE } from './components/ruler/Rulers';
 import { ShapeDataPanel } from './components/shapeData/ShapeDataPanel';
 import { LayersPanel } from './components/layers/LayersPanel';
-import { standardShapes } from './components/shapes/shapeLibrary';
-import type { StandardShape } from './components/shapes/shapeLibrary';
+import { standardStencil } from './components/shapes/shapeLibrary';
+import type { ShapeStencil, StandardShape } from './components/shapes/shapeLibrary';
+import { documentStencilEntries, masterPreviewPath } from './components/shapes/documentStencil';
 import { StatusBar, clampZoom } from './components/statusbar';
 import { paintDragPreview, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, isPrintableEntryKey, isOwnedBrowserShortcut, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent, textEditOverlay, withoutTextBox, hitTestControlHandles, controlHandleCanvasPositions, controlHandlesForShape, paintControlHandles, resolveControlDrag, shapeLocalToPage, controlCellWriteBlocked } from './interactions';
 import type { CanvasKeyboardIntent, DragStart, ResizeHandle, ControlDrag } from './interactions';
@@ -97,6 +98,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [showRulers, setShowRulers] = useState(true);
   const [rulerMark, setRulerMark] = useState<ModelPoint | null>(null);
   const [shapesCollapsed, setShapesCollapsed] = useState(false);
+  const [activeStencilId, setActiveStencilId] = useState('standard');
+  const [documentStencil, setDocumentStencil] = useState<{ masters: readonly DocumentMaster[]; previews: ReadonlyMap<number, string> }>({ masters: [], previews: new Map() });
   const [layersCollapsed, setLayersCollapsed] = useState(false);
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -163,6 +166,21 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       }
     } catch (value) { reportError(value); }
   }, [reportError]);
+  const loadDocumentStencil = useCallback((handle: DiagramHandle) => {
+    try {
+      const masters = handle.masters();
+      const previews = new Map<number, string>();
+      for (const master of masters) {
+        try { previews.set(master.id, masterPreviewPath(handle.layoutMaster(master.id))); }
+        catch { previews.set(master.id, ''); }
+      }
+      setDocumentStencil({ masters, previews });
+    } catch (value) { reportError(value); }
+  }, [reportError]);
+  const stencils = useMemo<readonly ShapeStencil[]>(() => [
+    standardStencil,
+    { id: 'document', nameKey: 'shapesPanel.documentShapes', shapes: documentStencilEntries(documentStencil.masters, documentStencil.previews) },
+  ], [documentStencil]);
   const commitTextEdit = useCallback(() => {
     const current = editingRef.current;
     const handle = handleRef.current;
@@ -193,7 +211,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     let handle: DiagramHandle | null = null;
     let stopUpdates = () => {};
     let stopResync = () => {};
-    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection(null); setContextMenu(null); setEditing(null); setDraft(''); modelRef.current = { snapshot: null, pageIndex: 0, frame: null, layers: [] }; setModel(modelRef.current); setError(null); setDirty(false);
+    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection(null); setContextMenu(null); setEditing(null); setDraft(''); modelRef.current = { snapshot: null, pageIndex: 0, frame: null, layers: [] }; setModel(modelRef.current); setError(null); setDirty(false); setDocumentStencil({ masters: [], previews: new Map() }); setActiveStencilId('standard');
     if (!file) { setLoading(false); return; }
     setLoading(true);
     const openingFonts = fontsRef.current;
@@ -204,7 +222,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         handle = openDiagram(file, { clientId: sessionClientId, fonts: openingFonts, initialUpdate }); registeredFontsRef.current = openingFonts; installFonts(loadedFonts, browserFontsRef.current); handleRef.current = handle; activeCollaboration?.onReplica?.(handle); attachedCollaborationRef.current = activeCollaboration;
         stopUpdates = handle.onUpdate(() => refresh(undefined, true));
         stopResync = handle.onResync(() => refresh(undefined, true));
-        refresh(0); setLoading(false); onReadyRef.current?.({ handle, refresh: () => refresh(undefined, false) });
+        refresh(0); loadDocumentStencil(handle); setLoading(false); onReadyRef.current?.({ handle, refresh: () => refresh(undefined, false) });
       } catch (value) { setLoading(false); reportError(value); }
     }, (value: unknown) => { if (!disposed) { setLoading(false); reportError(value); } });
     return () => {
@@ -218,7 +236,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         browserFontsRef.current.clear();
       }
     };
-  }, [sessionClientId, initialUpdate, file, refresh, reportError]);
+  }, [sessionClientId, initialUpdate, file, refresh, loadDocumentStencil, reportError]);
 
   useEffect(() => {
     const handle = handleRef.current;
@@ -782,7 +800,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     {leftPanel === undefined ? (
       <div style={styles.leftColumn}>
         <div style={styles.shapesWrap}>
-          <ShapesPanel shapes={standardShapes} collapsed={shapesCollapsed} onToggleCollapsed={() => setShapesCollapsed((value) => !value)} onInsert={insertShape} t={t} />
+          <ShapesPanel stencils={stencils} activeStencilId={activeStencilId} onSelectStencil={setActiveStencilId} collapsed={shapesCollapsed} onToggleCollapsed={() => setShapesCollapsed((value) => !value)} onInsert={insertShape} t={t} />
         </div>
         <LayersPanel layers={model.layers} collapsed={layersCollapsed} onToggleCollapsed={() => setLayersCollapsed((value) => !value)} onToggleLayer={toggleLayerVisible} t={t} />
       </div>

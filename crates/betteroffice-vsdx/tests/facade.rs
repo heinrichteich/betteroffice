@@ -780,6 +780,7 @@ fn session_added_shapes_reach_the_saved_package() {
             &page,
             &ShapeDraft {
                 name: Some("Added".to_owned()),
+                master: None,
                 cells: vec![
                     draft_cell("Width", "5", None, None),
                     draft_cell("X", "2", Some("Geometry"), Some(CellRow::Index(0))),
@@ -826,6 +827,7 @@ fn added_shape_drafts_evaluate_against_their_own_cells() {
             &page,
             &ShapeDraft {
                 name: Some("Added".to_owned()),
+                master: None,
                 cells: vec![
                     draft_cell("Width", "5", None, None),
                     draft_cell("Height", "Width*2", None, None),

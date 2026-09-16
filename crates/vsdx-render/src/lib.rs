@@ -469,6 +469,8 @@ impl Default for RenderLimits {
 pub enum RenderError {
     #[error("page not found: {0}")]
     MissingPage(String),
+    #[error("master not found: {0}")]
+    MissingMaster(u32),
     #[error("render budget exceeded: {0}")]
     Budget(&'static str),
     #[error("invalid font: {0}")]
@@ -622,12 +624,97 @@ impl Renderer {
         for primitive in &mut state.primitives {
             bake_group_transform(primitive, Affine::identity());
         }
-        let list = VsdxDisplayList {
+        self.finish_display_list(state, page_width, page_height)
+    }
+    /// Renders one document master for stencil previews, resolving its
+    /// shapes through the same master and style chains as pages.
+    pub fn layout_master(
+        &self,
+        package: &VsdxPackage,
+        master_id: u32,
+    ) -> Result<VsdxDisplayList, RenderError> {
+        let part = package
+            .master_part_ids
+            .iter()
+            .find_map(|(path, id)| (*id == master_id).then_some(path))
+            .ok_or(RenderError::MissingMaster(master_id))?;
+        let sheet = package
+            .master_contents
+            .get(part)
+            .ok_or(RenderError::MissingMaster(master_id))?;
+        let resolver = Resolver::new(package);
+        let mut shapes = BTreeMap::new();
+        for shape in sheet.shapes() {
+            resolve_master_shape_tree(&resolver, sheet, shape, &mut shapes)?;
+        }
+        let connectivity = vsdx_resolve::PageConnectivity::default();
+        let transforms = vsdx_resolve::scene_transforms(sheet, &shapes, |id, shape, name| {
+            evaluated(package, None, shape, id, name)
+        });
+        let sheet_dims = package.master_sheets.get(&master_id);
+        let master_width = sheet_dims
+            .and_then(|sheet| master_dimension(&resolver, package, sheet, "PageWidth"));
+        let master_height = sheet_dims
+            .and_then(|sheet| master_dimension(&resolver, package, sheet, "PageHeight"));
+        let (Some(master_width), Some(master_height)) = (master_width, master_height) else {
+            return Err(RenderError::PageDimensions(
+                "master dimensions are unavailable".into(),
+            ));
+        };
+        if master_width <= 0.0
+            || master_height <= 0.0
+            || !(master_width as f32).is_finite()
+            || !(master_height as f32).is_finite()
+            || !(master_width as f32 * PIXELS_PER_INCH).is_finite()
+            || !(master_height as f32 * PIXELS_PER_INCH).is_finite()
+        {
+            return Err(RenderError::PageDimensions(
+                "dimensions must be positive finite canvas values".into(),
+            ));
+        }
+        let mut state = State {
+            count: 0,
+            z_order: 0,
+            text_bytes: 0,
+            text_paragraphs: 0,
+            text_lines: 0,
+            text_runs: 0,
+            primitives: Vec::new(),
+        };
+        let mut cache = LayoutCache::default();
+        let layers: &[vsdx_resolve::PageLayer] = &[];
+        for shape in sheet.shapes() {
+            self.layout_shape(
+                package,
+                &resolver,
+                &connectivity,
+                None,
+                &shapes,
+                &transforms,
+                layers,
+                part,
+                shape,
+                0,
+                &mut state,
+                &mut cache,
+            )?;
+        }
+        for primitive in &mut state.primitives {
+            bake_group_transform(primitive, Affine::identity());
+        }
+        self.finish_display_list(state, master_width, master_height)
+    }
+    fn finish_display_list(
+        &self,
+        mut state: State,
+        width: f64,
+        height: f64,
+    ) -> Result<VsdxDisplayList, RenderError> {        let list = VsdxDisplayList {
             contract_version: CONTRACT_VERSION,
-            width: page_width as f32 * PIXELS_PER_INCH,
-            height: page_height as f32 * PIXELS_PER_INCH,
-            paint_transform: final_paint_transform(page_height as f32),
-            primitives: state.primitives,
+            width: width as f32 * PIXELS_PER_INCH,
+            height: height as f32 * PIXELS_PER_INCH,
+            paint_transform: final_paint_transform(height as f32),
+            primitives: std::mem::take(&mut state.primitives),
         };
         if !display_list_finite(&list) {
             return Err(RenderError::PageDimensions(
@@ -1052,6 +1139,7 @@ impl Renderer {
         let lookup = package
             .page_contents
             .get(page_part)
+            .or_else(|| package.master_contents.get(page_part))
             .ok_or_else(|| RenderError::MissingPage(page_part.into()))?;
         let tokens = resolver.resolve_text_in_context(shape, lookup, resolved)?;
         let mut paragraphs =
@@ -1664,13 +1752,58 @@ fn bounds_finite(bounds: Bounds) -> bool {
     .into_iter()
     .all(|value| value.is_finite() && (value as f32).is_finite())
 }
+fn resolve_master_shape_tree(
+    resolver: &Resolver<'_>,
+    sheet: &vsdx_parse::Sheet,
+    shape: &Shape,
+    shapes: &mut BTreeMap<u32, ResolvedShape>,
+) -> Result<(), RenderError> {
+    shapes.insert(
+        shape.id,
+        resolver.resolve_shape_in_sheet(shape, sheet)?,
+    );
+    for child in shape.shapes() {
+        resolve_master_shape_tree(resolver, sheet, child, shapes)?;
+    }
+    Ok(())
+}
+fn master_dimension(
+    resolver: &Resolver<'_>,
+    package: &VsdxPackage,
+    sheet: &vsdx_parse::Sheet,
+    name: &str,
+) -> Option<f64> {
+    let resolved = resolver.resolve_sheet(sheet).ok()?;
+    let Lookup::Found(cell) = resolved.cell(name)? else {
+        return None;
+    };
+    if let Some(formula) = cell.cell.formula.as_deref()
+        && let Evaluation::Evaluated(result) = evaluate_cell_with_shape_package_theme(
+            name,
+            formula,
+            &resolved,
+            &ParseLimits::default(),
+            &resolved,
+            package,
+        )
+        && let Value::Number(number) = result.value
+        && number.number.is_finite()
+    {
+        return Some(number.number);
+    }
+    cell.cell
+        .value
+        .as_deref()?
+        .parse()
+        .ok()
+        .filter(|value: &f64| value.is_finite())
+}
 fn page_dimension(
     resolver: &Resolver<'_>,
     package: &VsdxPackage,
     page: &str,
     name: &str,
-) -> Option<f64> {
-    let page_id = package.page_part_ids.get(page)?;
+) -> Option<f64> {    let page_id = package.page_part_ids.get(page)?;
     let sheet = package.page_sheets.get(page_id)?;
     let resolved = resolver.resolve_sheet(sheet).ok()?;
     let Lookup::Found(cell) = resolved.cell(name)? else {
@@ -2638,6 +2771,25 @@ mod tests {
         assert!(matches!(
             path[0],
             GeometryPathCommand::Move { x: 2.0, y: 3.0 }
+        ));
+    }
+
+    #[test]
+    fn layout_master_renders_inherited_geometry_for_stencil_previews() {
+        let bytes = include_bytes!("../../vsdx-parse/tests/fixtures/document-stencil.vsdx");
+        let package = vsdx_parse::parse_vsdx(bytes).unwrap();
+        let renderer = Renderer::default();
+        let list = renderer.layout_master(&package, 1).unwrap();
+        assert_eq!(list.contract_version, super::CONTRACT_VERSION);
+        let shapes = list
+            .primitives
+            .iter()
+            .filter(|primitive| matches!(primitive, Primitive::Shape { .. }))
+            .count();
+        assert_eq!(shapes, 1);
+        assert!(matches!(
+            renderer.layout_master(&package, 999),
+            Err(RenderError::MissingMaster(999))
         ));
     }
 
