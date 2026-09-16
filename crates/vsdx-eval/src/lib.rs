@@ -1048,95 +1048,22 @@ fn host_cell_unit(name: &str) -> Option<Unit> {
     }
 }
 
-/// Maps a host cell to its documented theme value.
+/// Maps a host colour cell to the theme value it reads.
 fn host_theme_value(host: &str) -> Option<&'static str> {
-    let host = host.rsplit('!').next().unwrap_or(host);
-    let (section, cell) = match host.split_once('.') {
-        Some((section, rest)) => (
-            section.rsplit('.').next().unwrap_or(section),
-            rest.rsplit('.').next().unwrap_or(rest),
-        ),
-        None => ("", host),
-    };
-    if cell.eq_ignore_ascii_case("GradientStopColor") {
-        if section.eq_ignore_ascii_case("LineGradient") {
-            return Some("LineStopColor");
-        }
-        return Some("FillStopColor");
-    }
-    if cell.eq_ignore_ascii_case("GradientStopColorTrans") {
-        if section.eq_ignore_ascii_case("LineGradient") {
-            return Some("LineStopTransparency");
-        }
-        return Some("FillStopTransparency");
-    }
-    if cell.eq_ignore_ascii_case("GradientStopPosition") {
-        if section.eq_ignore_ascii_case("LineGradient") {
-            return Some("LineStopPosition");
-        }
-        return Some("FillStopPosition");
-    }
-    Some(match cell.to_ascii_uppercase().as_str() {
-        "FILLFOREGND" => "FillColor",
-        "FILLBKGND" => "FillColor2",
-        "FILLFOREGNDTRANS" => "FillTransparency",
-        "FILLPATTERN" => "FillPattern",
-        "LINECOLOR" => "LineColor",
-        "LINEWEIGHT" => "LineWeight",
-        "LINEPATTERN" => "LinePattern",
-        "LINECAP" => "LineCap",
-        "LINECOLORTRANS" => "LineColorTrans",
-        "COMPOUNDTYPE" => "LineCompoundtype",
-        "BEGINARROW" => "LineBegin",
-        "ENDARROW" => "LineEnd",
-        "BEGINARROWSIZE" => "LineBeginSize",
-        "ENDARROWSIZE" => "LineEndSize",
-        "ROUNDING" => "LineRounding",
-        "LINEGRADIENTENABLED" => "LineGradientEnabled",
-        "LINEGRADIENTDIR" => "LineGradientDir",
-        "LINEGRADIENTANGLE" => "LineGradientAngle",
-        "FILLGRADIENTENABLED" => "FillGradientEnabled",
-        "FILLGRADIENTDIR" => "FillGradientDir",
-        "FILLGRADIENTANGLE" => "FillGradientAngle",
-        "ROTATEGRADIENTWITHSHAPE" => "RotateGradientWithShape",
-        "USEGROUPGRADIENT" => "UseGroupGradient",
-        "SHDWFOREGND" => "ShadowColor",
-        "SHDWFOREGNDTRANS" => "ShadowTransparency",
-        "SHDWPATTERN" => "ShadowPattern",
-        "SHAPESHDWTYPE" => "ShadowType",
-        "SHAPESHDWOFFSETX" => "ShadowXOffset",
-        "SHAPESHDWOFFSETY" => "ShadowYOffset",
-        "SHAPESHDWOBLIQUEANGLE" => "ShadowDirection",
-        "SHAPESHDWSCALEFACTOR" => "ShadowMagnification",
-        "SHAPESHDWBLUR" => "ShadowBlur",
-        "BEVELTOPTYPE" => "BevelTopType",
-        "BEVELTOPWIDTH" => "BevelTopWidth",
-        "BEVELTOPHEIGHT" => "BevelTopHeight",
-        "BEVELCONTOURCOLOR" => "BevelContourColor",
-        "BEVELCONTOURSIZE" => "BevelContourSize",
-        "BEVELMATERIALTYPE" => "BevelMaterial",
-        "BEVELLIGHTINGTYPE" => "BevelLighting",
-        "BEVELLIGHTINGANGLE" => "BevelLightingAngle",
-        "REFLECTIONBLUR" => "ReflectionBlur",
-        "REFLECTIONDIST" => "ReflectionDist",
-        "REFLECTIONSIZE" => "ReflectionSize",
-        "REFLECTIONTRANS" => "ReflectionTrans",
-        "GLOWCOLOR" => "GlowColor",
-        "GLOWCOLORTRANS" => "GlowTransparency",
-        "GLOWSIZE" => "GlowSize",
-        "SOFTEDGESSIZE" => "SoftEdgesSize",
-        "SKETCHENABLED" => "SketchEnabled",
-        "SKETCHAMOUNT" => "SketchAmount",
-        "SKETCHLINEWEIGHT" => "SketchLineWeight",
-        "SKETCHLINECHANGE" => "SketchLineChange",
-        "SKETCHFILLCHANGE" => "SketchFillChange",
-        "FONT" => "LatinFont",
-        "STYLE" => "TextStyle",
-        "ASIANFONT" => "AsianFont",
-        "COMPLEXSCRIPTFONT" => "ComplexFont",
-        "COLOR" => "TextColor",
-        _ => return None,
-    })
+    Some(
+        match host
+            .rsplit(['!', '.'])
+            .next()?
+            .to_ascii_uppercase()
+            .as_str()
+        {
+            "FILLFOREGND" => "FillColor",
+            "FILLBKGND" => "FillColor2",
+            "LINECOLOR" => "LineColor",
+            "COLOR" => "TextColor",
+            _ => return None,
+        },
+    )
 }
 
 /// Maps a documented colour theme value to its scheme slot.
