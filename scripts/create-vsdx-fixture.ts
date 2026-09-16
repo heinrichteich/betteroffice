@@ -79,15 +79,15 @@ async function writeTestFixtures(): Promise<void> {
     'visio/masters/master1.xml': `<MasterContents ${ns}><Shapes><Shape ID='10' Type='Shape'><Text>master text</Text></Shape></Shapes></MasterContents>`,
   });
 
-  const stencilDims = `<PageSheet><Cell N='PageWidth' V='1'/><Cell N='PageHeight' V='1'/></PageSheet>`;
+  const stencilDims = (width: number, height: number) => `<PageSheet><Cell N='PageWidth' V='${width}'/><Cell N='PageHeight' V='${height}'/></PageSheet>`;
   const stencilTri = `<Section N='Geometry'><Row IX='0' T='MoveTo'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row><Row IX='1' T='LineTo'><Cell N='X' V='1'/><Cell N='Y' V='0'/></Row><Row IX='2' T='LineTo'><Cell N='X' V='0.5'/><Cell N='Y' V='1'/></Row><Row IX='3' T='Close'/></Section>`;
   await writeZip(path.join(root, 'crates/vsdx-parse/tests/fixtures/document-stencil.vsdx'), {
     ...parts,
-    'visio/masters/masters.xml': `<Masters ${ns}><Master ID='1' NameU='Stencil-Rect' r:id='rId1' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${stencilDims}</Master><Master ID='2' NameU='Stencil-Tri' r:id='rId2' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${stencilDims}</Master></Masters>`,
+    'visio/masters/masters.xml': `<Masters ${ns}><Master ID='1' NameU='Stencil-Rect' r:id='rId1' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${stencilDims(1, 1)}</Master><Master ID='2' NameU='Stencil-Tri' r:id='rId2' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${stencilDims(2, 0.5)}</Master></Masters>`,
     'visio/masters/_rels/masters.xml.rels': "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Type='http://schemas.microsoft.com/visio/2010/relationships/master' Target='master1.xml'/><Relationship Id='rId2' Type='http://schemas.microsoft.com/visio/2010/relationships/master' Target='master2.xml'/></Relationships>",
     'visio/masters/master1.xml': `<MasterContents ${ns}><Shapes><Shape ID='10' Type='Shape'>${xform(1, 1, 0.5, 0.5, 0.5, 0.5, 0, 0, 0)}${rect}<Text>stencil rect</Text></Shape></Shapes></MasterContents>`,
-    'visio/masters/master2.xml': `<MasterContents ${ns}><Shapes><Shape ID='20' Type='Shape'>${xform(1, 1, 0.5, 0.5, 0.5, 0.5, 0, 0, 0)}${stencilTri}<Text>stencil tri</Text></Shape></Shapes></MasterContents>`,
-    'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Shape' Master='1'>${xform(2, 1, 4, 5, 1, 0.5, 0, 0, 0)}</Shape><Shape ID='2' Type='Shape'>${xform(1, 1, 1, 1, 0, 0, 0, 0, 0)}${rect}</Shape></Shapes></PageContents>`,
+    'visio/masters/master2.xml': `<MasterContents ${ns}><Shapes><Shape ID='20' Type='Shape'>${xform(2, 0.5, 1, 0.25, 1, 0.25, 0, 0, 0)}${stencilTri}<Text>stencil tri</Text></Shape></Shapes></MasterContents>`,
+    'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Shape' Master='1'>${xform(2, 1, 4, 5, 1, 0.5, 0, 0, 0)}</Shape><Shape ID='2' Type='Shape'>${xform(1, 1, 1, 1, 0, 0, 0, 0, 0)}${rect}</Shape><Shape ID='3' Type='Shape' Master='2'><Cell N='PinX' V='4'/><Cell N='PinY' V='2'/></Shape></Shapes></PageContents>`,
   });
 }
 

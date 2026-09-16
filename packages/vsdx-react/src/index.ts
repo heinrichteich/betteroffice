@@ -23,6 +23,5 @@ export type { LayersPanelProps } from './components/layers/LayersPanel';
 export { shapeLabel, standardShapeById, standardShapes, standardStencil } from './components/shapes/shapeLibrary';
 export type { ShapeStencil, StandardShape } from './components/shapes/shapeLibrary';
 export { documentMasterDraft, documentStencilEntries, masterPreviewPath } from './components/shapes/documentStencil';
-export type { DocumentStencilEntry } from './components/shapes/documentStencil';
 export { MAX_ZOOM, MIN_ZOOM, StatusBar, ZOOM_STOPS, clampZoom, sliderPositionForZoom, zoomForSliderPosition } from './components/statusbar';
 export type { StatusBarPage, StatusBarProps } from './components/statusbar';

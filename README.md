@@ -57,7 +57,7 @@ The browser React editor renders supported bitmap-only WMF wrappers. Custom brow
 
 Visio drawings (`.vsdx`) and templates (`.vstx`) open in the source-available VSDX core, which is not yet published. Stencils (`.vssx`) and macro-enabled files are not supported.
 
-The editor puts a flat command bar and a searchable thirty-two shape gallery over a focusable canvas with in-place shape text editing, keyboard undo and redo, Delete or Backspace, arrow-key nudge with a finer Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus.
+The editor puts a flat command bar and a shapes panel over a focusable canvas. The panel's category rail holds a searchable thirty-two shape gallery and a Document Stencil of the masters the open document defines, each previewed from its own geometry; inserting one adds an instance that keeps the master's geometry, size and local pin. Stencil previews load when the Document Stencil is first opened, not while the document opens. The canvas offers in-place shape text editing, keyboard undo and redo, Delete or Backspace, arrow-key nudge with a finer Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus.
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),

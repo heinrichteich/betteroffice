@@ -6,7 +6,7 @@ export interface SnapshotCellLocator { sheet: SnapshotCellSheet; shapeId: number
 export interface CellSnapshot { locator: SnapshotCellLocator; name: string; formula: string | null; value: string | null; rowType?: string; }
 export interface ShapeSnapshot { id: string; sourceId: number; name: string | null; master?: number | null; cells: CellSnapshot[]; children: ShapeSnapshot[]; }
 export interface PageLayer { index: number; name: string; visible: boolean; print: boolean; lock: boolean; active: boolean; color: string; status: string; }
-export interface DocumentMaster { id: number; name: string | null; }
+export interface DocumentMaster { id: number; name: string | null; display: PageDisplayList | null; }
 export interface PageSnapshot { id: string; sourcePartPath: string; name: string | null; shapes: ShapeSnapshot[]; }
 export interface PaletteEntry { index: number; color: string; }
 export interface DiagramSnapshot { pages: PageSnapshot[]; palette?: PaletteEntry[]; }

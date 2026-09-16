@@ -172,6 +172,14 @@ fn original_package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage> {
     }
 }
 
+/// Master IDs the opened package defines; sessions never add or remove masters.
+fn original_master_ids(doc: &Doc) -> EditResult<std::collections::BTreeSet<u32>> {
+    Ok(original_package_from_doc(doc)?
+        .master_sheets
+        .into_keys()
+        .collect())
+}
+
 fn original_shape_ids(doc: &Doc) -> EditResult<HashSet<String>> {
     let txn = doc.transact();
     let sheets = required_map(&txn, SHEETS)?;
@@ -1007,7 +1015,7 @@ impl DiagramSession {
     ) -> EditResult<ShapeReceipt> {
         validate_shape_draft(draft)?;
         if let Some(master) = draft.master
-            && !self.package()?.master_sheets.contains_key(&master)
+            && !original_master_ids(&self.doc)?.contains(&master)
         {
             return Err(EditError::InvalidState(
                 "shape draft references an unknown master".to_owned(),
@@ -1571,7 +1579,40 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
         }
     }
     validate_new_cells(before, staged, &before_identities)?;
+    validate_remote_masters(before, staged)?;
     connect::validate_remote_glue(before, staged)?;
+    Ok(())
+}
+
+/// Rejects remote shapes whose master the opened package does not define.
+fn validate_remote_masters(before: &Doc, staged: &Doc) -> EditResult<()> {
+    let before_txn = before.transact();
+    let staged_txn = staged.transact();
+    let before_sheets = required_map(&before_txn, SHEETS)?;
+    let staged_sheets = required_map(&staged_txn, SHEETS)?;
+    let mut added = Vec::new();
+    for (shape_id, staged_shape) in staged_sheets.iter(&staged_txn) {
+        if before_sheets.get(&before_txn, shape_id).is_some() {
+            continue;
+        }
+        let Out::YMap(staged_shape) = staged_shape else {
+            continue;
+        };
+        if let Some(master) = map_u32(&staged_shape, &staged_txn, "master")? {
+            added.push((shape_id.to_owned(), master));
+        }
+    }
+    if added.is_empty() {
+        return Ok(());
+    }
+    let known = original_master_ids(before)?;
+    for (shape_id, master) in added {
+        if !known.contains(&master) {
+            return Err(EditError::InvalidState(format!(
+                "remote update adds shape {shape_id} with unknown master {master}"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -1758,7 +1799,7 @@ fn validate_session_topology(before: &Doc, staged: &Doc) -> EditResult<()> {
         let Some(Out::YMap(staged_shape)) = staged_sheets.get(&staged_txn, shape_id) else {
             continue;
         };
-        for key in ["id", "pageId", "sourceId", "origin", "parentId"] {
+        for key in ["id", "pageId", "sourceId", "origin", "parentId", "master"] {
             if before_shape.get(&before_txn, key) != staged_shape.get(&staged_txn, key) {
                 return Err(EditError::InvalidState(format!(
                     "remote update changes immutable shape {key}"

@@ -62,22 +62,27 @@ impl VsdxRenderer {
         Ok(json)
     }
 
-    #[wasm_bindgen(js_name = layoutMasterJson)]
-    pub fn layout_master_json(
-        &mut self,
-        document: &VsdxDocument,
-        master_id: u32,
-    ) -> Result<String, JsValue> {
+    /// Lays every document master out once per materialized package.
+    #[wasm_bindgen(js_name = masterPreviewsJson)]
+    pub fn master_previews_json(&self, document: &VsdxDocument) -> Result<String, JsValue> {
         let package = document.session().package().map_err(js_error)?;
-        let rendered = self
-            .renderer
-            .layout_master(&package, master_id)
-            .map_err(js_error)?;
-        serde_json::to_string(&rendered).map_err(js_error)
+        let previews = package
+            .master_sheets
+            .keys()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "name": package.master_names.get(id),
+                    "display": self.renderer.layout_master(&package, *id).ok(),
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&previews).map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = pageLayersJson)]
-    pub fn page_layers_json(        &self,
+    pub fn page_layers_json(
+        &self,
         document: &VsdxDocument,
         page_index: u32,
     ) -> Result<String, JsValue> {
@@ -406,37 +411,38 @@ mod tests {
     }
 
     #[test]
-    fn masters_json_lists_document_masters_with_names() {
+    fn master_previews_list_every_document_master_once() {
         let document = VsdxDocument::open_collaborative(
             include_bytes!("../../vsdx-parse/tests/fixtures/document-stencil.vsdx"),
             1.0,
         )
         .unwrap();
-        let masters: serde_json::Value =
-            serde_json::from_str(&document.masters_json().unwrap()).unwrap();
+        let renderer = VsdxRenderer::new();
+        let previews: serde_json::Value =
+            serde_json::from_str(&renderer.master_previews_json(&document).unwrap()).unwrap();
+        let previews = previews.as_array().unwrap();
+        assert_eq!(previews.len(), 2);
+        assert_eq!(previews[0]["id"], serde_json::json!(1));
+        assert_eq!(previews[0]["name"], serde_json::json!("Stencil-Rect"));
         assert_eq!(
-            masters,
-            serde_json::json!([
-                { "id": 1, "name": "Stencil-Rect" },
-                { "id": 2, "name": "Stencil-Tri" },
-            ])
+            previews[0]["display"]["contractVersion"],
+            serde_json::json!(5)
         );
-    }
-
-    #[test]
-    fn layout_master_json_renders_a_master_display_list() {
-        let document = VsdxDocument::open_collaborative(
-            include_bytes!("../../vsdx-parse/tests/fixtures/document-stencil.vsdx"),
-            1.0,
-        )
-        .unwrap();
-        let mut renderer = VsdxRenderer::new();
-        let list: serde_json::Value =
-            serde_json::from_str(&renderer.layout_master_json(&document, 1).unwrap()).unwrap();
-        assert_eq!(list["contractVersion"], serde_json::json!(5));
-        assert_eq!(list["primitives"].as_array().unwrap().len(), 2);
-        let tri: serde_json::Value =
-            serde_json::from_str(&renderer.layout_master_json(&document, 2).unwrap()).unwrap();
-        assert_eq!(tri["primitives"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            previews[0]["display"]["primitives"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(previews[1]["id"], serde_json::json!(2));
+        assert_eq!(previews[1]["name"], serde_json::json!("Stencil-Tri"));
+        assert_eq!(
+            previews[1]["display"]["primitives"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }

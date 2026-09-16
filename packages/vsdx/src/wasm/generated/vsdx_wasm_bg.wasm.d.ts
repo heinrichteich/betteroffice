@@ -7,6 +7,7 @@ export const rendererVersion: () => [number, number];
 export const vsdxrenderer_clearLayerVisibility: (a: number) => void;
 export const vsdxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxrenderer_layoutPageJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const vsdxrenderer_masterPreviewsJson: (a: number, b: number) => [number, number, number, number];
 export const vsdxrenderer_new: () => number;
 export const vsdxrenderer_pageLayersJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];

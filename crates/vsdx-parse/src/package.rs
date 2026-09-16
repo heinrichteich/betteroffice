@@ -261,10 +261,7 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         .into_iter()
         .flat_map(|root| root.children_named("Master"))
     {
-        let Some(id) = master
-            .attribute("ID")
-            .and_then(|id| id.parse::<u32>().ok())
-        else {
+        let Some(id) = master.attribute("ID").and_then(|id| id.parse::<u32>().ok()) else {
             continue;
         };
         if let Some(name) = master

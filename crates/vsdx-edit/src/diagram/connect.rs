@@ -84,7 +84,8 @@ impl DiagramSession {
     ) -> EditResult<ShapeReceipt> {
         validate_shape_draft(draft)?;
         let glue = [(GlueEndpoint::Begin, from), (GlueEndpoint::End, to)];
-        self.validate_connector(page_id, draft, &glue)?;        let mut txn = self.transact_for(context);
+        self.validate_connector(page_id, draft, &glue)?;
+        let mut txn = self.transact_for(context);
         let receipt = insert_shape(&mut txn, self.client_id, page_id, draft)?;
         let connects = txn.get_or_insert_map(CONNECTS);
         for (endpoint, target) in glue {

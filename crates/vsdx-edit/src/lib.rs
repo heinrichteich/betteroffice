@@ -664,7 +664,11 @@ mod tests {
                     .add_shape(
                         &EditCtx::local("test"),
                         "page:1",
-                        &ShapeDraft { name: None, master: None, cells }
+                        &ShapeDraft {
+                            name: None,
+                            master: None,
+                            cells
+                        }
                     )
                     .is_err()
             );
@@ -740,9 +744,9 @@ mod tests {
         list.primitives
             .iter()
             .filter_map(|primitive| match primitive {
-                vsdx_render::Primitive::Shape { id: shape, path, .. } if shape.as_str() == id => {
-                    Some(format!("{path:?}"))
-                }
+                vsdx_render::Primitive::Shape {
+                    id: shape, path, ..
+                } if shape.as_str() == id => Some(format!("{path:?}")),
                 _ => None,
             })
             .collect()
@@ -753,7 +757,10 @@ mod tests {
         let names = stencil_session().package().unwrap().master_names;
         assert_eq!(
             names.into_iter().collect::<Vec<_>>(),
-            [(1, "Stencil-Rect".to_owned()), (2, "Stencil-Tri".to_owned())]
+            [
+                (1, "Stencil-Rect".to_owned()),
+                (2, "Stencil-Tri".to_owned())
+            ]
         );
     }
 
@@ -780,7 +787,11 @@ mod tests {
                 .iter()
                 .all(|cell| cell.locator.section.as_deref() != Some("Geometry")),
             "a master instance stores placement only; geometry stays inherited: {:?}",
-            added.cells.iter().map(|cell| &cell.name).collect::<Vec<_>>()
+            added
+                .cells
+                .iter()
+                .map(|cell| &cell.name)
+                .collect::<Vec<_>>()
         );
         let renderer = vsdx_render::Renderer::default();
         let package = session.package().unwrap();
@@ -788,7 +799,11 @@ mod tests {
             .layout_page(&package, "visio/pages/page1.xml")
             .unwrap();
         let inserted = shape_paths(&list, &format!("visio/pages/page1.xml:{}", added.source_id));
-        assert_eq!(inserted.len(), 1, "the instance renders its inherited geometry");
+        assert_eq!(
+            inserted.len(),
+            1,
+            "the instance renders its inherited geometry"
+        );
         assert_eq!(
             inserted,
             shape_paths(&list, "visio/pages/page1.xml:1"),
@@ -803,7 +818,11 @@ mod tests {
         for master in [Some(0), Some(999)] {
             assert!(
                 session
-                    .add_shape(&EditCtx::local("test"), "page:1", &stencil_instance_draft(master))
+                    .add_shape(
+                        &EditCtx::local("test"),
+                        "page:1",
+                        &stencil_instance_draft(master)
+                    )
                     .is_err(),
                 "master {master:?} must be refused"
             );
@@ -867,6 +886,124 @@ mod tests {
         assert!(session.undo());
         assert_eq!(session.snapshot().unwrap(), before);
         assert!(!session.can_undo());
+    }
+
+    fn placement_only_draft(master: u32, width: Option<&str>) -> ShapeDraft {
+        let mut cells = vec![placement_cell("PinX", "4"), placement_cell("PinY", "2")];
+        if let Some(width) = width {
+            cells.push(placement_cell("Width", width));
+            cells.push(placement_cell("Height", width));
+            cells.push(placement_cell("LocPinX", "Width*0.5"));
+            cells.push(placement_cell("LocPinY", "Height*0.5"));
+        }
+        ShapeDraft {
+            name: None,
+            master: Some(master),
+            cells,
+        }
+    }
+
+    #[test]
+    fn master_instance_insert_keeps_the_master_dimensions_when_none_are_written() {
+        let session = stencil_session();
+        let inherited = session
+            .add_shape(
+                &EditCtx::local("test"),
+                "page:1",
+                &placement_only_draft(2, None),
+            )
+            .unwrap();
+        let squared = session
+            .add_shape(
+                &EditCtx::local("test"),
+                "page:1",
+                &placement_only_draft(2, Some("1")),
+            )
+            .unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let source_id = |shape_id: &str| {
+            snapshot.pages[0]
+                .shapes
+                .iter()
+                .find(|shape| shape.id == shape_id)
+                .unwrap()
+                .source_id
+        };
+        let list = vsdx_render::Renderer::default()
+            .layout_page(&session.package().unwrap(), "visio/pages/page1.xml")
+            .unwrap();
+        let inherited = shape_paths(
+            &list,
+            &format!("visio/pages/page1.xml:{}", source_id(&inherited.shape_id)),
+        );
+        assert_eq!(
+            inherited,
+            shape_paths(&list, "visio/pages/page1.xml:3"),
+            "an instance without an XForm renders like the stored instance of the same master"
+        );
+        assert_ne!(
+            inherited,
+            shape_paths(
+                &list,
+                &format!("visio/pages/page1.xml:{}", source_id(&squared.shape_id))
+            ),
+            "writing 1x1 distorts a non-square master"
+        );
+    }
+
+    fn write_peer_shape_master(peer: &Doc, shape_id: &str, master: f64) {
+        let mut txn = peer.transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = match sheets.get(&txn, shape_id) {
+            Some(yrs::Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        shape.insert(&mut txn, "master", master);
+    }
+
+    #[test]
+    fn remote_master_instances_are_validated_against_the_package() {
+        for (master, accepted) in [(1.0, true), (0.0, false), (999.0, false)] {
+            let session = stencil_session();
+            let before = session.encode_state_as_update_v1();
+            let peer =
+                DiagramSession::open_from_update(&session.encode_state_as_update_v1(), 8).unwrap();
+            let receipt = peer
+                .add_shape(
+                    &EditCtx::local("peer"),
+                    "page:1",
+                    &stencil_instance_draft(Some(1)),
+                )
+                .unwrap();
+            if master != 1.0 {
+                write_peer_shape_master(&peer.doc, &receipt.shape_id, master);
+            }
+            let update = peer
+                .encode_diff_v1(&session.encode_state_vector_v1())
+                .unwrap();
+            assert_eq!(
+                session.apply_update_v1(&update).is_ok(),
+                accepted,
+                "master {master}"
+            );
+            if !accepted {
+                assert_eq!(before, session.encode_state_as_update_v1());
+            }
+        }
+    }
+
+    #[test]
+    fn remote_rewrite_of_an_existing_shape_master_is_rejected() {
+        let session = stencil_session();
+        let before = session.encode_state_as_update_v1();
+        let peer = peer_doc(&session, 9);
+        write_peer_shape_master(&peer, "page:1:shape:1", 2.0);
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert_eq!(before, session.encode_state_as_update_v1());
     }
 
     #[test]

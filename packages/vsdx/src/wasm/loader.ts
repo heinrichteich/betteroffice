@@ -9,7 +9,6 @@ export interface DiagramHandle {
   readonly clientId: number;
   snapshot(): DiagramSnapshot;
   masters(): DocumentMaster[];
-  layoutMaster(masterId: number): PageDisplayList;
   registerFont(face: VsdxFontFace): number;
   layoutPage(pageIndex: number): PageDisplayList;
   pageLayers(pageIndex: number): PageLayer[];
@@ -116,11 +115,12 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
   const json = <T>(operation: () => string, drainUpdates = false): T => JSON.parse(wasm(operation, drainUpdates)) as T;
   return {
     clientId: doc.clientId, snapshot: () => json(() => doc.snapshotJson()),
-    masters: () => json(() => doc.mastersJson()),
-    layoutMaster: masterId => {
-      const list = json<PageDisplayList>(() => renderer.layoutMasterJson(doc, masterId));
-      if (list.contractVersion !== 5) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
-      return list;
+    masters: () => {
+      const masters = json<DocumentMaster[]>(() => renderer.masterPreviewsJson(doc));
+      for (const master of masters) {
+        if (master.display && master.display.contractVersion !== 5) throw new Error(`unsupported VSDX display-list contract version ${master.display.contractVersion}`);
+      }
+      return masters;
     },
     registerFont: face => wasm(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes)),
     pageLayers: pageIndex => json(() => renderer.pageLayersJson(doc, pageIndex)),

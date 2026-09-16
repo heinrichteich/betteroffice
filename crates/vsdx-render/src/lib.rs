@@ -652,10 +652,10 @@ impl Renderer {
             evaluated(package, None, shape, id, name)
         });
         let sheet_dims = package.master_sheets.get(&master_id);
-        let master_width = sheet_dims
-            .and_then(|sheet| master_dimension(&resolver, package, sheet, "PageWidth"));
-        let master_height = sheet_dims
-            .and_then(|sheet| master_dimension(&resolver, package, sheet, "PageHeight"));
+        let master_width =
+            sheet_dims.and_then(|sheet| master_dimension(&resolver, package, sheet, "PageWidth"));
+        let master_height =
+            sheet_dims.and_then(|sheet| master_dimension(&resolver, package, sheet, "PageHeight"));
         let (Some(master_width), Some(master_height)) = (master_width, master_height) else {
             return Err(RenderError::PageDimensions(
                 "master dimensions are unavailable".into(),
@@ -709,7 +709,8 @@ impl Renderer {
         mut state: State,
         width: f64,
         height: f64,
-    ) -> Result<VsdxDisplayList, RenderError> {        let list = VsdxDisplayList {
+    ) -> Result<VsdxDisplayList, RenderError> {
+        let list = VsdxDisplayList {
             contract_version: CONTRACT_VERSION,
             width: width as f32 * PIXELS_PER_INCH,
             height: height as f32 * PIXELS_PER_INCH,
@@ -1758,10 +1759,7 @@ fn resolve_master_shape_tree(
     shape: &Shape,
     shapes: &mut BTreeMap<u32, ResolvedShape>,
 ) -> Result<(), RenderError> {
-    shapes.insert(
-        shape.id,
-        resolver.resolve_shape_in_sheet(shape, sheet)?,
-    );
+    shapes.insert(shape.id, resolver.resolve_shape_in_sheet(shape, sheet)?);
     for child in shape.shapes() {
         resolve_master_shape_tree(resolver, sheet, child, shapes)?;
     }
@@ -1803,7 +1801,8 @@ fn page_dimension(
     package: &VsdxPackage,
     page: &str,
     name: &str,
-) -> Option<f64> {    let page_id = package.page_part_ids.get(page)?;
+) -> Option<f64> {
+    let page_id = package.page_part_ids.get(page)?;
     let sheet = package.page_sheets.get(page_id)?;
     let resolved = resolver.resolve_sheet(sheet).ok()?;
     let Lookup::Found(cell) = resolved.cell(name)? else {

@@ -244,19 +244,6 @@ impl VsdxDocument {
         json(self.session.snapshot().map_err(js_error)?)
     }
 
-    #[wasm_bindgen(js_name = mastersJson)]
-    pub fn masters_json(&self) -> Result<String, JsValue> {
-        let package = self.session.package().map_err(js_error)?;
-        let masters = package
-            .master_sheets
-            .keys()
-            .map(|id| {
-                serde_json::json!({ "id": id, "name": package.master_names.get(id) })
-            })
-            .collect::<Vec<_>>();
-        json(masters)
-    }
-
     #[wasm_bindgen(js_name = mediaBytes)]
     pub fn media_bytes(&self, part_path: &str) -> Result<Vec<u8>, JsValue> {
         self.media_bytes_inner(part_path).map_err(js_error)

@@ -46,6 +46,10 @@ export class VsdxRenderer {
     clearLayerVisibility(): void;
     hitTestJson(x: number, y: number): string;
     layoutPageJson(document: VsdxDocument, page_index: number): string;
+    /**
+     * Lays every document master out once per materialized package.
+     */
+    masterPreviewsJson(document: VsdxDocument): string;
     constructor();
     pageLayersJson(document: VsdxDocument, page_index: number): string;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
@@ -66,6 +70,7 @@ export interface InitOutput {
     readonly vsdxrenderer_clearLayerVisibility: (a: number) => void;
     readonly vsdxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxrenderer_layoutPageJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly vsdxrenderer_masterPreviewsJson: (a: number, b: number) => [number, number, number, number];
     readonly vsdxrenderer_new: () => number;
     readonly vsdxrenderer_pageLayersJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];

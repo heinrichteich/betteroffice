@@ -5,19 +5,13 @@ function placementCell(name: string, formula: string): FormulaShapeDraft['cells'
   return { locator: { cellName: name }, name, formula };
 }
 
-export function documentMasterDraft(master: number, x: number, y: number, width: number, height: number): FormulaShapeDraft {
-  const safe = (value: number, fallback: number) => (Number.isFinite(value) && value > 0 ? value : fallback);
-  const safeWidth = safe(width, 1);
-  const safeHeight = safe(height, 1);
+/** Writes placement only: size and local pin stay inherited from the master. */
+export function documentMasterDraft(master: number, x: number, y: number): FormulaShapeDraft {
   return {
     master,
     cells: [
       placementCell('PinX', String(Number.isFinite(x) ? x : 0)),
       placementCell('PinY', String(Number.isFinite(y) ? y : 0)),
-      placementCell('Width', String(safeWidth)),
-      placementCell('Height', String(safeHeight)),
-      placementCell('LocPinX', 'Width*0.5'),
-      placementCell('LocPinY', 'Height*0.5'),
     ],
   };
 }
@@ -88,7 +82,9 @@ function collectPaths(primitives: readonly PagePrimitive[], transform: Affine, o
   }
 }
 
-function pathBounds(paths: string[][]): { minX: number; minY: number; scale: number } | null {
+interface PreviewBounds { minX: number; minY: number; scale: number; offsetX: number; offsetY: number }
+
+function pathBounds(paths: string[][]): PreviewBounds | null {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const segments of paths) {
     for (const segment of segments) {
@@ -102,8 +98,11 @@ function pathBounds(paths: string[][]): { minX: number; minY: number; scale: num
       }
     }
   }
-  if (!Number.isFinite(minX) || !Number.isFinite(minY) || maxX <= minX || maxY <= minY) return null;
-  return { minX, minY, scale: Math.max(maxX - minX, maxY - minY) };
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || maxX < minX || maxY < minY) return null;
+  const width = maxX - minX;
+  const height = maxY - minY;
+  const scale = Math.max(width, height) || 1;
+  return { minX, minY, scale, offsetX: (1 - width / scale) / 2, offsetY: (1 - height / scale) / 2 };
 }
 
 export function masterPreviewPath(list: PageDisplayList): string {
@@ -118,30 +117,22 @@ export function masterPreviewPath(list: PageDisplayList): string {
       const [command, ...rest] = segment.split(' ');
       const numbers: number[] = [];
       for (let index = 0; index + 1 < rest.length; index += 2) {
-        numbers.push((Number(rest[index]) - bounds.minX) / bounds.scale, (Number(rest[index + 1]) - bounds.minY) / bounds.scale);
+        numbers.push(
+          (Number(rest[index]) - bounds.minX) / bounds.scale + bounds.offsetX,
+          (Number(rest[index + 1]) - bounds.minY) / bounds.scale + bounds.offsetY,
+        );
       }
       return `${command} ${numbers.map(formatNumber).join(' ')}`;
     }).join(' '))
     .join(' ');
 }
 
-export interface DocumentStencilEntry {
-  master: DocumentMaster;
-  preview: string;
-}
-
-export function documentStencilEntries(
-  masters: readonly DocumentMaster[],
-  previews: ReadonlyMap<number, string>,
-): StandardShape[] {
-  return masters.map((master) => {
-    const preview = previews.get(master.id) ?? '';
-    return {
-      id: `document-master-${master.id}`,
-      nameKey: 'shapesPanel.shape.documentShape',
-      label: master.name ?? `#${master.id}`,
-      preview,
-      draft: (x, y, width, height) => documentMasterDraft(master.id, x, y, width, height),
-    } satisfies StandardShape;
-  });
+export function documentStencilEntries(masters: readonly DocumentMaster[]): StandardShape[] {
+  return masters.map((master) => ({
+    id: `document-master-${master.id}`,
+    nameKey: 'shapesPanel.shape.documentShape',
+    label: master.name ?? `#${master.id}`,
+    preview: master.display ? masterPreviewPath(master.display) : '',
+    draft: (x, y) => documentMasterDraft(master.id, x, y),
+  } satisfies StandardShape));
 }
