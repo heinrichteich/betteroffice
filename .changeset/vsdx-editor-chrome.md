@@ -1,8 +1,9 @@
 ---
+"@betteroffice/vsdx": patch
 "@betteroffice/vsdx-react": patch
 "@betteroffice/vsdx-i18n": patch
 ---
 
-Add a right-click menu for the selected shape with keyboard navigation and z-order submenus that
-stay inside the viewport, draw the rotation grip as a circle on a stalk, and give the shapes panel
-a header, a search box and a category rail. A queued drag preview follows the latest Shift state.
+Add Shape Data APIs and an editor panel for viewing and editing custom shape properties. Also add
+a keyboard-accessible shape context menu, refine the selection and rotation controls, and improve
+the searchable shapes panel and queued drag previews.
