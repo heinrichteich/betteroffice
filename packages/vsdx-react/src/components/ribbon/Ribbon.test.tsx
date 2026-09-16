@@ -21,14 +21,15 @@ function renderRibbon(diagram: DiagramHandle, selection: { pageId: string; shape
   return render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selection} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} hasSelection={selection !== null} /></RibbonCommandsProvider>);
 }
 
-test('renders file, home and insert tabs and supports click and roving arrow-key selection', () => {
+test('renders file, home, insert and view tabs and supports click and roving arrow-key selection', () => {
   cleanup();
   const diagram = { snapshot: () => ({ pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: [] }] }), canUndo: () => false, canRedo: () => false } as unknown as DiagramHandle;
   const view = render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={null} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} hasSelection={false} /></RibbonCommandsProvider>);
   const home = view.getByRole('tab', { name: 'Home' }); const insert = view.getByRole('tab', { name: 'Insert' });
-  expect(view.getAllByRole('tab')).toHaveLength(3); expect(home.getAttribute('aria-selected')).toBe('true'); expect(home.tabIndex).toBe(0); expect(insert.tabIndex).toBe(-1);
+  expect(view.getAllByRole('tab')).toHaveLength(4); expect(home.getAttribute('aria-selected')).toBe('true'); expect(home.tabIndex).toBe(0); expect(insert.tabIndex).toBe(-1);
   fireEvent.click(insert); expect(insert.getAttribute('aria-selected')).toBe('true'); expect(insert.tabIndex).toBe(0);
-  fireEvent.keyDown(insert, { key: 'ArrowRight' }); const file = view.getByRole('tab', { name: 'File' }); expect(file.getAttribute('aria-selected')).toBe('true'); expect(document.activeElement).toBe(file);
+  fireEvent.keyDown(insert, { key: 'ArrowRight' }); const viewTab = view.getByRole('tab', { name: 'View' }); expect(viewTab.getAttribute('aria-selected')).toBe('true'); expect(document.activeElement).toBe(viewTab);
+  fireEvent.keyDown(viewTab, { key: 'ArrowRight' }); const file = view.getByRole('tab', { name: 'File' }); expect(file.getAttribute('aria-selected')).toBe('true'); expect(document.activeElement).toBe(file);
 });
 
 test('home surface is one flat row with no group-label text nodes', () => {
@@ -57,7 +58,7 @@ test('only the active tab is selected and arrow keys move it', () => {
   expect(view.getByRole('tab', { name: 'File' }).getAttribute('aria-selected')).toBe('true');
   expect(document.activeElement).toBe(view.getByRole('tab', { name: 'File' }));
   fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'End' });
-  expect(view.getByRole('tab', { name: 'Insert' }).getAttribute('aria-selected')).toBe('true');
+  expect(view.getByRole('tab', { name: 'View' }).getAttribute('aria-selected')).toBe('true');
   fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Home' });
   expect(view.getByRole('tab', { name: 'File' }).getAttribute('aria-selected')).toBe('true');
   view.unmount();
@@ -100,7 +101,7 @@ test('every rendered command maps to a command id from commands.ts', () => {
   const selection = { pageId: 'page', shapeId: 'one', hit: { kind: 'shape' as const, shapeId: 'one' } };
   const valid = new Set(Object.keys(createRibbonCommands(diagram, null, 'page', () => {}, () => {}, () => {})));
   const view = renderRibbon(diagram, selection);
-  for (const tab of ['File', 'Home', 'Insert', 'Shape']) fireEvent.click(view.getByRole('tab', { name: tab }));
+  for (const tab of ['File', 'Home', 'Insert', 'View', 'Shape']) fireEvent.click(view.getByRole('tab', { name: tab }));
   fireEvent.click(view.getByRole('tab', { name: 'Home' }));
   for (const toggle of view.container.querySelectorAll('[data-split-toggle]')) fireEvent.click(toggle);
   const rendered = view.container.querySelectorAll('[data-command-id]');
@@ -108,6 +109,7 @@ test('every rendered command maps to a command id from commands.ts', () => {
   for (const node of rendered) expect(valid.has(node.getAttribute('data-command-id') ?? '')).toBe(true);
   for (const node of view.container.querySelectorAll('button[aria-label], input[aria-label]')) {
     if (node.hasAttribute('data-split-toggle')) continue;
+    if (node.hasAttribute('data-view-toggle')) continue;
     const role = node.parentElement?.getAttribute('role');
     if (role === 'tab' || node.getAttribute('role') === 'tab') continue;
     expect(node.hasAttribute('data-command-id')).toBe(true);
@@ -130,8 +132,23 @@ test('disabled commands keep their labels and stay out of the tab order', () => 
 
 test('tabs without commands stay hidden until they have content', () => {
   const view = renderRibbon(stubDiagram(), null);
-  for (const name of ['Design', 'Review', 'View', 'Help', 'Shape']) expect(view.queryByRole('tab', { name })).toBeNull();
+  for (const name of ['Design', 'Review', 'Help', 'Shape']) expect(view.queryByRole('tab', { name })).toBeNull();
   expect(view.queryByText(en.ribbon.empty)).toBeNull();
+  view.unmount();
+});
+
+test('view panel toggles grid, snap and rulers with pressed state', () => {
+  cleanup();
+  const diagram = stubDiagram();
+  const seen: string[] = [];
+  const view = render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={null} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} hasSelection={false} view={{ grid: true, snap: false, rulers: true }} onToggleView={(key) => seen.push(key)} /></RibbonCommandsProvider>);
+  fireEvent.click(view.getByRole('tab', { name: 'View' }));
+  const panel = view.getByTestId('vsdx-ribbon-view-panel');
+  expect(panel.querySelectorAll('[data-view-toggle]')).toHaveLength(3);
+  expect(panel.querySelector('[data-view-toggle="grid"]')?.getAttribute('aria-pressed')).toBe('true');
+  expect(panel.querySelector('[data-view-toggle="snap"]')?.getAttribute('aria-pressed')).toBe('false');
+  fireEvent.click(panel.querySelector('[data-view-toggle="snap"]') as HTMLElement);
+  expect(seen).toEqual(['snap']);
   view.unmount();
 });
 
