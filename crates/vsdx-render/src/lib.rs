@@ -4073,6 +4073,9 @@ mod tests {
 
     fn free_connector(id: u32, begin: (f64, f64), end: (f64, f64)) -> Shape {
         let mut connector = shape(id, 1.0, 1.0);
+        connector.children.retain(
+            |child| !matches!(child, ShapeChild::Section(section) if section.name == "Geometry"),
+        );
         connector.children.extend([
             ShapeChild::Cell(cell("OneD", "1")),
             ShapeChild::Cell(cell("BeginX", &begin.0.to_string())),
