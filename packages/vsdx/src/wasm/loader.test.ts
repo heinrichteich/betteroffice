@@ -93,6 +93,39 @@ describe('VSDX wasm boundary', () => {
     diagram.dispose();
   });
 
+  test('exports one vector SVG per diagram page', () => {
+    const diagram = openDiagram(textAccounting, { clientId: 9014 });
+    try {
+      const pages = diagram.exportSvg();
+      expect(pages).toHaveLength(diagram.snapshot().pages.length);
+      expect(pages[0].startsWith('<svg xmlns="http://www.w3.org/2000/svg"')).toBe(true);
+      expect(pages[0].endsWith('</svg>')).toBe(true);
+      expect(pages.join('')).toContain('<text');
+      expect(pages.join('')).not.toContain('@font-face');
+    } finally {
+      diagram.dispose();
+    }
+  });
+
+  test('exports a scaled PNG per diagram page', () => {
+    const diagram = openDiagram(textAccounting, { clientId: 9015 });
+    try {
+      const first = diagram.exportPng(0, 1);
+      expect(first[0]).toBe(0x89);
+      expect(first[1]).toBe(0x50);
+      const list = diagram.layoutPage(0);
+      expect(first.byteLength).toBeGreaterThan(8);
+      const second = diagram.exportPng(0, 2);
+      expect(second.byteLength).toBeGreaterThan(first.byteLength);
+      expect(list.width).toBeGreaterThan(0);
+      expect(() => diagram.exportPng(-1, 1)).toThrow('non-negative integer');
+      expect(() => diagram.exportPng(0, 0)).toThrow('positive number');
+      expect(() => diagram.exportPng(99, 1)).toThrow();
+    } finally {
+      diagram.dispose();
+    }
+  });
+
   test('decodes wasm text diagnostic categories using wire casing', () => {
     const diagram = openDiagram(textAccounting, { clientId: 9011 });
     const diagnostics = diagram.layoutPage(0).primitives.flatMap(primitive => primitive.kind === 'textBox' ? primitive.paragraphs.flatMap(paragraph => paragraph.runs.flatMap(run => run.diagnostics ?? [])) : []);

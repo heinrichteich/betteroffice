@@ -88,8 +88,7 @@ impl VsdxRenderer {
     }
 
     #[wasm_bindgen(js_name = hitTestJson)]
-    pub fn hit_test_json(&self, x: f32, y: f32) -> Result<String, JsValue> {
-        let result = self
+    pub fn hit_test_json(&self, x: f32, y: f32) -> Result<String, JsValue> {        let result = self
             .rendered
             .as_ref()
             .and_then(|rendered| vsdx_render::hit_test(rendered, x, y));
@@ -103,6 +102,58 @@ impl VsdxRenderer {
             None => serde_json::Value::Null,
         };
         serde_json::to_string(&result).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = exportSvgJson)]
+    pub fn export_svg_json(&self, document: &VsdxDocument) -> Result<String, JsValue> {
+        let package = document.session().package().map_err(js_error)?;
+        let pages = self.renderer.export_svg(&package).map_err(js_error)?;
+        serde_json::to_string(&pages).map_err(js_error)
+    }
+
+    #[cfg(feature = "raster")]
+    #[wasm_bindgen(js_name = exportPng)]
+    pub fn export_png(
+        &self,
+        document: &VsdxDocument,
+        page_index: u32,
+        scale: f32,
+    ) -> Result<Vec<u8>, JsValue> {
+        let package = document.session().package().map_err(js_error)?;
+        let part = package
+            .page_part_paths
+            .get(page_index as usize)
+            .ok_or_else(|| JsValue::from_str("page index is outside the document"))?;
+        let list = self
+            .renderer
+            .layout_page(&package, part)
+            .map_err(js_error)?;
+        let mut assets = Vec::new();
+        for primitive in &list.primitives {
+            collect_image_assets(primitive, &mut assets);
+        }
+        let images: std::collections::HashMap<&str, &[u8]> = assets
+            .into_iter()
+            .filter_map(|asset_id| package.part_bytes(asset_id).map(|bytes| (asset_id, bytes)))
+            .collect();
+        vsdx_raster::render_list(&list, &images, scale)
+            .map(|page| page.bytes)
+            .map_err(js_error)
+    }
+}
+
+fn collect_image_assets<'a>(
+    primitive: &'a vsdx_render::Primitive,
+    out: &mut Vec<&'a str>,
+) {
+    match primitive {
+        vsdx_render::Primitive::Image { asset_id, .. } => out.push(asset_id),
+        vsdx_render::Primitive::Group { primitives, .. } => {
+            for child in primitives {
+                collect_image_assets(child, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -389,5 +440,36 @@ mod tests {
         renderer.set_layer_visible("visio/pages/page1.xml", 0, false);
         renderer.layout_page_json(&document, 0).unwrap();
         renderer.clear_layer_visibility();
+    }
+
+    #[test]
+    fn export_svg_json_renders_one_vector_page_per_diagram_page() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        let renderer = VsdxRenderer::new();
+        let pages: Vec<String> =
+            serde_json::from_str(&renderer.export_svg_json(&document).unwrap()).unwrap();
+        assert_eq!(pages.len(), 1);
+        assert!(pages[0].starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""));
+        assert!(pages[0].contains("<text"));
+        assert!(renderer.export_svg_json(&document).is_ok());
+    }
+
+    #[cfg(feature = "raster")]
+    #[test]
+    fn export_png_renders_scaled_raster_pages() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        let renderer = VsdxRenderer::new();
+        let first = renderer.export_png(&document, 0, 1.0).unwrap();
+        assert_eq!(&first[0..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+        let second = renderer.export_png(&document, 0, 2.0).unwrap();
+        assert!(second.len() > first.len());
     }
 }
