@@ -1717,21 +1717,11 @@ fn connector_geometry(
     if !geometry.commands.iter().all(command_finite) {
         return None;
     }
-    let mut path = Vec::with_capacity(geometry.commands.len() + 1);
-    for (index, command) in geometry.commands.into_iter().enumerate() {
-        match command {
-            ooxml_drawingml::GeometryPathCommand::Move { .. } if index == 0 => {
-                path.push(ooxml_drawingml::GeometryPathCommand::Move {
-                    x: begin.x,
-                    y: begin.y,
-                });
-            }
-            ooxml_drawingml::GeometryPathCommand::Move { x, y } => {
-                path.push(ooxml_drawingml::GeometryPathCommand::Line { x, y });
-            }
-            command => path.push(command),
-        }
-    }
+    let mut path = geometry.commands;
+    path[0] = ooxml_drawingml::GeometryPathCommand::Move {
+        x: begin.x,
+        y: begin.y,
+    };
     path.push(ooxml_drawingml::GeometryPathCommand::Line { x: end.x, y: end.y });
     Some(path)
 }
@@ -4089,6 +4079,9 @@ mod tests {
         for style in [2.0, 16.0] {
             assert_eq!(connector_route(begin, end, style), direct);
         }
+        for style in [-1.0, 23.0, 1e30, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(connector_route(begin, end, style), horizontal);
+        }
         let aligned = ScenePoint { x: 1.0, y: 3.0 };
         assert_eq!(
             connector_route(begin, aligned, 1.0),
@@ -4208,6 +4201,38 @@ mod tests {
                 .into_iter()
                 .map(SectionChild::Row)
                 .collect(),
+            other_attrs: vec![],
+        }));
+        let list = render(vec![connector]);
+        let Primitive::Shape { path, .. } = shape_primitive(&list, 1) else {
+            unreachable!()
+        };
+        assert_eq!(
+            *path,
+            vec![
+                Move { x: 1.0, y: 1.0 },
+                Line { x: 4.0, y: 1.0 },
+                Line { x: 4.0, y: 3.0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn closed_filed_connector_geometry_falls_back_to_synthesized_route() {
+        use GeometryPathCommand::{Line, Move};
+        let mut connector = unglued_connector(Some("1"));
+        connector.children.push(ShapeChild::Section(Section {
+            name: "Geometry".into(),
+            index: None,
+            del: false,
+            children: vec![
+                row(0, "MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                row(1, "LineTo", vec![cell("X", "0.5"), cell("Y", "0")]),
+                row(2, "Close", vec![]),
+            ]
+            .into_iter()
+            .map(SectionChild::Row)
+            .collect(),
             other_attrs: vec![],
         }));
         let list = render(vec![connector]);
