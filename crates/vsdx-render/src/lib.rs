@@ -2587,6 +2587,45 @@ mod tests {
     }
 
     #[test]
+    fn container_and_member_paint_as_ordered_shapes() {
+        let mut container = shape(1, 5.0, 4.0);
+        container.children.push(ShapeChild::Cell(Cell {
+            name: "Relationships".into(),
+            formula: Some("SUM(DEPENDSON(1,Sheet.2!SheetRef()))".into()),
+            value: Some("0".into()),
+            unit: None,
+            del: false,
+            other_attrs: Vec::new(),
+        }));
+        container.children.push(ShapeChild::Section(Section {
+            name: "User".into(),
+            index: None,
+            del: false,
+            children: vec![SectionChild::Row(Row {
+                index: None,
+                name: Some("msvStructureType".into()),
+                local_name: None,
+                row_type: None,
+                del: false,
+                children: vec![RowChild::Cell(cell("Value", "Container"))],
+                other_attrs: Vec::new(),
+            })],
+            other_attrs: Vec::new(),
+        }));
+        let member = shape(2, 5.0, 4.0);
+        let list = render(vec![container, member]);
+        let ids = list
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Shape { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["page:1".to_owned(), "page:2".to_owned()]);
+    }
+
+    #[test]
     fn font_size_round_trips_in_inches_and_paints_in_pixels() {
         let mut shape = text_shape(vec![TextToken::Literal("a".into())]);
         shape.children.push(text_section(

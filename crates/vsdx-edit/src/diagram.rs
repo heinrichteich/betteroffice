@@ -18,6 +18,8 @@ use crate::{
     ShapeSnapshot,
 };
 
+mod containers;
+
 const SCHEMA_VERSION: f64 = 1.0;
 pub(crate) const MAX_SHAPE_NESTING: usize = 256;
 type SectionRows<'a> = Vec<(
