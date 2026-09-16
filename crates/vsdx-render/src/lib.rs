@@ -75,8 +75,8 @@ fn rich_paragraphs(
 ) -> Vec<RichParagraph> {
     let mut character = TextRun {
         text: String::new(),
-        family: "sans-serif".into(),
-        size_in: 1.0 / 6.0,
+        family: "Calibri".into(),
+        size_in: 10.0 / 72.0,
         bold: false,
         italic: false,
         color: "currentColor".into(),
@@ -92,7 +92,7 @@ fn rich_paragraphs(
     };
     let mut paragraphs = vec![RichParagraph {
         runs: Vec::new(),
-        align: 0,
+        align: 1,
         before: 0.0,
         after: 0.0,
         left: 0.0,
@@ -130,7 +130,7 @@ fn rich_paragraphs(
             vsdx_resolve::ResolvedTextToken::ParagraphRun { properties, .. } => {
                 let paragraph = RichParagraph {
                     runs: Vec::new(),
-                    align: property_number(properties, "HorzAlign").unwrap_or(0.0) as i32,
+                    align: property_number(properties, "HorzAlign").unwrap_or(1.0) as i32,
                     before: property_number(properties, "SpBefore").unwrap_or(0.0) as f32,
                     after: property_number(properties, "SpAfter").unwrap_or(0.0) as f32,
                     left: property_number(properties, "IndLeft").unwrap_or(0.0) as f32,
@@ -697,7 +697,6 @@ impl Renderer {
         {
             return self.layout_connector(
                 package,
-                resolver,
                 connectivity,
                 references,
                 page_part,
@@ -705,6 +704,7 @@ impl Renderer {
                 id,
                 z_order,
                 resolved,
+                &sections,
                 state,
             );
         }
@@ -725,13 +725,10 @@ impl Renderer {
         }
         sections.sort_by_key(|section| section.index.unwrap_or(0));
         let geometry = (!sections.is_empty()).then(|| {
-            let mut geometry = vsdx_resolve::RealizedGeometry::default();
-            for section in sections {
-                let realized = realize_geometry(section, bounds.width, bounds.height);
-                geometry.commands.extend(realized.commands);
-                geometry.issues.extend(realized.issues);
-            }
-            geometry
+            sections
+                .iter()
+                .map(|section| realize_geometry(section, bounds.width, bounds.height))
+                .collect::<Vec<_>>()
         });
         let child_shapes = shape.shapes().collect::<Vec<_>>();
         if !child_shapes.is_empty() {
@@ -813,43 +810,80 @@ impl Renderer {
                 "shape has no Geometry section",
             );
         };
-        if !geometry.issues.is_empty() || geometry.commands.is_empty() {
+        let drawn = geometry
+            .iter()
+            .filter(|realized| !realized.controls.no_show)
+            .collect::<Vec<_>>();
+        let issues = drawn
+            .iter()
+            .flat_map(|realized| realized.issues.iter().cloned())
+            .collect::<Vec<_>>();
+        if !issues.is_empty() {
             return self.placeholder_at(
                 id,
                 z_order,
                 bounds,
                 state,
-                &format!("unsupported geometry: {:?}", geometry.issues),
+                &format!("unsupported geometry: {issues:?}"),
             );
         }
-        let path = geometry
-            .commands
-            .into_iter()
-            .map(|mut command| {
-                transform_affine(&mut command, affine(transform.local));
-                command
+        let paths = drawn
+            .iter()
+            .filter(|realized| !realized.commands.is_empty())
+            .map(|realized| {
+                (
+                    &realized.controls,
+                    realized
+                        .commands
+                        .iter()
+                        .cloned()
+                        .map(|mut command| {
+                            transform_affine(&mut command, affine(transform.local));
+                            command
+                        })
+                        .collect::<Vec<_>>(),
+                )
             })
             .collect::<Vec<_>>();
-        let (fill, stroke) = match paint::paint(package, references, resolved, shape.id) {
-            Ok(paint) => paint,
-            Err(reason) => {
-                return self.placeholder_at(
-                    id,
-                    z_order,
-                    bounds,
-                    state,
-                    &format!("unresolvable colour: {reason}"),
-                );
-            }
-        };
-        state.primitives.push(Primitive::Shape {
-            id: id.clone(),
-            z_order,
-            path,
-            fill,
-            stroke,
-            transform: Affine::identity(),
-        });
+        if paths.is_empty() && !drawn.is_empty() {
+            return self.placeholder_at(
+                id,
+                z_order,
+                bounds,
+                state,
+                "unsupported geometry: no path commands",
+            );
+        }
+        let needs_fill = paths.iter().any(|(controls, _)| !controls.no_fill);
+        let needs_stroke = paths.iter().any(|(controls, _)| !controls.no_line);
+        let outcome = paint::paint(
+            package,
+            references,
+            resolved,
+            shape.id,
+            needs_fill,
+            needs_stroke,
+        );
+        let mut diagnostics = outcome.diagnostics;
+        for (controls, path) in paths {
+            state.primitives.push(Primitive::Shape {
+                id: id.clone(),
+                z_order,
+                path,
+                fill: if controls.no_fill {
+                    None
+                } else {
+                    outcome.fill.clone()
+                },
+                stroke: if controls.no_line {
+                    None
+                } else {
+                    outcome.stroke.clone()
+                },
+                transform: Affine::identity(),
+                diagnostics: std::mem::take(&mut diagnostics),
+            });
+        }
         self.text(
             package,
             resolver,
@@ -876,7 +910,6 @@ impl Renderer {
     fn layout_connector(
         &self,
         package: &VsdxPackage,
-        _resolver: &Resolver<'_>,
         connectivity: &vsdx_resolve::PageConnectivity,
         references: Option<&PageShapeReferences>,
         page_part: &str,
@@ -884,8 +917,13 @@ impl Renderer {
         id: String,
         z_order: u32,
         resolved: &ResolvedShape,
+        sections: &[&vsdx_resolve::ResolvedSection],
         state: &mut State,
     ) -> Result<(), RenderError> {
+        let visible = sections.iter().filter(|section| !section.controls.no_show);
+        if !sections.is_empty() && visible.clone().next().is_none() {
+            return Ok(());
+        }
         let Some(connector) = connectivity.connectors.get(&shape.id) else {
             return self.placeholder(
                 page_part,
@@ -934,17 +972,26 @@ impl Renderer {
                 "connector route cannot be computed: non-finite endpoint",
             );
         }
-        let (fill, stroke) = match paint::paint(package, references, resolved, shape.id) {
-            Ok(paint) => paint,
-            Err(reason) => return self.placeholder(page_part, shape, state, &reason),
-        };
+        let needs_fill =
+            sections.is_empty() || visible.clone().any(|section| !section.controls.no_fill);
+        let needs_stroke =
+            sections.is_empty() || visible.clone().any(|section| !section.controls.no_line);
+        let outcome = paint::paint(
+            package,
+            references,
+            resolved,
+            shape.id,
+            needs_fill,
+            needs_stroke,
+        );
         state.primitives.push(Primitive::Shape {
             id,
             z_order,
             path: connector_route(begin, end, paint::number(resolved, "RoutStyle")),
-            fill,
-            stroke,
+            fill: outcome.fill,
+            stroke: outcome.stroke,
             transform: Affine::identity(),
+            diagnostics: outcome.diagnostics,
         });
         Ok(())
     }
@@ -969,13 +1016,11 @@ impl Renderer {
                 "non-finite text metrics".into(),
             ));
         }
-        let page = package
-            .page_part_ids
+        let lookup = package
+            .page_contents
             .get(page_part)
-            .and_then(|id| package.page_sheets.get(id))
-            .or_else(|| package.page_contents.get(page_part))
             .ok_or_else(|| RenderError::MissingPage(page_part.into()))?;
-        let tokens = resolver.resolve_text_in_context(shape, page, resolved)?;
+        let tokens = resolver.resolve_text_in_context(shape, lookup, resolved)?;
         let mut paragraphs =
             rich_paragraphs(self, package, references, resolved, shape.id, &tokens);
         if paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()) {
@@ -1091,7 +1136,7 @@ impl Renderer {
         }
         state.text_lines += lines.len();
         let used_height = cursor_y - y;
-        let vertical = paint::number(resolved, "VerticalAlign").unwrap_or(0.0) as i32;
+        let vertical = paint::number(resolved, "VerticalAlign").unwrap_or(1.0) as i32;
         let dy = match vertical {
             1 => (block_height - top - bottom - used_height) * 0.5,
             2 => block_height - top - bottom - used_height,
@@ -2043,6 +2088,10 @@ mod tests {
         child
             .children
             .push(ShapeChild::Text(vec![TextToken::Literal("ab".into())]));
+        child.children.push(text_section(
+            "Character",
+            vec![row(0, "", vec![cell("Size", "1")])],
+        ));
         let mut parent = group(1, 10.0, 20.0, vec![child]);
         with_cell(
             &mut parent,
@@ -2084,7 +2133,7 @@ mod tests {
         );
         assert_point_close(
             transform.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
-            matrix.apply_point(1.0 + 0.166_666_67 * 0.5, 2.0),
+            matrix.apply_point(1.5, 2.0),
         );
     }
 
@@ -2384,43 +2433,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unsupported_section_paint_controls_produce_placeholders() {
-        for control in ["NoFill", "NoLine", "NoShow"] {
-            for formula in ["0", "1", "Unknown(1)"] {
-                let mut shape = shape(1, 1.0, 1.0);
-                let section = shape
-                    .children
-                    .iter_mut()
-                    .find_map(|child| match child {
-                        ShapeChild::Section(section) if section.name == "Geometry" => Some(section),
-                        _ => None,
-                    })
-                    .unwrap();
-                section
-                    .children
-                    .push(SectionChild::Unknown(vsdx_parse::OpaqueXml {
-                        name: "Cell".into(),
-                        attributes: vec![
-                            ("N".into(), control.into()),
-                            ("F".into(), formula.into()),
-                            ("V".into(), "0".into()),
-                        ],
-                        children: Vec::new(),
-                    }));
-                let list = render(vec![shape]);
-                if formula == "0" {
-                    assert!(
-                        list.primitives
-                            .iter()
-                            .any(|primitive| matches!(primitive, Primitive::Shape { .. }))
-                    );
-                } else {
-                    assert!(list.primitives.iter().all(|primitive| matches!(primitive, Primitive::Placeholder { reason, .. } if reason.contains(control))));
-                }
-            }
-        }
-    }
+    mod section_controls;
 
     #[test]
     fn hit_testing_does_not_bridge_separate_subpaths() {
@@ -2443,24 +2456,27 @@ mod tests {
         let list = Renderer::default()
             .layout_page(&package, "visio/pages/page1.xml")
             .unwrap();
-        let path = list
+        let paths = list
             .primitives
             .iter()
-            .find_map(|primitive| match primitive {
+            .filter_map(|primitive| match primitive {
                 Primitive::Shape { path, .. } => Some(path),
                 _ => None,
             })
-            .unwrap();
-        assert_eq!(
-            path.iter()
-                .filter(|command| matches!(
-                    command,
-                    ooxml_drawingml::GeometryPathCommand::Move { .. }
-                ))
-                .count(),
-            2
-        );
-        assert_eq!(path.len(), 4);
+            .collect::<Vec<_>>();
+        assert_eq!(paths.len(), 2);
+        for path in &paths {
+            assert_eq!(
+                path.iter()
+                    .filter(|command| matches!(
+                        command,
+                        ooxml_drawingml::GeometryPathCommand::Move { .. }
+                    ))
+                    .count(),
+                1
+            );
+            assert_eq!(path.len(), 2);
+        }
     }
 
     fn render(shapes: Vec<Shape>) -> VsdxDisplayList {
@@ -2609,6 +2625,7 @@ mod tests {
     fn tabs_advance_to_effective_stops_and_align_following_text() {
         for (alignment, expected_start) in [(0, 4.0), (1, 3.0), (2, 2.0)] {
             let mut shape = text_shape(vec![
+                TextToken::ParagraphRun(0),
                 TextToken::CharacterRun(0),
                 TextToken::Literal("a".into()),
                 TextToken::Tab(0),
@@ -2629,6 +2646,10 @@ mod tests {
                     ],
                 )],
             ));
+            shape.children.push(text_section(
+                "Paragraph",
+                vec![row(0, "", vec![cell("HorzAlign", "0")])],
+            ));
             with_cell(&mut shape, "Width", "10");
             let list = render(vec![shape]);
             let Primitive::TextBox { lines, .. } = text_box(&list) else {
@@ -2646,6 +2667,7 @@ mod tests {
     #[test]
     fn undefined_tab_uses_actual_default_interval_with_renderer_policy_diagnostic() {
         let mut shape = text_shape(vec![
+            TextToken::ParagraphRun(0),
             TextToken::CharacterRun(0),
             TextToken::Literal("a".into()),
             TextToken::Tab(3),
@@ -2655,6 +2677,10 @@ mod tests {
             "Tabs",
             vec![row(0, "", vec![cell("Position", "0.25")])],
         ));
+        shape.children.push(text_section(
+            "Paragraph",
+            vec![row(0, "", vec![cell("HorzAlign", "0")])],
+        ));
         with_cell(&mut shape, "DefaultTabStop", "0.75");
         let list = render(vec![shape]);
         let Primitive::TextBox {
@@ -2663,7 +2689,7 @@ mod tests {
         else {
             unreachable!()
         };
-        assert!(paragraphs[0].runs[1].diagnostics.iter().any(|diagnostic| {
+        assert!(paragraphs[1].runs[1].diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "missing-tab-position"
                 && diagnostic
                     .detail
@@ -2699,7 +2725,7 @@ mod tests {
         );
         assert!(runs[1].diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unregistered-font"
-                && diagnostic.detail == "unregistered font 'sans-serif'"
+                && diagnostic.detail == "unregistered font 'Calibri'"
                 && diagnostic.category == DiagnosticCategory::Fidelity
         }));
         assert!(
@@ -2727,12 +2753,21 @@ mod tests {
 
     #[test]
     fn paragraph_alignment_positions_lines_in_scene_inches() {
-        for (align, expected_x) in [(0, 1.0), (1, 1.458_333_4), (2, 1.916_666_6)] {
+        for (align, expected_x) in [
+            (None, 1.4375),
+            (Some(0), 1.0),
+            (Some(1), 1.4375),
+            (Some(2), 1.875),
+        ] {
             let mut shape = text_shape(vec![
                 TextToken::ParagraphRun(0),
                 TextToken::Literal("a".into()),
             ]);
             with_cell(&mut shape, "TxtWidth", "1");
+            shape.children.push(text_section(
+                "Character",
+                vec![row(0, "", vec![cell("Size", "0.25")])],
+            ));
             shape.children.push(ShapeChild::Section(Section {
                 name: "Paragraph".into(),
                 index: None,
@@ -2740,7 +2775,9 @@ mod tests {
                 children: vec![SectionChild::Row(row(
                     0,
                     "",
-                    vec![cell("HorzAlign", &align.to_string())],
+                    align
+                        .map(|value| vec![cell("HorzAlign", &value.to_string())])
+                        .unwrap_or_default(),
                 ))],
                 other_attrs: vec![],
             }));
@@ -2759,6 +2796,10 @@ mod tests {
             TextToken::Literal("a\nb".into()),
         ]);
         with_cell(&mut shape, "TxtWidth", "1");
+        shape.children.push(text_section(
+            "Character",
+            vec![row(0, "", vec![cell("Size", "0.25")])],
+        ));
         shape.children.push(ShapeChild::Section(Section {
             name: "Paragraph".into(),
             index: None,
@@ -2767,6 +2808,7 @@ mod tests {
                 0,
                 "",
                 vec![
+                    cell("HorzAlign", "0"),
                     cell("IndLeft", "0.2"),
                     cell("IndRight", "0.3"),
                     cell("IndFirst", "0.1"),
@@ -2782,7 +2824,7 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!((lines[0].x - 1.3).abs() < 1e-5);
         assert!((lines[1].x - 1.2).abs() < 1e-5);
-        assert!((lines[1].y - lines[0].y - 1.0 / 3.0).abs() < 1e-5);
+        assert!((lines[1].y - lines[0].y - 0.5).abs() < 1e-5);
     }
 
     #[test]
@@ -2876,7 +2918,7 @@ mod tests {
         };
         assert!(paragraphs[0].runs[0].diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unregistered-font"
-                && diagnostic.detail == "unregistered font 'sans-serif'"
+                && diagnostic.detail == "unregistered font 'Calibri'"
         }));
     }
 
@@ -3207,6 +3249,10 @@ mod tests {
         child
             .children
             .push(ShapeChild::Text(vec![TextToken::Literal("ab".into())]));
+        child.children.push(text_section(
+            "Character",
+            vec![row(0, "", vec![cell("Size", "1")])],
+        ));
         let mut parent = group(1, 10.0, 20.0, vec![child]);
         with_cell(
             &mut parent,
@@ -3248,7 +3294,7 @@ mod tests {
         );
         assert_point_close(
             transform.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
-            matrix.apply_point(1.0 + 0.166_666_67 * 0.5, 2.0),
+            matrix.apply_point(1.5, 2.0),
         );
     }
 
@@ -3314,6 +3360,10 @@ mod tests {
         rotated
             .children
             .push(ShapeChild::Text(vec![TextToken::Literal("ab".into())]));
+        rotated.children.push(text_section(
+            "Character",
+            vec![row(0, "", vec![cell("Size", "1")])],
+        ));
         with_cell(
             &mut rotated,
             "Angle",
@@ -3609,6 +3659,7 @@ mod tests {
                     }),
                     stroke: None,
                     transform: Affine::identity(),
+                    diagnostics: Vec::new(),
                 },
                 Primitive::Shape {
                     id: "top".into(),
@@ -3624,6 +3675,7 @@ mod tests {
                     }),
                     stroke: None,
                     transform: Affine::identity(),
+                    diagnostics: Vec::new(),
                 },
                 Primitive::Image {
                     id: "rotated-image".into(),
@@ -3669,6 +3721,7 @@ mod tests {
                     }),
                     stroke: None,
                     transform: Affine::identity(),
+                    diagnostics: Vec::new(),
                 },
                 Primitive::Shape {
                     id: "stroke".into(),
@@ -3684,6 +3737,7 @@ mod tests {
                         dashed: false,
                     }),
                     transform: Affine::identity(),
+                    diagnostics: Vec::new(),
                 },
             ],
         };
@@ -3855,7 +3909,7 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_foreign_data_and_colours_become_placeholders() {
+    fn unresolved_foreign_data_placeholders_while_colours_default_paint() {
         let mut image = shape(1, 1.0, 1.0);
         image.children.push(ShapeChild::ForeignData(ForeignData {
             foreign_type: None,
@@ -3871,13 +3925,36 @@ mod tests {
         assert!(
             matches!(&list.primitives[0], Primitive::Placeholder { reason, .. } if reason == "unsupported ForeignData image")
         );
+        let Primitive::Shape {
+            fill,
+            stroke,
+            diagnostics,
+            path,
+            ..
+        } = &list.primitives[1]
+        else {
+            panic!("unresolvable fill did not render");
+        };
+        assert!(!path.is_empty());
+        assert_eq!(
+            fill,
+            &Some(Paint::Solid {
+                color: "#000000".into()
+            })
+        );
+        assert_eq!(stroke.as_ref().unwrap().color, "#040506");
         assert!(
-            matches!(&list.primitives[1], Primitive::Placeholder { reason, .. } if reason.starts_with("unresolvable colour:"))
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "unresolvable-fill-colour"
+                    && diagnostic.detail
+                        == "unresolvable fill colour: missing colour cell FillForegnd"
+                    && diagnostic.category == DiagnosticCategory::Fidelity)
         );
     }
 
     #[test]
-    fn dangling_media_and_non_finite_stroke_width_become_placeholders() {
+    fn dangling_media_placeholders_while_non_finite_stroke_width_defaults() {
         let mut image = shape(1, 1.0, 1.0);
         image.children.push(ShapeChild::ForeignData(ForeignData {
             foreign_type: None,
@@ -3902,13 +3979,149 @@ mod tests {
         assert!(
             matches!(&list.primitives[0], Primitive::Placeholder { reason, .. } if reason.contains("dangling ForeignData image target"))
         );
+        let Primitive::Shape {
+            fill,
+            stroke,
+            diagnostics,
+            ..
+        } = &list.primitives[1]
+        else {
+            panic!("non-finite stroke width did not render");
+        };
+        assert_eq!(
+            fill,
+            &Some(Paint::Solid {
+                color: "#010203".into()
+            })
+        );
+        let stroke = stroke.as_ref().unwrap();
+        assert_eq!(stroke.color, "#040506");
+        assert_eq!(stroke.width, 0.01);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "unresolvable-stroke-width");
+        assert_eq!(
+            diagnostics[0].detail,
+            "unresolvable stroke width: non-finite LineWeight"
+        );
+        assert_eq!(diagnostics[0].category, DiagnosticCategory::Fidelity);
+    }
+
+    #[test]
+    fn unresolvable_stroke_defaults_stroke_and_keeps_fill() {
+        let mut lined = shape(1, 1.0, 1.0);
+        lined.children.retain(
+            |child| !matches!(child, ShapeChild::Cell(Cell { name, .. }) if name == "LineColor"),
+        );
+        let list = render(vec![lined]);
+        let Primitive::Shape {
+            fill,
+            stroke,
+            diagnostics,
+            ..
+        } = &list.primitives[0]
+        else {
+            panic!("unresolvable stroke did not render");
+        };
+        assert_eq!(
+            fill,
+            &Some(Paint::Solid {
+                color: "#010203".into()
+            })
+        );
+        assert_eq!(
+            stroke,
+            &Some(Stroke {
+                color: "#000000".into(),
+                width: 0.02,
+                dashed: false,
+            })
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "unresolvable-stroke-colour");
+        assert_eq!(
+            diagnostics[0].detail,
+            "unresolvable stroke colour: missing colour cell LineColor"
+        );
+        assert_eq!(diagnostics[0].category, DiagnosticCategory::Fidelity);
+    }
+
+    #[test]
+    fn defaulted_paint_diagnostics_survive_the_display_list() {
+        let mut coloured = shape(1, 1.0, 1.0);
+        coloured.children.retain(
+            |child| !matches!(child, ShapeChild::Cell(Cell { name, .. }) if name == "FillForegnd"),
+        );
+        let list = render(vec![shape(2, 4.0, 1.0), coloured]);
+        let json = serde_json::to_value(&list).unwrap();
+        let shapes = json["primitives"].as_array().unwrap();
         assert!(
-            matches!(&list.primitives[1], Primitive::Placeholder { reason, .. } if reason.contains("non-finite stroke width"))
+            shapes[0].get("diagnostics").is_none(),
+            "resolved paint must not grow the contract"
+        );
+        let diagnostics = shapes[1]["diagnostics"].as_array().unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0]["code"], "unresolvable-fill-colour");
+        assert_eq!(diagnostics[0]["category"], "fidelity");
+        assert_eq!(
+            diagnostics[0]["detail"],
+            "unresolvable fill colour: missing colour cell FillForegnd"
+        );
+        let round_tripped: VsdxDisplayList = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, list);
+    }
+
+    #[test]
+    fn unresolvable_connector_colour_keeps_route() {
+        let mut package = glued_connector_package("Connections.X1");
+        let SheetChild::Shapes(shapes) = package
+            .page_contents
+            .get_mut("page")
+            .unwrap()
+            .children
+            .iter_mut()
+            .find(|child| matches!(child, SheetChild::Shapes(_)))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        let connector = shapes
+            .iter_mut()
+            .find_map(|child| match child {
+                ShapesChild::Shape(shape) if shape.id == 1 => Some(shape),
+                _ => None,
+            })
+            .unwrap();
+        connector.children.retain(
+            |child| !matches!(child, ShapeChild::Cell(Cell { name, .. }) if name == "LineColor"),
+        );
+        connector
+            .children
+            .push(ShapeChild::Cell(formula("LineColor", "THEMEVAL(999)")));
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert!(!list.primitives.iter().any(
+            |primitive| matches!(primitive, Primitive::Placeholder { id, .. } if id == "page:1")
+        ));
+        let Primitive::Shape {
+            stroke,
+            diagnostics,
+            path,
+            ..
+        } = shape_primitive(&list, 1)
+        else {
+            unreachable!()
+        };
+        assert!(!path.is_empty());
+        assert_eq!(stroke.as_ref().unwrap().color, "#000000");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "unresolvable-stroke-colour"
+                    && diagnostic.detail.contains("THEMEVAL colour-scheme index"))
         );
     }
 
     #[test]
-    fn unsupported_colour_reason_preserves_evaluator_detail() {
+    fn unsupported_colour_reason_survives_as_a_paint_diagnostic() {
         let mut coloured = shape(1, 1.0, 1.0);
         coloured.children.retain(
             |child| !matches!(child, ShapeChild::Cell(Cell { name, .. }) if name == "FillForegnd"),
@@ -3917,8 +4130,22 @@ mod tests {
             .children
             .push(ShapeChild::Cell(formula("FillForegnd", "THEMEVAL(999)")));
         let list = render(vec![coloured]);
+        let Primitive::Shape {
+            fill, diagnostics, ..
+        } = &list.primitives[0]
+        else {
+            panic!("unsupported fill colour did not render");
+        };
+        assert_eq!(
+            fill,
+            &Some(Paint::Solid {
+                color: "#000000".into()
+            })
+        );
         assert!(
-            matches!(&list.primitives[0], Primitive::Placeholder { reason, .. } if reason.starts_with("unresolvable colour:") && reason.len() > "unresolvable colour:".len())
+            diagnostics.iter().any(|diagnostic| diagnostic.code == "unresolvable-fill-colour"
+                && diagnostic.detail
+                    == "unresolvable fill colour: THEMEVAL colour-scheme index must be 1 through 8")
         );
     }
 
@@ -4242,11 +4469,11 @@ mod tests {
         assert_point_close((transform.e, transform.f), (9.487798, 10.472947));
         assert_point_close(
             transform.apply_point(lines[0].x, lines[0].y),
-            (9.487798, 10.472947),
+            (9.745717, 10.163713),
         );
         assert_point_close(
             transform.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
-            (9.409306, 10.373197),
+            (9.680307, 10.080587),
         );
         let Primitive::Image {
             x,
@@ -4476,6 +4703,49 @@ mod tests {
     }
 
     #[test]
+    fn group_subshapes_render_master_geometry_and_text_with_page_formatting() {
+        let package = vsdx_parse::parse_vsdx(include_bytes!(
+            "../../vsdx-parse/tests/fixtures/group-master-shape.vsdx"
+        ))
+        .unwrap();
+        let page = &package.page_part_paths[0];
+        let renderer = Renderer::default();
+        let list = renderer.layout_page(&package, page).unwrap();
+        let mut boxes = BTreeMap::new();
+        text_boxes_by_id(&list.primitives, &mut boxes);
+        assert_eq!(boxes.len(), 2);
+        for id in [2, 4] {
+            let Primitive::TextBox {
+                width,
+                height,
+                paragraphs,
+                ..
+            } = boxes[&format!("{page}:{id}")]
+            else {
+                panic!("missing text box")
+            };
+            assert_eq!((*width, *height), (2.0, 1.0));
+            let runs = paragraphs
+                .iter()
+                .flat_map(|paragraph| &paragraph.runs)
+                .collect::<Vec<_>>();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].text, "group label");
+            assert_eq!(runs[0].size_in, 0.25);
+        }
+        let mut rendered = std::collections::BTreeSet::new();
+        assert_resolved_text(
+            &renderer,
+            &package,
+            page,
+            &list.primitives,
+            &mut rendered,
+            &mut TextCorpusStats::default(),
+        );
+        assert_eq!(rendered.len(), 2);
+    }
+
+    #[test]
     fn text_accounting_fixture_covers_resolved_text_sources() {
         let package = vsdx_parse::parse_vsdx(include_bytes!(
             "../../vsdx-parse/tests/fixtures/text-accounting.vsdx"
@@ -4699,11 +4969,6 @@ mod tests {
         stats: &mut TextCorpusStats,
     ) {
         let contents = &package.page_contents[page_part];
-        let page = package
-            .page_part_ids
-            .get(page_part)
-            .and_then(|id| package.page_sheets.get(id))
-            .unwrap_or(contents);
         let resolver = Resolver::new(package);
         let references = PageShapeReferences::new(&resolver, page_part).ok();
         let mut text_boxes = BTreeMap::new();
@@ -4714,7 +4979,7 @@ mod tests {
                 package,
                 &resolver,
                 references.as_ref(),
-                page,
+                contents,
                 page_part,
                 shape,
                 &text_boxes,
@@ -4730,7 +4995,7 @@ mod tests {
         package: &VsdxPackage,
         resolver: &Resolver<'_>,
         references: Option<&PageShapeReferences>,
-        page: &Sheet,
+        lookup: &Sheet,
         page_part: &str,
         shape: &Shape,
         text_boxes: &BTreeMap<String, &Primitive>,
@@ -4744,7 +5009,7 @@ mod tests {
             return;
         }
         let tokens = resolver
-            .resolve_text_in_context(shape, page, &resolved)
+            .resolve_text_in_context(shape, lookup, &resolved)
             .unwrap();
         if tokens.iter().all(|token| {
             matches!(
@@ -4832,7 +5097,7 @@ mod tests {
         }
         for child in shape.shapes() {
             assert_shape_text(
-                renderer, package, resolver, references, page, page_part, child, text_boxes,
+                renderer, package, resolver, references, lookup, page_part, child, text_boxes,
                 rendered, stats,
             );
         }

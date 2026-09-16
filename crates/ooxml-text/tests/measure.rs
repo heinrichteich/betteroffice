@@ -182,6 +182,152 @@ fn trailing_spaces_can_overhang_without_wrapping_the_word() {
 }
 
 #[test]
+fn trailing_ideographic_spaces_overhang_like_ascii_spaces() {
+    const W_IDEO: f64 = 16.0;
+    let value = measure(json!([{ "kind": "text", "text": "00\u{3000}" }]), 2.0 * W0).unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 3)]);
+    approx(
+        value["lines"][0]["width"].as_f64().unwrap(),
+        2.0 * W0 + W_IDEO,
+        "retained ideographic advance",
+    );
+    let value = measure(
+        json!([{ "kind": "text", "text": "00\u{3000}\u{3000}\u{3000}" }]),
+        2.0 * W0,
+    )
+    .unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 5)]);
+    approx(
+        value["lines"][0]["width"].as_f64().unwrap(),
+        2.0 * W0 + 3.0 * W_IDEO,
+        "retained ideographic advances",
+    );
+}
+
+#[test]
+fn ideographic_space_breaks_words_keeping_full_advance() {
+    const W_IDEO: f64 = 16.0;
+    let value = measure(
+        json!([{ "kind": "text", "text": "00\u{3000}00" }]),
+        2.0 * W0 + 1.0,
+    )
+    .unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 3), (0, 3, 0, 5)]);
+    let lines = value["lines"].as_array().unwrap();
+    approx(
+        lines[0]["width"].as_f64().unwrap(),
+        2.0 * W0 + W_IDEO,
+        "first line keeps the trailing ideographic advance",
+    );
+    approx(
+        lines[1]["width"].as_f64().unwrap(),
+        2.0 * W0,
+        "second line width",
+    );
+}
+
+#[test]
+fn justified_text_does_not_compress_ideographic_spaces() {
+    const W_IDEO: f64 = 16.0;
+    let natural = 12.0 * W0 + 3.0 * W_IDEO;
+    let minimum = natural - 0.25 * 3.0 * W_IDEO;
+    for (alignment, width, expected_lines) in [
+        ("justify", natural, 1),
+        ("justify", minimum, 2),
+        ("left", minimum, 2),
+    ] {
+        let input = json!({
+            "block":{"kind":"paragraph","runs":[{"kind":"text","text":"000\u{3000}000\u{3000}000\u{3000}000"}],"attrs":{"alignment":alignment}},
+            "maxWidth":width,"fontChains":{"liberation sans|0|0":[0]},
+            "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+        });
+        let measured: Value =
+            serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(
+            measured["lines"].as_array().unwrap().len(),
+            expected_lines,
+            "{alignment} at {width}"
+        );
+    }
+    let input = json!({
+        "block":{"kind":"paragraph","runs":[{"kind":"text","text":"000\u{3000}000\u{3000}000\u{3000}000"}]},
+        "maxWidth":natural,"fontChains":{"liberation sans|0|0":[0]},
+        "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+    });
+    let measured: Value =
+        serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+            .unwrap();
+    approx(
+        measured["lines"][0]["clusterAdvances"][3]["advance"]
+            .as_f64()
+            .unwrap(),
+        W_IDEO,
+        "ideographic advance uncompressed",
+    );
+}
+
+#[test]
+fn justified_mixed_ascii_and_trailing_ideographic_keeps_spaces_uncompressed() {
+    const W_IDEO: f64 = 16.0;
+    let natural = 12.0 * W0 + 3.0 * SP;
+    for trailing in ["\u{3000}", "\u{3000}\u{3000}"] {
+        let count = trailing.chars().count() as f64;
+        let text = format!("000 000 000 000{trailing}");
+        let input = json!({
+            "block":{"kind":"paragraph","runs":[{"kind":"text","text":text}],"attrs":{"alignment":"justify"}},
+            "maxWidth":natural,"fontChains":{"liberation sans|0|0":[0]},
+            "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+        });
+        let measured: Value =
+            serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(
+            measured["lines"].as_array().unwrap().len(),
+            1,
+            "trailing {count}"
+        );
+        let line = &measured["lines"][0];
+        approx(
+            line["width"].as_f64().unwrap(),
+            natural + count * W_IDEO,
+            "full width retained",
+        );
+        for idx in [3, 7, 11] {
+            approx(
+                line["clusterAdvances"][idx]["advance"].as_f64().unwrap(),
+                SP,
+                "ascii space uncompressed",
+            );
+        }
+        approx(
+            line["clusterAdvances"][0]["advance"].as_f64().unwrap(),
+            W0,
+            "unchanged glyph advance",
+        );
+        let base = 15;
+        for offset in 0..count as usize {
+            approx(
+                line["clusterAdvances"][base + offset]["advance"]
+                    .as_f64()
+                    .unwrap(),
+                W_IDEO,
+                "trailing ideographic advance",
+            );
+        }
+    }
+}
+
+#[test]
+fn ideographic_space_only_run_measures_like_empty_paragraph() {
+    for text in ["\u{3000}", "\u{3000}\u{3000}"] {
+        let v = measure(json!([{ "kind": "text", "text": text }]), 200.0).unwrap();
+        assert_eq!(spans(&v), vec![(0, 0, 0, 0)]);
+        assert_eq!(v["lines"][0]["width"].as_f64().unwrap(), 0.0);
+    }
+}
+
+#[test]
 fn justified_text_compresses_spaces_before_wrapping() {
     let natural = 12.0 * W0 + 3.0 * SP;
     let minimum = natural - 0.25 * 3.0 * SP;
@@ -309,6 +455,69 @@ fn multi_run_line_takes_max_font_basis() {
         "24pt descent",
     );
     approx(line["lineHeight"].as_f64().unwrap(), 2.0 * LH, "24pt line");
+}
+
+#[test]
+fn wrapped_runs_only_contribute_metrics_to_the_lines_they_occupy() {
+    let preceding = json!({ "kind": "text", "text": "0".repeat(22) });
+    let small = measure(json!([preceding]), 200.0).unwrap();
+    let large = measure(
+        json!([{ "kind": "text", "text": "0", "fontSize": 24.0 }]),
+        200.0,
+    )
+    .unwrap();
+    for following in [
+        json!([{ "kind": "text", "text": "00", "fontSize": 24.0 }]),
+        json!([{ "kind": "text", "text": "0".repeat(20), "fontSize": 24.0 }]),
+        json!([{ "kind": "field", "fallback": "00", "fontSize": 24.0 }]),
+        json!([
+            { "kind": "tab", "fontSize": 24.0 },
+            { "kind": "text", "text": "00" }
+        ]),
+    ] {
+        let mut runs = vec![preceding.clone()];
+        runs.extend(following.as_array().unwrap().iter().cloned());
+        let measured = measure(json!(runs), 200.0).unwrap();
+        let lines = measured["lines"].as_array().unwrap();
+        assert!(lines.len() >= 2);
+        assert_eq!(spans(&measured)[0], (0, 0, 0, 22));
+        for metric in ["ascent", "descent", "lineHeight"] {
+            assert_eq!(
+                lines[0][metric], small["lines"][0][metric],
+                "{following}: {metric}"
+            );
+            for line in &lines[1..] {
+                assert_eq!(
+                    line[metric], large["lines"][0][metric],
+                    "{following}: {metric}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn empty_runs_still_contribute_metrics_before_a_wrap() {
+    let measured = measure(
+        json!([
+            { "kind": "text", "text": "0".repeat(22) },
+            { "kind": "text", "text": "", "fontSize": 24.0 },
+            { "kind": "text", "text": "00" }
+        ]),
+        200.0,
+    )
+    .unwrap();
+    assert_eq!(spans(&measured), vec![(0, 0, 1, 0), (2, 0, 2, 2)]);
+    approx(
+        measured["lines"][0]["lineHeight"].as_f64().unwrap(),
+        2.0 * LH,
+        "empty 24pt run contributes to its line",
+    );
+    approx(
+        measured["lines"][1]["lineHeight"].as_f64().unwrap(),
+        LH,
+        "following line only contains 12pt text",
+    );
 }
 
 #[test]
@@ -859,6 +1068,60 @@ fn tab_advances_to_default_grid_stops() {
     );
 }
 
+#[test]
+fn automatic_tabs_resume_on_grid_multiples_after_custom_stops() {
+    for (stops, expected) in [
+        (json!([{ "val": "start", "pos": 1500.0 }]), 144.0),
+        (json!([{ "val": "start", "pos": 1440.0 }]), 144.0),
+        (
+            json!([
+                { "val": "start", "pos": 1500.0 },
+                { "val": "clear", "pos": 2160.0 }
+            ]),
+            192.0,
+        ),
+    ] {
+        let v = measure_with(
+            json!({
+                "kind": "paragraph",
+                "runs": [
+                    { "kind": "tab" },
+                    { "kind": "text", "text": "0" },
+                    { "kind": "tab" },
+                    { "kind": "text", "text": "0" }
+                ],
+                "attrs": { "tabs": stops }
+            }),
+            300.0,
+        )
+        .unwrap();
+        assert_eq!(spans(&v), vec![(0, 0, 3, 1)]);
+        approx(
+            v["lines"][0]["width"].as_f64().unwrap(),
+            expected + W0,
+            "automatic tab after custom stop",
+        );
+    }
+}
+
+#[test]
+fn paragraph_indent_does_not_shift_the_automatic_tab_grid() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "tab" }, { "kind": "text", "text": "0" }],
+            "attrs": { "indent": { "left": 10.0 } }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        48.0 - 10.0 + W0,
+        "automatic tab position is relative to the content area",
+    );
+}
+
 // 12. end and center anchor following text; decimal uses start; bar is zero
 #[test]
 fn tab_stop_alignment_semantics() {
@@ -947,9 +1210,8 @@ fn tab_falls_back_to_default_grid() {
     );
 }
 
-// 14. an over-edge stop clamps; a wrapped tab keeps its pre-wrap width
 #[test]
-fn tab_clamps_to_line_edge_and_wraps_when_full() {
+fn right_aligned_tab_clamps_to_line_edge() {
     // end stop at 200px on a 100px line: clamp to 100 − W0
     let v = measure_with(
         json!({
@@ -962,24 +1224,44 @@ fn tab_clamps_to_line_edge_and_wraps_when_full() {
     .unwrap();
     assert_eq!(spans(&v), vec![(0, 0, 1, 1)]);
     approx(v["lines"][0]["width"].as_f64().unwrap(), 100.0, "clamped");
+}
 
-    // 22 zeros fill 195.77px of a 200px line; the tab's 44.23px to the 240px
-    // grid line cannot fit or clamp (no room for the following zero), so the
-    // tab wraps carrying that width
-    let v = measure(
-        json!([
-            { "kind": "text", "text": "0000000000000000000000" },
-            { "kind": "tab" },
-            { "kind": "text", "text": "0" }
-        ]),
+#[test]
+fn wrapped_tabs_resolve_against_the_new_line_grid() {
+    for tab_count in 1..=3 {
+        let mut runs = vec![json!({ "kind": "text", "text": "0".repeat(22) })];
+        runs.extend((0..tab_count).map(|_| json!({ "kind": "tab" })));
+        runs.push(json!({ "kind": "text", "text": "0" }));
+        let v = measure(json!(runs), 200.0).unwrap();
+        assert_eq!(spans(&v), vec![(0, 0, 0, 22), (1, 0, tab_count + 1, 1)]);
+        approx(
+            v["lines"][1]["width"].as_f64().unwrap(),
+            tab_count as f64 * 48.0 + W0,
+            "wrapped tab advances from the new line origin",
+        );
+    }
+}
+
+#[test]
+fn wrapped_tab_uses_the_body_indent_instead_of_the_first_line_offset() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [
+                { "kind": "text", "text": "0".repeat(17) },
+                { "kind": "tab" },
+                { "kind": "text", "text": "0" }
+            ],
+            "attrs": { "indent": { "left": 24.0, "firstLine": 24.0 } }
+        }),
         200.0,
     )
     .unwrap();
-    assert_eq!(spans(&v), vec![(0, 0, 0, 22), (1, 0, 2, 1)]);
+    assert_eq!(spans(&v), vec![(0, 0, 0, 17), (1, 0, 2, 1)]);
     approx(
         v["lines"][1]["width"].as_f64().unwrap(),
-        (240.0 - 22.0 * W0) + W0,
-        "wrapped tab keeps pre-wrap width",
+        24.0 + W0,
+        "new line tab advances from the body indent to the 48px stop",
     );
 }
 
@@ -1003,6 +1285,68 @@ fn tab_in_hanging_indent_lands_on_the_body_edge() {
         24.0 + W0,
         "tab to indent stop",
     );
+}
+
+#[test]
+fn declared_tabs_before_the_indent_preserve_their_alignment() {
+    for (alignment, expected) in [
+        ("start", 40.0 + 2.0 * W0),
+        ("end", 40.0),
+        ("center", 40.0 + W0),
+    ] {
+        let v = measure_with(
+            json!({
+                "kind": "paragraph",
+                "runs": [{ "kind": "tab" }, { "kind": "text", "text": "00" }],
+                "attrs": {
+                    "indent": { "left": 64.0, "hanging": 64.0 },
+                    "tabs": [{ "val": alignment, "pos": 600.0 }]
+                }
+            }),
+            300.0,
+        )
+        .unwrap();
+        approx(
+            v["lines"][0]["width"].as_f64().unwrap(),
+            expected,
+            alignment,
+        );
+    }
+}
+
+#[test]
+fn hanging_indent_preserves_declared_tabs_before_the_body_edge() {
+    for label in ["", "(1)"] {
+        for explicit_body_stop in [false, true] {
+            let mut stops = vec![json!({ "val": "end", "pos": 595.0 })];
+            if explicit_body_stop {
+                stops.push(json!({ "val": "start", "pos": 879.0 }));
+            }
+            let v = measure_with(
+                json!({
+                    "kind": "paragraph",
+                    "runs": [
+                        { "kind": "tab" },
+                        { "kind": "text", "text": label },
+                        { "kind": "tab" },
+                        { "kind": "text", "text": "00000000" }
+                    ],
+                    "attrs": {
+                        "indent": { "left": 58.6, "hanging": 58.6 },
+                        "tabs": stops
+                    }
+                }),
+                139.0,
+            )
+            .unwrap();
+            assert_eq!(spans(&v), vec![(0, 0, 3, 8)]);
+            approx(
+                v["lines"][0]["width"].as_f64().unwrap(),
+                58.6 + 8.0 * W0,
+                "body text starts at the left indent after the label tab",
+            );
+        }
+    }
 }
 
 // 16. a tab's font contributes to line metrics
@@ -1052,6 +1396,31 @@ fn field_measures_at_fallback_text() {
         2.0 * LH,
         "24pt field line",
     );
+}
+
+#[test]
+fn horizontal_rule_reserves_atomic_width_and_run_font_metrics() {
+    let v = measure(
+        json!([
+            {"kind":"text","text":"000000000000000"},
+            {"kind":"horizontalRule","width":100,"fallback":"\u{200b}","fontSize":24},
+            {"kind":"text","text":"0"}
+        ]),
+        200.0,
+    )
+    .unwrap();
+    assert_eq!(spans(&v), vec![(0, 0, 0, 15), (1, 0, 2, 1)]);
+    approx(
+        v["lines"][1]["width"].as_f64().unwrap(),
+        100.0 + W0,
+        "rule advance",
+    );
+    approx(
+        v["lines"][1]["lineHeight"].as_f64().unwrap(),
+        2.0 * LH,
+        "rule font metrics",
+    );
+    assert!(measure(json!([{"kind":"horizontalRule","width":-1}]), 200.0).is_err());
 }
 
 // 18. a field that doesn't fit a non-empty line wraps whole (one unbreakable
@@ -1230,12 +1599,8 @@ fn visible_list_marker_reserves_the_hanging_slot_on_the_first_line() {
 // Lines without a font-bearing run use the fallback at the 12pt default: ascent
 // 0.8 × 16 = 12.8, descent 0.2 × 16 = 3.2, ruled height 16 × 1.15 = 18.4.
 
-// 22. an image alone on the line grows it to the image height plus the
-// descent buffer on BOTH sides; with text, the image seats on the baseline
-// (full height above, text descent below)
 #[test]
 fn inline_image_grows_the_line_box() {
-    // image alone: fallback descent 3.2 buffers both sides
     let v = measure(
         json!([{ "kind": "image", "width": 50.0, "height": 100.0 }]),
         200.0,
@@ -1246,10 +1611,10 @@ fn inline_image_grows_the_line_box() {
     approx(line["width"].as_f64().unwrap(), 50.0, "image width");
     approx(
         line["lineHeight"].as_f64().unwrap(),
-        106.4,
-        "alone: h + 2×3.2",
+        103.2,
+        "alone: image height plus descent",
     );
-    approx(line["ascent"].as_f64().unwrap(), 103.2, "alone ascent");
+    approx(line["ascent"].as_f64().unwrap(), 100.0, "alone ascent");
     approx(line["descent"].as_f64().unwrap(), 3.2, "alone descent");
 
     // image flowing with text: baseline-seated, text descent below only
@@ -1308,6 +1673,26 @@ fn inline_image_grows_the_line_box() {
 }
 
 #[test]
+fn inline_images_keep_the_same_top_with_or_without_text() {
+    let image = json!({ "kind": "image", "width": 50.0, "height": 100.0 });
+    for runs in [
+        json!([image]),
+        json!([image, { "kind": "text", "text": "0" }]),
+        json!([{ "kind": "text", "text": "0" }, image]),
+        json!([image, image]),
+    ] {
+        let measured = measure(runs, 200.0).unwrap();
+        let line = &measured["lines"][0];
+        approx(line["ascent"].as_f64().unwrap(), 100.0, "image baseline");
+        approx(
+            line["lineHeight"].as_f64().unwrap(),
+            100.0 + line["descent"].as_f64().unwrap(),
+            "only descent follows the image",
+        );
+    }
+}
+
+#[test]
 fn inline_wrap_distances_do_not_move_text_or_resize_image_only_lines() {
     for mut runs in [
         json!([{ "kind": "image", "width": 50.0, "height": 100.0 }]),
@@ -1336,7 +1721,7 @@ fn inline_image_wrapping_and_column_fit() {
     assert_eq!(spans(&v), vec![(0, 0, 0, 22), (1, 0, 1, 1)]);
     approx(
         v["lines"][1]["lineHeight"].as_f64().unwrap(),
-        30.0 + 2.0 * 3.2,
+        30.0 + 3.2,
         "wrapped image line",
     );
 
@@ -1354,7 +1739,7 @@ fn inline_image_wrapping_and_column_fit() {
     );
     approx(
         v["lines"][1]["lineHeight"].as_f64().unwrap(),
-        50.0 + 2.0 * 3.2,
+        50.0 + 3.2,
         "rendered (fitted) height reserved",
     );
     approx(

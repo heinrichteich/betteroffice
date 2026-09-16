@@ -28,7 +28,7 @@ const MODULES: WasmModule[] = [
     crate: 'docx-parse',
     name: 'docx_parse',
     generated: 'packages/docx/src/wasm/generated/parse',
-    cargoArgs: ['--locked', '--features', 'wasm'],
+    cargoArgs: ['--locked', '--features', 'wasm,tiff'],
   },
 ];
 
