@@ -3789,10 +3789,7 @@ mod tests {
         assert_eq!(shadow.blur_emu, 38100);
         assert_eq!(shadow.dist_emu, 25420);
         assert_eq!(shadow.direction_60k, 5400000);
-        assert_eq!(
-            shadow.color,
-            ThemeEffectColor::Srgb("A5A5A5".to_owned())
-        );
+        assert_eq!(shadow.color, ThemeEffectColor::Srgb("A5A5A5".to_owned()));
         assert_eq!(shadow.alpha_1000pct, Some(60000));
         assert!(effects.effect_styles[2].has_bevel);
         assert_eq!(effects.variation_schemes.len(), 1);

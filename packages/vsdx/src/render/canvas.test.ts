@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { canvasPointToModel, modelPointToCanvas, paintPage } from './canvas';
-import type { PageDisplayList } from '../types';
+import type { PageDisplayList, ShapePrimitive } from '../types';
 
 function context(log: string[]): CanvasRenderingContext2D {
   return new Proxy({
@@ -175,6 +175,44 @@ test('paints a linear gradient across the shape box along its angle', async () =
   expect(gradients[0].args).toEqual([1 - radius, 0.5, 1 + radius, 0.5]);
   expect(gradients[0].stops).toEqual([[0, '#ff0000'], [1, '#0000ff']]);
   expect(fillStyle).toBe(painted[0]);
+});
+
+const shadow = { color: '#11223380', blurIn: 0.5, offsetXIn: 0.125, offsetYIn: -0.125 };
+
+function shadowedPage(primitives: PageDisplayList['primitives']): PageDisplayList {
+  return { contractVersion: 6, width: 768, height: 768, paintTransform: pagePaintTransform, primitives };
+}
+
+test('casts a shape shadow in device pixels and clears it before the stroke', async () => {
+  const log: string[] = [];
+  await paintPage(context(log), shadowedPage([{
+    kind: 'shape', id: 'boxed', zOrder: 0, path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 1, y: 1 }, { type: 'close' }],
+    fill: { kind: 'solid', color: '#ffffff' }, stroke: { color: '#000000', width: 1, dashed: false }, shadow,
+  }]));
+  expect(log).toContain('shadowColor=#11223380');
+  expect(log).toContain('shadowOffsetX=12');
+  expect(log).toContain('shadowOffsetY=12');
+  expect(log).toContain('shadowBlur=48');
+  expect(log.indexOf('shadowColor=#11223380')).toBeLessThan(log.findIndex(entry => entry.startsWith('fill:')));
+  expect(log.findIndex(entry => entry === 'shadowBlur=0')).toBeLessThan(log.findIndex(entry => entry.startsWith('stroke:')));
+});
+
+test('a shape shadow follows the device scale and the group transform', async () => {
+  const log: string[] = [];
+  const shaded: ShapePrimitive = { kind: 'shape', id: 'boxed', zOrder: 0, path: [{ type: 'move', x: 0, y: 0 }], fill: { kind: 'solid', color: '#ffffff' }, shadow };
+  await paintPage(context(log), shadowedPage([shaded]), 2, 3);
+  expect(log).toContain('shadowOffsetX=72');
+  expect(log).toContain('shadowBlur=288');
+  const nested: string[] = [];
+  await paintPage(context(nested), shadowedPage([{ kind: 'group', id: 'g', zOrder: 0, transform: { a: 2, b: 0, c: 0, d: 2, e: 0, f: 0 }, primitives: [shaded] }]));
+  expect(nested).toContain('shadowOffsetX=24');
+  expect(nested).toContain('shadowBlur=96');
+});
+
+test('an unshadowed shape never touches the canvas shadow state', async () => {
+  const log: string[] = [];
+  await paintPage(context(log), shadowedPage([{ kind: 'shape', id: 'plain', zOrder: 0, path: [{ type: 'move', x: 0, y: 0 }], fill: { kind: 'solid', color: '#ffffff' } }]));
+  expect(log.some(entry => entry.startsWith('shadow'))).toBe(false);
 });
 
 test('a degenerate gradient box falls back to its first stop', async () => {

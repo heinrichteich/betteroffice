@@ -1,5 +1,7 @@
 use super::*;
-use vsdx_parse::{ThemeEffectColor, ThemeEffectStyle, ThemeEffects, ThemeOuterShadow};
+use vsdx_parse::{
+    ThemeEffectColor, ThemeEffectStyle, ThemeEffects, ThemeOuterShadow, ThemeVariationScheme,
+};
 
 fn shadow_shape(id: u32, cells: Vec<Cell>) -> Shape {
     let mut shape = shape(id, 1.0, 1.0);
@@ -252,4 +254,95 @@ fn empty_theme_effects_cast_no_shadow() {
     let package = themed_package(vec![shadow_shape(1, vec![cell("ShapeShdwShow", "0")])]);
     let list = Renderer::default().layout_page(&package, "page").unwrap();
     assert_eq!(shape_shadow(&list), None);
+}
+
+fn transparent_shadow_color(transparency: &str) -> String {
+    let mut cells = explicit_cells();
+    cells.retain(|cell| cell.name != "ShdwForegndTrans");
+    cells.push(cell("ShdwForegndTrans", transparency));
+    let list = render(vec![shadow_shape(1, cells)]);
+    shape_shadow(&list).expect("shadow").color
+}
+
+#[test]
+fn shadow_transparency_is_the_complement_of_the_painted_alpha() {
+    assert_eq!(transparent_shadow_color("0"), "#112233");
+    assert_eq!(transparent_shadow_color("0.25"), "#112233BF");
+    assert_eq!(transparent_shadow_color("1"), "#11223300");
+}
+
+#[test]
+fn a_missing_theme_alpha_paints_an_opaque_shadow() {
+    let mut package = themed_package(vec![shadow_shape(
+        1,
+        vec![
+            cell("ShapeShdwShow", "2"),
+            cell("QuickStyleEffectsMatrix", "2"),
+        ],
+    )]);
+    package.themes.insert(1, ooxml_drawingml::Theme::default());
+    let effects = package.theme_effects.get_mut(&1).unwrap();
+    effects.effect_styles[1]
+        .outer_shadow
+        .as_mut()
+        .unwrap()
+        .alpha_1000pct = None;
+    let list = Renderer::default().layout_page(&package, "page").unwrap();
+    assert_eq!(shape_shadow(&list).expect("shadow").color, "#FF0000");
+}
+
+fn variant_package(scheme: ThemeVariationScheme, colors: Vec<Vec<Option<String>>>) -> VsdxPackage {
+    let mut package = themed_package(vec![shadow_shape(
+        1,
+        vec![
+            cell("ShapeShdwShow", "2"),
+            cell("QuickStyleEffectsMatrix", "100"),
+            cell("QuickStyleShadowColor", "100"),
+        ],
+    )]);
+    package.themes.insert(1, ooxml_drawingml::Theme::default());
+    let effects = package.theme_effects.get_mut(&1).unwrap();
+    effects.effect_styles[1]
+        .outer_shadow
+        .as_mut()
+        .unwrap()
+        .color = ThemeEffectColor::Placeholder;
+    effects.variation_schemes = vec![scheme];
+    effects.variation_colors = colors;
+    package
+}
+
+#[test]
+fn a_variant_scheme_without_effect_indexes_casts_no_shadow() {
+    let package = variant_package(
+        ThemeVariationScheme {
+            embellishment: 0,
+            effect_indexes: vec![],
+        },
+        vec![],
+    );
+    let list = Renderer::default().layout_page(&package, "page").unwrap();
+    assert_eq!(shape_shadow(&list), None);
+}
+
+#[test]
+fn a_theme_without_variation_colors_falls_back_to_the_palette() {
+    let package = variant_package(
+        ThemeVariationScheme {
+            embellishment: 0,
+            effect_indexes: vec![2],
+        },
+        vec![],
+    );
+    let list = Renderer::default().layout_page(&package, "page").unwrap();
+    let shadow = shape_shadow(&list).expect("shadow");
+    assert!(shadow.color.starts_with('#') && shadow.color.len() == 7);
+    match &list.primitives[0] {
+        Primitive::Shape { diagnostics, .. } => assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "unresolvable-shadow-colour")
+        ),
+        _ => unreachable!(),
+    }
 }

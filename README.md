@@ -59,6 +59,8 @@ Visio drawings (`.vsdx`) and templates (`.vstx`) open in the source-available VS
 
 The editor puts a flat command bar and a searchable thirty-two shape gallery over a focusable canvas with in-place shape text editing, keyboard undo and redo, Delete or Backspace, arrow-key nudge with a finer Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus.
 
+Shapes render their drop shadows, resolved from explicit shadow cells, page defaults, legacy shadow patterns and theme effect schemes. Oblique shadows render as a simple offset and report a fidelity diagnostic.
+
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
 [crates.io](https://docs.betteroffice.dev/docs/rust),

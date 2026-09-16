@@ -157,7 +157,7 @@ pub fn resolve(
             diagnostics,
         };
     }
-    let (color, alpha) = shadow_color(
+    let (color, opacity) = shadow_color(
         package,
         references,
         shape,
@@ -165,7 +165,7 @@ pub fn resolve(
         &theme,
         &mut diagnostics,
     );
-    let color = with_alpha(&color, alpha);
+    let color = with_opacity(&color, opacity);
     ShadowOutcome {
         shadow: Some(Shadow {
             color,
@@ -280,15 +280,15 @@ fn shadow_color(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> (String, f64) {
     if let Ok(color) = paint::colour(package, references, shape, shape_id, "ShdwForegnd") {
-        return (color, transparency(package, references, shape, shape_id));
+        return (color, opacity(package, references, shape, shape_id));
     }
     if let Some(color) = cached_color(package, shape, "ShdwForegnd") {
-        return (color, transparency(package, references, shape, shape_id));
+        return (color, opacity(package, references, shape, shape_id));
     }
     if let Some(theme) = theme
         && let Some(color) = theme.color.clone()
     {
-        return (color, theme.alpha);
+        return (color, theme.opacity);
     }
     diagnostics.push(Diagnostic::for_code(
         "unresolvable-shadow-colour",
@@ -296,11 +296,12 @@ fn shadow_color(
     ));
     (
         crate::palette_colour(package, 0.0).unwrap_or_else(|| "#000000".into()),
-        0.0,
+        1.0,
     )
 }
 
-fn transparency(
+/// `ShdwForegndTrans` is a transparency, so opacity is its complement.
+fn opacity(
     package: &VsdxPackage,
     references: Option<&PageShapeReferences>,
     shape: &ResolvedShape,
@@ -308,8 +309,8 @@ fn transparency(
 ) -> f64 {
     paint::resolved_number(package, references, shape, shape_id, "ShdwForegndTrans")
         .filter(|value| value.is_finite())
-        .map(|value| value.clamp(0.0, 1.0))
-        .unwrap_or(0.0)
+        .map(|value| 1.0 - value.clamp(0.0, 1.0))
+        .unwrap_or(1.0)
 }
 
 fn cached_color(package: &VsdxPackage, shape: &ResolvedShape, name: &str) -> Option<String> {
@@ -324,24 +325,39 @@ fn cached_color(package: &VsdxPackage, shape: &ResolvedShape, name: &str) -> Opt
     crate::palette_colour(package, value.parse().ok()?)
 }
 
-fn with_alpha(hex: &str, alpha: f64) -> String {
-    if alpha <= 0.0 {
+fn with_opacity(hex: &str, opacity: f64) -> String {
+    if opacity >= 1.0 {
         return hex.to_owned();
     }
     let digits = hex.strip_prefix('#').unwrap_or(hex);
     if digits.len() != 6 {
         return hex.to_owned();
     }
-    format!("{hex}{:02X}", (alpha.clamp(0.0, 1.0) * 255.0).round() as u8)
+    format!(
+        "{hex}{:02X}",
+        (opacity.clamp(0.0, 1.0) * 255.0).round() as u8
+    )
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct ThemeShadow {
     dx_in: f64,
     dy_in: f64,
     blur_in: f64,
     color: Option<String>,
-    alpha: f64,
+    opacity: f64,
+}
+
+impl Default for ThemeShadow {
+    fn default() -> Self {
+        Self {
+            dx_in: 0.0,
+            dy_in: 0.0,
+            blur_in: 0.0,
+            color: None,
+            opacity: 1.0,
+        }
+    }
 }
 
 fn theme_shadow(
@@ -383,10 +399,10 @@ fn theme_shadow(
         dy_in: -dist_in * radians.sin(),
         blur_in: (outer.blur_emu as f64 / EMU_PER_INCH).max(0.0),
         color,
-        alpha: outer
+        opacity: outer
             .alpha_1000pct
             .map(|alpha| (alpha as f64 / 100000.0).clamp(0.0, 1.0))
-            .unwrap_or(0.0),
+            .unwrap_or(1.0),
     })
 }
 
@@ -440,7 +456,8 @@ fn variant_effect_index(
         .iter()
         .find(|scheme| scheme.embellishment == quick_type as u32)
         .or_else(|| effects.variation_schemes.first())?;
-    let position = (variant - 100).clamp(0, scheme.effect_indexes.len() as i64 - 1);
+    let last = scheme.effect_indexes.len().checked_sub(1)? as i64;
+    let position = (variant - 100).clamp(0, last);
     let index = *scheme.effect_indexes.get(position as usize)? as usize;
     (index >= 1).then(|| index - 1)
 }
@@ -472,7 +489,8 @@ fn quick_shadow_color(
     if (100..=106).contains(&slot) {
         let scheme = match matrix {
             Some(variant) if (100..=199).contains(&variant) => {
-                (variant - 100).clamp(0, effects.variation_colors.len() as i64 - 1) as usize
+                let last = effects.variation_colors.len().checked_sub(1)? as i64;
+                (variant - 100).clamp(0, last) as usize
             }
             _ => 0,
         };
