@@ -8,7 +8,7 @@ mod vector;
 
 pub use display_list::*;
 pub use layout::{PIXELS_PER_INCH, final_paint_transform, to_canvas, to_canvas_length};
-pub use vector::{TextFragment, text_fragments};
+pub use vector::{LinearGradient, TextFragment, linear_gradient, text_fragments};
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -556,6 +556,14 @@ impl Renderer {
         self.font_bytes = font_bytes;
         self.registered_fonts.insert(key, id);
         Ok(())
+    }
+    /// The faces layout measured with, for backends that also paint glyphs.
+    pub fn fonts(&self) -> &ooxml_text::FontStore {
+        &self.fonts
+    }
+    /// The face layout measured `family` with, after style and generic fallback.
+    pub fn font_id(&self, family: &str, bold: bool, italic: bool) -> Option<ooxml_text::FontId> {
+        self.font_for(family, bold, italic)
     }
     pub fn layout_page(
         &self,

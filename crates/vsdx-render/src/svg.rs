@@ -4,14 +4,16 @@ use vsdx_parse::VsdxPackage;
 
 use crate::display_list::{Affine, Primitive, VsdxDisplayList};
 use crate::vector::{
-    collect_ordered, escape, fragments, jpeg_dimensions, matrix, num, png_dimensions,
-    solid_color, z_order,
+    collect_ordered, escape, fragments, jpeg_dimensions, linear_gradient, matrix, num,
+    png_dimensions, solid_color, z_order,
 };
 use crate::{RenderError, Renderer};
 
 struct Emitter<'a> {
     package: &'a VsdxPackage,
     out: String,
+    defs: String,
+    gradients: usize,
 }
 
 fn path_data(path: &[GeometryPathCommand]) -> String {
@@ -57,28 +59,21 @@ fn path_data(path: &[GeometryPathCommand]) -> String {
     data.trim_end().to_owned()
 }
 
-fn paint_attributes(
-    fill: &Option<crate::display_list::Paint>,
-    stroke: &Option<crate::display_list::Stroke>,
-) -> String {
+fn stroke_attributes(stroke: &Option<crate::display_list::Stroke>) -> String {
     let mut attributes = String::new();
-    match solid_color(fill) {
-        Some(color) => attributes.push_str(&format!(" fill=\"{}\"", escape(color))),
-        None => attributes.push_str(" fill=\"none\""),
-    }
-    if let Some(stroke) = stroke {
-        if crate::vector::rgb(&stroke.color).is_some() {
-            attributes.push_str(&format!(
-                " stroke=\"{}\" stroke-width=\"{}",
-                escape(&stroke.color),
-                num(f64::from(stroke.width).max(0.0))
-            ));
-            if stroke.dashed {
-                let step = num(f64::from(stroke.width).max(0.0) * 2.0);
-                attributes.push_str(&format!("\" stroke-dasharray=\"{step} {step}"));
-            }
-            attributes.push('"');
+    if let Some(stroke) = stroke
+        && crate::vector::rgb(&stroke.color).is_some()
+    {
+        attributes.push_str(&format!(
+            " stroke=\"{}\" stroke-width=\"{}",
+            escape(&stroke.color),
+            num(f64::from(stroke.width).max(0.0))
+        ));
+        if stroke.dashed {
+            let step = num(f64::from(stroke.width).max(0.0) * 2.0);
+            attributes.push_str(&format!("\" stroke-dasharray=\"{step} {step}"));
         }
+        attributes.push('"');
     }
     attributes
 }
@@ -104,6 +99,40 @@ const FLIP_Y: Affine = Affine {
 };
 
 impl<'a> Emitter<'a> {
+    /// Multi-stop fills become a `<defs>` gradient; everything else stays flat.
+    fn fill_attribute(
+        &mut self,
+        fill: &Option<crate::display_list::Paint>,
+        path: &[GeometryPathCommand],
+    ) -> String {
+        if let Some(paint) = fill
+            && let Some(gradient) = linear_gradient(paint, path)
+        {
+            let id = format!("vsdxGradient{}", self.gradients);
+            self.gradients += 1;
+            self.defs.push_str(&format!(
+                "<linearGradient id=\"{id}\" gradientUnits=\"userSpaceOnUse\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\">",
+                num(f64::from(gradient.start.0)),
+                num(f64::from(gradient.start.1)),
+                num(f64::from(gradient.end.0)),
+                num(f64::from(gradient.end.1))
+            ));
+            for (position, color) in &gradient.stops {
+                self.defs.push_str(&format!(
+                    "<stop offset=\"{}\" stop-color=\"{}\"/>",
+                    num(f64::from(*position)),
+                    escape(color)
+                ));
+            }
+            self.defs.push_str("</linearGradient>");
+            return format!(" fill=\"url(#{id})\"");
+        }
+        match solid_color(fill) {
+            Some(color) => format!(" fill=\"{}\"", escape(color)),
+            None => " fill=\"none\"".to_owned(),
+        }
+    }
+
     fn primitive(&mut self, primitive: &Primitive, outer: Affine) {
         let mut ordered = Vec::new();
         collect_ordered(primitive, &mut ordered);
@@ -120,17 +149,23 @@ impl<'a> Emitter<'a> {
                     let mut element = String::from("<path d=\"");
                     element.push_str(&escape(&data));
                     element.push('"');
-                    element.push_str(&paint_attributes(fill, stroke));
+                    element.push_str(&self.fill_attribute(fill, path));
+                    element.push_str(&stroke_attributes(stroke));
                     element.push_str("/>");
                     self.wrapped(&element, composed);
                 }
                 Primitive::TextBox {
-                    paragraphs, lines, ..
+                    y,
+                    height,
+                    paragraphs,
+                    lines,
+                    ..
                 } => {
+                    let frame = composed
+                        .compose(translate(0.0, y * 2.0 + height))
+                        .compose(FLIP_Y);
                     for run in fragments(paragraphs, lines) {
-                        let anchor = composed
-                            .compose(translate(run.x, run.line_y))
-                            .compose(FLIP_Y);
+                        let anchor = frame.compose(translate(run.x, run.line_y));
                         self.out.push_str(&format!(
                             "<text transform=\"{}\" x=\"0\" y=\"0\" dominant-baseline=\"text-before-edge\" font-family=\"'{}', {}\" font-size=\"{}\" fill=\"{}\"",
                             matrix(anchor),
@@ -266,13 +301,20 @@ fn emit_page(list: &VsdxDisplayList, package: &VsdxPackage) -> String {
     let mut emitter = Emitter {
         package,
         out: String::new(),
+        defs: String::new(),
+        gradients: 0,
     };
     for primitive in primitives {
         emitter.primitive(primitive, Affine::identity());
     }
+    let defs = if emitter.defs.is_empty() {
+        String::new()
+    } else {
+        format!("<defs>{}</defs>", emitter.defs)
+    };
     let paint = list.paint_transform;
     format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\"><g transform=\"{transform}\">{body}</g></svg>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">{defs}<g transform=\"{transform}\">{body}</g></svg>",
         width = num(f64::from(list.width)),
         height = num(f64::from(list.height)),
         transform = matrix(Affine {
@@ -393,5 +435,128 @@ mod tests {
     fn rejects_an_unknown_page_index() {
         let package = package();
         assert!(Renderer::default().export_svg_page(&package, 99).is_err());
+    }
+
+    fn list_with(primitive: Primitive) -> VsdxDisplayList {
+        VsdxDisplayList {
+            contract_version: crate::CONTRACT_VERSION,
+            width: 384.0,
+            height: 384.0,
+            paint_transform: crate::PaintTransform {
+                a: 96.0,
+                b: 0.0,
+                c: 0.0,
+                d: -96.0,
+                e: 0.0,
+                f: 384.0,
+            },
+            primitives: vec![primitive],
+        }
+    }
+
+    fn unit_rect() -> Vec<GeometryPathCommand> {
+        vec![
+            GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+            GeometryPathCommand::Line { x: 2.0, y: 0.0 },
+            GeometryPathCommand::Line { x: 2.0, y: 1.0 },
+            GeometryPathCommand::Line { x: 0.0, y: 1.0 },
+            GeometryPathCommand::Close,
+        ]
+    }
+
+    fn filled(stops: Vec<crate::display_list::GradientStop>) -> Primitive {
+        Primitive::Shape {
+            id: "rect".into(),
+            z_order: 0,
+            path: unit_rect(),
+            fill: Some(crate::display_list::Paint::Gradient {
+                angle_deg: Some(0.0),
+                stops,
+            }),
+            stroke: None,
+            transform: Affine::identity(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn stop(position: f32, color: &str) -> crate::display_list::GradientStop {
+        crate::display_list::GradientStop {
+            position,
+            color: color.into(),
+        }
+    }
+
+    #[test]
+    fn multi_stop_fills_export_as_gradients_not_flat_colour() {
+        let svg = emit_page(
+            &list_with(filled(vec![stop(0.0, "#102030"), stop(1.0, "#405060")])),
+            &package(),
+        );
+        assert!(
+            svg.contains(
+                "<defs><linearGradient id=\"vsdxGradient0\" gradientUnits=\"userSpaceOnUse\""
+            ),
+            "missing gradient definition: {svg}"
+        );
+        assert!(svg.contains(" fill=\"url(#vsdxGradient0)\""), "{svg}");
+        assert!(svg.contains("stop-color=\"#102030\"") && svg.contains("stop-color=\"#405060\""));
+        assert!(
+            svg.contains(" y1=\"0.5\"") && svg.contains(" y2=\"0.5\""),
+            "{svg}"
+        );
+    }
+
+    #[test]
+    fn single_stop_fills_stay_flat() {
+        let svg = emit_page(&list_with(filled(vec![stop(0.0, "#102030")])), &package());
+        assert!(svg.contains(" fill=\"#102030\""), "{svg}");
+        assert!(!svg.contains("linearGradient"));
+    }
+
+    #[test]
+    fn text_anchors_match_the_canvas_flip() {
+        let run = crate::display_list::TextRun {
+            text: "Hi".into(),
+            family: "Arial".into(),
+            size_in: 0.2,
+            bold: false,
+            italic: false,
+            underline: false,
+            small_caps: false,
+            superscript: false,
+            subscript: false,
+            letter_spacing: 0.0,
+            case: 0,
+            color: "#102030".into(),
+            diagnostics: Vec::new(),
+            tab: None,
+            diagnosed_face: None,
+        };
+        let svg = emit_page(
+            &list_with(Primitive::TextBox {
+                id: "t".into(),
+                z_order: 0,
+                x: 2.0,
+                y: 1.0,
+                width: 1.0,
+                height: 1.0,
+                paragraphs: vec![crate::display_list::TextParagraph { runs: vec![run] }],
+                lines: vec![crate::display_list::PositionedLine {
+                    x: 2.1,
+                    y: 1.4,
+                    width: 0.5,
+                    height: 0.2,
+                    start: 0,
+                    end: 2,
+                    caret_stops: Vec::new(),
+                }],
+                transform: Affine::identity(),
+            }),
+            &package(),
+        );
+        assert!(
+            svg.contains("<text transform=\"matrix(1 0 0 -1 2.1 1.6)\""),
+            "text must sit where the canvas flip puts it: {svg}"
+        );
     }
 }

@@ -88,7 +88,8 @@ impl VsdxRenderer {
     }
 
     #[wasm_bindgen(js_name = hitTestJson)]
-    pub fn hit_test_json(&self, x: f32, y: f32) -> Result<String, JsValue> {        let result = self
+    pub fn hit_test_json(&self, x: f32, y: f32) -> Result<String, JsValue> {
+        let result = self
             .rendered
             .as_ref()
             .and_then(|rendered| vsdx_render::hit_test(rendered, x, y));
@@ -120,40 +121,9 @@ impl VsdxRenderer {
         scale: f32,
     ) -> Result<Vec<u8>, JsValue> {
         let package = document.session().package().map_err(js_error)?;
-        let part = package
-            .page_part_paths
-            .get(page_index as usize)
-            .ok_or_else(|| JsValue::from_str("page index is outside the document"))?;
-        let list = self
-            .renderer
-            .layout_page(&package, part)
-            .map_err(js_error)?;
-        let mut assets = Vec::new();
-        for primitive in &list.primitives {
-            collect_image_assets(primitive, &mut assets);
-        }
-        let images: std::collections::HashMap<&str, &[u8]> = assets
-            .into_iter()
-            .filter_map(|asset_id| package.part_bytes(asset_id).map(|bytes| (asset_id, bytes)))
-            .collect();
-        vsdx_raster::render_list(&list, &images, scale)
+        vsdx_raster::render_page(&self.renderer, &package, page_index as usize, scale)
             .map(|page| page.bytes)
             .map_err(js_error)
-    }
-}
-
-fn collect_image_assets<'a>(
-    primitive: &'a vsdx_render::Primitive,
-    out: &mut Vec<&'a str>,
-) {
-    match primitive {
-        vsdx_render::Primitive::Image { asset_id, .. } => out.push(asset_id),
-        vsdx_render::Primitive::Group { primitives, .. } => {
-            for child in primitives {
-                collect_image_assets(child, out);
-            }
-        }
-        _ => {}
     }
 }
 

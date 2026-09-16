@@ -1,6 +1,6 @@
-use crate::display_list::{
-    Affine, Paint, PositionedLine, Primitive, TextParagraph,
-};
+use ooxml_drawingml::GeometryPathCommand;
+
+use crate::display_list::{Affine, Paint, PositionedLine, Primitive, TextParagraph};
 
 /// Compact float formatting shared by the vector exporters.
 pub(crate) fn num(value: f64) -> String {
@@ -35,11 +35,88 @@ pub(crate) fn solid_color(paint: &Option<Paint>) -> Option<&str> {
     match paint {
         Some(Paint::Solid { color }) => rgb(color).map(|_| color.as_str()),
         Some(Paint::Gradient { stops, .. }) => stops
-            .first()
-            .filter(|stop| rgb(&stop.color).is_some())
+            .iter()
+            .find(|stop| rgb(&stop.color).is_some())
             .map(|stop| stop.color.as_str()),
         None => None,
     }
+}
+
+/// Bounds of a geometry path as `(min_x, min_y, max_x, max_y)`.
+pub(crate) fn path_bounds(path: &[GeometryPathCommand]) -> Option<(f32, f32, f32, f32)> {
+    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    let mut point = |x: f64, y: f64| {
+        let (x, y) = (x as f32, y as f32);
+        if x.is_finite() && y.is_finite() {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    };
+    for command in path {
+        match command {
+            GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
+                point(*x, *y)
+            }
+            GeometryPathCommand::Quad { cpx, cpy, x, y } => {
+                point(*cpx, *cpy);
+                point(*x, *y);
+            }
+            GeometryPathCommand::Cubic {
+                cp1x,
+                cp1y,
+                cp2x,
+                cp2y,
+                x,
+                y,
+            } => {
+                point(*cp1x, *cp1y);
+                point(*cp2x, *cp2y);
+                point(*x, *y);
+            }
+            GeometryPathCommand::Close => {}
+        }
+    }
+    (min_x.is_finite() && min_y.is_finite()).then_some((min_x, min_y, max_x, max_y))
+}
+
+/// One fill's linear gradient in path space: endpoints and ordered stops.
+pub struct LinearGradient {
+    pub start: (f32, f32),
+    pub end: (f32, f32),
+    pub stops: Vec<(f32, String)>,
+}
+
+/// Gradient geometry for `fill` over `path`, or `None` when it paints solid.
+///
+/// Shared by every exporter so the projections cannot disagree.
+pub fn linear_gradient(fill: &Paint, path: &[GeometryPathCommand]) -> Option<LinearGradient> {
+    let Paint::Gradient { angle_deg, stops } = fill else {
+        return None;
+    };
+    let mut ordered: Vec<(f32, String)> = stops
+        .iter()
+        .filter(|stop| stop.position.is_finite() && rgb(&stop.color).is_some())
+        .map(|stop| (stop.position.clamp(0.0, 1.0), stop.color.clone()))
+        .collect();
+    if ordered.len() < 2 {
+        return None;
+    }
+    ordered.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let (min_x, min_y, max_x, max_y) = path_bounds(path)?;
+    let radius = (max_x - min_x).hypot(max_y - min_y) / 2.0;
+    if !radius.is_finite() || radius <= 0.0 {
+        return None;
+    }
+    let (center_x, center_y) = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+    let (sin, cos) = angle_deg.unwrap_or(0.0).to_radians().sin_cos();
+    Some(LinearGradient {
+        start: (center_x - cos * radius, center_y - sin * radius),
+        end: (center_x + cos * radius, center_y + sin * radius),
+        stops: ordered,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -195,6 +272,7 @@ pub struct TextFragment {
     pub text: String,
     pub x: f32,
     pub line_y: f32,
+    pub family: String,
     pub size_in: f32,
     pub bold: bool,
     pub italic: bool,
@@ -204,16 +282,14 @@ pub struct TextFragment {
 }
 
 /// Splits laid-out lines at run boundaries for exporters.
-pub fn text_fragments(
-    paragraphs: &[TextParagraph],
-    lines: &[PositionedLine],
-) -> Vec<TextFragment> {
+pub fn text_fragments(paragraphs: &[TextParagraph], lines: &[PositionedLine]) -> Vec<TextFragment> {
     fragments(paragraphs, lines)
         .into_iter()
         .map(|fragment| TextFragment {
             text: fragment.text,
             x: fragment.x,
             line_y: fragment.line_y,
+            family: fragment.family,
             size_in: fragment.size_in,
             bold: fragment.bold,
             italic: fragment.italic,
@@ -225,10 +301,7 @@ pub fn text_fragments(
 }
 
 /// Splits laid-out lines at run boundaries, dropping control characters.
-pub(crate) fn fragments(
-    paragraphs: &[TextParagraph],
-    lines: &[PositionedLine],
-) -> Vec<Fragment> {
+pub(crate) fn fragments(paragraphs: &[TextParagraph], lines: &[PositionedLine]) -> Vec<Fragment> {
     let mut offset = 0u32;
     let runs: Vec<(&crate::display_list::TextRun, u32, u32)> = paragraphs
         .iter()
@@ -267,7 +340,9 @@ pub(crate) fn fragments(
                 italic: run.italic,
                 underline: run.underline,
                 letter_spacing: run.letter_spacing,
-                color: rgb(&run.color).map(|_| run.color.clone()).unwrap_or_else(|| "#000000".into()),
+                color: rgb(&run.color)
+                    .map(|_| run.color.clone())
+                    .unwrap_or_else(|| "#000000".into()),
             });
         }
     }

@@ -1,32 +1,30 @@
 //! Raster backend: paints a VSDX display-list page to PNG via tiny-skia.
-//!
-//! Twin of the browser canvas painter; text is always set in the Carlito
-//! Regular vendored by `betteroffice-xlsx-raster`, so output is identical on
-//! every machine with no system font access.
 
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::sync::LazyLock;
 
 use ooxml_drawingml::GeometryPathCommand;
-use rustybuzz::ttf_parser::{self, OutlineBuilder};
+use ooxml_text::{FontId, FontStore, PathCmd};
+use rustybuzz::ttf_parser;
 use tiny_skia::{
-    Color, FillRule, FilterQuality, GradientStop, IntSize, LinearGradient, Paint, Path, PathBuilder,
-    Pixmap, PixmapPaint, Point, Rect, SpreadMode, Stroke, StrokeDash, Transform,
+    Color, FillRule, FilterQuality, GradientStop, IntSize, LinearGradient, Paint, Path,
+    PathBuilder, Pixmap, PixmapPaint, Point, Rect, SpreadMode, Stroke, StrokeDash, Transform,
 };
 use vsdx_parse::VsdxPackage;
 use vsdx_render::{
-    Affine, Paint as VsPaint, Primitive, Renderer, Stroke as VsStroke, VsdxDisplayList,
-    text_fragments,
+    Affine, Paint as VsPaint, Primitive, Renderer, Stroke as VsStroke, TextFragment,
+    VsdxDisplayList, linear_gradient, text_fragments,
 };
 
-/// Carlito Regular shared with the XLSX raster backend (OFL, metric-compatible
-/// with Calibri, the usual Visio body font).
+/// Carlito Regular (OFL), metric-compatible with Calibri.
 const FONT_BYTES: &[u8] = include_bytes!("../../xlsx-raster/assets/Carlito-Regular.ttf");
 
-static FACE: LazyLock<rustybuzz::Face<'static>> = LazyLock::new(|| {
-    rustybuzz::Face::from_slice(FONT_BYTES, 0).expect("vendored carlito is a valid font")
-});
+/// Last-resort face when the caller registered nothing for a run's family.
+fn fallback_face() -> Option<(FontStore, FontId)> {
+    let mut store = FontStore::new();
+    let id = store.register(FONT_BYTES.to_vec()).ok()?;
+    Some((store, id))
+}
 
 /// One rendered page's longest side.
 pub const MAX_PAGE_DIM: u32 = 16_384;
@@ -34,12 +32,14 @@ pub const MAX_PAGE_DIM: u32 = 16_384;
 pub const MAX_PAGE_PIXELS: u64 = 16_777_216;
 /// One decoded image.
 pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
-/// Synthetic bold's second pass, in device pixels at 12 pt.
-const BOLD_OFFSET_PX: f32 = 0.35;
-/// Synthetic italic shear, scale-independent.
+/// Synthetic bold's second pass, as a fraction of the em.
+const BOLD_OFFSET_EM: f32 = 0.35 / 12.0;
+/// Synthetic italic shear.
 const ITALIC_SHEAR: f32 = 0.21;
 /// Glyphs above this device size are skipped rather than rasterized.
 const MAX_GLYPH_PX: f32 = 8192.0;
+/// Baseline below a line's top edge, as a fraction of the em.
+const BASELINE_EM: f32 = 0.8;
 
 /// PNG bytes plus what the render could not draw.
 pub struct RenderedPage {
@@ -70,13 +70,9 @@ pub fn render_page(
     }
     let images: HashMap<&str, &[u8]> = assets
         .into_iter()
-        .filter_map(|asset_id| {
-            package
-                .part_bytes(asset_id)
-                .map(|bytes| (asset_id, bytes))
-        })
+        .filter_map(|asset_id| package.part_bytes(asset_id).map(|bytes| (asset_id, bytes)))
         .collect();
-    render_list(&list, &images, scale)
+    render_list(Some(renderer), &list, &images, scale)
 }
 
 fn collect_images<'a>(primitive: &'a Primitive, out: &mut Vec<&'a str>) {
@@ -91,8 +87,10 @@ fn collect_images<'a>(primitive: &'a Primitive, out: &mut Vec<&'a str>) {
     }
 }
 
-/// Renders an already laid-out page; `images` maps asset ids to file bytes.
+/// Renders an already laid-out page with the faces `fonts` measured it with;
+/// `images` maps asset ids to file bytes.
 pub fn render_list(
+    fonts: Option<&Renderer>,
     list: &VsdxDisplayList,
     images: &HashMap<&str, &[u8]>,
     scale: f32,
@@ -127,10 +125,13 @@ pub fn render_list(
         e: paint.e,
         f: paint.f,
     });
+    let fallback = fallback_face();
     let skipped = {
         let mut painter = Painter {
             pixmap: &mut pixmap,
             images,
+            fonts,
+            fallback: fallback.as_ref(),
             skipped_images: 0,
         };
         let mut top: Vec<&Primitive> = list.primitives.iter().collect();
@@ -170,6 +171,26 @@ fn tiny(transform: Affine) -> Transform {
     )
 }
 
+fn translate(x: f32, y: f32) -> Affine {
+    Affine {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: x,
+        f: y,
+    }
+}
+
+const FLIP_Y: Affine = Affine {
+    a: 1.0,
+    b: 0.0,
+    c: 0.0,
+    d: -1.0,
+    e: 0.0,
+    f: 0.0,
+};
+
 fn parse_color(value: &str) -> Option<Color> {
     let hex = value.strip_prefix('#')?;
     if hex.len() != 6 {
@@ -187,10 +208,31 @@ fn parse_color(value: &str) -> Option<Color> {
 struct Painter<'a, 'b> {
     pixmap: &'a mut Pixmap,
     images: &'b HashMap<&'b str, &'b [u8]>,
+    fonts: Option<&'b Renderer>,
+    fallback: Option<&'b (FontStore, FontId)>,
     skipped_images: usize,
 }
 
-impl Painter<'_, '_> {
+/// A registered face plus the store that measured with it.
+struct Face<'a> {
+    store: &'a FontStore,
+    id: FontId,
+}
+
+impl<'b> Painter<'_, 'b> {
+    /// The face layout measured this family with, else the vendored fallback.
+    fn face(&self, family: &str, bold: bool, italic: bool) -> Option<Face<'b>> {
+        if let Some(renderer) = self.fonts
+            && let Some(id) = renderer.font_id(family, bold, italic)
+        {
+            return Some(Face {
+                store: renderer.fonts(),
+                id,
+            });
+        }
+        self.fallback.map(|(store, id)| Face { store, id: *id })
+    }
+
     fn paint(&mut self, primitive: &Primitive, outer: Affine) {
         match primitive {
             Primitive::Shape {
@@ -209,18 +251,24 @@ impl Painter<'_, '_> {
                         .fill_path(&shape, &paint, FillRule::Winding, composed, None);
                 }
                 if let Some((paint, stroke)) = stroke_paint(stroke) {
-                    self.pixmap.stroke_path(&shape, &paint, &stroke, composed, None);
+                    self.pixmap
+                        .stroke_path(&shape, &paint, &stroke, composed, None);
                 }
             }
             Primitive::TextBox {
+                y,
+                height,
                 paragraphs,
                 lines,
                 transform,
                 ..
             } => {
-                let composed = outer.compose(*transform);
+                let frame = outer
+                    .compose(*transform)
+                    .compose(translate(0.0, y * 2.0 + height))
+                    .compose(FLIP_Y);
                 for fragment in text_fragments(paragraphs, lines) {
-                    self.text(&fragment, composed);
+                    self.text(&fragment, frame);
                 }
             }
             Primitive::Image {
@@ -289,108 +337,155 @@ impl Painter<'_, '_> {
         }
     }
 
-    fn text(&mut self, fragment: &vsdx_render::TextFragment, outer: Affine) {
+    fn text(&mut self, fragment: &TextFragment, frame: Affine) {
         if fragment.size_in <= 0.0 || !fragment.size_in.is_finite() {
             return;
         }
-        let size_px = fragment.size_in * device_scale(outer);
+        let device = device_scale(frame);
+        let size_px = fragment.size_in * device;
         if !size_px.is_finite() || size_px <= 0.0 || size_px > MAX_GLYPH_PX {
             return;
         }
         let Some(color) = parse_color(&fragment.color) else {
             return;
         };
-        let (anchor_x, anchor_y) = outer.apply_point(fragment.x, fragment.line_y);
-        let baseline = anchor_y + size_px * 0.8;
+        let Some(face) = self.face(&fragment.family, fragment.bold, fragment.italic) else {
+            return;
+        };
+        let space = frame.compose(translate(fragment.x, fragment.line_y));
+        let baseline = fragment.size_in * BASELINE_EM;
         let mut paint = Paint::default();
         paint.set_color(color);
         paint.anti_alias = true;
         let shear = if fragment.italic { ITALIC_SHEAR } else { 0.0 };
         let spacing = if fragment.letter_spacing.is_finite() {
-            fragment.letter_spacing * device_scale(outer)
+            fragment.letter_spacing
         } else {
             0.0
         };
-        let bold_shift = fragment.bold.then(|| BOLD_OFFSET_PX * size_px / 12.0);
+        let bold_shift = fragment.bold.then_some(BOLD_OFFSET_EM * fragment.size_in);
         for extra in [0.0].into_iter().chain(bold_shift) {
             self.glyphs(
+                &face,
                 &fragment.text,
-                anchor_x + extra,
+                extra,
                 baseline,
-                size_px,
+                fragment.size_in,
                 shear,
                 spacing,
                 &paint,
+                space,
             );
         }
         if fragment.underline {
-            let face = &*FACE;
-            let scale = size_px / face.units_per_em() as f32;
-            let width = glyph_advance(&fragment.text) * scale
+            let width = advance(&face, &fragment.text, fragment.size_in)
                 + spacing * fragment.text.chars().count().max(1) as f32;
-            self.underline(width, anchor_x, baseline, scale, &paint);
+            self.underline(
+                &face,
+                width,
+                baseline,
+                fragment.size_in,
+                device,
+                &paint,
+                space,
+            );
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn glyphs(
         &mut self,
+        face: &Face<'_>,
         text: &str,
         anchor_x: f32,
         baseline: f32,
-        size_px: f32,
+        size_in: f32,
         shear: f32,
         spacing: f32,
         paint: &Paint,
+        space: Affine,
     ) {
-        let face = &*FACE;
-        let scale = size_px / face.units_per_em() as f32;
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str(text);
-        let shaped = rustybuzz::shape(face, &[], buffer);
+        let Ok(shaped) = ooxml_text::shape(face.store, face.id, text, size_in, &[]) else {
+            return;
+        };
         let mut pen = anchor_x;
-        for (info, position) in shaped
-            .glyph_infos()
-            .iter()
-            .zip(shaped.glyph_positions())
-        {
-            let tx = pen + position.x_offset as f32 * scale;
-            let ty = baseline - position.y_offset as f32 * scale;
-            if let Some(path) = glyph_path(face, info.glyph_id as u16) {
-                self.pixmap.fill_path(
-                    &path,
-                    paint,
-                    FillRule::Winding,
-                    Transform::from_row(scale, 0.0, shear * scale, -scale, tx, ty),
-                    None,
-                );
+        for glyph in &shaped {
+            let outline = face
+                .store
+                .outline_glyph(face.id, glyph.glyph_id as u16)
+                .ok()
+                .filter(|outline| outline.upem > 0);
+            if let Some(outline) = outline {
+                let scale = size_in / f32::from(outline.upem);
+                if let Some(path) = glyph_path(&outline.cmds) {
+                    let placed = Affine {
+                        a: scale,
+                        b: 0.0,
+                        c: shear * scale,
+                        d: -scale,
+                        e: pen + glyph.x_offset,
+                        f: baseline - glyph.y_offset,
+                    };
+                    self.pixmap.fill_path(
+                        &path,
+                        paint,
+                        FillRule::Winding,
+                        tiny(space.compose(placed)),
+                        None,
+                    );
+                }
             }
-            pen += position.x_advance as f32 * scale + spacing;
+            pen += glyph.x_advance + spacing;
         }
     }
 
-    fn underline(&mut self, width: f32, x: f32, baseline: f32, scale: f32, paint: &Paint) {
-        let face = &*FACE;
-        let em = face.units_per_em() as f32;
-        let metrics = face.underline_metrics();
-        let position = metrics.map(|m| m.position as f32).unwrap_or(-0.1 * em);
-        let thickness = metrics.map(|m| m.thickness as f32).unwrap_or(0.05 * em);
-        let height = (thickness * scale).max(0.5);
-        let cy = baseline - position * scale;
+    #[allow(clippy::too_many_arguments)]
+    fn underline(
+        &mut self,
+        face: &Face<'_>,
+        width: f32,
+        baseline: f32,
+        size_in: f32,
+        device: f32,
+        paint: &Paint,
+        space: Affine,
+    ) {
+        let (position, thickness) = underline_metrics(face);
+        let height = (thickness * size_in).max(0.5 / device);
+        let cy = baseline - position * size_in;
         if width > 0.0
-            && let Some(rect) = Rect::from_xywh(x, cy - height / 2.0, width, height)
+            && let Some(rect) = Rect::from_xywh(0.0, cy - height / 2.0, width, height)
         {
-            self.pixmap
-                .fill_rect(rect, paint, Transform::identity(), None);
+            self.pixmap.fill_path(
+                &PathBuilder::from_rect(rect),
+                paint,
+                FillRule::Winding,
+                tiny(space),
+                None,
+            );
         }
     }
 
     fn label(&mut self, reason: &str, x: f32, y: f32, outer: Affine) {
-        let (anchor_x, anchor_y) = outer.apply_point(x, y);
-        let size_px = 10.0 / 72.0 * device_scale(outer);
+        let Some(face) = self.face("sans-serif", false, false) else {
+            return;
+        };
+        let size_in = 10.0 / 72.0;
         let mut paint = Paint::default();
         paint.set_color(Color::from_rgba8(0x5d, 0x66, 0x75, 255));
         paint.anti_alias = true;
-        self.glyphs(reason, anchor_x, anchor_y, size_px, 0.0, 0.0, &paint);
+        let space = outer.compose(translate(x, y)).compose(FLIP_Y);
+        self.glyphs(
+            &face,
+            reason,
+            0.0,
+            size_in * BASELINE_EM,
+            size_in,
+            0.0,
+            0.0,
+            &paint,
+            space,
+        );
     }
 
     fn placeholder_rect(&mut self, x: f32, y: f32, width: f32, height: f32, outer: Affine) {
@@ -437,8 +532,8 @@ impl Painter<'_, '_> {
         let size = IntSize::from_wh(width, height)?;
         let mut data = decoded.into_raw();
         for pixel in data.chunks_exact_mut(4) {
-            let color = tiny_skia::ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3])
-                .premultiply();
+            let color =
+                tiny_skia::ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
             pixel.copy_from_slice(&[color.red(), color.green(), color.blue(), color.alpha()]);
         }
         Pixmap::from_vec(data, size).map(|pixmap| (pixmap, (width as f32, height as f32)))
@@ -449,15 +544,28 @@ fn device_scale(transform: Affine) -> f32 {
     transform.a.hypot(transform.b).max(0.0)
 }
 
-fn glyph_advance(text: &str) -> f32 {
-    let face = &*FACE;
-    let mut buffer = rustybuzz::UnicodeBuffer::new();
-    buffer.push_str(text);
-    rustybuzz::shape(face, &[], buffer)
-        .glyph_positions()
-        .iter()
-        .map(|position| position.x_advance as f32)
-        .sum()
+fn advance(face: &Face<'_>, text: &str, size_in: f32) -> f32 {
+    ooxml_text::shape(face.store, face.id, text, size_in, &[])
+        .map(|glyphs| glyphs.iter().map(|glyph| glyph.x_advance).sum())
+        .unwrap_or(0.0)
+}
+
+/// Underline position and thickness as fractions of the em.
+fn underline_metrics(face: &Face<'_>) -> (f32, f32) {
+    face.store
+        .font_bytes(face.id)
+        .ok()
+        .and_then(|bytes| ttf_parser::Face::parse(bytes, 0).ok())
+        .and_then(|parsed| {
+            let em = f32::from(parsed.units_per_em());
+            parsed.underline_metrics().map(|metrics| {
+                (
+                    f32::from(metrics.position) / em,
+                    f32::from(metrics.thickness) / em,
+                )
+            })
+        })
+        .unwrap_or((-0.1, 0.05))
 }
 
 fn build_path(path: &[GeometryPathCommand]) -> Option<Path> {
@@ -490,100 +598,41 @@ fn build_path(path: &[GeometryPathCommand]) -> Option<Path> {
     builder.finish()
 }
 
-fn shape_bounds(path: &[GeometryPathCommand]) -> Option<(f32, f32, f32, f32)> {
-    let mut min_x = f32::INFINITY;
-    let mut min_y = f32::INFINITY;
-    let mut max_x = f32::NEG_INFINITY;
-    let mut max_y = f32::NEG_INFINITY;
-    let mut point = |x: f64, y: f64| {
-        let (x, y) = (x as f32, y as f32);
-        if x.is_finite() && y.is_finite() {
-            min_x = min_x.min(x);
-            min_y = min_y.min(y);
-            max_x = max_x.max(x);
-            max_y = max_y.max(y);
-        }
-    };
-    for command in path {
-        match command {
-            GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => point(*x, *y),
-            GeometryPathCommand::Quad { cpx, cpy, x, y } => {
-                point(*cpx, *cpy);
-                point(*x, *y);
-            }
-            GeometryPathCommand::Cubic {
-                cp1x,
-                cp1y,
-                cp2x,
-                cp2y,
-                x,
-                y,
-            } => {
-                point(*cp1x, *cp1y);
-                point(*cp2x, *cp2y);
-                point(*x, *y);
-            }
-            GeometryPathCommand::Close => {}
-        }
-    }
-    (min_x.is_finite() && min_y.is_finite()).then_some((min_x, min_y, max_x, max_y))
+fn solid_paint(color: Color) -> Paint<'static> {
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = true;
+    paint
 }
 
 fn fill_paint(fill: &Option<VsPaint>, path: &[GeometryPathCommand]) -> Option<Paint<'static>> {
-    match fill {
-        Some(VsPaint::Solid { color }) => {
-            let mut paint = Paint::default();
-            paint.set_color(parse_color(color)?);
-            paint.anti_alias = true;
-            Some(paint)
-        }
-        Some(VsPaint::Gradient { angle_deg, stops }) => {
-            let mut raw: Vec<(f32, Color)> = stops
-                .iter()
-                .filter_map(|stop| parse_color(&stop.color).map(|color| (stop.position, color)))
-                .filter(|(position, _)| position.is_finite())
-                .collect();
-            if raw.is_empty() {
-                return None;
-            }
-            raw.sort_by(|left, right| {
-                left.0
-                    .partial_cmp(&right.0)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            let first = raw[0].1;
-            if raw.len() == 1 {
-                let mut paint = Paint::default();
-                paint.set_color(first);
-                paint.anti_alias = true;
-                return Some(paint);
-            }
-            let (min_x, min_y, max_x, max_y) = shape_bounds(path)?;
-            let center_x = (min_x + max_x) / 2.0;
-            let center_y = (min_y + max_y) / 2.0;
-            let radius = ((max_x - min_x).powi(2) + (max_y - min_y).powi(2)).sqrt() / 2.0;
-            if !radius.is_finite() || radius <= 0.0 {
-                let mut paint = Paint::default();
-                paint.set_color(first);
-                paint.anti_alias = true;
-                return Some(paint);
-            }
-            let radians = angle_deg.unwrap_or(0.0).to_radians();
-            let (sin, cos) = radians.sin_cos();
-            let mut paint = Paint::default();
-            paint.shader = LinearGradient::new(
-                Point::from_xy(center_x - cos * radius, center_y - sin * radius),
-                Point::from_xy(center_x + cos * radius, center_y + sin * radius),
-                raw.into_iter()
-                    .map(|(position, color)| GradientStop::new(position, color))
-                    .collect(),
+    let fill = fill.as_ref()?;
+    if let Some(gradient) = linear_gradient(fill, path) {
+        let stops = gradient
+            .stops
+            .iter()
+            .filter_map(|(position, color)| {
+                parse_color(color).map(|color| GradientStop::new(*position, color))
+            })
+            .collect();
+        return Some(Paint {
+            shader: LinearGradient::new(
+                Point::from_xy(gradient.start.0, gradient.start.1),
+                Point::from_xy(gradient.end.0, gradient.end.1),
+                stops,
                 SpreadMode::Pad,
                 Transform::identity(),
-            )?;
-            paint.anti_alias = true;
-            Some(paint)
-        }
-        None => None,
+            )?,
+            anti_alias: true,
+            ..Paint::default()
+        });
+    }
+    match fill {
+        VsPaint::Solid { color } => parse_color(color).map(solid_paint),
+        VsPaint::Gradient { stops, .. } => stops
+            .iter()
+            .find_map(|stop| parse_color(&stop.color))
+            .map(solid_paint),
     }
 }
 
@@ -609,34 +658,25 @@ fn stroke_paint(stroke: &Option<VsStroke>) -> Option<(Paint<'_>, Stroke)> {
     ))
 }
 
-fn glyph_path(face: &ttf_parser::Face, glyph_id: u16) -> Option<Path> {
-    let mut builder = PathCollector {
-        builder: PathBuilder::new(),
-    };
-    face.outline_glyph(ttf_parser::GlyphId(glyph_id), &mut builder)?;
-    builder.builder.finish()
-}
-
-struct PathCollector {
-    builder: PathBuilder,
-}
-
-impl OutlineBuilder for PathCollector {
-    fn move_to(&mut self, x: f32, y: f32) {
-        self.builder.move_to(x, y);
+fn glyph_path(cmds: &[PathCmd]) -> Option<Path> {
+    let mut builder = PathBuilder::new();
+    for cmd in cmds {
+        match *cmd {
+            PathCmd::MoveTo { x, y } => builder.move_to(x, y),
+            PathCmd::LineTo { x, y } => builder.line_to(x, y),
+            PathCmd::QuadTo { cx, cy, x, y } => builder.quad_to(cx, cy, x, y),
+            PathCmd::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => builder.cubic_to(c1x, c1y, c2x, c2y, x, y),
+            PathCmd::Close => builder.close(),
+        }
     }
-    fn line_to(&mut self, x: f32, y: f32) {
-        self.builder.line_to(x, y);
-    }
-    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        self.builder.quad_to(x1, y1, x, y);
-    }
-    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        self.builder.cubic_to(x1, y1, x2, y2, x, y);
-    }
-    fn close(&mut self) {
-        self.builder.close();
-    }
+    builder.finish()
 }
 
 fn encode_png(pixmap: Pixmap, width: u32, height: u32) -> Result<Vec<u8>, String> {
@@ -699,10 +739,10 @@ mod tests {
     #[test]
     fn renders_white_pages_at_display_list_size_times_scale() {
         let images = HashMap::new();
-        let first = render_list(&empty_list(8.5, 11.0), &images, 1.0).unwrap();
+        let first = render_list(None, &empty_list(8.5, 11.0), &images, 1.0).unwrap();
         assert_eq!((first.width, first.height), (816, 1056));
         assert_eq!(png_size(&first.bytes), (816, 1056));
-        let second = render_list(&empty_list(8.5, 11.0), &images, 2.0).unwrap();
+        let second = render_list(None, &empty_list(8.5, 11.0), &images, 2.0).unwrap();
         assert_eq!((second.width, second.height), (1632, 2112));
         assert_eq!(png_size(&second.bytes), (1632, 2112));
     }
@@ -751,7 +791,7 @@ mod tests {
             transform: Affine::identity(),
             diagnostics: Vec::new(),
         });
-        let page = render_list(&list, &HashMap::new(), 1.0).unwrap();
+        let page = render_list(None, &list, &HashMap::new(), 1.0).unwrap();
         let decoded = image::load_from_memory(&page.bytes).unwrap().into_rgba8();
         let marked = decoded
             .pixels()
@@ -786,7 +826,7 @@ mod tests {
             height: 1.0,
             transform: Affine::identity(),
         });
-        let page = render_list(&list, &HashMap::new(), 1.0).unwrap();
+        let page = render_list(None, &list, &HashMap::new(), 1.0).unwrap();
         assert_eq!(page.skipped_images, 1);
     }
 
@@ -815,7 +855,7 @@ mod tests {
         });
         let mut images: HashMap<&str, &[u8]> = HashMap::new();
         images.insert("a", &data);
-        let page = render_list(&list, &images, 1.0).unwrap();
+        let page = render_list(None, &list, &images, 1.0).unwrap();
         assert_eq!(page.skipped_images, 0);
         let decoded = image::load_from_memory(&page.bytes).unwrap().into_rgba8();
         let red = decoded
@@ -839,7 +879,111 @@ mod tests {
             lines: Vec::new(),
             transform: Affine::identity(),
         });
-        let page = render_list(&list, &HashMap::new(), 1.0).unwrap();
+        let page = render_list(None, &list, &HashMap::new(), 1.0).unwrap();
         assert_eq!(page.skipped_images, 0);
+    }
+
+    const IDENTITY: &str = r#"{"a":1,"b":0,"c":0,"d":1,"e":0,"f":0}"#;
+
+    /// One 4x4 inch page holding a single-line text box under `transform`.
+    fn text_list(text: &str, family: &str, transform: &str) -> VsdxDisplayList {
+        serde_json::from_str(&format!(
+            r##"{{"contractVersion":5,"width":384,"height":384,
+                "paintTransform":{{"a":96,"b":0,"c":0,"d":-96,"e":0,"f":384}},
+                "primitives":[{{"kind":"textBox","id":"t","zOrder":0,
+                  "x":1,"y":1,"width":2,"height":1,
+                  "paragraphs":[{{"runs":[{{"text":"{text}","family":"{family}",
+                    "sizeIn":0.2,"bold":false,"italic":false,"color":"#000000"}}]}}],
+                  "lines":[{{"x":1,"y":1.1,"width":2,"height":0.24,
+                    "start":0,"end":{end},"caretStops":[]}}],
+                  "transform":{transform}}}]}}"##,
+            end = text.len()
+        ))
+        .unwrap()
+    }
+
+    /// Bounds of the painted pixels as `(min_x, min_y, max_x, max_y)`.
+    fn ink_bounds(page: &RenderedPage) -> (u32, u32, u32, u32) {
+        let decoded = image::load_from_memory(&page.bytes).unwrap().into_rgba8();
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0, 0);
+        for (x, y, pixel) in decoded.enumerate_pixels() {
+            if pixel.0 != [255, 255, 255, 255] {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+        assert!(min_x <= max_x && min_y <= max_y, "page has no painted text");
+        (min_x, min_y, max_x, max_y)
+    }
+
+    #[test]
+    fn text_paints_inside_its_own_box() {
+        let list = text_list("Hamburgefonstiv", "Arial", IDENTITY);
+        let page = render_list(None, &list, &HashMap::new(), 1.0).unwrap();
+        let (min_x, min_y, max_x, max_y) = ink_bounds(&page);
+        assert!(
+            min_x >= 96 && max_x <= 288,
+            "x ran outside the box: {min_x}..{max_x}"
+        );
+        assert!(
+            min_y >= 192 && max_y <= 288,
+            "y ran outside the box: {min_y}..{max_y}"
+        );
+    }
+
+    #[test]
+    fn rotated_text_boxes_paint_rotated_glyphs() {
+        let upright = render_list(
+            None,
+            &text_list("Hamburgefonstiv", "Arial", IDENTITY),
+            &HashMap::new(),
+            1.0,
+        )
+        .unwrap();
+        let quarter = render_list(
+            None,
+            &text_list(
+                "Hamburgefonstiv",
+                "Arial",
+                r#"{"a":0,"b":1,"c":-1,"d":0,"e":3,"f":0}"#,
+            ),
+            &HashMap::new(),
+            1.0,
+        )
+        .unwrap();
+        let (ux0, uy0, ux1, uy1) = ink_bounds(&upright);
+        let (rx0, ry0, rx1, ry1) = ink_bounds(&quarter);
+        assert!(
+            ux1 - ux0 > uy1 - uy0,
+            "upright text should read wider than tall"
+        );
+        assert!(
+            ry1 - ry0 > rx1 - rx0,
+            "a quarter turn should make the same run taller than wide"
+        );
+    }
+
+    #[test]
+    fn paints_runs_with_the_registered_family() {
+        let list = text_list("\u{5e9}\u{5dc}\u{5d5}\u{5dd}", "Noto Sans Hebrew", IDENTITY);
+        let mut renderer = Renderer::default();
+        renderer
+            .register_font(
+                "Noto Sans Hebrew",
+                false,
+                false,
+                include_bytes!("../../../packages/fonts/assets/NotoSansHebrew-Regular.ttf")
+                    .to_vec(),
+            )
+            .unwrap();
+        let fallback = render_list(None, &list, &HashMap::new(), 1.0).unwrap();
+        let registered = render_list(Some(&renderer), &list, &HashMap::new(), 1.0).unwrap();
+        assert!(
+            fallback.bytes != registered.bytes,
+            "the registered face must reach the glyph painter"
+        );
+        ink_bounds(&registered);
     }
 }

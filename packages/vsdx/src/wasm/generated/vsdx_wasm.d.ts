@@ -44,6 +44,8 @@ export class VsdxRenderer {
     free(): void;
     [Symbol.dispose](): void;
     clearLayerVisibility(): void;
+    exportPng(document: VsdxDocument, page_index: number, scale: number): Uint8Array;
+    exportSvgJson(document: VsdxDocument): string;
     hitTestJson(x: number, y: number): string;
     layoutPageJson(document: VsdxDocument, page_index: number): string;
     constructor();
@@ -64,6 +66,8 @@ export interface InitOutput {
     readonly parseVsdxJson: (a: number, b: number) => [number, number, number, number];
     readonly rendererVersion: () => [number, number];
     readonly vsdxrenderer_clearLayerVisibility: (a: number) => void;
+    readonly vsdxrenderer_exportPng: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly vsdxrenderer_exportSvgJson: (a: number, b: number) => [number, number, number, number];
     readonly vsdxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxrenderer_layoutPageJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxrenderer_new: () => number;
