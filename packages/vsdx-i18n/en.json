@@ -71,5 +71,24 @@
       "star7": "7-Point Star",
       "star16": "16-Point Star"
     }
+  },
+  "explorer": {
+    "title": "Drawing Explorer",
+    "collapse": "Collapse Drawing Explorer",
+    "expand": "Expand Drawing Explorer",
+    "document": "Document",
+    "pages": "Pages",
+    "shapes": "Shapes",
+    "shape": "Shape {id}",
+    "groupTag": "Group",
+    "oneDTag": "1-D",
+    "shapeSection": "Shape",
+    "row": "Row {index}",
+    "cell": "Cell",
+    "formula": "Formula",
+    "value": "Value",
+    "empty": "No diagram open",
+    "emptyShapes": "No shapes",
+    "depthLimit": "Deeper levels hidden"
   }
 }

@@ -67,7 +67,7 @@ export const EDITORS = [
   {
     name: "Diagrams",
     format: "vsdx",
-    desc: "VSDX editor with a flat command bar, a searchable standard-shape gallery, a page tab strip and a zoom status bar, for moving, resizing with handles and Shift-drag, rotating with a grip, adding and deleting shapes, arranging z-order, flipping, setting fill and line colour, and saving diagrams, with a focusable canvas offering keyboard undo and redo, Delete or Backspace, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus. It opens Visio drawings and templates. No connector-drag UI.",
+    desc: "VSDX editor with a flat command bar, a searchable standard-shape gallery, a page tab strip and a zoom status bar, for moving, resizing with handles and Shift-drag, rotating with a grip, adding and deleting shapes, arranging z-order, flipping, setting fill and line colour, and saving diagrams, with a focusable canvas offering keyboard undo and redo, Delete or Backspace, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus. A read-only Drawing Explorer shows pages, shapes, group children and ShapeSheet sections with each cell's formula beside its value. It opens Visio drawings and templates. No connector-drag UI.",
     status: "source preview",
   },
 ];
@@ -112,7 +112,7 @@ export const PACKAGES = [
   {
     name: "@betteroffice/vsdx-react",
     sourceOnly: true,
-    desc: "The VSDX editor as a drop-in React component: a flat command bar, a searchable standard-shape gallery, a page tab strip and a zoom status bar over move, resize with handles and Shift-drag, rotate with a grip, add, delete, z-order arrange, flip, set fill or line colour, and save, with a focusable canvas offering keyboard undo and redo, Delete or Backspace, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus. No connector-drag UI.",
+    desc: "The VSDX editor as a drop-in React component: a flat command bar, a searchable standard-shape gallery, a page tab strip and a zoom status bar over move, resize with handles and Shift-drag, rotate with a grip, add, delete, z-order arrange, flip, set fill or line colour, and save, with a focusable canvas offering keyboard undo and redo, Delete or Backspace, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus, and a read-only Drawing Explorer showing pages, shapes, group children and ShapeSheet sections with each cell's formula beside its value. No connector-drag UI.",
   },
 ];
 

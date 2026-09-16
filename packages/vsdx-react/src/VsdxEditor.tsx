@@ -9,6 +9,7 @@ import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
 import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
+import { DrawingExplorer } from './components/explorer/DrawingExplorer';
 import { standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
 import { StatusBar, clampZoom } from './components/statusbar';
@@ -37,12 +38,13 @@ export interface VsdxEditorProps {
   onChange?: () => void;
   onError?: (error: Error) => void;
   leftPanel?: ReactNode;
+  rightPanel?: ReactNode;
   statusBar?: ReactNode;
 }
 
 interface EditorModel { snapshot: DiagramSnapshot | null; pageIndex: number; frame: PageDisplayList | null; }
 
-export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, className, onReady, onChange, onError, leftPanel, statusBar }: VsdxEditorProps) {
+export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, className, onReady, onChange, onError, leftPanel, rightPanel, statusBar }: VsdxEditorProps) {
   const strings = useMemo(() => deepMerge(en, i18n) as typeof en, [i18n]);
   const t = useMemo(() => createT(strings), [strings]);
   const handleRef = useRef<DiagramHandle | null>(null);
@@ -75,6 +77,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const initialUpdate = sessionSwitchBlocked ? sessionRef.current.initialUpdate : requestedInitialUpdate;
   const [zoom, setZoom] = useState(1);
   const [shapesCollapsed, setShapesCollapsed] = useState(false);
+  const [explorerCollapsed, setExplorerCollapsed] = useState(false);
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ top: number; left: number } | null>(null);
@@ -492,6 +495,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       {fidelity.length > 0 && <details style={styles.fidelity}><summary>{t('diagnostics.fidelityHeading')}</summary>{fidelity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</details>}
       {error && <div role="alert" style={styles.error}>{error}</div>}
     </main>
+    {rightPanel === undefined ? <DrawingExplorer snapshot={model.snapshot} activePageIndex={model.pageIndex} selection={selection} onSelectPage={(index) => refresh(index)} onSelectShape={setSelection} collapsed={explorerCollapsed} onToggleCollapsed={() => setExplorerCollapsed((value) => !value)} t={t} /> : rightPanel}
     </div>
     {statusBar === undefined ? <StatusBar pages={model.snapshot?.pages ?? []} activeIndex={model.pageIndex} onSelectPage={(index) => refresh(index)} onReorderPage={reorderPage} zoom={zoom} onZoomChange={setZoom} onFitToWindow={fitToWindow} t={t} /> : statusBar}
     </RibbonCommandsProvider>
