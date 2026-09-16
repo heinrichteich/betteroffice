@@ -45,6 +45,7 @@ function snapshot(): DiagramSnapshot {
     shapeCell(12, 'OneD', null, '1'),
     shapeCell(12, 'BeginX', null, '0'),
     shapeCell(12, 'EndX', null, '1'),
+    sectionCell(12, 'Geometry', { index: 0 }, 'MoveTo', 'X', '0', '0'),
   ]);
   return {
     pages: [
@@ -117,6 +118,17 @@ test('renders cells lazily with formula and value side by side', () => {
   expect(view.getByText('PinX')).toBeDefined();
 });
 
+test('keeps sections with the same name on different shapes independent', () => {
+  const view = harness();
+  fireEvent.click(button(view, 'Shape 5 "Alpha" (Group)'));
+  fireEvent.click(button(view, 'Shape 12 "Link" (1-D)'));
+  const sections = view.getAllByRole('button', { name: 'Geometry' });
+  expect(sections).toHaveLength(2);
+  fireEvent.click(sections[0] as HTMLButtonElement);
+  expect(sections[0]?.getAttribute('aria-expanded')).toBe('true');
+  expect(sections[1]?.getAttribute('aria-expanded')).toBe('false');
+});
+
 test('selecting a node reuses the editor selection model', () => {
   const view = harness();
   fireEvent.click(button(view, 'Shape 5 "Alpha" (Group)'));
@@ -154,6 +166,43 @@ test('navigates pages and falls back for unnamed or empty pages', () => {
   expect(shapesNodes).toHaveLength(2);
   fireEvent.click(shapesNodes[1] as HTMLButtonElement);
   expect(view.getByText(t('explorer.emptyShapes'))).toBeDefined();
+});
+
+test('reflects an active page change in the tree', () => {
+  const props = {
+    snapshot: snapshot(),
+    selection: null,
+    onSelectPage: () => {},
+    onSelectShape: () => {},
+    collapsed: false,
+    onToggleCollapsed: () => {},
+    t,
+  };
+  const view = render(<DrawingExplorer {...props} activePageIndex={0} />);
+  view.rerender(<DrawingExplorer {...props} activePageIndex={1} />);
+  const page = view.getByRole('button', { name: 'Page 2' });
+  expect(page.closest('[role="treeitem"]')?.getAttribute('aria-selected')).toBe('true');
+  expect(page.getAttribute('aria-expanded')).toBe('true');
+  expect(view.getAllByRole('button', { name: 'Shapes' })).toHaveLength(1);
+});
+
+test('does not reopen a selected shape after the user collapses it', () => {
+  const props = {
+    snapshot: snapshot(),
+    activePageIndex: 0,
+    onSelectPage: () => {},
+    onSelectShape: () => {},
+    collapsed: false,
+    onToggleCollapsed: () => {},
+    t,
+  };
+  const selection = { pageId: 'page:1', shapeId: 'g1', hit: { kind: 'shape' as const, shapeId: 'g1' } };
+  const view = render(<DrawingExplorer {...props} selection={selection} />);
+  const node = view.getByRole('button', { name: 'Shape 5 "Alpha" (Group)' });
+  fireEvent.click(node);
+  fireEvent.click(node);
+  view.rerender(<DrawingExplorer {...props} selection={{ ...selection }} />);
+  expect(node.getAttribute('aria-expanded')).toBe('false');
 });
 
 test('bounds the depth of a hostile document', () => {

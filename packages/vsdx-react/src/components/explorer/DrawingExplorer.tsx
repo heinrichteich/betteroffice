@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react';
 import type { TFunction } from '@betteroffice/vsdx-i18n';
 import type { CellSnapshot, DiagramSnapshot, ShapeSnapshot } from '@betteroffice/vsdx';
@@ -115,20 +115,22 @@ function pageIdsKey(snapshot: DiagramSnapshot | null): string {
 
 export function DrawingExplorer({ snapshot, activePageIndex, selection, onSelectPage, onSelectShape, collapsed, onToggleCollapsed, t, className }: DrawingExplorerProps) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set(['document', 'pages']));
-  const documentKeyRef = useRef<string | null>(null);
+  const expandedPageRef = useRef<string | null>(null);
   const documentKey = pageIdsKey(snapshot);
 
-  useEffect(() => {
-    if (documentKeyRef.current === documentKey) return;
-    documentKeyRef.current = documentKey;
-    const active = snapshot?.pages[Math.max(0, Math.min(activePageIndex, (snapshot?.pages.length ?? 1) - 1))];
+  useLayoutEffect(() => {
+    const activeIndex = Math.max(0, Math.min(activePageIndex, (snapshot?.pages.length ?? 1) - 1));
+    const expandedPageKey = `${documentKey}:${activeIndex}`;
+    if (expandedPageRef.current === expandedPageKey) return;
+    expandedPageRef.current = expandedPageKey;
+    const active = snapshot?.pages[activeIndex];
     const next = new Set<string>(['document', 'pages']);
     if (active) {
       next.add(`page:${active.id}`);
       next.add(`shapes:${active.id}`);
     }
     setExpanded(next);
-  });
+  }, [activePageIndex, documentKey, snapshot]);
 
   useEffect(() => {
     if (!snapshot || !selection) return;
@@ -142,7 +144,7 @@ export function DrawingExplorer({ snapshot, activePageIndex, selection, onSelect
       next.add('pages');
       next.add(`page:${page.id}`);
       next.add(`shapes:${page.id}`);
-      for (const shape of path) next.add(`shape:${page.id}:${shape.id}`);
+      for (const shape of path.slice(0, -1)) next.add(`shape:${page.id}:${shape.id}`);
       return next;
     });
   }, [snapshot, selection]);
@@ -205,7 +207,7 @@ export function DrawingExplorer({ snapshot, activePageIndex, selection, onSelect
                   nodeKey={`page:${page.id}`}
                   level={3}
                   label={page.name ?? t('pages.fallbackTitle', { number: pageIndex + 1 })}
-                  selected={false}
+                  selected={pageIndex === activePageIndex}
                   expandable
                   expanded={expanded.has(`page:${page.id}`)}
                   onToggle={() => toggle(`page:${page.id}`)}
@@ -306,7 +308,7 @@ function ShapeNode({ page, pageIndex, shape, depth, level, expanded, selection, 
         <ShapeNode key={child.id} page={page} pageIndex={pageIndex} shape={child} depth={depth + 1} level={level + 1} expanded={expanded} selection={selection} onToggle={onToggle} onSelectShape={onSelectShape} t={t} />
       ))}
       {isOpen && visibleSections.map((section) => (
-        <SectionNode key={section.key} pageId={page.id} section={section} level={level + 1} expanded={expanded} onToggle={onToggle} t={t} />
+        <SectionNode key={section.key} pageId={page.id} shapeId={shape.id} section={section} level={level + 1} expanded={expanded} onToggle={onToggle} t={t} />
       ))}
     </TreeNode>
   );
@@ -314,6 +316,7 @@ function ShapeNode({ page, pageIndex, shape, depth, level, expanded, selection, 
 
 interface SectionNodeProps {
   pageId: string;
+  shapeId: string;
   section: ExplorerSection;
   level: number;
   expanded: ReadonlySet<string>;
@@ -321,8 +324,8 @@ interface SectionNodeProps {
   t: TFunction;
 }
 
-function SectionNode({ pageId, section, level, expanded, onToggle, t }: SectionNodeProps) {
-  const nodeKey = `section:${pageId}:${section.key}`;
+function SectionNode({ pageId, shapeId, section, level, expanded, onToggle, t }: SectionNodeProps) {
+  const nodeKey = `section:${pageId}:${shapeId}:${section.key}`;
   const isOpen = expanded.has(nodeKey);
   const rows = isOpen ? groupSectionRows(section.cells, (index) => t('explorer.row', { index: index + 1 })) : [];
   return (
