@@ -2,6 +2,7 @@
 
 mod display_list;
 mod layout;
+mod line_jumps;
 mod paint;
 
 pub use display_list::*;
@@ -573,6 +574,7 @@ impl Renderer {
             text_lines: 0,
             text_runs: 0,
             primitives: Vec::new(),
+            jump_overrides: Vec::new(),
         };
         let mut cache = LayoutCache::default();
         for shape in page.shapes() {
@@ -593,6 +595,11 @@ impl Renderer {
         for primitive in &mut state.primitives {
             bake_group_transform(primitive, Affine::identity());
         }
+        line_jumps::apply_line_jumps(
+            &mut state.primitives,
+            &state.jump_overrides,
+            &line_jumps::page_jump_settings(package, &resolver, page_part),
+        );
         let list = VsdxDisplayList {
             contract_version: CONTRACT_VERSION,
             width: page_width as f32 * PIXELS_PER_INCH,
@@ -938,13 +945,22 @@ impl Renderer {
             Err(reason) => return self.placeholder(page_part, shape, state, &reason),
         };
         state.primitives.push(Primitive::Shape {
-            id,
+            id: id.clone(),
             z_order,
             path: connector_route(begin, end, paint::number(resolved, "RoutStyle")),
             fill,
             stroke,
             transform: Affine::identity(),
         });
+        state
+            .jump_overrides
+            .push(line_jumps::ConnectorJumpOverride {
+                id,
+                code: line_jumps::connector_override(package, resolved, "ConLineJumpCode"),
+                style: line_jumps::connector_override(package, resolved, "ConLineJumpStyle"),
+                dir_x: line_jumps::connector_override(package, resolved, "ConLineJumpDirX"),
+                dir_y: line_jumps::connector_override(package, resolved, "ConLineJumpDirY"),
+            });
         Ok(())
     }
     #[allow(clippy::too_many_arguments)]
@@ -1534,6 +1550,7 @@ struct State {
     text_lines: usize,
     text_runs: usize,
     primitives: Vec<Primitive>,
+    jump_overrides: Vec<line_jumps::ConnectorJumpOverride>,
 }
 impl State {
     fn next_z(&mut self) -> u32 {
@@ -3851,6 +3868,215 @@ mod tests {
         assert!(!list.primitives.iter().any(
             |primitive| matches!(primitive, Primitive::Placeholder { id, .. } if id == "page:1")
         ));
+    }
+
+    fn free_connector(id: u32, begin: (f64, f64), end: (f64, f64)) -> Shape {
+        let mut connector = shape(id, 1.0, 1.0);
+        connector.children.extend([
+            ShapeChild::Cell(cell("OneD", "1")),
+            ShapeChild::Cell(cell("BeginX", &begin.0.to_string())),
+            ShapeChild::Cell(cell("BeginY", &begin.1.to_string())),
+            ShapeChild::Cell(cell("EndX", &end.0.to_string())),
+            ShapeChild::Cell(cell("EndY", &end.1.to_string())),
+        ]);
+        connector
+    }
+
+    fn jump_package(
+        shapes: Vec<Shape>,
+        page_cells: &[(&str, &str)],
+        style_cells: &[(&str, &str)],
+    ) -> VsdxPackage {
+        let mut package = package(shapes);
+        let sheet = package.page_sheets.get_mut(&1).unwrap();
+        for (name, value) in page_cells {
+            sheet.children.push(SheetChild::Cell(cell(name, value)));
+        }
+        if !style_cells.is_empty() {
+            package.style_sheets.push(Sheet {
+                id: Some(0),
+                children: style_cells
+                    .iter()
+                    .map(|(name, value)| SheetChild::Cell(cell(name, value)))
+                    .collect(),
+                other_attrs: vec![("NameU".into(), "No Style".into())],
+            });
+        }
+        package
+    }
+
+    fn jump_path(list: &VsdxDisplayList, id: u32) -> &[GeometryPathCommand] {
+        let Primitive::Shape { path, .. } = shape_primitive(list, id) else {
+            unreachable!()
+        };
+        path
+    }
+
+    fn quad_count(path: &[GeometryPathCommand]) -> usize {
+        path.iter()
+            .filter(|command| matches!(command, GeometryPathCommand::Quad { .. }))
+            .count()
+    }
+
+    fn move_count(path: &[GeometryPathCommand]) -> usize {
+        path.iter()
+            .filter(|command| matches!(command, GeometryPathCommand::Move { .. }))
+            .count()
+    }
+
+    fn crossing_shapes() -> Vec<Shape> {
+        vec![
+            free_connector(1, (0.0, 1.0), (4.0, 1.0)),
+            free_connector(2, (2.0, 0.0), (2.0, 2.0)),
+        ]
+    }
+
+    fn apex(path: &[GeometryPathCommand], axis: char, at: f64) -> Option<(f64, f64)> {
+        path.iter().find_map(|command| match *command {
+            GeometryPathCommand::Quad { x, y, .. }
+                if (if axis == 'y' { y } else { x } - at).abs() < 1e-9 =>
+            {
+                Some((x, y))
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn line_jump_bridges_the_more_horizontal_connector() {
+        let package = jump_package(crossing_shapes(), &[("LineJumpCode", "1")], &[]);
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        let horizontal = jump_path(&list, 1);
+        assert_eq!(quad_count(horizontal), 2);
+        assert_eq!(apex(horizontal, 'y', 1.025), Some((2.0, 1.025)));
+        assert_eq!(jump_path(&list, 2).len(), 2);
+    }
+
+    #[test]
+    fn line_jump_code_zero_suppresses_bridges() {
+        let package = jump_package(crossing_shapes(), &[("LineJumpCode", "0")], &[]);
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert_eq!(jump_path(&list, 1).len(), 2);
+        assert_eq!(jump_path(&list, 2).len(), 2);
+    }
+
+    #[test]
+    fn line_jump_page_sheet_overrides_the_stylesheet() {
+        let package = jump_package(
+            crossing_shapes(),
+            &[("LineJumpCode", "0")],
+            &[("LineJumpCode", "1")],
+        );
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert_eq!(quad_count(jump_path(&list, 1)), 0);
+        assert_eq!(quad_count(jump_path(&list, 2)), 0);
+    }
+
+    #[test]
+    fn line_jump_stylesheet_fallback_sizes_the_bridge() {
+        let package = jump_package(
+            crossing_shapes(),
+            &[],
+            &[
+                ("LineJumpCode", "1"),
+                ("LineJumpFactorX", "1"),
+                ("LineToLineX", "0.2"),
+            ],
+        );
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert_eq!(apex(jump_path(&list, 1), 'y', 1.1), Some((2.0, 1.1)));
+    }
+
+    #[test]
+    fn line_jump_vertical_code_bridges_the_more_vertical_connector() {
+        let package = jump_package(crossing_shapes(), &[("LineJumpCode", "2")], &[]);
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert_eq!(jump_path(&list, 1).len(), 2);
+        assert_eq!(apex(jump_path(&list, 2), 'x', 1.975), Some((1.975, 1.0)));
+    }
+
+    #[test]
+    fn connector_never_deflects_the_bridge_to_the_other_connector() {
+        let mut shapes = crossing_shapes();
+        with_cell(&mut shapes[0], "ConLineJumpCode", "1");
+        let package = jump_package(shapes, &[("LineJumpCode", "1")], &[]);
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert_eq!(jump_path(&list, 1).len(), 2);
+        assert_eq!(quad_count(jump_path(&list, 2)), 2);
+    }
+
+    #[test]
+    fn connector_neither_suppresses_the_crossing() {
+        let mut shapes = crossing_shapes();
+        with_cell(&mut shapes[0], "ConLineJumpCode", "4");
+        let package = jump_package(shapes, &[("LineJumpCode", "1")], &[]);
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert_eq!(quad_count(jump_path(&list, 1)), 0);
+        assert_eq!(quad_count(jump_path(&list, 2)), 0);
+    }
+
+    #[test]
+    fn connector_always_forces_a_bridge_under_code_zero() {
+        let mut shapes = crossing_shapes();
+        with_cell(&mut shapes[0], "ConLineJumpCode", "2");
+        let package = jump_package(shapes, &[("LineJumpCode", "0")], &[]);
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert_eq!(quad_count(jump_path(&list, 1)), 2);
+    }
+
+    #[test]
+    fn line_jump_gap_style_breaks_the_route() {
+        let mut shapes = crossing_shapes();
+        with_cell(&mut shapes[0], "ConLineJumpStyle", "2");
+        let package = jump_package(shapes, &[("LineJumpCode", "1")], &[]);
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        let horizontal = jump_path(&list, 1);
+        assert_eq!(quad_count(horizontal), 0);
+        assert_eq!(move_count(horizontal), 2);
+        assert_eq!(jump_path(&list, 2).len(), 2);
+    }
+
+    #[test]
+    fn line_jump_ignores_shared_endpoints() {
+        let package = jump_package(
+            vec![
+                free_connector(1, (0.0, 1.0), (2.0, 1.0)),
+                free_connector(2, (2.0, 1.0), (2.0, 3.0)),
+            ],
+            &[("LineJumpCode", "1")],
+            &[],
+        );
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert_eq!(jump_path(&list, 1).len(), 2);
+        assert_eq!(jump_path(&list, 2).len(), 2);
+    }
+
+    #[test]
+    fn line_jump_display_order_codes_follow_z_order() {
+        for (code, jumper) in [("4", 2), ("5", 1)] {
+            let package = jump_package(crossing_shapes(), &[("LineJumpCode", code)], &[]);
+            let list = Renderer::default().layout_page(&package, "page").unwrap();
+            assert_eq!(quad_count(jump_path(&list, jumper)), 2, "code {code}");
+            assert_eq!(
+                quad_count(jump_path(&list, if jumper == 1 { 2 } else { 1 })),
+                0,
+                "code {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn line_jump_bridges_bent_connector_legs() {
+        let mut bent = free_connector(1, (0.0, 0.0), (2.0, 2.0));
+        with_cell(&mut bent, "RoutStyle", "1");
+        let package = jump_package(
+            vec![bent, free_connector(2, (1.0, -1.0), (1.0, 1.0))],
+            &[("LineJumpCode", "1")],
+            &[],
+        );
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert_eq!(apex(jump_path(&list, 1), 'y', 0.025), Some((1.0, 0.025)));
+        assert_eq!(jump_path(&list, 2).len(), 2);
     }
 
     #[test]
