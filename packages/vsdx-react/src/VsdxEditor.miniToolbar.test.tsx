@@ -200,6 +200,16 @@ test('an outside press and a menu action close the toolbar with the menu', () =>
   }
 });
 
+test('guarded colour cells hide the mini toolbar instead of refusing on pick', () => {
+  const { view } = renderShapeMenu({ cells: [cell('FillForegnd', 'GUARD(RGB(255,0,0))'), cell('LineColor', 'GUARD(RGB(0,0,255))'), cell('Angle', '0'), cell('FlipX', '0'), cell('FlipY', '0')] });
+  try {
+    expect(shapeMenu()).not.toBeNull();
+    expect(toolbar()).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
 test('commands that do not exist or are disabled are not shown', () => {
   function PartialHost({ commands }: { commands: Partial<Record<RibbonCommandId, RibbonCommand | undefined>> }) {
     const ref = { current: null } as RefObject<HTMLDivElement | null>;

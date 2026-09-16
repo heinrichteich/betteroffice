@@ -89,24 +89,34 @@ export function CommandMenu({ menuLabel, entries, position, dividerAfter, anchor
   useEffect(() => {
     const node = menuRef.current;
     if (!node) return;
-    const rect = node.getBoundingClientRect();
-    if (rect.width === 0 && rect.height === 0) return;
-    setPos((previous) => {
-      const next = { top: Math.max(MENU_MARGIN, Math.min(position.top, window.innerHeight - rect.height - MENU_MARGIN)), left: Math.max(MENU_MARGIN, Math.min(position.left, window.innerWidth - rect.width - MENU_MARGIN)) };
-      return previous.top === next.top && previous.left === next.left ? previous : next;
-    });
+    const clamp = () => {
+      const rect = node.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return;
+      setPos((previous) => {
+        const next = { top: Math.max(MENU_MARGIN, Math.min(position.top, window.innerHeight - rect.height - MENU_MARGIN)), left: Math.max(MENU_MARGIN, Math.min(position.left, window.innerWidth - rect.width - MENU_MARGIN)) };
+        return previous.top === next.top && previous.left === next.left ? previous : next;
+      });
+    };
+    clamp();
+    window.addEventListener('resize', clamp);
+    return () => window.removeEventListener('resize', clamp);
   }, [position]);
   useLayoutEffect(() => {
     const submenu = submenuRef.current;
     const anchor = itemRefs.current[openParentIndex];
     if (!submenu || !anchor) return;
-    const bounds = submenu.getBoundingClientRect();
-    const parent = anchor.getBoundingClientRect();
-    const left = submenuSide(parent.right, bounds.width, window.innerWidth) === 'right' ? parent.right : parent.left - bounds.width;
-    setSubmenuPosition({
-      left: Math.max(MENU_MARGIN, Math.min(left, window.innerWidth - bounds.width - MENU_MARGIN)),
-      top: Math.max(MENU_MARGIN, Math.min(parent.top, window.innerHeight - bounds.height - MENU_MARGIN)),
-    });
+    const place = () => {
+      const bounds = submenu.getBoundingClientRect();
+      const parent = anchor.getBoundingClientRect();
+      const left = submenuSide(parent.right, bounds.width, window.innerWidth) === 'right' ? parent.right : parent.left - bounds.width;
+      setSubmenuPosition({
+        left: Math.max(MENU_MARGIN, Math.min(left, window.innerWidth - bounds.width - MENU_MARGIN)),
+        top: Math.max(MENU_MARGIN, Math.min(parent.top, window.innerHeight - bounds.height - MENU_MARGIN)),
+      });
+    };
+    place();
+    window.addEventListener('resize', place);
+    return () => window.removeEventListener('resize', place);
   }, [openParentIndex, pos]);
   useEffect(() => {
     function onOutside(event: MouseEvent) {
