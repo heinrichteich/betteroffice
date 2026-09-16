@@ -10,6 +10,8 @@ use crate::display_list::Primitive;
 const END_EPSILON: f64 = 1e-9;
 const MAX_STYLE_DEPTH: usize = 8;
 const SEGMENT_INDEX_LEAF_SIZE: usize = 8;
+const MAX_CROSSING_CANDIDATES: usize = 20_000_000;
+const MAX_PLACED_JUMPS: usize = 100_000;
 
 pub struct PageJumpSettings {
     pub code: i32,
@@ -97,11 +99,17 @@ pub fn apply_line_jumps(
     let mut jumps: BTreeMap<usize, Vec<PlacedJump>> = BTreeMap::new();
     let segments = route_segments(&routes);
     let index = SegmentIndex::new(&segments);
+    let mut candidates = MAX_CROSSING_CANDIDATES;
+    let mut budget = MAX_PLACED_JUMPS;
     for (segment_index, segment) in segments.iter().enumerate() {
-        index.overlapping(&segments, segment.bounds, &mut |other_index| {
+        let within_budget = index.overlapping(&segments, segment.bounds, &mut |other_index| {
             if other_index <= segment_index || segments[other_index].route == segment.route {
                 return true;
             }
+            if candidates == 0 {
+                return false;
+            }
+            candidates -= 1;
             let other = &segments[other_index];
             let Some(crossing) = crossing(&routes, segment, other) else {
                 return true;
@@ -125,11 +133,18 @@ pub fn apply_line_jumps(
                 };
                 let item = &lookup[routes[route].id.as_str()];
                 if let Some(jump) = placed_jump(item, settings, &crossing, winner == Side::A) {
+                    if budget == 0 {
+                        return false;
+                    }
+                    budget -= 1;
                     jumps.entry(route).or_default().push(jump);
                 }
             }
             true
         });
+        if !within_budget {
+            return;
+        }
     }
     for (index, mut placed) in jumps {
         if let Some(path) = shape_mut(primitives, &routes[index].id) {
@@ -1032,5 +1047,160 @@ mod tests {
             path.iter()
                 .any(|command| matches!(command, GeometryPathCommand::Quad { .. }))
         );
+    }
+
+    fn route(id: &str, z: u32, points: &[(f64, f64)]) -> Primitive {
+        let mut path = vec![GeometryPathCommand::Move {
+            x: points[0].0,
+            y: points[0].1,
+        }];
+        for (x, y) in &points[1..] {
+            path.push(GeometryPathCommand::Line { x: *x, y: *y });
+        }
+        Primitive::Shape {
+            id: id.into(),
+            z_order: z,
+            path,
+            fill: None,
+            stroke: Some(stroke()),
+            transform: crate::Affine::identity(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn plain(ids: &[&str]) -> Vec<ConnectorJumpOverride> {
+        ids.iter()
+            .map(|id| ConnectorJumpOverride {
+                id: (*id).into(),
+                code: 0,
+                style: 0,
+                dir_x: 0,
+                dir_y: 0,
+            })
+            .collect()
+    }
+
+    fn arcs(primitives: &[Primitive]) -> usize {
+        primitives
+            .iter()
+            .map(|p| match p {
+                Primitive::Shape { path, .. } => path
+                    .iter()
+                    .filter(|c| matches!(c, GeometryPathCommand::Quad { .. }))
+                    .count(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn degenerate_route_geometry_never_bridges() {
+        for (name, primitives, ids) in [
+            (
+                "collinear overlap",
+                vec![
+                    route("a", 0, &[(0.0, 0.0), (4.0, 0.0)]),
+                    route("b", 1, &[(1.0, 0.0), (5.0, 0.0)]),
+                ],
+                &["a", "b"][..],
+            ),
+            (
+                "zero length",
+                vec![
+                    route("a", 0, &[(0.0, 0.0), (4.0, 0.0)]),
+                    route("b", 1, &[(2.0, 0.0), (2.0, 0.0)]),
+                ],
+                &["a", "b"][..],
+            ),
+            (
+                "endpoint touch",
+                vec![
+                    route("a", 0, &[(0.0, 0.0), (2.0, 0.0)]),
+                    route("b", 1, &[(2.0, 0.0), (2.0, 2.0)]),
+                ],
+                &["a", "b"][..],
+            ),
+            (
+                "bend touch",
+                vec![
+                    route("a", 0, &[(0.0, 0.0), (2.0, 0.0), (2.0, 2.0)]),
+                    route("b", 1, &[(0.0, 2.0), (2.0, 0.0)]),
+                ],
+                &["a", "b"][..],
+            ),
+            (
+                "self crossing",
+                vec![route(
+                    "a",
+                    0,
+                    &[(0.0, 0.0), (2.0, 2.0), (2.0, 0.0), (0.0, 2.0)],
+                )],
+                &["a"][..],
+            ),
+        ] {
+            for code in [0, 1, 2, 4, 5] {
+                let mut primitives = primitives.clone();
+                apply_line_jumps(&mut primitives, &plain(ids), &settings(code));
+                assert_eq!(arcs(&primitives), 0, "{name} code {code}");
+            }
+        }
+    }
+
+    #[test]
+    fn unusable_jump_factors_leave_the_route_intact() {
+        for (factor, line_to) in [
+            (0.0, 0.1),
+            (-0.5, 0.1),
+            (0.5, 0.0),
+            (0.5, -0.1),
+            (1e300, 0.1),
+        ] {
+            let mut primitives = vec![
+                route("a", 0, &[(0.0, 1.0), (4.0, 1.0)]),
+                route("b", 1, &[(2.0, 0.0), (2.0, 2.0)]),
+            ];
+            let mut jump = settings(1);
+            jump.factor_x = factor;
+            jump.factor_y = factor;
+            jump.line_to_x = line_to;
+            jump.line_to_y = line_to;
+            apply_line_jumps(&mut primitives, &plain(&["a", "b"]), &jump);
+            assert_eq!(arcs(&primitives), 0, "factor {factor} line_to {line_to}");
+        }
+    }
+
+    #[test]
+    fn exhausting_the_jump_budget_leaves_every_route_unbridged() {
+        let count = MAX_PLACED_JUMPS / 2 + 8;
+        let mut primitives: Vec<Primitive> = (0..count)
+            .map(|index| {
+                let y = index as f64 * 1e-4;
+                route(&format!("h{index}"), index as u32, &[(0.0, y), (4.0, y)])
+            })
+            .collect();
+        primitives.extend((0..2).map(|index| {
+            let x = 1.0 + index as f64;
+            route(
+                &format!("v{index}"),
+                (count + index) as u32,
+                &[(x, -1.0), (x, count as f64)],
+            )
+        }));
+        let ids: Vec<String> = (0..count)
+            .map(|index| format!("h{index}"))
+            .chain((0..2).map(|index| format!("v{index}")))
+            .collect();
+        let overrides: Vec<ConnectorJumpOverride> = ids
+            .iter()
+            .map(|id| ConnectorJumpOverride {
+                id: id.clone(),
+                code: 0,
+                style: 0,
+                dir_x: 0,
+                dir_y: 0,
+            })
+            .collect();
+        apply_line_jumps(&mut primitives, &overrides, &settings(1));
+        assert_eq!(arcs(&primitives), 0);
     }
 }
