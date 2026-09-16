@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { anchoredZoomScroll, canvasPointerPosition, centredPageScroll, inchFormula, pageBreakLines, pageCanvasDpr, pageCanvasSize, resolveDragGeometry, selectionCorners, stillSelectable, surfaceSize, viewportCentreKey, zoomForWheelDelta } from './VsdxEditor';
+import { anchoredZoomScroll, canvasPointerPosition, centredPageScroll, contentOverflow, inchFormula, pageBreakLines, pageCanvasBleed, pageCanvasDpr, pageCanvasLayout, pageCanvasSize, resolveDragGeometry, selectionCorners, stillSelectable, surfaceSize, viewportCentreKey, zoomForWheelDelta } from './VsdxEditor';
 import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
 
 const frame: PageDisplayList = {
@@ -258,6 +258,41 @@ test('the page canvas covers the page plus bleed instead of the padded surface',
   const surface = surfaceSize(frame.width, frame.height, 1);
   expect(canvas.width * canvas.height).toBeLessThan(surface.width * surface.height / 10);
   expect(canvas.width * canvas.height).toBeLessThan(2 * 1024 * 1024);
+});
+
+test('the page canvas grows its bleed to cover off-page content instead of clipping it', () => {
+  expect(contentOverflow(frame)).toBe(0);
+  expect(pageCanvasBleed(frame, 1)).toBe(64);
+  const outside = {
+    ...frame,
+    primitives: [{ kind: 'image', id: 'scratch', zOrder: 0, assetId: 'scratch', x: -3, y: 5, width: 2, height: 1 }],
+  } as PageDisplayList;
+  expect(contentOverflow(outside)).toBeCloseTo(288, 8);
+  expect(pageCanvasBleed(outside, 1)).toBe(288);
+  const layout = pageCanvasLayout(outside, 1);
+  expect(layout.origin).toEqual({ x: 288, y: 288 });
+  expect(layout.width).toBeCloseTo(frame.width + 576, 8);
+  expect(layout.height).toBeCloseTo(frame.height + 576, 8);
+  const surface = surfaceSize(frame.width, frame.height, 1);
+  expect(layout.width * layout.height).toBeLessThan(surface.width * surface.height / 10);
+});
+
+test('the off-page bleed follows group transforms, scales with zoom, and stays capped', () => {
+  const grouped = {
+    ...frame,
+    primitives: [{
+      kind: 'group', id: 'group', zOrder: 0, transform: { a: 1, b: 0, c: 0, d: 1, e: -5, f: 0 },
+      primitives: [{ kind: 'image', id: 'inner', zOrder: 0, assetId: 'inner', x: 0, y: 5, width: 1, height: 1 }],
+    }],
+  } as unknown as PageDisplayList;
+  expect(contentOverflow(grouped)).toBeCloseTo(480, 8);
+  expect(pageCanvasBleed(grouped, 0.5)).toBe(240);
+  const distant = {
+    ...frame,
+    primitives: [{ kind: 'image', id: 'far', zOrder: 0, assetId: 'far', x: -100, y: 5, width: 1, height: 1 }],
+  } as PageDisplayList;
+  expect(pageCanvasBleed(distant, 1)).toBe(512);
+  expect(pageCanvasLayout(distant, 1).width).toBeCloseTo(frame.width + 1024, 8);
 });
 
 test('the page canvas DPR clamps large backing stores instead of exceeding browser limits', () => {

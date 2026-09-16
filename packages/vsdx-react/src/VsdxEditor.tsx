@@ -186,12 +186,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const context = canvas.getContext('2d'); if (!context) return;
     const controller = new AbortController();
     const originHandle = handleRef.current;
-    const canvasSize = pageCanvasSize(frame.width, frame.height, zoom);
-    const effective = sizeCanvasForSurface(canvas, canvasSize.width, canvasSize.height, window.devicePixelRatio || 1);
+    const layout = pageCanvasLayout(frame, zoom);
+    const effective = sizeCanvasForSurface(canvas, layout.width, layout.height, window.devicePixelRatio || 1);
     void paintPage(context, frame, effective, zoom, {
       signal: controller.signal,
-      origin: PAGE_CANVAS_ORIGIN,
-      surface: canvasSize,
+      origin: layout.origin,
+      surface: layout,
       resolveImage: async (assetId) => {
         if (controller.signal.aborted) return null;
         try { return await resolveImage(assetId, originHandle, imageCache, t('errors.decodePageImage')); }
@@ -205,8 +205,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const canvas = overlayCanvasRef.current; const frame = model.frame;
     if (!canvas || !frame) return;
     const context = canvas.getContext('2d'); if (!context) return;
-    const canvasSize = pageCanvasSize(frame.width, frame.height, zoom);
-    const effective = sizeCanvasForSurface(canvas, canvasSize.width, canvasSize.height, window.devicePixelRatio || 1);
+    const layout = pageCanvasLayout(frame, zoom);
+    const effective = sizeCanvasForSurface(canvas, layout.width, layout.height, window.devicePixelRatio || 1);
     context.setTransform(1, 0, 0, 1, 0, 0);
     context.clearRect(0, 0, canvas.width, canvas.height);
     const snapshot = model.snapshot;
@@ -217,12 +217,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         const placement = findShapePlacement(page.shapes, selection.shapeId);
         const policy = placement ? mutationPolicyFor(handleRef.current, page.id, selection.shapeId, placement.shape) : null;
         const blocked = placement ? isHandleResizeBlocked(placement.shape, policy) : false;
-        if (corners) paintSelectionFrame(context, corners, effective, zoom, blocked ? [] : undefined, PAGE_CANVAS_ORIGIN);
+        if (corners) paintSelectionFrame(context, corners, effective, zoom, blocked ? [] : undefined, layout.origin);
       } catch { void 0; }
     }
     const start = pointerRef.current; const release = dragPreviewRef.current;
     if (start && release) {
-      try { paintDragPreview(context, previewOutline(start, release, frame.paintTransform), effective, zoom, PAGE_CANVAS_ORIGIN); } catch { void 0; }
+      try { paintDragPreview(context, previewOutline(start, release, frame.paintTransform), effective, zoom, layout.origin); } catch { void 0; }
     }
   }, [model.frame, model.snapshot, model.pageIndex, selection, zoom]);
 
@@ -333,7 +333,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         const placement = findShapePlacement(page.shapes, currentSelection.shapeId);
         const policy = placement ? mutationPolicyFor(handleRef.current, page.id, currentSelection.shapeId, placement.shape) : null;
         const blocked = placement ? isHandleResizeBlocked(placement.shape, policy) : false;
-        if (corners) paintSelectionFrame(context, corners, pageCanvasDpr(frame, zoomRef.current), zoomRef.current, blocked ? [] : undefined, PAGE_CANVAS_ORIGIN);
+        const layout = pageCanvasLayout(frame, zoomRef.current);
+        if (corners) paintSelectionFrame(context, corners, pageCanvasDpr(frame, zoomRef.current, window.devicePixelRatio || 1, layout.bleed), zoomRef.current, blocked ? [] : undefined, layout.origin);
       } catch { void 0; }
     }
   };
@@ -469,9 +470,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           const corners = previewOutline(liveStart, release, liveFrame.paintTransform, snap);
           context.setTransform(1, 0, 0, 1, 0, 0);
           context.clearRect(0, 0, overlay.width, overlay.height);
-          const previewDpr = pageCanvasDpr(liveFrame, zoomRef.current);
-          paintDragPreview(context, corners, previewDpr, zoomRef.current, PAGE_CANVAS_ORIGIN);
-          paintSelectionFrame(context, corners, previewDpr, zoomRef.current, undefined, PAGE_CANVAS_ORIGIN);
+          const layout = pageCanvasLayout(liveFrame, zoomRef.current);
+          const previewDpr = pageCanvasDpr(liveFrame, zoomRef.current, window.devicePixelRatio || 1, layout.bleed);
+          paintDragPreview(context, corners, previewDpr, zoomRef.current, layout.origin);
+          paintSelectionFrame(context, corners, previewDpr, zoomRef.current, undefined, layout.origin);
         } catch (value) { reportError(value); }
       });
     } catch (value) { reportError(value); }
@@ -667,6 +669,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const fidelity = diagnostics.filter((diagnostic) => diagnostic.category === 'fidelity');
   const surfaceWidth = model.frame ? model.frame.width * zoom + SURFACE_PAD * 2 : 0;
   const surfaceHeight = model.frame ? model.frame.height * zoom + SURFACE_PAD * 2 : 0;
+  const canvasLayout = model.frame ? pageCanvasLayout(model.frame, zoom) : null;
   return <div className={className} style={styles.root} aria-label={t('editor.appLabel')}>
     <header style={styles.titleBar}><strong>{t('ribbon.documentName')}</strong><span style={{ color: dirty ? '#a16207' : '#526273' }}>{dirty ? t('ribbon.dirty') : t('ribbon.saved')}</span></header>
     <RibbonCommandsProvider handle={handleRef.current} snapshot={model.snapshot} pageId={model.snapshot?.pages[model.pageIndex]?.id} selection={selection} onMutation={() => refresh(undefined, true)} onError={reportError} onDownload={download}>
@@ -677,8 +680,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     <main ref={workspaceRef} style={styles.workspace}>
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
-      {model.frame && <div style={{ ...styles.surface, width: surfaceWidth, height: surfaceHeight }}>
-        <div style={{ ...styles.canvasFrame, left: SURFACE_PAD - PAGE_CANVAS_BLEED, top: SURFACE_PAD - PAGE_CANVAS_BLEED }}>
+      {model.frame && canvasLayout && <div style={{ ...styles.surface, width: surfaceWidth, height: surfaceHeight }}>
+        <div style={{ ...styles.canvasFrame, left: SURFACE_PAD - canvasLayout.origin.x, top: SURFACE_PAD - canvasLayout.origin.y }}>
           <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onKeyUp={onCanvasKeyUp} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
           <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
         </div>
@@ -699,6 +702,8 @@ const WORKSPACE_MARGIN = 32;
 export const SURFACE_PAD = 2000;
 /** Page overflow kept inside the canvas backing store, in CSS pixels. */
 export const PAGE_CANVAS_BLEED = 64;
+/** Largest per-side canvas overflow for off-page content, in CSS pixels. */
+export const PAGE_CANVAS_MAX_BLEED = 512;
 /** Page origin inside its canvas, in CSS pixels. */
 export const PAGE_CANVAS_ORIGIN: ModelPoint = { x: PAGE_CANVAS_BLEED, y: PAGE_CANVAS_BLEED };
 
@@ -711,6 +716,77 @@ export function pageCanvasSize(frameWidth: number, frameHeight: number, zoom: nu
 export function pageCanvasDpr(frame: Pick<PageDisplayList, 'width' | 'height'>, zoom: number, dpr: number = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1, bleed = PAGE_CANVAS_BLEED): number {
   const canvas = pageCanvasSize(frame.width, frame.height, zoom, bleed);
   return effectiveDprForSurface(canvas.width, canvas.height, dpr);
+}
+
+function composeAffine(outer: Affine, inner: Affine): Affine {
+  return {
+    a: outer.a * inner.a + outer.c * inner.b,
+    b: outer.b * inner.a + outer.d * inner.b,
+    c: outer.a * inner.c + outer.c * inner.d,
+    d: outer.b * inner.c + outer.d * inner.d,
+    e: outer.a * inner.e + outer.c * inner.f + outer.e,
+    f: outer.b * inner.e + outer.d * inner.f + outer.f,
+  };
+}
+
+function pathCommandPoints(command: { type: string; [key: string]: number | string }): ModelPoint[] {
+  const at = (xKey: string, yKey: string): ModelPoint | null => {
+    const x = command[xKey];
+    const y = command[yKey];
+    return typeof x === 'number' && typeof y === 'number' ? { x, y } : null;
+  };
+  return [at('x', 'y'), at('cpx', 'cpy'), at('cp1x', 'cp1y'), at('cp2x', 'cp2y')].filter((point): point is ModelPoint => point !== null);
+}
+
+/** Furthest any painted primitive extends beyond the page rect, in scale-1 pixels. */
+export function contentOverflow(frame: Pick<PageDisplayList, 'width' | 'height' | 'paintTransform' | 'primitives'>): number {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  const track = (transform: Affine, point: ModelPoint): void => {
+    const x = transform.a * point.x + transform.c * point.y + transform.e;
+    const y = transform.b * point.x + transform.d * point.y + transform.f;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  };
+  const visit = (primitives: readonly PagePrimitive[], transform: Affine, depth: number): void => {
+    if (depth >= 256) return;
+    for (const primitive of primitives) {
+      if (primitive.kind === 'group') {
+        visit(primitive.primitives, primitive.transform ? composeAffine(transform, primitive.transform) : transform, depth + 1);
+        continue;
+      }
+      if (primitive.kind === 'placeholder') {
+        for (const point of [{ x: primitive.x, y: primitive.y }, { x: primitive.x + primitive.width, y: primitive.y }, { x: primitive.x, y: primitive.y + primitive.height }, { x: primitive.x + primitive.width, y: primitive.y + primitive.height }]) track(transform, point);
+        continue;
+      }
+      const live = primitive.transform ? composeAffine(transform, primitive.transform) : transform;
+      if (primitive.kind === 'shape') {
+        for (const command of primitive.path) for (const point of pathCommandPoints(command)) track(live, point);
+      } else {
+        for (const point of [{ x: primitive.x, y: primitive.y }, { x: primitive.x + primitive.width, y: primitive.y }, { x: primitive.x, y: primitive.y + primitive.height }, { x: primitive.x + primitive.width, y: primitive.y + primitive.height }]) track(live, point);
+      }
+    }
+  };
+  visit(frame.primitives, frame.paintTransform, 0);
+  if (minX === Number.POSITIVE_INFINITY) return 0;
+  return Math.max(0, -minX, -minY, maxX - frame.width, maxY - frame.height);
+}
+
+/** Per-side canvas bleed covering off-page content, in CSS pixels. */
+export function pageCanvasBleed(frame: Pick<PageDisplayList, 'width' | 'height' | 'paintTransform' | 'primitives'>, zoom: number): number {
+  const safeZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+  return Math.min(Math.max(PAGE_CANVAS_BLEED, Math.ceil(contentOverflow(frame) * safeZoom)), PAGE_CANVAS_MAX_BLEED);
+}
+
+/** CSS size, bleed, and page origin of the canvas backing a page extent and zoom. */
+export function pageCanvasLayout(frame: PageDisplayList, zoom: number): { width: number; height: number; bleed: number; origin: ModelPoint } {
+  const bleed = pageCanvasBleed(frame, zoom);
+  return { ...pageCanvasSize(frame.width, frame.height, zoom, bleed), bleed, origin: { x: bleed, y: bleed } };
 }
 
 /** CSS size of the scrollable white surface for a page extent and zoom. */
