@@ -493,17 +493,23 @@ pub fn sniff_image(asset_id: &str, bytes: &[u8]) -> Option<(&'static str, &'stat
         Some(("gif", "image/gif"))
     } else if bytes.starts_with(b"BM") {
         Some(("bmp", "image/bmp"))
-    } else if asset_id.ends_with(".png") {
+    } else if has_extension(asset_id, "png") {
         Some(("png", "image/png"))
-    } else if asset_id.ends_with(".jpg") || asset_id.ends_with(".jpeg") {
+    } else if has_extension(asset_id, "jpg") || has_extension(asset_id, "jpeg") {
         Some(("jpg", "image/jpeg"))
-    } else if asset_id.ends_with(".emf") {
+    } else if has_extension(asset_id, "emf") {
         Some(("emf", "image/x-emf"))
-    } else if asset_id.ends_with(".wmf") {
+    } else if has_extension(asset_id, "wmf") {
         Some(("wmf", "image/x-wmf"))
     } else {
         None
     }
+}
+
+fn has_extension(asset_id: &str, extension: &str) -> bool {
+    asset_id
+        .rsplit_once('.')
+        .is_some_and(|(_, actual)| actual.eq_ignore_ascii_case(extension))
 }
 
 #[cfg(test)]
@@ -569,6 +575,14 @@ mod tests {
         assert_eq!(
             sniff_image("visio/media/image.emf", &[]),
             Some(("emf", "image/x-emf"))
+        );
+    }
+
+    #[test]
+    fn wmf_uses_renderable_content_type() {
+        assert_eq!(
+            sniff_image("visio/media/image.WMF", &[]),
+            Some(("wmf", "image/x-wmf"))
         );
     }
 }

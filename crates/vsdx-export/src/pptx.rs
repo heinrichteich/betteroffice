@@ -210,17 +210,18 @@ fn slide_xml(
                 reason,
                 ..
             } => {
-                let name = escape(id);
-                let label = escape(reason);
+                let placed = Placed {
+                    x: emu(f64::from(*x)),
+                    y: emu(page_height - f64::from(*y) - f64::from(*height)),
+                    w: emu(f64::from(*width)).max(1),
+                    h: emu(f64::from(*height)).max(1),
+                    rot: 0,
+                    flip_h: false,
+                    flip_v: false,
+                };
                 let id_value = next_id;
                 next_id += 1;
-                shapes.push_str(&format!(
-                    "<p:sp><p:nvSpPr><p:cNvPr id=\"{id_value}\" name=\"{name}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln w=\"12700\"><a:solidFill><a:srgbClr val=\"8A94A6\"/></a:solidFill><a:prstDash val=\"dash\"/></a:ln></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz=\"1200\"><a:solidFill><a:srgbClr val=\"5D6675\"/></a:solidFill><a:latin typeface=\"Calibri\"/></a:rPr><a:t>{label}</a:t></a:r></a:p></p:txBody></p:sp>",
-                    emu(f64::from(*x)),
-                    emu(page_height - f64::from(*y) - f64::from(*height)),
-                    emu(f64::from(*width)).max(1),
-                    emu(f64::from(*height)).max(1),
-                ));
+                shapes.push_str(&placeholder_xml(id, reason, &placed, id_value));
             }
             Primitive::Image {
                 id,
@@ -233,6 +234,17 @@ fn slide_xml(
                 ..
             } => {
                 let Some(media_index) = index_by_asset.get(asset_id) else {
+                    shapes.push_str(&image_placeholder(
+                        id,
+                        *x,
+                        *y,
+                        *width,
+                        *height,
+                        *transform,
+                        page_height,
+                        next_id,
+                    ));
+                    next_id += 1;
                     continue;
                 };
                 let Some(placed) = place_rect(*x, *y, *width, *height, *transform, page_height)
@@ -284,12 +296,20 @@ fn scale_primitives(primitives: &mut [Primitive], scale: f64) {
                 height,
                 transform,
                 ..
+            } => {
+                *x *= scale as f32;
+                *y *= scale as f32;
+                *width *= scale as f32;
+                *height *= scale as f32;
+                transform.e *= scale as f32;
+                transform.f *= scale as f32;
             }
-            | Primitive::TextBox {
+            Primitive::TextBox {
                 x,
                 y,
                 width,
                 height,
+                paragraphs,
                 transform,
                 ..
             } => {
@@ -297,6 +317,12 @@ fn scale_primitives(primitives: &mut [Primitive], scale: f64) {
                 *y *= scale as f32;
                 *width *= scale as f32;
                 *height *= scale as f32;
+                for paragraph in paragraphs {
+                    for run in &mut paragraph.runs {
+                        run.size_in *= scale as f32;
+                        run.letter_spacing *= scale as f32;
+                    }
+                }
                 transform.e *= scale as f32;
                 transform.f *= scale as f32;
             }
@@ -323,6 +349,31 @@ fn scale_primitives(primitives: &mut [Primitive], scale: f64) {
             }
         }
     }
+}
+
+fn image_placeholder(
+    id: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    transform: vsdx_render::Affine,
+    page_height: f64,
+    id_value: u32,
+) -> String {
+    let Some(placed) = place_rect(x, y, width, height, transform, page_height) else {
+        return String::new();
+    };
+    placeholder_xml(id, &format!("Unsupported image: {id}"), &placed, id_value)
+}
+
+fn placeholder_xml(id: &str, label: &str, placed: &Placed, id_value: u32) -> String {
+    let name = escape(id);
+    let label = escape(label);
+    format!(
+        "<p:sp><p:nvSpPr><p:cNvPr id=\"{id_value}\" name=\"{name}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln w=\"12700\"><a:solidFill><a:srgbClr val=\"8A94A6\"/></a:solidFill><a:prstDash val=\"dash\"/></a:ln></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz=\"1200\"><a:solidFill><a:srgbClr val=\"5D6675\"/></a:solidFill><a:latin typeface=\"Calibri\"/></a:rPr><a:t>{label}</a:t></a:r></a:p></p:txBody></p:sp>",
+        xfrm(placed)
+    )
 }
 
 fn scale_command(command: &mut ooxml_drawingml::GeometryPathCommand, scale: f64) {

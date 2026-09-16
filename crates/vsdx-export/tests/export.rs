@@ -259,6 +259,68 @@ fn pptx_carries_images_as_media() {
 }
 
 #[test]
+fn pptx_scales_mixed_pages_and_preserves_metafiles() {
+    let diagram = vsdx_parse::parse_vsdx(include_bytes!(
+        "../../vsdx-parse/tests/fixtures/export-mixed-pages.vsdx"
+    ))
+    .unwrap();
+    let bytes = export_pptx(&diagram).unwrap();
+    ooxml_opc::sanitize_package_for_format(&bytes, "pptx").unwrap();
+    let parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+    let presentation = String::from_utf8(
+        parts
+            .iter()
+            .find(|(path, _)| path == "ppt/presentation.xml")
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap();
+    let slide = String::from_utf8(
+        parts
+            .iter()
+            .find(|(path, _)| path == "ppt/slides/slide2.xml")
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap();
+    let types = String::from_utf8(
+        parts
+            .iter()
+            .find(|(path, _)| path == "[Content_Types].xml")
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap();
+    assert!(presentation.contains("<p:sldSz cx=\"9144000\" cy=\"7315200\"/>"));
+    assert!(slide.contains("<a:rPr sz=\"2400\""));
+    assert!(slide.contains("Unsupported image:"));
+    assert!(types.contains("Extension=\"emf\" ContentType=\"image/x-emf\""));
+    assert!(types.contains("Extension=\"wmf\" ContentType=\"image/x-wmf\""));
+    assert!(parts.iter().any(|(path, _)| path.ends_with(".emf")));
+    assert!(parts.iter().any(|(path, _)| path.ends_with(".wmf")));
+    assert!(!parts.iter().any(|(path, _)| path.ends_with(".tiff")));
+
+    let docx = export_docx(&diagram).unwrap();
+    let docx_parts = ooxml_opc::unzip_parts(&docx).unwrap();
+    let document = String::from_utf8(
+        docx_parts
+            .iter()
+            .find(|(path, _)| path == "word/document.xml")
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap();
+    assert!(document.contains("Unsupported image:"));
+    assert!(docx_parts.iter().any(|(path, _)| path.ends_with(".emf")));
+    assert!(docx_parts.iter().any(|(path, _)| path.ends_with(".wmf")));
+    assert!(!docx_parts.iter().any(|(path, _)| path.ends_with(".tiff")));
+}
+
+#[test]
 fn shape_data_lists_property_rows() {
     let diagram = package(vec![rect_shape(1, "2", "2")]);
     let data = shape_data(&diagram).unwrap();

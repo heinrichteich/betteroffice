@@ -42,6 +42,25 @@ async function writeTestFixtures(): Promise<void> {
   for (const [name, contents] of Object.entries(nestedParts)) nestedZip.file(name, contents, { date: zipDate, createFolders: false });
   fs.writeFileSync(nestedOutput, await nestedZip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', platform: 'DOS' }));
 
+  const exportFixture = new JSZip();
+  const exportParts: Record<string, string | Uint8Array> = {
+    ...parts,
+    'visio/document.xml': `<VisioDocument ${ns}><FaceNames><FaceName ID='0' Name='Calibri'/></FaceNames><StyleSheets><StyleSheet ID='1' NameU='Text'><Section N='Character'><Row IX='0'><Cell N='Font' V='0'/><Cell N='Size' V='0.5'/></Row></Section></StyleSheet></StyleSheets><DocumentSheet><Cell N='PageWidth' V='10'/><Cell N='PageHeight' V='8'/></DocumentSheet></VisioDocument>`,
+    'visio/pages/pages.xml': `<Pages ${ns}><Page ID='1' NameU='Landscape' Name='Landscape' r:id='rId1' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><PageSheet><Cell N='PageWidth' V='10'/><Cell N='PageHeight' V='8'/></PageSheet></Page><Page ID='2' NameU='Portrait' Name='Portrait' r:id='rId2' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><PageSheet><Cell N='PageWidth' V='4'/><Cell N='PageHeight' V='12'/></PageSheet></Page></Pages>`,
+    'visio/pages/_rels/pages.xml.rels': "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page1.xml'/><Relationship Id='rId2' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page2.xml'/></Relationships>",
+    'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Shape' TextStyle='1'>${xform(2, 1, 2, 2, 1, 0.5, 0, 0, 0)}${rect}<Text>canvas</Text></Shape></Shapes></PageContents>`,
+    'visio/pages/page2.xml': `<PageContents ${ns}><Shapes><Shape ID='2' Type='Shape' TextStyle='1'>${xform(2, 1, 2, 10, 1, 0.5, 0, 0, 0)}${rect}<Text>scaled</Text></Shape><Shape ID='3' Type='Shape'>${xform(1, 1, 1, 7, 0.5, 0.5, 0, 0, 0)}<ForeignData ForeignType='Metafile'><Rel r:id='rIdEmf' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'/></ForeignData></Shape><Shape ID='4' Type='Shape'>${xform(1, 1, 2, 7, 0.5, 0.5, 0, 0, 0)}<ForeignData ForeignType='Metafile'><Rel r:id='rIdWmf' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'/></ForeignData></Shape><Shape ID='5' Type='Shape'>${xform(1, 1, 3, 7, 0.5, 0.5, 0, 0, 0)}<ForeignData ForeignType='Bitmap'><Rel r:id='rIdUnsupported' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'/></ForeignData></Shape></Shapes></PageContents>`,
+    'visio/pages/_rels/page2.xml.rels': "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rIdEmf' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/image' Target='../media/vector.emf'/><Relationship Id='rIdWmf' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/image' Target='../media/vector.wmf'/><Relationship Id='rIdUnsupported' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/image' Target='../media/unsupported.tiff'/></Relationships>",
+    'visio/media/vector.emf': new Uint8Array([1, 0, 0, 0]),
+    'visio/media/vector.wmf': new Uint8Array([1, 0, 9, 0]),
+    'visio/media/unsupported.tiff': new Uint8Array([73, 73, 42, 0]),
+  };
+  for (const [part, contents] of Object.entries(exportParts)) exportFixture.file(part, contents, { date: zipDate, createFolders: false });
+  fs.writeFileSync(
+    path.join(root, 'crates/vsdx-parse/tests/fixtures/export-mixed-pages.vsdx'),
+    await exportFixture.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', platform: 'DOS' }),
+  );
+
   const groupedGlue = new JSZip();
   for (const [part, contents] of Object.entries({
     ...parts,
