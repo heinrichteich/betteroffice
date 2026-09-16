@@ -2752,6 +2752,13 @@ mod tests {
         })
     }
 
+    fn test_page_number(page_id: &str) -> u32 {
+        page_id
+            .strip_prefix("page:")
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("test page ID carries its source page")
+    }
+
     fn tree_draft(
         session: &DiagramSession,
         page_id: &str,
@@ -2768,6 +2775,11 @@ mod tests {
             cells: shape.cells.clone(),
             text: session.shape_text(page_id, &shape.id).unwrap(),
             copy_source_id: Some(shape.copy_source_id.unwrap_or(shape.source_id)),
+            copy_source_page_id: Some(
+                shape
+                    .copy_source_page_id
+                    .unwrap_or(test_page_number(page_id)),
+            ),
             source_shape_id: Some(shape.id.clone()),
             source_id: Some(shape.source_id),
             copy_refusal: shape.copy_refusal.clone(),
@@ -3193,6 +3205,7 @@ mod tests {
             cells: Vec::new(),
             text: String::new(),
             copy_source_id: None,
+            copy_source_page_id: None,
             source_shape_id: Some("page:1:shape:10".to_owned()),
             source_id: Some(10),
             copy_refusal: None,
@@ -3205,6 +3218,7 @@ mod tests {
                 cells: Vec::new(),
                 text: String::new(),
                 copy_source_id: None,
+                copy_source_page_id: None,
                 source_shape_id: Some("page:1:shape:10".to_owned()),
                 source_id: Some(10),
                 copy_refusal: None,
@@ -3400,6 +3414,97 @@ mod tests {
                 .to_vec();
             assert_eq!(actual, tokens);
         }
+    }
+
+    #[test]
+    fn pasted_shapes_remember_their_source_page() {
+        let session = grouped_glue_session();
+        let (pasted, _) = paste_group(&session, "page:1", 10);
+        assert_eq!(pasted.copy_source_id, Some(10));
+        assert_eq!(pasted.copy_source_page_id, Some(1));
+        assert_eq!(pasted.children[0].copy_source_id, Some(11));
+        assert_eq!(pasted.children[0].copy_source_page_id, Some(1));
+    }
+
+    #[test]
+    fn cut_paste_without_its_source_preserves_text_tokens() {
+        let session = DiagramSession::open(
+            include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx"),
+            917,
+        )
+        .unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let source = find_by_source(&snapshot.pages[0].shapes, 2).clone();
+        let draft = tree_draft(&session, "page:1", &source);
+        assert_eq!(draft.copy_source_page_id, Some(1));
+        session
+            .delete_shape(&EditCtx::local("cut"), "page:1", &source.id)
+            .unwrap();
+        let receipt = session
+            .add_shape_tree(&EditCtx::local("paste"), "page:1", &draft)
+            .unwrap();
+        let resnapshot = session.snapshot().unwrap();
+        let pasted = resnapshot.pages[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == receipt.shape_id)
+            .unwrap();
+        assert_eq!(pasted.copy_source_page_id, Some(1));
+        let package = session.package().unwrap();
+        let part = package.page_part_paths[0].clone();
+        let tokens = package.page_contents[&part]
+            .shapes()
+            .find(|shape| shape.id == pasted.source_id)
+            .unwrap()
+            .text()
+            .unwrap()
+            .to_vec();
+        assert_eq!(tokens, vec![vsdx_parse::TextToken::Field(0)]);
+        let reopened = DiagramSession::open(&session.save().unwrap(), 918).unwrap();
+        assert_reopened_projection_eq(&session, &reopened, "cut paste preserves field");
+    }
+
+    #[test]
+    fn detached_paste_with_an_unknown_source_page_is_refused() {
+        let session = grouped_glue_session();
+        let snapshot = session.snapshot().unwrap();
+        let source = find_by_source(&snapshot.pages[0].shapes, 10).clone();
+        let mut draft = tree_draft(&session, "page:1", &source);
+        draft.copy_source_page_id = Some(99);
+        draft.children[0].copy_source_page_id = Some(99);
+        session
+            .delete_shape(&EditCtx::local("cut"), "page:1", &source.id)
+            .unwrap();
+        let before = session.encode_state_as_update_v1();
+        let error = session
+            .add_shape_tree(&EditCtx::local("paste"), "page:1", &draft)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("paste source page is missing"),
+            "unexpected refusal: {error}"
+        );
+        assert_eq!(session.encode_state_as_update_v1(), before);
+    }
+
+    #[test]
+    fn detached_paste_spanning_source_pages_is_refused() {
+        let session = grouped_glue_session();
+        let snapshot = session.snapshot().unwrap();
+        let source = find_by_source(&snapshot.pages[0].shapes, 10).clone();
+        let mut draft = tree_draft(&session, "page:1", &source);
+        draft.children[0].copy_source_page_id = Some(2);
+        session
+            .delete_shape(&EditCtx::local("cut"), "page:1", &source.id)
+            .unwrap();
+        let before = session.encode_state_as_update_v1();
+        let error = session
+            .add_shape_tree(&EditCtx::local("paste"), "page:1", &draft)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("span multiple pages"),
+            "unexpected refusal: {error}"
+        );
+        assert_eq!(session.encode_state_as_update_v1(), before);
     }
 
     #[test]

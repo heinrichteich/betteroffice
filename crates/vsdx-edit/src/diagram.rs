@@ -345,7 +345,9 @@ fn edited_story_texts(
                 .and_then(|value| value.parse::<u32>().ok())
         });
         let copy_source_id = map_u32(&shape, &txn, "copySourceId")?;
-        if let (Some(page_id), Some(copy_source_id)) = (page_id, copy_source_id)
+        let copy_source_page = map_u32(&shape, &txn, "copySourcePageId")?;
+        if let (Some(page_id), Some(copy_source_id)) =
+            (copy_source_page.or(page_id), copy_source_id)
             && let Some(tokens) = verbatim_source_text(package, page_id, copy_source_id, &current)
         {
             verbatim.insert(shape_id.to_owned(), tokens);
@@ -1584,6 +1586,7 @@ impl DiagramSession {
             .get_map(SHEETS)
             .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
         let mut source_page_id: Option<String> = None;
+        let mut source_page_numeric: Option<u32> = None;
         let mut found = 0;
         let mut missing: Option<String> = None;
         for node in &nodes {
@@ -1612,6 +1615,20 @@ impl DiagramSession {
                         }
                         None => source_page_id = Some(owner),
                     }
+                    // Prefer the stored original page so copies of copies resolve their text.
+                    let numeric = match map_u32(&source, &txn, "copySourcePageId")? {
+                        Some(page) => page,
+                        None => session_page_number(source_page_id.as_deref().unwrap_or_default())?,
+                    };
+                    match source_page_numeric {
+                        Some(expected) if expected == numeric => {}
+                        Some(_) => {
+                            return Err(EditError::InvalidState(
+                                "paste sources span multiple pages".to_owned(),
+                            ));
+                        }
+                        None => source_page_numeric = Some(numeric),
+                    }
                 }
                 _ => {
                     if let Some(reason) = &node.draft.copy_refusal {
@@ -1627,6 +1644,13 @@ impl DiagramSession {
             return Err(EditError::ShapeNotFound(
                 missing.unwrap_or_else(|| "copy source".to_owned()),
             ));
+        }
+        if found == 0 {
+            source_page_numeric = draft_source_page(&nodes)?;
+        }
+        if let Some(numeric) = source_page_numeric {
+            map_ref(&pages, &txn, &format!("page:{numeric}"))
+                .map_err(|_| EditError::InvalidState("paste source page is missing".to_owned()))?;
         }
         if sheets.len(&txn) as usize + nodes.len() > ParseLimits::default().max_shapes {
             return Err(EditError::InvalidState(
@@ -1696,6 +1720,9 @@ impl DiagramSession {
             shape.insert(&mut txn, "origin", "added");
             if let Some(key) = keys[position] {
                 shape.insert(&mut txn, "copySourceId", key as f64);
+            }
+            if let Some(page) = source_page_numeric {
+                shape.insert(&mut txn, "copySourcePageId", page as f64);
             }
             if let Some(parent) = node.parent {
                 shape.insert(&mut txn, "parentId", fresh[parent].as_str());
@@ -2071,6 +2098,34 @@ fn tree_copy_keys(nodes: &[FlatTreeNode<'_>]) -> EditResult<Vec<Option<u32>>> {
     Ok(keys)
 }
 
+/// Numeric source page behind a `page:N` session ID.
+fn session_page_number(page_id: &str) -> EditResult<u32> {
+    page_id
+        .strip_prefix("page:")
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or_else(|| EditError::InvalidState("copy source is missing its page".to_owned()))
+}
+
+/// Single source page carried by a detached paste draft, if any.
+fn draft_source_page(nodes: &[FlatTreeNode<'_>]) -> EditResult<Option<u32>> {
+    let mut page = None;
+    for node in nodes {
+        let Some(candidate) = node.draft.copy_source_page_id else {
+            continue;
+        };
+        match page {
+            Some(expected) if expected == candidate => {}
+            Some(_) => {
+                return Err(EditError::InvalidState(
+                    "paste sources span multiple pages".to_owned(),
+                ));
+            }
+            None => page = Some(candidate),
+        }
+    }
+    Ok(page)
+}
+
 /// `Sheet.N!` spans outside string literals, with the digit range and the target ID.
 fn sheet_ref_spans(formula: &str) -> Vec<(usize, usize, u32)> {
     let bytes = formula.as_bytes();
@@ -2209,6 +2264,7 @@ fn validate_schema(doc: &Doc) -> EditResult<()> {
                 ));
             }
             map_u32(&shape, &txn, "copySourceId")?;
+            map_u32(&shape, &txn, "copySourcePageId")?;
             let cells = map_map(&shape, &txn, "cells")?;
             for (key, cell) in cells.iter(&txn) {
                 let Out::YMap(cell) = cell else {
@@ -2730,6 +2786,7 @@ fn validate_session_topology(before: &Doc, staged: &Doc) -> EditResult<()> {
             "origin",
             "parentId",
             "copySourceId",
+            "copySourcePageId",
             "copyRefusal",
         ] {
             if before_shape.get(&before_txn, key) != staged_shape.get(&staged_txn, key) {
@@ -3274,6 +3331,7 @@ fn snapshot_shape<T: ReadTxn>(
             cells: snapshots,
             children: Vec::new(),
             copy_source_id: map_u32(&shape, txn, "copySourceId")?,
+            copy_source_page_id: map_u32(&shape, txn, "copySourcePageId")?,
             copy_refusal: map_string(&shape, txn, "copyRefusal"),
         });
     };
@@ -3297,6 +3355,7 @@ fn snapshot_shape<T: ReadTxn>(
         cells: snapshots,
         children,
         copy_source_id: map_u32(&shape, txn, "copySourceId")?,
+        copy_source_page_id: map_u32(&shape, txn, "copySourcePageId")?,
         copy_refusal: map_string(&shape, txn, "copyRefusal"),
     })
 }
@@ -3703,8 +3762,12 @@ fn structural_edits(
                 let node_text = node_text.unwrap_or_default();
                 texts.insert(node.id.as_str(), node_text.clone());
                 if let Some(copy_source_id) = node.copy_source_id
-                    && let Some(tokens) =
-                        verbatim_source_text(package, *page_id, copy_source_id, &node_text)
+                    && let Some(tokens) = verbatim_source_text(
+                        package,
+                        node.copy_source_page_id.unwrap_or(*page_id),
+                        copy_source_id,
+                        &node_text,
+                    )
                 {
                     verbatim.insert(node.id.as_str(), tokens);
                 }

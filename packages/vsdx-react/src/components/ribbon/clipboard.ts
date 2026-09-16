@@ -3,7 +3,7 @@ import type { FormulaShapeDraft, FormulaShapeTreeDraft, ShapeSnapshot } from '@b
 export interface ClipboardCellLocator { cellName: string; section?: string; sectionIndex?: number; rowIndex?: number; rowName?: string; rowType?: string; }
 export interface ClipboardCell { locator: ClipboardCellLocator; name: string; formula?: string; value?: string; rowType?: string; }
 export interface VsdxClipboardGlue { connectorSource: string; endpoint: string; targetSource: string; toCell: string; }
-export interface VsdxClipboardEntry { pageId: string; name?: string; cells: ClipboardCell[]; text: string; pinX: number | null; pinY: number | null; pasteCount: number; sourceShapeId?: string; sourceId?: number; copySourceId?: number; copyRefusal?: string; children: VsdxClipboardEntry[]; glue: VsdxClipboardGlue[]; }
+export interface VsdxClipboardEntry { pageId: string; name?: string; cells: ClipboardCell[]; text: string; pinX: number | null; pinY: number | null; pasteCount: number; sourceShapeId?: string; sourceId?: number; copySourceId?: number; copySourcePageId?: number; copyRefusal?: string; children: VsdxClipboardEntry[]; glue: VsdxClipboardGlue[]; }
 
 export const PASTE_OFFSET = { x: 0.25, y: -0.25 } as const;
 export const DUPLICATE_OFFSET = { x: -0.25, y: 0.25 } as const;
@@ -29,7 +29,7 @@ export function buildClipboardEntry(pageId: string, shape: ShapeSnapshot, text: 
   if (reason != null) throw new Error(`vsdx copy is not supported for shape ${shape.id} with ${reason}`);
   const textFor = options?.textFor ?? (() => '');
   const node = buildNode(shape, text, textFor);
-  return { pageId, name: node.name, cells: node.cells, text: node.text, pinX: resolvedNumeric(shape, 'PinX'), pinY: resolvedNumeric(shape, 'PinY'), pasteCount: 0, sourceShapeId: shape.id, sourceId: shape.sourceId, ...(shape.copySourceId != null ? { copySourceId: shape.copySourceId } : {}), ...(shape.copyRefusal != null ? { copyRefusal: shape.copyRefusal } : {}), children: node.children, glue: options?.glue ?? [] };
+  return { pageId, name: node.name, cells: node.cells, text: node.text, pinX: resolvedNumeric(shape, 'PinX'), pinY: resolvedNumeric(shape, 'PinY'), pasteCount: 0, sourceShapeId: shape.id, sourceId: shape.sourceId, ...(shape.copySourceId != null ? { copySourceId: shape.copySourceId } : {}), ...(shape.copySourcePageId != null ? { copySourcePageId: shape.copySourcePageId } : {}), ...(shape.copyRefusal != null ? { copyRefusal: shape.copyRefusal } : {}), children: node.children, glue: options?.glue ?? [] };
 }
 
 function buildNode(shape: ShapeSnapshot, text: string, textFor: (shape: ShapeSnapshot) => string): { name?: string; cells: ClipboardCell[]; text: string; children: VsdxClipboardEntry[] } {
@@ -55,7 +55,7 @@ function buildNode(shape: ShapeSnapshot, text: string, textFor: (shape: ShapeSna
     text,
     children: shape.children.map((child) => {
       const node = buildNode(child, textFor(child), textFor);
-      return { pageId: '', name: node.name, cells: node.cells, text: node.text, pinX: null, pinY: null, pasteCount: 0, sourceShapeId: child.id, sourceId: child.sourceId, ...(child.copySourceId != null ? { copySourceId: child.copySourceId } : {}), ...(child.copyRefusal != null ? { copyRefusal: child.copyRefusal } : {}), children: node.children, glue: [] };
+      return { pageId: '', name: node.name, cells: node.cells, text: node.text, pinX: null, pinY: null, pasteCount: 0, sourceShapeId: child.id, sourceId: child.sourceId, ...(child.copySourceId != null ? { copySourceId: child.copySourceId } : {}), ...(child.copySourcePageId != null ? { copySourcePageId: child.copySourcePageId } : {}), ...(child.copyRefusal != null ? { copyRefusal: child.copyRefusal } : {}), children: node.children, glue: [] };
     }),
   };
 }
@@ -99,6 +99,7 @@ function toTreeDraft(entry: VsdxClipboardEntry, dx: number, dy: number, isRoot: 
     cells,
     text: entry.text,
     ...(entry.copySourceId !== undefined ? { copySourceId: entry.copySourceId } : {}),
+    ...(entry.copySourcePageId !== undefined ? { copySourcePageId: entry.copySourcePageId } : {}),
     ...(entry.sourceShapeId !== undefined ? { sourceShapeId: entry.sourceShapeId } : {}),
     ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
     ...(entry.copyRefusal !== undefined ? { copyRefusal: entry.copyRefusal } : {}),

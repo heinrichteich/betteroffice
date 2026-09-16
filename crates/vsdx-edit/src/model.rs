@@ -55,6 +55,8 @@ pub struct ShapeSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_source_id: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_source_page_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_refusal: Option<String>,
 }
 
@@ -119,6 +121,8 @@ pub struct ShapeTreeDraft {
     pub text: String,
     #[serde(default)]
     pub copy_source_id: Option<u32>,
+    #[serde(default)]
+    pub copy_source_page_id: Option<u32>,
     #[serde(default)]
     pub source_shape_id: Option<String>,
     #[serde(default)]

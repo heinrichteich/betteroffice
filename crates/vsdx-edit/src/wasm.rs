@@ -133,6 +133,8 @@ struct FormulaShapeTreeDraft {
     #[serde(default)]
     copy_source_id: Option<u32>,
     #[serde(default)]
+    copy_source_page_id: Option<u32>,
+    #[serde(default)]
     source_shape_id: Option<String>,
     #[serde(default)]
     source_id: Option<u32>,
@@ -182,6 +184,7 @@ impl FormulaShapeTreeDraft {
             cells,
             text: self.text,
             copy_source_id: self.copy_source_id,
+            copy_source_page_id: self.copy_source_page_id,
             source_shape_id: self.source_shape_id,
             source_id: self.source_id,
             copy_refusal: self.copy_refusal,
