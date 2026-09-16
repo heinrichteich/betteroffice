@@ -55,7 +55,7 @@ The browser React editor renders supported bitmap-only WMF wrappers. Custom brow
 
 ### Diagrams — `.vsdx`
 
-Visio drawings (`.vsdx`) and templates (`.vstx`) open in the source-available VSDX core, which is not yet published. Stencils (`.vssx`) and macro-enabled files are not supported.
+Visio drawings (`.vsdx`) and templates (`.vstx`) open in the source-available VSDX core, which is not yet published. Stencils (`.vssx`) and macro-enabled files are not supported. Visio containers load with their members, move as one edit, and resize to fit.
 
 The editor puts a flat command bar and a searchable thirty-two shape gallery over a focusable canvas with keyboard undo and redo, Delete or Backspace, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus.
 

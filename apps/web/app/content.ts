@@ -107,7 +107,7 @@ export const PACKAGES = [
   {
     name: "@betteroffice/vsdx",
     sourceOnly: true,
-    desc: "VSDX core — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, saving, and collaboration on Visio drawings and templates. addConnector adds a 1D connector glued to two shapes at their pins or existing connection points.",
+    desc: "VSDX core — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, saving, and collaboration on Visio drawings and templates. addConnector adds a 1D connector glued to two shapes at their pins or existing connection points. Containers load with their members, move as one edit, and resize to fit.",
   },
   {
     name: "@betteroffice/vsdx-react",

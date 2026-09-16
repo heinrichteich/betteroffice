@@ -6,7 +6,7 @@ use vsdx_eval::{
 pub use vsdx_parse::StructuralEdit;
 use vsdx_parse::{Cell, ParseLimits, Shape, VsdxError, VsdxPackage};
 pub use vsdx_parse::{CellLocator, CellRow, CellSheet, MutationGesture, SemanticCellEdit};
-use vsdx_resolve::{PageConnectivity, ResolveError, ResolvedShape, Resolver};
+use vsdx_resolve::{PageConnectivity, PageContainers, ResolveError, ResolvedShape, Resolver};
 
 #[derive(Debug)]
 pub enum Error {
@@ -424,6 +424,9 @@ impl<'a> Page<'a> {
     }
     pub fn connectivity(&self) -> Result<PageConnectivity> {
         Ok(Resolver::new(&self.diagram.package).resolve_page_connectivity(self.part)?)
+    }
+    pub fn containers(&self) -> Result<PageContainers> {
+        Ok(Resolver::new(&self.diagram.package).resolve_page_containers(self.part)?)
     }
 }
 
