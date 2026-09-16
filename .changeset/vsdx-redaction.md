@@ -2,8 +2,8 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Redact Visio packages instead of refusing them. `ooxml-redact` now accepts `.vsdx` and `.vstx`,
-removing shape text and the Value, Prompt and Label cells of Property and User sections while
-preserving the structure and geometry the package needs to stay valid. Macro-enabled files stay
-refused, and a package whose ShapeSheet nesting cannot be resolved is refused rather than partially
-redacted.
+Support VSDX drawing and VSTX template redaction and opt-in sharing. Mask private
+Visio text and attributes independently of part paths, rename relationships and
+named rows consistently, and preserve standard geometry and theme colors.
+Validate inputs and redacted outputs with the Visio parser; refuse unsupported
+macro-enabled files and stencils.

@@ -2,8 +2,14 @@ use quick_xml::events::Event;
 use quick_xml::name::ResolveResult;
 use quick_xml::{NsReader, XmlVersion};
 
+use crate::mask::TextMasker;
 use crate::rels::attribute_local;
 use crate::{Format, RedactError};
+
+mod relationships;
+pub(crate) use relationships::normalize_relationships;
+
+pub(crate) const NAMESPACE: &[u8] = b"http://schemas.microsoft.com/office/visio/2012/main";
 
 pub(crate) struct VisioContentTypes {
     pub(crate) accepted_drawing: bool,
@@ -66,31 +72,156 @@ pub(crate) fn is_visio(format: Format) -> bool {
     matches!(format, Format::Vsdx | Format::Vstx)
 }
 
-/// Whether a package path holds Visio drawing XML governed by the allowlist.
-pub(crate) fn is_visio_part(path: &str) -> bool {
-    path.to_ascii_lowercase().starts_with("visio/")
+pub(crate) fn package_plumbing(path: &str) -> bool {
+    path == "[content_types].xml" || path.ends_with(".rels")
 }
 
-pub(crate) fn is_section(element: &str) -> bool {
-    element.eq_ignore_ascii_case("Section")
+pub(crate) fn preserve_package_attribute(element: &str, key: &str) -> bool {
+    matches!(
+        (element, key),
+        ("Relationship", "Id" | "Type" | "Target" | "TargetMode")
+            | ("Override", "PartName" | "ContentType")
+            | ("Default", "Extension" | "ContentType")
+    )
 }
 
-pub(crate) fn is_cell(element: &str) -> bool {
-    element.eq_ignore_ascii_case("Cell")
+pub(crate) fn relationship_namespace(namespace: &[u8]) -> bool {
+    matches!(
+        namespace,
+        b"http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            | b"http://purl.oclc.org/ooxml/officeDocument/relationships"
+    )
 }
 
-/// Deny-by-default redacts every Visio text node outside package plumbing.
-pub(crate) fn redact_text(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".rels") || lower.ends_with("[content_types].xml") {
+pub(crate) fn preserve_other_attribute(
+    element: &str,
+    key: &str,
+    value: &str,
+    drawingml: bool,
+    relationship: bool,
+) -> bool {
+    if relationship && matches!(attribute_local(key), "id" | "embed" | "link") {
+        return is_rel_id(value);
+    }
+    if key == "xml:space" {
+        return matches!(value, "default" | "preserve");
+    }
+    if element == "property" && key == "fmtid" {
+        return value == "{D5CDD505-2E9C-101B-9397-08002B2CF9AE}";
+    }
+    if element == "property" && key == "pid" {
+        return value.bytes().all(|byte| byte.is_ascii_digit());
+    }
+    if !drawingml || !crate::rels::is_unqualified(key) {
         return false;
     }
-    true
+    if matches!(
+        key,
+        "val"
+            | "pos"
+            | "ang"
+            | "scaled"
+            | "rotWithShape"
+            | "w"
+            | "lim"
+            | "dpi"
+            | "fov"
+            | "zoom"
+            | "x"
+            | "y"
+            | "z"
+            | "lat"
+            | "lon"
+            | "rev"
+            | "dist"
+            | "dir"
+            | "sx"
+            | "sy"
+            | "kx"
+            | "ky"
+            | "blurRad"
+            | "endA"
+            | "stA"
+            | "endPos"
+            | "stPos"
+    ) {
+        if is_decimal(value) || matches!(value, "true" | "false") {
+            return true;
+        }
+        if matches!(element, "srgbClr" | "sysClr") && key == "val" {
+            return value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || matches!(
+                    value,
+                    "window"
+                        | "windowText"
+                        | "menu"
+                        | "menuText"
+                        | "highlight"
+                        | "highlightText"
+                        | "btnFace"
+                        | "btnText"
+                );
+        }
+        if element == "schemeClr" && key == "val" {
+            return matches!(
+                value,
+                "dk1"
+                    | "lt1"
+                    | "dk2"
+                    | "lt2"
+                    | "accent1"
+                    | "accent2"
+                    | "accent3"
+                    | "accent4"
+                    | "accent5"
+                    | "accent6"
+                    | "hlink"
+                    | "folHlink"
+                    | "phClr"
+                    | "bg1"
+                    | "bg2"
+                    | "tx1"
+                    | "tx2"
+            );
+        }
+        if element == "prstDash" && key == "val" {
+            return matches!(
+                value,
+                "solid"
+                    | "dot"
+                    | "dash"
+                    | "lgDash"
+                    | "dashDot"
+                    | "lgDashDot"
+                    | "lgDashDotDot"
+                    | "sysDash"
+                    | "sysDot"
+                    | "sysDashDot"
+                    | "sysDashDotDot"
+            );
+        }
+    }
+    if key == "lastClr" {
+        return value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    matches!(
+        (key, value),
+        ("cap", "rnd" | "sq" | "flat")
+            | ("cmpd", "sng" | "dbl" | "thickThin" | "thinThick" | "tri")
+            | ("algn", "ctr" | "in")
+            | ("flip", "none" | "x" | "y" | "xy")
+            | ("path", "shape" | "circle" | "rect")
+            | (
+                "type",
+                "none" | "triangle" | "stealth" | "diamond" | "oval" | "arrow"
+            )
+            | ("w" | "len", "sm" | "med" | "lg")
+    )
 }
 
 pub(crate) fn attribute_named(attributes: &[(String, String)], expected: &str) -> Option<String> {
     for (key, value) in attributes {
-        if attribute_local(key).eq_ignore_ascii_case(expected) {
+        if key == expected {
             return Some(value.clone());
         }
     }
@@ -141,7 +272,7 @@ fn is_known_section(name: &str) -> bool {
     )
 }
 
-/// Sections with provably numeric cached values and formulas; all others redact V and F.
+/// Sections eligible for preserving numeric layout and formatting cells.
 fn is_safe_section(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -236,9 +367,11 @@ fn is_known_cell(name: &str) -> bool {
             | "linegradientdir"
             | "linegradientenabled"
             | "linepattern"
+            | "linepatterntrans"
             | "lineweight"
             | "locpinx"
             | "locpiny"
+            | "locale"
             | "menu"
             | "nofill"
             | "noline"
@@ -277,6 +410,9 @@ fn is_known_cell(name: &str) -> bool {
             | "style"
             | "subaddress"
             | "themeindex"
+            | "textbkgnd"
+            | "textdirection"
+            | "textblockverticalalign"
             | "tooltip"
             | "topmargin"
             | "txtangle"
@@ -303,21 +439,17 @@ fn is_known_row_type(name: &str) -> bool {
             | "LineTo"
             | "RelLineTo"
             | "ArcTo"
-            | "RelArcTo"
-            | "EllipticalArcTo"
-            | "RelEllipticalArcTo"
             | "Ellipse"
-            | "RelEllipse"
-            | "SplineStart"
-            | "RelSplineStart"
-            | "SplineKnot"
-            | "RelSplineKnot"
-            | "PolylineTo"
-            | "RelPolylineTo"
+            | "EllipticalArcTo"
             | "InfiniteLine"
-            | "RelInfiniteLine"
+            | "NURBSTo"
+            | "PolylineTo"
+            | "RelCubBezTo"
+            | "RelEllipticalArcTo"
+            | "RelQuadBezTo"
+            | "SplineStart"
+            | "SplineKnot"
             | "Close"
-            | "Connection"
     )
 }
 
@@ -332,48 +464,36 @@ fn is_known_foreign_type(name: &str) -> bool {
 fn is_known_unit(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "mm" | "cm" | "m" | "in" | "pt" | "pc" | "deg" | "rad" | "dl" | "dp"
+        "mm" | "cm"
+            | "m"
+            | "in"
+            | "ft"
+            | "pt"
+            | "pc"
+            | "pica"
+            | "deg"
+            | "rad"
+            | "dl"
+            | "dp"
+            | "da"
+            | "bool"
+            | "str"
+            | "es"
+            | "em"
+            | "ed"
+            | "ew"
     )
 }
 
 fn is_decimal(value: &str) -> bool {
-    let value = value.trim();
-    if value.is_empty() {
-        return false;
-    }
-    let value = value.strip_prefix(['+', '-']).unwrap_or(value);
-    if value.is_empty() {
-        return false;
-    }
-    let (head, exponent) = match value.split_once(['e', 'E']) {
-        Some((head, exponent)) => {
-            let exponent = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
-            if head.is_empty()
-                || exponent.is_empty()
-                || !exponent.bytes().all(|b| b.is_ascii_digit())
-            {
-                return false;
-            }
-            (head, Some(exponent))
-        }
-        None => (value, None),
-    };
-    let _ = exponent;
-    let mut dot = false;
-    let mut digits = false;
-    for byte in head.bytes() {
-        match byte {
-            b'0'..=b'9' => digits = true,
-            b'.' if !dot => dot = true,
-            _ => return false,
-        }
-    }
-    digits
+    value.trim().parse::<f64>().is_ok_and(f64::is_finite)
 }
 
-/// Cached values survive only as numbers or booleans.
+/// Cached numbers, colors, booleans, and inheritance markers survive.
 fn is_safe_value(value: &str) -> bool {
     is_decimal(value)
+        || is_hex_color(value)
+        || matches!(value, "Themed" | "Inh")
         || value.trim().eq_ignore_ascii_case("true")
         || value.trim().eq_ignore_ascii_case("false")
 }
@@ -383,6 +503,9 @@ fn is_user_cell(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "value"
+            | "data1"
+            | "data2"
+            | "data3"
             | "prompt"
             | "label"
             | "address"
@@ -445,6 +568,7 @@ fn is_safe_formula(value: &str) -> bool {
     }
     tokens.iter().all(|token| {
         is_known_cell(token)
+            || is_known_unit(token)
             || matches!(
                 token.to_ascii_lowercase().as_str(),
                 "true"
@@ -456,6 +580,25 @@ fn is_safe_formula(value: &str) -> bool {
                     | "documentsheet"
                     | "connections"
                     | "themeval"
+                    | "guard"
+                    | "themeguard"
+                    | "if"
+                    | "and"
+                    | "or"
+                    | "not"
+                    | "abs"
+                    | "min"
+                    | "max"
+                    | "sqrt"
+                    | "sin"
+                    | "cos"
+                    | "tan"
+                    | "atan2"
+                    | "pi"
+                    | "int"
+                    | "round"
+                    | "nurbs"
+                    | "polyline"
                     | "rgb"
             )
     })
@@ -487,116 +630,6 @@ fn is_hex_color(value: &str) -> bool {
         && value.starts_with('#')
 }
 
-/// Alphabetic runs that may survive redaction; mirrors the allowlist for tests.
-#[cfg(test)]
-pub(crate) fn is_structural_word(word: &str) -> bool {
-    if word.len() < 4 {
-        return true;
-    }
-    if word.bytes().all(|b| b == b'x' || b == b'X') {
-        return true;
-    }
-    let lower = word.to_ascii_lowercase();
-    if is_known_section(&lower) || is_known_cell(&lower) {
-        return true;
-    }
-    matches!(
-        lower.as_str(),
-        "moveto"
-            | "relmoveto"
-            | "lineto"
-            | "rellineto"
-            | "arcto"
-            | "relarcto"
-            | "ellipticalarcto"
-            | "relellipticalarcto"
-            | "ellipse"
-            | "relellipse"
-            | "splinestart"
-            | "relsplinestart"
-            | "splineknot"
-            | "relsplineknot"
-            | "polylineto"
-            | "relpolylineto"
-            | "infiniteline"
-            | "relinfiniteline"
-            | "close"
-            | "connection"
-            | "shape"
-            | "group"
-            | "guide"
-            | "foreign"
-            | "bitmap"
-            | "metafile"
-            | "true"
-            | "false"
-            | "inh"
-            | "noformula"
-            | "sheet"
-            | "pagesheet"
-            | "documentsheet"
-            | "connections"
-            | "themeval"
-            | "external"
-            | "example"
-            | "https"
-            | "redactedproperty"
-            | "redactedstyle"
-            | "normal"
-            | "page"
-            | "pages"
-            | "master"
-            | "masters"
-            | "theme"
-            | "themes"
-            | "window"
-            | "windows"
-            | "document"
-            | "visio"
-            | "comments"
-            | "comment"
-            | "recordsets"
-            | "recordset"
-            | "dataconnections"
-            | "dataconnection"
-            | "application"
-            | "relationship"
-            | "relationships"
-            | "types"
-            | "content"
-            | "override"
-            | "default"
-            | "extension"
-            | "partname"
-            | "contenttype"
-            | "target"
-            | "targetmode"
-            | "type"
-            | "office"
-            | "drawing"
-            | "template"
-            | "main"
-            | "image"
-            | "hyperlink"
-            | "microsoft"
-            | "schemas"
-            | "openxmlformats"
-            | "package"
-            | "http"
-            | "rels"
-            | "style"
-            | "styles"
-            | "basedon"
-            | "refby"
-            | "core"
-            | "custom"
-            | "docprops"
-            | "extended"
-            | "officedocument"
-            | "properties"
-    )
-}
-
 /// Structural Visio attribute values survive; everything else is redacted.
 pub(crate) fn preserve_attribute(
     element: &str,
@@ -607,12 +640,15 @@ pub(crate) fn preserve_attribute(
     is_relationship: bool,
 ) -> bool {
     let local = attribute_local(key);
-    if local.eq_ignore_ascii_case("id") && is_relationship && is_rel_id(value) {
+    if is_relationship && matches!(local, "id" | "embed" | "link") && is_rel_id(value) {
         return true;
+    }
+    if !crate::rels::is_unqualified(key) {
+        return key == "xml:space" && matches!(value, "default" | "preserve");
     }
     if local.eq_ignore_ascii_case("ID") || local.eq_ignore_ascii_case("IX") {
         let trimmed = value.trim();
-        return !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_digit() || b == b' ');
+        return !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_digit());
     }
     if local.eq_ignore_ascii_case("Del") {
         return matches!(value.trim(), "0" | "1");
@@ -662,6 +698,11 @@ pub(crate) fn preserve_attribute(
         return false;
     }
     if element.eq_ignore_ascii_case("Row") {
+        if local == "N" {
+            return value
+                .strip_prefix("Row")
+                .is_some_and(|tail| !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()));
+        }
         if local.eq_ignore_ascii_case("T") {
             return is_known_row_type(value);
         }
@@ -709,7 +750,10 @@ pub(crate) fn preserve_attribute(
             return is_known_foreign_type(value);
         }
         if local.eq_ignore_ascii_case("CompressionType") {
-            return matches!(value, "0" | "1" | "None" | "GZip");
+            return matches!(
+                value,
+                "0" | "1" | "None" | "GZip" | "JPEG" | "PNG" | "GIF" | "TIFF" | "BMP"
+            );
         }
         return false;
     }
@@ -725,35 +769,57 @@ pub(crate) fn preserve_attribute(
     false
 }
 
-/// Schema-valid replacement for a redacted Visio attribute value.
-pub(crate) fn redacted_value(element: &str, key: &str, value: &str) -> String {
+pub(crate) fn cached_formula(
+    cell: Option<&str>,
+    section: Option<&str>,
+    cached: Option<&str>,
+) -> String {
+    if cell.is_some_and(|name| is_known_cell(name) && !is_user_cell(name))
+        && section.is_none_or(is_safe_section)
+        && let Some(value) = cached.filter(|value| is_decimal(value))
+    {
+        return value.to_owned();
+    }
+    "0".to_owned()
+}
+
+/// Replace private attributes using typed defaults where needed.
+pub(crate) fn redacted_value(
+    element: &str,
+    key: &str,
+    value: &str,
+    masker: &mut TextMasker,
+) -> Result<String, RedactError> {
     let local = attribute_local(key);
+    if local == "typeface" || element == "FaceName" && local == "Name" {
+        return Ok("Arial".to_owned());
+    }
     if local.eq_ignore_ascii_case("Date") || local.eq_ignore_ascii_case("dateUtc") {
-        return "1970-01-01T00:00:00Z".to_owned();
+        return Ok("1970-01-01T00:00:00Z".to_owned());
     }
     if local.eq_ignore_ascii_case("UniqueID")
         || local.eq_ignore_ascii_case("BaseID")
         || local.to_ascii_lowercase().ends_with("guid")
     {
         if value.trim_start().starts_with('{') && value.trim_end().ends_with('}') {
-            return "{00000000-0000-0000-0000-000000000000}".to_owned();
+            return Ok("{00000000-0000-0000-0000-000000000000}".to_owned());
         }
-        return "00000000-0000-0000-0000-000000000000".to_owned();
+        return Ok("00000000-0000-0000-0000-000000000000".to_owned());
     }
     if element.eq_ignore_ascii_case("ColorEntry") && local.eq_ignore_ascii_case("RGB") {
-        return "#000000".to_owned();
+        return Ok("#000000".to_owned());
     }
     if element.eq_ignore_ascii_case("ForeignData") && local.eq_ignore_ascii_case("CompressionType")
     {
-        return "0".to_owned();
+        return Ok("0".to_owned());
     }
     if element.eq_ignore_ascii_case("RefBy") && local.eq_ignore_ascii_case("T") {
-        return "Page".to_owned();
+        return Ok("Page".to_owned());
     }
     if is_numeric_attribute(local) {
-        return "0".to_owned();
+        return Ok("0".to_owned());
     }
-    crate::xml::placeholder(value)
+    masker.replace(value)
 }
 
 /// Relationship reference ids are emitter-assigned counters without author text.
@@ -832,74 +898,4 @@ fn is_numeric_attribute(local: &str) -> bool {
             | "lineidx"
             | "effectidx"
     )
-}
-
-#[cfg(test)]
-mod vocabulary_tests {
-    use super::{
-        is_known_cell, is_known_row_type, is_known_section, is_safe_section, is_user_cell,
-    };
-
-    /// Canonical mixed-case Visio spellings the vocabulary must recognise.
-    #[test]
-    fn canonical_visio_spellings_are_recognised() {
-        for name in [
-            "AutoGen",
-            "DrawingResizeType",
-            "ExtraInfo",
-            "FillForegnd",
-            "ResizeMode",
-            "PinX",
-            "PinY",
-            "LocPinX",
-            "LocPinY",
-            "BeginX",
-            "EndY",
-            "LineWeight",
-            "FillPattern",
-            "NoShow",
-        ] {
-            assert!(
-                is_known_cell(name),
-                "cell {name} fell out of the vocabulary"
-            );
-        }
-        assert!(is_known_section("Geometry"));
-        assert!(is_safe_section("Character"));
-        assert!(is_known_row_type("EllipticalArcTo"));
-        assert!(is_user_cell("Prompt"));
-    }
-
-    /// Lowercased matches! arms must not contain capitals.
-    #[test]
-    fn lowercased_match_arms_have_no_unreachable_capitals() {
-        let whole = include_str!("visio.rs");
-        let source = &whole[..whole.find("#[cfg(test)]").unwrap_or(whole.len())];
-        let needle = ".to_ascii_lowercase().as_str(),";
-        let mut offenders = Vec::new();
-        let mut checked = 0;
-        for (index, _) in source.match_indices(needle) {
-            let rest = &source[index + needle.len()..];
-            let Some(end) = rest.find(
-                "
-    )",
-            ) else {
-                continue;
-            };
-            checked += 1;
-            for arm in rest[..end].split('"').skip(1).step_by(2) {
-                if arm.chars().any(|character| character.is_ascii_uppercase()) {
-                    offenders.push(arm.to_owned());
-                }
-            }
-        }
-        assert!(
-            checked >= 5,
-            "guard found only {checked} lowercased matches"
-        );
-        assert!(
-            offenders.is_empty(),
-            "unreachable arms (scrutinee is lowercased): {offenders:?}"
-        );
-    }
 }

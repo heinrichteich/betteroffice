@@ -332,6 +332,10 @@ fn serialize_run_content(
         }
         RunContent::Drawing { image } => return serialize_drawing_content(image, context),
         RunContent::Shape { shape } => return serialize_shape_content(shape, context),
+        RunContent::HorizontalRule { rule } => {
+            validate_replayed_fragment(&rule.xml)?;
+            return Ok(rule.xml.clone());
+        }
         RunContent::CommentReference { id } => {
             writer.start_element("w:commentReference");
             if let Some(id) = id {
@@ -770,7 +774,7 @@ fn serialize_picture_graphic(image: &Image, id: &str) -> String {
     );
     writer
         .start_element("a:prstGeom")
-        .attribute("prst", "rect")
+        .attribute("prst", image.shape_type.as_deref().unwrap_or("rect"))
         .start_element("a:avLst")
         .end_element()
         .end_element();
@@ -1201,6 +1205,34 @@ mod tests {
             now: "2000-01-01T00:00:00.000Z".to_owned(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn picture_presets_survive_drawing_serialization() {
+        for preset in [None, Some("ellipse"), Some("roundRect")] {
+            let mut value = serde_json::to_value(crate::image::placeholder_image("rId1")).unwrap();
+            if let Some(preset) = preset {
+                value["shapeType"] = serde_json::json!(preset);
+            }
+            let image: Image = serde_json::from_value(value).unwrap();
+            let xml = serialize_drawing_content(&image, &mut context()).unwrap();
+            assert!(xml.contains(&format!(
+                r#"<a:prstGeom prst="{}">"#,
+                preset.unwrap_or("rect")
+            )));
+            let limits = crate::xml::ParseLimits::default();
+            let parsed = crate::xml::parse_xml(
+                xml.as_bytes(),
+                "drawing.xml",
+                &mut crate::xml::ParseBudget::new(&limits),
+            )
+            .unwrap();
+            let image = crate::image::parse_drawing(parsed.root().unwrap(), None, None).unwrap();
+            assert_eq!(
+                serde_json::to_value(image).unwrap()["shapeType"].as_str(),
+                preset
+            );
+        }
     }
 
     #[test]

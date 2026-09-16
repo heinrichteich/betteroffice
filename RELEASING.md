@@ -15,24 +15,47 @@ crates.io before each upload, so rerunning a partial release resumes safely.
 
 ## Initial crates.io release
 
-The first publication requires a crates.io API token because Trusted
-Publishing can only be configured after a crate exists.
+Trusted Publishing can only be configured after a crate exists, so a crate
+that is not on crates.io yet cannot be created with OIDC. Every release
+attempts to obtain an OIDC token via `rust-lang/crates-io-auth-action` (pinned to the
+official v1 commit) and publishes per crate: a crate that does not exist yet
+goes straight to `CRATES_IO_BOOTSTRAP_TOKEN`, while a crate that already
+exists tries OIDC first and falls back to the bootstrap token only if the
+OIDC token is unavailable or the publish fails. The choice is independent per crate.
+`scripts/publish-crates.mjs` passes only the selected token to that crate's
+`cargo publish` (under both `CARGO_REGISTRY_TOKEN` and
+`CARGO_REGISTRIES_CRATES_IO_TOKEN`, with `CRATES_IO_BOOTSTRAP_TOKEN` removed
+from every cargo child environment), rechecks the target version after a
+failed OIDC upload before falling back, and records each bootstrap use in the
+step summary before the registry wait for that crate can fail.
+If a failed attempt is followed by a visible registry version, the summary
+reports an unconfirmed publishing credential without attributing it to either
+token. Only a successful Cargo publish confirms the credential used.
 
-1. Create a short-lived crates.io token authorized to publish new crates.
+1. Create a short-lived crates.io token authorized to publish new crates and
+   any existing crates that may need the fallback.
 2. Add it to the repository as `CRATES_IO_BOOTSTRAP_TOKEN` before merging the
-   initial release PR.
+   release PR that introduces the new crate names.
 3. Merge the release PR and confirm every crate was published.
-4. Add a GitHub Trusted Publisher to each crate with owner `openooxml`,
-   repository `betteroffice`, and workflow `release.yml`.
-5. Remove the GitHub secret and revoke the bootstrap token.
-
-Subsequent releases use `rust-lang/crates-io-auth-action` and GitHub OIDC to
-obtain a short-lived crates.io token.
+4. Add a GitHub Trusted Publisher to each newly created crate with owner
+   `openooxml`, repository `betteroffice`, and workflow `release.yml`, before
+   its next release.
+5. Remove the GitHub secret and revoke the bootstrap token once OIDC works
+   for all crates, not just once all names exist. The release records each
+   crate it creates with the bootstrap token and each existing crate it
+   publishes with the bootstrap fallback separately in the step summary,
+   recording each use before that crate's registry wait runs.
 
 `scripts/check-publish-targets.mjs --crates` runs before the crates publish and
 fails the release, naming every crate that is not on crates.io yet — unless
-`CRATES_IO_BOOTSTRAP_TOKEN` is set, which is the one credential that can create
-a crate.
+`CRATES_IO_BOOTSTRAP_TOKEN` is set, in which case it reports the missing
+crates as "will be created with the bootstrap token" and passes.
+
+`release.yml` always attempts the OIDC exchange on the publish path. That
+step may continue on failure only when the bootstrap token is detected, so an
+OIDC exchange that yields no token falls back per crate as above; without the
+bootstrap token an OIDC failure still fails the release. A registry lookup
+error fails the release instead of guessing a crate is new.
 
 ## Initial npm release of a new package
 

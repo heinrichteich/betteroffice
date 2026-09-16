@@ -27,6 +27,7 @@ import type {
 export * from './inputPositionMap';
 export {
   ResidentEngineWorkerClient,
+  ResidentWorkerFailureError,
   canUseResidentEngineWorker,
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,
@@ -347,6 +348,9 @@ export type YrsRawOp =
 
 /** Host context for {@link YrsSession.yrsBlocksForStory} (theme + list numbering). */
 export interface YrsRenderEnv {
+  tocStyleIds?: string[];
+  paragraphSpacingLinePx?: number;
+  defaultParagraphStyleId?: string;
   /** Theme color name → hex (`accent1` → `4472C4`), for theme-color resolution. */
   themeColors?: Record<string, string>;
   /** The document default tab stop in twips. */
