@@ -147,6 +147,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       const retainedIndex = current.pages.findIndex((page) => page.id === activeId);
       const pageIndex = Math.max(0, Math.min(requestedPage ?? (retainedIndex >= 0 ? retainedIndex : previous.pageIndex), Math.max(0, current.pages.length - 1)));
       const frame = current.pages.length ? handle.layoutPage(pageIndex) : null;
+      if (pageIndex !== previous.pageIndex) setContextMenu(null);
       const layers = current.pages.length ? readPageLayers(handle, pageIndex) : [];
       modelRef.current = { snapshot: current, pageIndex, frame, layers };
       setModel(modelRef.current);
@@ -192,7 +193,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     let handle: DiagramHandle | null = null;
     let stopUpdates = () => {};
     let stopResync = () => {};
-    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection(null); setEditing(null); setDraft(''); modelRef.current = { snapshot: null, pageIndex: 0, frame: null, layers: [] }; setModel(modelRef.current); setError(null); setDirty(false);
+    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection(null); setContextMenu(null); setEditing(null); setDraft(''); modelRef.current = { snapshot: null, pageIndex: 0, frame: null, layers: [] }; setModel(modelRef.current); setError(null); setDirty(false);
     if (!file) { setLoading(false); return; }
     setLoading(true);
     const openingFonts = fontsRef.current;
