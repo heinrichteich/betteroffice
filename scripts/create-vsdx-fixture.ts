@@ -96,8 +96,8 @@ async function writeTestFixtures(): Promise<void> {
     await textAccounting.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', platform: 'DOS' }),
   );
 
-  const connector = (styleCell: string) =>
-    `<Shape ID='1' Type='Shape'>${xform(3, 2, 2.5, 2, 1.5, 1, 0, 0, 0)}<Cell N='OneD' V='1'/><Cell N='BeginX' V='1'/><Cell N='BeginY' V='1'/><Cell N='EndX' V='4'/><Cell N='EndY' V='3'/>${styleCell}</Shape>`;
+  const connector = (styleCell: string, geometry = '') =>
+    `<Shape ID='1' Type='Shape'>${xform(3, 2, 2.5, 2, 1.5, 1, 0, 0, 0)}<Cell N='OneD' V='1'/><Cell N='BeginX' V='1'/><Cell N='BeginY' V='1'/><Cell N='EndX' V='4'/><Cell N='EndY' V='3'/>${styleCell}${geometry}</Shape>`;
   const routePage = (styleCell: string) =>
     `<PageContents ${ns}><Shapes>${connector(styleCell)}</Shapes></PageContents>`;
   const routeSheet = (routeCell: string) =>
@@ -105,11 +105,12 @@ async function writeTestFixtures(): Promise<void> {
   const routeStyle = new JSZip();
   for (const [part, contents] of Object.entries({
     ...parts,
-    'visio/pages/pages.xml': `<Pages ${ns}><Page ID='1' NameU='ShapeOverridesPage' Name='ShapeOverridesPage' r:id='rId1' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${routeSheet("<Cell N='RouteStyle' V='2'/>")}</Page><Page ID='2' NameU='PageFallback' Name='PageFallback' r:id='rId2' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${routeSheet("<Cell N='RouteStyle' V='5'/>")}</Page><Page ID='3' NameU='StraightStyle' Name='StraightStyle' r:id='rId3' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${routeSheet("<Cell N='RouteStyle' V='1'/>")}</Page></Pages>`,
-    'visio/pages/_rels/pages.xml.rels': "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page1.xml'/><Relationship Id='rId2' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page2.xml'/><Relationship Id='rId3' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page3.xml'/></Relationships>",
+    'visio/pages/pages.xml': `<Pages ${ns}><Page ID='1' NameU='ShapeOverridesPage' Name='ShapeOverridesPage' r:id='rId1' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${routeSheet("<Cell N='RouteStyle' V='2'/>")}</Page><Page ID='2' NameU='PageFallback' Name='PageFallback' r:id='rId2' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${routeSheet("<Cell N='RouteStyle' V='5'/>")}</Page><Page ID='3' NameU='StraightStyle' Name='StraightStyle' r:id='rId3' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${routeSheet("<Cell N='RouteStyle' V='1'/>")}</Page><Page ID='4' NameU='MultiSubpath' Name='MultiSubpath' r:id='rId4' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${routeSheet('')}</Page></Pages>`,
+    'visio/pages/_rels/pages.xml.rels': "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page1.xml'/><Relationship Id='rId2' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page2.xml'/><Relationship Id='rId3' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page3.xml'/><Relationship Id='rId4' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page4.xml'/></Relationships>",
     'visio/pages/page1.xml': routePage("<Cell N='ShapeRouteStyle' V='1'/>"),
     'visio/pages/page2.xml': routePage(''),
     'visio/pages/page3.xml': routePage("<Cell N='ShapeRouteStyle' V='2'/>"),
+    'visio/pages/page4.xml': `<PageContents ${ns}><Shapes>${connector("<Cell N='ShapeRouteStyle' V='1'/>", "<Section N='Geometry'><Row IX='0' T='MoveTo'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row><Row IX='1' T='LineTo'><Cell N='X' V='0.25'/><Cell N='Y' V='0'/></Row><Row IX='2' T='MoveTo'><Cell N='X' V='0.75'/><Cell N='Y' V='1'/></Row><Row IX='3' T='LineTo'><Cell N='X' V='1'/><Cell N='Y' V='1'/></Row></Section>")}</Shapes></PageContents>`,
   } as Record<string, string>)) routeStyle.file(part, contents, { date: zipDate, createFolders: false });
   fs.writeFileSync(
     path.join(root, 'crates/vsdx-parse/tests/fixtures/connector-route-style.vsdx'),

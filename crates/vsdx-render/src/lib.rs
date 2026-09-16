@@ -1678,6 +1678,15 @@ fn connector_geometry(
             ooxml_drawingml::GeometryPathCommand::Move { x: 0.0, y: 0.0 },
         );
     }
+    if geometry
+        .commands
+        .iter()
+        .filter(|command| matches!(command, ooxml_drawingml::GeometryPathCommand::Move { .. }))
+        .nth(1)
+        .is_some()
+    {
+        return None;
+    }
     let matrix = affine(transform.local);
     for command in &mut geometry.commands {
         transform_affine(command, matrix);
@@ -4182,6 +4191,19 @@ mod tests {
         assert_eq!(
             route_fixture_path("visio/pages/page3.xml"),
             vec![Move { x: 1.0, y: 1.0 }, Line { x: 4.0, y: 3.0 }]
+        );
+    }
+
+    #[test]
+    fn two_subpath_filed_connector_geometry_falls_back_to_synthesized_route() {
+        use GeometryPathCommand::{Line, Move};
+        assert_eq!(
+            route_fixture_path("visio/pages/page4.xml"),
+            vec![
+                Move { x: 1.0, y: 1.0 },
+                Line { x: 4.0, y: 1.0 },
+                Line { x: 4.0, y: 3.0 },
+            ]
         );
     }
 
