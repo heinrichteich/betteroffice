@@ -1736,8 +1736,11 @@ fn text_markers_fields_and_style_rows_are_merged() {
     );
     value.text_style = Some(1);
     add_page(&mut package, value.clone());
-    let tokens = Resolver::new(&package)
-        .resolve_text(&value, &sheet(None, vec![]))
+    let resolver = Resolver::new(&package);
+    let empty = sheet(None, vec![]);
+    let resolved = resolver.resolve_shape_in_sheet(&value, &empty).unwrap();
+    let tokens = resolver
+        .resolve_text_in_context(&value, &empty, &resolved)
         .unwrap();
     assert!(
         matches!(tokens[0], ResolvedTextToken::CharacterRun { ref properties, .. } if matches!(properties["Font"], Lookup::Found(_)))
@@ -1787,10 +1790,10 @@ fn text_uses_effective_page_or_document_rows_and_master_stream() {
             ])],
         ),
     );
-    let page = package.page_sheets.get(&1).unwrap();
+    let contents = package.page_contents.get("page").unwrap();
     let resolved = Resolver::new(&package).resolve_shape("page", 1).unwrap();
     let tokens = Resolver::new(&package)
-        .resolve_text_in_context(&local, page, &resolved)
+        .resolve_text_in_context(&local, contents, &resolved)
         .unwrap();
     assert!(
         matches!(tokens[0], ResolvedTextToken::CharacterRun { ref properties, .. } if matches!(&properties["Font"], Lookup::Found(cell) if cell.cell.value.as_deref() == Some("page")))
@@ -2022,8 +2025,175 @@ fn style_references_supplied_by_a_master_are_consulted() {
     );
 }
 
+const GROUP_PAGE: &str = "visio/pages/page1.xml";
+
+fn group_master_package() -> &'static VsdxPackage {
+    static PACKAGE: std::sync::LazyLock<VsdxPackage> = std::sync::LazyLock::new(|| {
+        parse_vsdx(include_bytes!(
+            "../../vsdx-parse/tests/fixtures/group-master-shape.vsdx"
+        ))
+        .unwrap()
+    });
+    &PACKAGE
+}
+
 #[test]
-fn geometry_control_diagnostics_follow_section_inheritance() {
+fn group_subshape_master_shape_resolves_one_level_with_page_sheet() {
+    let resolver = Resolver::new(group_master_package());
+    let shapes = resolver.resolve_page_shapes(GROUP_PAGE).unwrap();
+    assert_eq!(found(&shapes[&2], "PinX"), ("1", Provenance::MasterShape));
+    assert_eq!(found(&shapes[&2], "Width"), ("2", Provenance::MasterShape));
+    assert_eq!(found(&shapes[&2], "PageValue"), ("23", Provenance::Page));
+    assert_eq!(found(&shapes[&2], "LocalValue"), ("11", Provenance::Local));
+    assert_eq!(shapes[&2], resolver.resolve_shape(GROUP_PAGE, 2).unwrap());
+}
+
+#[test]
+fn group_subshape_master_shape_resolves_two_levels_with_page_sheet() {
+    let resolver = Resolver::new(group_master_package());
+    let shapes = resolver.resolve_page_shapes(GROUP_PAGE).unwrap();
+    assert_eq!(found(&shapes[&4], "PinY"), ("2", Provenance::MasterShape));
+    assert_eq!(found(&shapes[&4], "PageValue"), ("23", Provenance::Page));
+    assert_eq!(shapes[&4], resolver.resolve_shape(GROUP_PAGE, 4).unwrap());
+}
+
+#[test]
+fn top_level_master_shape_is_unchanged_with_page_sheet() {
+    let resolver = Resolver::new(group_master_package());
+    let shapes = resolver.resolve_page_shapes(GROUP_PAGE).unwrap();
+    assert_eq!(found(&shapes[&1], "PinX"), ("2", Provenance::Master));
+    assert_eq!(found(&shapes[&1], "PageValue"), ("23", Provenance::Page));
+}
+
+#[test]
+fn master_internal_group_lookup_is_unchanged() {
+    let package = group_master_package();
+    let resolver = Resolver::new(package);
+    let sheet = &package.master_contents["visio/masters/master7.xml"];
+    let child = sheet.shapes().next().unwrap().shapes().next().unwrap();
+    let resolved = resolver.resolve_shape_in_sheet(child, sheet).unwrap();
+    assert_eq!(found(&resolved, "PinX"), ("1", Provenance::MasterShape));
+    let sheet = &package.master_contents["visio/masters/master8.xml"];
+    let resolved = resolver.resolve_sheet(sheet).unwrap();
+    assert_eq!(found(&resolved, "MasterValue"), ("41", Provenance::Local));
+    assert_eq!(
+        found(&resolved, "DocumentValue"),
+        ("37", Provenance::Document)
+    );
+}
+
+fn collect_shapes<'a>(shape: &'a Shape, out: &mut Vec<&'a Shape>) {
+    out.push(shape);
+    for child in shape.shapes() {
+        collect_shapes(child, out);
+    }
+}
+
+#[derive(Default, Debug)]
+struct LookupTally {
+    lost: usize,
+    gained: usize,
+    changed: usize,
+}
+
+fn resolved_cells(
+    shape: &crate::ResolvedShape,
+) -> std::collections::BTreeMap<(&str, &str, &str), &crate::ResolvedCell> {
+    shape
+        .cells
+        .iter()
+        .map(|(name, value)| (("", "", name.as_str()), value))
+        .chain(shape.sections.iter().flat_map(|(section, value)| {
+            value.rows.iter().flat_map(move |(row, value)| {
+                value.cells.iter().map(move |(name, value)| {
+                    ((section.as_str(), row.as_str(), name.as_str()), value)
+                })
+            })
+        }))
+        .filter_map(|(key, value)| match value {
+            Lookup::Found(cell) => Some((key, cell)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn tally_shape(old: &crate::ResolvedShape, new: &crate::ResolvedShape, tally: &mut LookupTally) {
+    let old = resolved_cells(old);
+    let new = resolved_cells(new);
+    tally.lost += old.keys().filter(|key| !new.contains_key(*key)).count();
+    tally.gained += new.keys().filter(|key| !old.contains_key(*key)).count();
+    tally.changed += old
+        .iter()
+        .filter(|(key, value)| new.get(*key).is_some_and(|new| new != *value))
+        .count();
+}
+
+fn tally_group_lookups(package: &VsdxPackage, tally: &mut LookupTally) -> usize {
+    let resolver = Resolver::new(package);
+    let mut subshapes = 0;
+    for (page_part, contents) in &package.page_contents {
+        let inherit = package
+            .page_part_ids
+            .get(page_part)
+            .and_then(|id| package.page_sheets.get(id))
+            .unwrap_or(contents);
+        let fixed = resolver.resolve_page_shapes(page_part).unwrap();
+        let mut shapes = Vec::new();
+        for shape in contents.shapes() {
+            collect_shapes(shape, &mut shapes);
+        }
+        for shape in shapes {
+            subshapes += usize::from(shape.master_shape.is_some() && shape.master.is_none());
+            let legacy = resolver.resolve_shape_in_sheet(shape, inherit).unwrap();
+            tally_shape(&legacy, &fixed[&shape.id], tally);
+        }
+    }
+    subshapes
+}
+
+#[test]
+fn group_lookup_adds_and_changes_cells_without_losing_any() {
+    let mut tally = LookupTally::default();
+    assert_eq!(tally_group_lookups(group_master_package(), &mut tally), 2);
+    assert_eq!(tally.lost, 0);
+    assert!(tally.gained > 0);
+    assert!(tally.changed > 0);
+}
+
+#[test]
+fn corpus_group_lookup_adds_cells_without_losing_any() {
+    let Some(dir) = std::env::var_os("VSDX_CORPUS_DIR") else {
+        eprintln!("skipping group lookup corpus test: VSDX_CORPUS_DIR is unset");
+        return;
+    };
+    let files: Vec<_> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("vsdx"))
+        })
+        .collect();
+    assert!(!files.is_empty(), "expected VSDX corpus files");
+    let mut tally = LookupTally::default();
+    let mut subshapes = 0;
+    for file in files {
+        let package = parse_vsdx(&fs::read(file).unwrap()).unwrap();
+        subshapes += tally_group_lookups(&package, &mut tally);
+    }
+    assert_eq!(tally.lost, 0);
+    if subshapes == 0 {
+        eprintln!(
+            "skipping group lookup corpus test: no sub-shapes with MasterShape and no Master"
+        );
+        return;
+    }
+    eprintln!("VSDX corpus group lookup: subshapes={subshapes} {tally:?}");
+    assert!(tally.gained > 0);
+}
+
+#[test]
+fn geometry_controls_follow_section_inheritance() {
     let geometry = |formula: &str| {
         let mut geometry = section("Geometry", Vec::new());
         geometry.index = Some(1);
@@ -2036,7 +2206,7 @@ fn geometry_control_diagnostics_follow_section_inheritance() {
             }));
         ShapeChild::Section(geometry)
     };
-    for (formula, unsupported) in [("Inh", true), ("0", false)] {
+    for (formula, active) in [("Inh", true), ("0", false)] {
         let mut package = package();
         let mut local = shape(10, vec![geometry(formula)]);
         local.master = Some(5);
@@ -2048,13 +2218,157 @@ fn geometry_control_diagnostics_follow_section_inheritance() {
             .values()
             .find(|section| section.index == Some(1))
             .unwrap();
+        assert!(section.unsupported_controls.is_empty());
+        assert_eq!(section.controls.no_show, active);
+        let realized = crate::realize_geometry(section, 1.0, 1.0);
+        assert_eq!(realized.controls.no_show, active);
+        assert!(realized.issues.is_empty());
+    }
+}
+
+#[test]
+fn geometry_unevaluable_control_reports_uncertainty_without_hiding() {
+    let mut geometry = section("Geometry", Vec::new());
+    geometry.index = Some(1);
+    geometry
+        .children
+        .push(SectionChild::Unknown(vsdx_parse::OpaqueXml {
+            name: "Cell".into(),
+            attributes: vec![
+                ("N".into(), "NoFill".into()),
+                ("F".into(), "Unknown(1)".into()),
+                ("V".into(), "0".into()),
+            ],
+            children: Vec::new(),
+        }));
+    let mut package = package();
+    add_page(&mut package, shape(10, vec![ShapeChild::Section(geometry)]));
+    let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+    let section = resolved
+        .sections
+        .values()
+        .find(|section| section.index == Some(1))
+        .unwrap();
+    assert!(!section.controls.no_fill);
+    assert_eq!(section.unsupported_controls, vec!["NoFill".to_owned()]);
+    let realized = crate::realize_geometry(section, 1.0, 1.0);
+    assert!(!realized.controls.no_fill);
+    assert_eq!(
+        realized.issues,
+        vec![crate::GeometryIssue::UnsupportedSectionControl(
+            "NoFill".into()
+        )]
+    );
+}
+
+#[test]
+fn geometry_controls_evaluate_formulas_before_cached_values() {
+    for control in ["NoFill", "NoLine", "NoShow"] {
+        for (formula, cached, active) in [
+            (Some("0"), "1", false),
+            (Some("FALSE"), "1", false),
+            (Some("TRUE"), "0", true),
+            (Some("-2"), "0", true),
+            (Some("1-1"), "1", false),
+            (None, "1", true),
+        ] {
+            let mut attributes = vec![("N".into(), control.into()), ("V".into(), cached.into())];
+            if let Some(formula) = formula {
+                attributes.push(("F".into(), formula.into()));
+            }
+            let mut geometry = section("Geometry", Vec::new());
+            geometry
+                .children
+                .push(SectionChild::Unknown(vsdx_parse::OpaqueXml {
+                    name: "Cell".into(),
+                    attributes,
+                    children: vec![],
+                }));
+            let mut package = package();
+            add_page(&mut package, shape(10, vec![ShapeChild::Section(geometry)]));
+            let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+            let section = resolved
+                .sections
+                .values()
+                .find(|section| section.name == "Geometry")
+                .unwrap();
+            assert!(section.unsupported_controls.is_empty());
+            assert_eq!(
+                [
+                    section.controls.no_fill,
+                    section.controls.no_line,
+                    section.controls.no_show
+                ],
+                [
+                    active && control == "NoFill",
+                    active && control == "NoLine",
+                    active && control == "NoShow"
+                ]
+            );
+        }
+    }
+}
+
+#[test]
+fn geometry_editing_cells_are_not_unsupported_controls() {
+    for control in ["NoSnap", "NoQuickDrag"] {
+        let mut geometry = section("Geometry", Vec::new());
+        geometry
+            .children
+            .push(SectionChild::Unknown(vsdx_parse::OpaqueXml {
+                name: "Cell".into(),
+                attributes: vec![("N".into(), control.into()), ("V".into(), "1".into())],
+                children: vec![],
+            }));
+        let mut package = package();
+        add_page(&mut package, shape(10, vec![ShapeChild::Section(geometry)]));
+        let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+        let section = resolved
+            .sections
+            .values()
+            .find(|section| section.name == "Geometry")
+            .unwrap();
+        assert!(section.unsupported_controls.is_empty(), "{control}");
         assert_eq!(
-            section.unsupported_controls.contains(&"NoShow".to_owned()),
-            unsupported
-        );
-        assert_eq!(
-            !crate::realize_geometry(section, 1.0, 1.0).issues.is_empty(),
-            unsupported
+            section.controls,
+            crate::GeometrySectionControls::default(),
+            "{control}"
         );
     }
+}
+
+#[test]
+fn geometry_unknown_controls_report_issues_after_inheritance() {
+    let mut geometry = section("Geometry", Vec::new());
+    geometry
+        .children
+        .push(SectionChild::Unknown(vsdx_parse::OpaqueXml {
+            name: "Cell".into(),
+            attributes: vec![
+                ("N".into(), "NoSuchControl".into()),
+                ("V".into(), "1".into()),
+            ],
+            children: vec![],
+        }));
+    let mut package = package();
+    let mut local = shape(10, vec![]);
+    local.master = Some(5);
+    add_page(&mut package, local);
+    add_master(
+        &mut package,
+        5,
+        shape(50, vec![ShapeChild::Section(geometry)]),
+    );
+    let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+    let section = resolved
+        .sections
+        .values()
+        .find(|section| section.name == "Geometry")
+        .unwrap();
+    assert_eq!(
+        crate::realize_geometry(section, 1.0, 1.0).issues,
+        vec![crate::GeometryIssue::UnsupportedSectionControl(
+            "NoSuchControl".into()
+        )]
+    );
 }
