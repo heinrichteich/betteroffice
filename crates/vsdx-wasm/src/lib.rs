@@ -62,9 +62,22 @@ impl VsdxRenderer {
         Ok(json)
     }
 
+    #[wasm_bindgen(js_name = layoutMasterJson)]
+    pub fn layout_master_json(
+        &mut self,
+        document: &VsdxDocument,
+        master_id: u32,
+    ) -> Result<String, JsValue> {
+        let package = document.session().package().map_err(js_error)?;
+        let rendered = self
+            .renderer
+            .layout_master(&package, master_id)
+            .map_err(js_error)?;
+        serde_json::to_string(&rendered).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = pageLayersJson)]
-    pub fn page_layers_json(
-        &self,
+    pub fn page_layers_json(        &self,
         document: &VsdxDocument,
         page_index: u32,
     ) -> Result<String, JsValue> {
@@ -330,6 +343,7 @@ mod tests {
                     "page:1",
                     &vsdx_edit::ShapeDraft {
                         name: None,
+                        master: None,
                         cells: Vec::new(),
                     },
                     &vsdx_edit::ConnectorGlue {
@@ -389,5 +403,40 @@ mod tests {
         renderer.set_layer_visible("visio/pages/page1.xml", 0, false);
         renderer.layout_page_json(&document, 0).unwrap();
         renderer.clear_layer_visibility();
+    }
+
+    #[test]
+    fn masters_json_lists_document_masters_with_names() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/document-stencil.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        let masters: serde_json::Value =
+            serde_json::from_str(&document.masters_json().unwrap()).unwrap();
+        assert_eq!(
+            masters,
+            serde_json::json!([
+                { "id": 1, "name": "Stencil-Rect" },
+                { "id": 2, "name": "Stencil-Tri" },
+            ])
+        );
+    }
+
+    #[test]
+    fn layout_master_json_renders_a_master_display_list() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/document-stencil.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        let mut renderer = VsdxRenderer::new();
+        let list: serde_json::Value =
+            serde_json::from_str(&renderer.layout_master_json(&document, 1).unwrap()).unwrap();
+        assert_eq!(list["contractVersion"], serde_json::json!(5));
+        assert_eq!(list["primitives"].as_array().unwrap().len(), 2);
+        let tri: serde_json::Value =
+            serde_json::from_str(&renderer.layout_master_json(&document, 2).unwrap()).unwrap();
+        assert_eq!(tri["primitives"].as_array().unwrap().len(), 2);
     }
 }

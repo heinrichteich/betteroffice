@@ -46,7 +46,9 @@
     "searchPlaceholder": "Search shapes",
     "categoriesLabel": "Shape categories",
     "standardShapes": "Standard Shapes",
+    "documentShapes": "Document Stencil",
     "empty": "No shapes found",
+    "documentEmpty": "This document defines no masters",
     "shape": {
       "rectangle": "Rectangle",
       "square": "Square",
@@ -79,7 +81,8 @@
       "star5": "5-Point Star",
       "star6": "6-Point Star",
       "star7": "7-Point Star",
-      "star16": "16-Point Star"
+      "star16": "16-Point Star",
+      "documentShape": "Document shape"
     }
   },
   "shapeData": {

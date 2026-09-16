@@ -27,8 +27,19 @@ interface GeometryPath {
 export interface StandardShape {
   id: string;
   nameKey: TranslationKey;
+  label?: string;
   preview: string;
   draft: (x: number, y: number, width: number, height: number) => FormulaShapeDraft;
+}
+
+export interface ShapeStencil {
+  id: string;
+  nameKey: TranslationKey;
+  shapes: readonly StandardShape[];
+}
+
+export function shapeLabel(shape: StandardShape, t: (key: TranslationKey) => string): string {
+  return shape.label ?? t(shape.nameKey);
 }
 
 export const polygonVertices: Readonly<Record<string, readonly Point[]>> = {
@@ -302,3 +313,9 @@ export const standardShapes: readonly StandardShape[] = [
 export function standardShapeById(id: string): StandardShape | undefined {
   return standardShapes.find((shape) => shape.id === id);
 }
+
+export const standardStencil: ShapeStencil = {
+  id: 'standard',
+  nameKey: 'shapesPanel.standardShapes',
+  shapes: standardShapes,
+};

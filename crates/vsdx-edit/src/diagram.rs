@@ -376,7 +376,7 @@ fn shape_from_snapshot(snapshot: &ShapeSnapshot) -> Shape {
         name: snapshot.name.clone(),
         name_u: None,
         shape_type: Some("Shape".to_owned()),
-        master: None,
+        master: snapshot.master,
         master_shape: None,
         line_style: None,
         fill_style: None,
@@ -584,6 +584,9 @@ fn seed_shape(
     map.insert(txn, "pageId", page_id);
     map.insert(txn, "sourceId", shape.id as f64);
     map.insert(txn, "origin", "original");
+    if let Some(master) = shape.master {
+        map.insert(txn, "master", f64::from(master));
+    }
     if let Some(parent_id) = parent_id {
         map.insert(txn, "parentId", parent_id);
     }
@@ -1003,6 +1006,13 @@ impl DiagramSession {
         draft: &ShapeDraft,
     ) -> EditResult<ShapeReceipt> {
         validate_shape_draft(draft)?;
+        if let Some(master) = draft.master
+            && !self.package()?.master_sheets.contains_key(&master)
+        {
+            return Err(EditError::InvalidState(
+                "shape draft references an unknown master".to_owned(),
+            ));
+        }
         let mut txn = self.transact_for(context);
         insert_shape(&mut txn, self.client_id, page_id, draft)
     }
@@ -1168,6 +1178,9 @@ fn insert_shape(
     if let Some(name) = &draft.name {
         shape.insert(txn, "name", name.as_str());
     }
+    if let Some(master) = draft.master {
+        shape.insert(txn, "master", f64::from(master));
+    }
     let cells = shape.insert(txn, "cells", MapPrelim::default());
     shape.insert(txn, "shapes", ArrayPrelim::default());
     for cell in &draft.cells {
@@ -1199,6 +1212,11 @@ fn validate_shape_draft(draft: &ShapeDraft) -> EditResult<()> {
     };
     if let Some(name) = &draft.name {
         text(name)?;
+    }
+    if draft.master == Some(0) {
+        return Err(EditError::InvalidState(
+            "shape draft references an invalid master".to_owned(),
+        ));
     }
     if draft.cells.len() > limits.max_cells {
         return Err(EditError::InvalidState(
@@ -2223,6 +2241,7 @@ fn snapshot_shape<T: ReadTxn>(
         .get(shape_id)
         .copied()
         .unwrap_or(stored_source_id);
+    let master = map_u32(&shape, txn, "master")?;
     let cells = map_map(&shape, txn, "cells")?;
     let references = local_references(&cells, txn)?;
     let evaluate_locally = |formula: &str| evaluate_cached_formula(formula, &references);
@@ -2268,6 +2287,7 @@ fn snapshot_shape<T: ReadTxn>(
             id: shape_id.to_owned(),
             source_id,
             name: map_string(&shape, txn, "name"),
+            master,
             cells: snapshots,
             children: Vec::new(),
         });
@@ -2289,6 +2309,7 @@ fn snapshot_shape<T: ReadTxn>(
         id: shape_id.to_owned(),
         source_id,
         name: map_string(&shape, txn, "name"),
+        master,
         cells: snapshots,
         children,
     })
@@ -2889,6 +2910,9 @@ fn structural_container_edits(
 
 fn shape_xml(shape: &ShapeSnapshot, text: Option<&str>) -> String {
     let mut output = format!("<Shape Type=\"Shape\" ID=\"{}\"", shape.source_id);
+    if let Some(master) = shape.master {
+        output.push_str(&format!(" Master=\"{master}\""));
+    }
     if let Some(name) = &shape.name {
         output.push_str(" Name=\"");
         xml_escape(&mut output, name);
@@ -3462,6 +3486,7 @@ mod tests {
         let context = EditCtx::local("t");
         let draft = ShapeDraft {
             name: None,
+            master: None,
             cells: ["Width", "Height", "PinX", "PinY"]
                 .into_iter()
                 .map(|name| CellSnapshot {

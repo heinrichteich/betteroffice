@@ -1,6 +1,6 @@
 import initWasmModule, { VsdxDocument, VsdxRenderer, rendererVersion } from './generated/vsdx_wasm.js';
 import type { InitInput } from './generated/vsdx_wasm.js';
-import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectorGlue, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, TextReceipt, VsdxFontFace, PageLayer } from '../types';
+import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectorGlue, DiagramSnapshot, DocumentMaster, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, TextReceipt, VsdxFontFace, PageLayer } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; initialUpdate?: Uint8Array; }
@@ -8,6 +8,8 @@ export interface CollaborationResync { update: Uint8Array; }
 export interface DiagramHandle {
   readonly clientId: number;
   snapshot(): DiagramSnapshot;
+  masters(): DocumentMaster[];
+  layoutMaster(masterId: number): PageDisplayList;
   registerFont(face: VsdxFontFace): number;
   layoutPage(pageIndex: number): PageDisplayList;
   pageLayers(pageIndex: number): PageLayer[];
@@ -114,6 +116,12 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
   const json = <T>(operation: () => string, drainUpdates = false): T => JSON.parse(wasm(operation, drainUpdates)) as T;
   return {
     clientId: doc.clientId, snapshot: () => json(() => doc.snapshotJson()),
+    masters: () => json(() => doc.mastersJson()),
+    layoutMaster: masterId => {
+      const list = json<PageDisplayList>(() => renderer.layoutMasterJson(doc, masterId));
+      if (list.contractVersion !== 5) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
+      return list;
+    },
     registerFont: face => wasm(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes)),
     pageLayers: pageIndex => json(() => renderer.pageLayersJson(doc, pageIndex)),
     setLayerVisible: (pagePartPath, layerIndex, visible) => wasm(() => renderer.setLayerVisible(pagePartPath, layerIndex, visible)),

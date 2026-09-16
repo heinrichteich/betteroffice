@@ -84,8 +84,7 @@ impl DiagramSession {
     ) -> EditResult<ShapeReceipt> {
         validate_shape_draft(draft)?;
         let glue = [(GlueEndpoint::Begin, from), (GlueEndpoint::End, to)];
-        self.validate_connector(page_id, draft, &glue)?;
-        let mut txn = self.transact_for(context);
+        self.validate_connector(page_id, draft, &glue)?;        let mut txn = self.transact_for(context);
         let receipt = insert_shape(&mut txn, self.client_id, page_id, draft)?;
         let connects = txn.get_or_insert_map(CONNECTS);
         for (endpoint, target) in glue {
@@ -112,6 +111,13 @@ impl DiagramSession {
         glue: &[(GlueEndpoint, &ConnectorGlue); 2],
     ) -> EditResult<()> {
         let mut package = self.package()?;
+        if let Some(master) = draft.master
+            && !package.master_sheets.contains_key(&master)
+        {
+            return Err(EditError::InvalidState(
+                "shape draft references an unknown master".to_owned(),
+            ));
+        }
         let snapshot = self.snapshot()?;
         let page = snapshot
             .pages
@@ -132,6 +138,7 @@ impl DiagramSession {
             id: String::new(),
             source_id,
             name: draft.name.clone(),
+            master: draft.master,
             cells: draft.cells.clone(),
             children: Vec::new(),
         };
@@ -363,6 +370,7 @@ mod tests {
     fn rect_draft(pin_x: &str, pin_y: &str) -> ShapeDraft {
         ShapeDraft {
             name: None,
+            master: None,
             cells: [
                 ("Width", "1"),
                 ("Height", "1"),
@@ -380,6 +388,7 @@ mod tests {
     fn connector_draft() -> ShapeDraft {
         ShapeDraft {
             name: Some("Connector".to_owned()),
+            master: None,
             cells: [
                 ("OneD", "1"),
                 ("BeginX", "1"),
@@ -492,6 +501,7 @@ mod tests {
                 "page:1",
                 &ShapeDraft {
                     name: None,
+                    master: None,
                     cells: target_cells,
                 },
             )
@@ -754,6 +764,7 @@ mod tests {
                     "page:1",
                     &ShapeDraft {
                         name: None,
+                        master: None,
                         cells: Vec::new(),
                     },
                     &ConnectorGlue {

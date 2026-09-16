@@ -50,6 +50,8 @@ pub struct ShapeSnapshot {
     pub id: String,
     pub source_id: u32,
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master: Option<u32>,
     pub cells: Vec<CellSnapshot>,
     pub children: Vec<ShapeSnapshot>,
 }
@@ -111,6 +113,8 @@ pub struct TextReceipt {
 #[serde(rename_all = "camelCase")]
 pub struct ShapeDraft {
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master: Option<u32>,
     pub cells: Vec<CellSnapshot>,
 }
 
