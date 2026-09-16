@@ -140,31 +140,24 @@ fn solid(paint: &Option<Paint>) -> Option<(f64, f64, f64)> {
 fn pdf_text(value: &str) -> String {
     let filtered: String = value
         .chars()
-        .filter(|ch| !matches!(ch, '\t' | '\n' | '\r'))
+        .filter_map(|ch| match ch {
+            '\t' | '\n' | '\r' => None,
+            ' '..='~' => Some(ch),
+            _ => Some('?'),
+        })
         .collect();
-    if filtered.bytes().all(|byte| (0x20..0x7f).contains(&byte)) {
-        let mut out = String::with_capacity(filtered.len() + 2);
-        out.push('(');
-        for ch in filtered.chars() {
-            match ch {
-                '(' | ')' | '\\' => {
-                    out.push('\\');
-                    out.push(ch);
-                }
-                _ => out.push(ch),
+    let mut out = String::with_capacity(filtered.len() + 2);
+    out.push('(');
+    for ch in filtered.chars() {
+        match ch {
+            '(' | ')' | '\\' => {
+                out.push('\\');
+                out.push(ch);
             }
+            _ => out.push(ch),
         }
-        out.push(')');
-        return out;
     }
-    let mut units: Vec<u16> = vec![0xFEFF];
-    units.extend(filtered.encode_utf16());
-    let mut out = String::with_capacity(units.len() * 4 + 2);
-    out.push('<');
-    for unit in units {
-        out.push_str(&format!("{unit:04X}"));
-    }
-    out.push('>');
+    out.push(')');
     out
 }
 
@@ -192,7 +185,7 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32, bool)> {
         if length < 2 || index + length > bytes.len() {
             return None;
         }
-        if matches!(marker, 0xC0..=0xC2) && length >= 7 {
+        if matches!(marker, 0xC0..=0xC2) && length >= 8 {
             let height = u16::from_be_bytes([bytes[index + 3], bytes[index + 4]]) as u32;
             let width = u16::from_be_bytes([bytes[index + 5], bytes[index + 6]]) as u32;
             let components = bytes[index + 7];
@@ -231,13 +224,27 @@ fn paint_path(
     fill: &Option<Paint>,
     stroke: &Option<crate::display_list::Stroke>,
 ) {
+    let mut current = None;
+    let mut subpath_start = None;
     for command in path {
         let line = match command {
-            GeometryPathCommand::Move { x, y } => format!("{} {} m\n", num(*x), num(*y)),
-            GeometryPathCommand::Line { x, y } => format!("{} {} l\n", num(*x), num(*y)),
+            GeometryPathCommand::Move { x, y } => {
+                current = Some((*x, *y));
+                subpath_start = current;
+                format!("{} {} m\n", num(*x), num(*y))
+            }
+            GeometryPathCommand::Line { x, y } => {
+                current = Some((*x, *y));
+                format!("{} {} l\n", num(*x), num(*y))
+            }
             GeometryPathCommand::Quad { cpx, cpy, x, y } => {
-                let (c1x, c1y) = (cpx + (*x - cpx) / 3.0, cpy + (*y - cpy) / 3.0);
-                let (c2x, c2y) = (cpx + 2.0 * (*x - cpx) / 3.0, cpy + 2.0 * (*y - cpy) / 3.0);
+                let (current_x, current_y) = current.unwrap_or((*x, *y));
+                let (c1x, c1y) = (
+                    current_x + 2.0 * (*cpx - current_x) / 3.0,
+                    current_y + 2.0 * (*cpy - current_y) / 3.0,
+                );
+                let (c2x, c2y) = (*x + 2.0 * (*cpx - *x) / 3.0, *y + 2.0 * (*cpy - *y) / 3.0);
+                current = Some((*x, *y));
                 format!(
                     "{} {} {} {} {} {} c\n",
                     num(c1x),
@@ -255,16 +262,22 @@ fn paint_path(
                 cp2y,
                 x,
                 y,
-            } => format!(
-                "{} {} {} {} {} {} c\n",
-                num(*cp1x),
-                num(*cp1y),
-                num(*cp2x),
-                num(*cp2y),
-                num(*x),
-                num(*y)
-            ),
-            GeometryPathCommand::Close => "h\n".to_owned(),
+            } => {
+                current = Some((*x, *y));
+                format!(
+                    "{} {} {} {} {} {} c\n",
+                    num(*cp1x),
+                    num(*cp1y),
+                    num(*cp2x),
+                    num(*cp2y),
+                    num(*x),
+                    num(*y)
+                )
+            }
+            GeometryPathCommand::Close => {
+                current = subpath_start;
+                "h\n".to_owned()
+            }
         };
         out.extend_from_slice(line.as_bytes());
     }
@@ -795,6 +808,48 @@ mod tests {
     fn pages_of(pdf: &[u8]) -> usize {
         let text = String::from_utf8_lossy(pdf);
         text.match_indices("/Type /Page ").count()
+    }
+
+    #[test]
+    fn truncated_sof_jpeg_returns_no_dimensions() {
+        let jpeg = [
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x07, 0x08, 0x00, 0x01, 0x00, 0x01,
+        ];
+        assert_eq!(jpeg_dimensions(&jpeg), None);
+    }
+
+    #[test]
+    fn quadratic_paths_match_their_cubic_equivalent() {
+        let quadratic = [
+            GeometryPathCommand::Move { x: 1.0, y: 2.0 },
+            GeometryPathCommand::Quad {
+                cpx: 4.0,
+                cpy: 8.0,
+                x: 10.0,
+                y: 5.0,
+            },
+        ];
+        let cubic = [
+            GeometryPathCommand::Move { x: 1.0, y: 2.0 },
+            GeometryPathCommand::Cubic {
+                cp1x: 3.0,
+                cp1y: 6.0,
+                cp2x: 6.0,
+                cp2y: 7.0,
+                x: 10.0,
+                y: 5.0,
+            },
+        ];
+        let mut quadratic_pdf = Vec::new();
+        let mut cubic_pdf = Vec::new();
+        paint_path(&mut quadratic_pdf, &quadratic, &None, &None);
+        paint_path(&mut cubic_pdf, &cubic, &None, &None);
+        assert_eq!(quadratic_pdf, cubic_pdf);
+    }
+
+    #[test]
+    fn limits_text_to_ascii_supported_by_standard_fonts() {
+        assert_eq!(pdf_text("Caf\u{e9} \u{03a9} \u{1f642}"), "(Caf? ? ?)");
     }
 
     #[test]

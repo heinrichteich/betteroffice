@@ -107,7 +107,7 @@ export const PACKAGES = [
   {
     name: "@betteroffice/vsdx",
     sourceOnly: true,
-    desc: "VSDX core — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, saving, collaboration, and vector PDF export.",
+    desc: "VSDX core — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, saving, collaboration, and vector PDF export. PDF text is selectable for printable ASCII; fonts are not embedded and other characters are replaced.",
   },
   {
     name: "@betteroffice/vsdx-react",
