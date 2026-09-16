@@ -1,6 +1,6 @@
 import initWasmModule, { VsdxDocument, VsdxRenderer, rendererVersion } from './generated/vsdx_wasm.js';
 import type { InitInput } from './generated/vsdx_wasm.js';
-import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectorGlue, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, TextReceipt, VsdxFontFace, PageLayer } from '../types';
+import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectorGlue, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, RawValidationIssue, ShapeReceipt, TextReceipt, ValidationIssue, VsdxFontFace, PageLayer } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; initialUpdate?: Uint8Array; }
@@ -11,6 +11,8 @@ export interface DiagramHandle {
   registerFont(face: VsdxFontFace): number;
   layoutPage(pageIndex: number): PageDisplayList;
   pageLayers(pageIndex: number): PageLayer[];
+  validate(): ValidationIssue[];
+  validatePage(pageIndex: number): ValidationIssue[];
   setLayerVisible(pagePartPath: string, layerIndex: number, visible: boolean): void;
   clearLayerVisibility(): void;
   hitTest(x: number, y: number): HitTestResult | null;
@@ -116,6 +118,13 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     clientId: doc.clientId, snapshot: () => json(() => doc.snapshotJson()),
     registerFont: face => wasm(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes)),
     pageLayers: pageIndex => json(() => renderer.pageLayersJson(doc, pageIndex)),
+    validate: () => mapValidationIssues(json<RawValidationIssue[]>(() => renderer.validateJson(doc)), json<DiagramSnapshot>(() => doc.snapshotJson())),
+    validatePage: (pageIndex) => {
+      const snapshot = json<DiagramSnapshot>(() => doc.snapshotJson());
+      const page = snapshot.pages[pageIndex];
+      if (!page) throw new Error('page index is outside the document');
+      return mapValidationIssues(json<RawValidationIssue[]>(() => renderer.validatePageJson(doc, pageIndex)), snapshot).filter((issue) => issue.pageId === page.id);
+    },
     setLayerVisible: (pagePartPath, layerIndex, visible) => wasm(() => renderer.setLayerVisible(pagePartPath, layerIndex, visible)),
     clearLayerVisibility: () => wasm(() => renderer.clearLayerVisibility()),
     layoutPage: pageIndex => {
@@ -154,5 +163,28 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
 }
 function requireInitialized(): void { if (!initialized) throw new Error('vsdx wasm is not initialized; call initWasm() first'); }
 function clientId(): number { if (!globalThis.crypto?.getRandomValues) throw new Error('crypto.getRandomValues is required to generate a collaboration client ID'); const values = new Uint32Array(2); let value = 0; do { crypto.getRandomValues(values); value = (values[0] & 0x1fffff) * 0x1_0000_0000 + values[1]; } while (!value); return value; }
+function mapValidationIssues(raw: RawValidationIssue[], snapshot: DiagramSnapshot): ValidationIssue[] {
+  const pages = new Map(snapshot.pages.map((page) => [page.sourcePartPath, page]));
+  const shapes = new Map<string, Map<number, string>>();
+  for (const page of snapshot.pages) {
+    const index = new Map<number, string>();
+    const work = [...page.shapes];
+    while (work.length) {
+      const shape = work.pop()!;
+      if (!index.has(shape.sourceId)) index.set(shape.sourceId, shape.id);
+      work.push(...shape.children);
+    }
+    shapes.set(page.sourcePartPath, index);
+  }
+  const out: ValidationIssue[] = [];
+  for (const issue of raw) {
+    const page = pages.get(issue.pagePart);
+    const shapeId = shapes.get(issue.pagePart)?.get(issue.shapeId);
+    if (!page || !shapeId) continue;
+    const otherShapeId = issue.otherShapeId === null ? null : shapes.get(issue.pagePart)?.get(issue.otherShapeId) ?? null;
+    out.push({ id: issue.id, rule: issue.rule, severity: issue.severity, pageId: page.id, shapeId, otherShapeId, endpoint: issue.endpoint, row: issue.row });
+  }
+  return out;
+}
 function construct<T>(operation: () => T): T { try { return operation(); } catch (error) { throw toError(error); } }
 function toError(error: unknown): Error { return error instanceof Error ? error : new Error(typeof error === 'string' ? error : String(error)); }

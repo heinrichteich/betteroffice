@@ -255,6 +255,7 @@ dependencies = [
  "betteroffice-vsdx-eval",
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-resolve",
+ "betteroffice-vsdx-validate",
 ]
 
 [[package]]
@@ -316,6 +317,16 @@ dependencies = [
  "betteroffice-vsdx-parse",
  "serde",
  "thiserror",
+]
+
+[[package]]
+name = "betteroffice-vsdx-validate"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-vsdx-formula",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "serde",
 ]
 
 [[package]]

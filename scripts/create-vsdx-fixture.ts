@@ -72,8 +72,20 @@ async function writeTestFixtures(): Promise<void> {
     'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Shape'>${xform(4, 3, 7, 5, 2, 1.5, 0, 0, 0)}<Section N='Geometry'><Row T='MoveTo' IX='0'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row><Row T='RelLineTo' IX='2'><Cell N='X' V='1'/><Cell N='Y' V='0'/></Row><Row T='RelLineTo' IX='3'><Cell N='X' V='1'/><Cell N='Y' V='1'/></Row><Row T='RelLineTo' IX='4'><Cell N='X' V='0'/><Cell N='Y' V='1'/></Row></Section></Shape><Shape ID='2' Type='Shape'>${xform(4, 3, 14, 5, 2, 1.5, 0, 0, 0)}<Section N='Geometry'><Row T='MoveTo' IX='0'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row><Row T='RelLineTo' IX='1'><Cell N='X' V='1'/><Cell N='Y' V='0'/></Row><Row T='RelMoveTo' IX='2'><Cell N='X' V='0'/><Cell N='Y' V='1'/></Row><Row T='RelLineTo' IX='3'><Cell N='X' V='1'/><Cell N='Y' V='1'/></Row></Section></Shape></Shapes></PageContents>`,
   });
 
-  await writeZip(path.join(root, 'crates/vsdx-parse/tests/fixtures/text-accounting.vsdx'), {
+  await writeZip(path.join(root, 'crates/vsdx-parse/tests/fixtures/validation.vsdx'), {
     ...parts,
+    'visio/pages/page1.xml': `<PageContents ${ns}><Shapes>`
+      + `<Shape ID='1' Type='Shape'>${xform(1, 1, 1, 1, 0.5, 0.5, 0, 0, 0)}${rect}<Section N='Property'><Row N='Owner'><Cell N='Label' V='Owner'/><Cell N='Value' V=''/><Cell N='Type' V='0'/><Cell N='Ask' V='1'/></Row><Row N='Notes'><Cell N='Label' V='Notes'/><Cell N='Value' V=''/><Cell N='Type' V='0'/><Cell N='Ask' V='0'/></Row></Section></Shape>`
+      + `<Shape ID='2' Type='Shape'>${xform(1, 1, 1.5, 1, 0.5, 0.5, 0, 0, 0)}${rect}</Shape>`
+      + `<Shape ID='3' Type='Shape'>${xform(1, 1, 9, 9, 0.5, 0.5, 0, 0, 0)}${rect}</Shape>`
+      + `<Shape ID='4' Type='Shape'><Cell N='OneD' V='1'/><Cell N='BeginX' V='1'/><Cell N='BeginY' V='1'/><Cell N='EndX' V='0.2'/><Cell N='EndY' V='3'/></Shape>`
+      + `<Shape ID='5' Type='Shape'><Cell N='OneD' V='1'/><Cell N='BeginX' V='6'/><Cell N='BeginY' V='6'/><Cell N='EndX' V='7'/><Cell N='EndY' V='7'/></Shape>`
+      + `<Shape ID='6' Type='Shape'><Cell N='OneD' V='1'/><Cell N='BeginX' V='1.5'/><Cell N='BeginY' V='1'/><Cell N='EndX' V='9'/><Cell N='EndY' V='9'/></Shape>`
+      + `<Shape ID='7' Type='Shape'>${xform(1, 1, 3, 3, 0.5, 0.5, 0, 0, 0)}${rect}</Shape>`
+      + `</Shapes><Connects><Connect FromSheet='4' FromCell='BeginX' FromPart='9' ToSheet='1' ToCell='PinX' ToPart='3'/><Connect FromSheet='6' FromCell='BeginX' FromPart='9' ToSheet='2' ToCell='PinX' ToPart='3'/><Connect FromSheet='6' FromCell='EndX' FromPart='9' ToSheet='3' ToCell='PinX' ToPart='3'/></Connects></PageContents>`,
+  });
+
+  await writeZip(path.join(root, 'crates/vsdx-parse/tests/fixtures/text-accounting.vsdx'), {    ...parts,
     'visio/document.xml': `<VisioDocument ${ns}><FaceNames><FaceName ID='0' Name='Calibri'/></FaceNames><StyleSheets><StyleSheet ID='1' NameU='Text'><Section N='Character'><Row IX='0'><Cell N='Font' V='0'/><Cell N='Size' V='0.25'/><Cell N='Color' V='RGB(1,2,3)'/></Row></Section></StyleSheet></StyleSheets><DocumentSheet><Cell N='PageWidth' V='8.5'/><Cell N='PageHeight' V='11'/></DocumentSheet></VisioDocument>`,
     'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Shape'>${xform(1, 1, 1, 1, 0, 0, 0, 0, 0)}${rect}<Text><cp IX='0'/><pp IX='0'/></Text></Shape><Shape ID='2' Type='Shape'>${xform(1, 1, 2, 1, 0, 0, 0, 0, 0)}${rect}<Section N='Field'><Row IX='0'><Cell N='Value' V='field value'/></Row></Section><Text><fld IX='0'/></Text></Shape><Shape ID='3' Type='Shape' TextStyle='1'>${xform(1, 1, 3, 1, 0, 0, 0, 0, 0)}${rect}<Text><cp IX='0'/>style text</Text></Shape><Shape ID='4' Type='Shape' Master='1' MasterShape='10'>${xform(1, 1, 4, 1, 0, 0, 0, 0, 0)}${rect}</Shape></Shapes></PageContents>`,
     'visio/masters/master1.xml': `<MasterContents ${ns}><Shapes><Shape ID='10' Type='Shape'><Text>master text</Text></Shape></Shapes></MasterContents>`,

@@ -87,5 +87,22 @@
     "noSelection": "Select a shape to see its data.",
     "empty": "This shape has no visible data.",
     "valueLabel": "Value"
+  },
+  "issuesPanel": {
+    "title": "Issues",
+    "collapse": "Collapse Issues",
+    "expand": "Expand Issues",
+    "empty": "No issues on this page",
+    "selectIssue": "Select shape {name}",
+    "unnamedShape": "Shape {id}",
+    "endpoint": { "begin": "begin", "end": "end" },
+    "rules": {
+      "dangling-connector": "Connector {name} is glued at only one end ({endpoint})",
+      "dangling-connector-unconnected": "Connector {name} is not glued at either end",
+      "isolated-shape": "Shape {name} has no connections",
+      "overlapping-shapes": "Shape {name} overlaps {other}",
+      "connector-crossing": "Connector {name} crosses {other}",
+      "empty-shape-data": "Shape {name} has an empty required field ({row})"
+    }
   }
 }

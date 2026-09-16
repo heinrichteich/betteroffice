@@ -6,6 +6,9 @@ export interface SnapshotCellLocator { sheet: SnapshotCellSheet; shapeId: number
 export interface CellSnapshot { locator: SnapshotCellLocator; name: string; formula: string | null; value: string | null; rowType?: string; }
 export interface ShapeSnapshot { id: string; sourceId: number; name: string | null; cells: CellSnapshot[]; children: ShapeSnapshot[]; }
 export interface PageLayer { index: number; name: string; visible: boolean; print: boolean; lock: boolean; active: boolean; color: string; status: string; }
+export type ValidationSeverity = 'error' | 'warning';
+export interface RawValidationIssue { id: string; rule: string; severity: ValidationSeverity; pagePart: string; pageId: number | null; shapeId: number; otherShapeId: number | null; endpoint: string | null; row: string | null; }
+export interface ValidationIssue { id: string; rule: string; severity: ValidationSeverity; pageId: string; shapeId: string; otherShapeId: string | null; endpoint: string | null; row: string | null; }
 export interface PageSnapshot { id: string; sourcePartPath: string; name: string | null; shapes: ShapeSnapshot[]; }
 export interface PaletteEntry { index: number; color: string; }
 export interface DiagramSnapshot { pages: PageSnapshot[]; palette?: PaletteEntry[]; }
