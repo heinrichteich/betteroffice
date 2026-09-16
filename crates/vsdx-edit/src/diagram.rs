@@ -27,6 +27,7 @@ type SectionRows<'a> = Vec<(
     (String, Option<u32>),
     Vec<(Option<CellRow>, Vec<&'a CellSnapshot>)>,
 )>;
+type DeleteCandidate = (usize, String, String, ArrayRef, u32, usize, Vec<String>);
 
 pub(crate) fn seed_doc(
     doc: &Doc,
@@ -762,6 +763,22 @@ impl DiagramSession {
         }
         let mut txn = self.transact_for(context);
         for entry in deletes {
+            let pages = txn
+                .get_map(PAGES)
+                .ok_or_else(|| EditError::InvalidState("missing pages map".to_owned()))?;
+            let page = map_ref(&pages, &txn, &entry.page_id)?;
+            let root_order = map_array(&page, &txn, "shapes")?;
+            let sheets = txn
+                .get_map(SHEETS)
+                .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
+            if !shape_tree_entries(&sheets, &txn, &root_order)?
+                .iter()
+                .any(|shape| shape.id == entry.shape_id)
+            {
+                return Err(EditError::ShapeNotFound(entry.shape_id.clone()));
+            }
+        }
+        for entry in deletes {
             let context_for_policy =
                 CrdtMutationContext::new(&txn, &entry.page_id, &entry.shape_id)?;
             match decide_mutation(
@@ -790,7 +807,7 @@ impl DiagramSession {
             .map(|entry| (entry.page_id.clone(), entry.shape_id.clone()))
             .collect();
         while !remaining.is_empty() {
-            let mut best: Option<(usize, String, String, ArrayRef, u32, usize, Vec<String>)> = None;
+            let mut best: Option<DeleteCandidate> = None;
             for (position, (page_id, shape_id)) in remaining.iter().enumerate() {
                 let pages = txn
                     .get_map(PAGES)

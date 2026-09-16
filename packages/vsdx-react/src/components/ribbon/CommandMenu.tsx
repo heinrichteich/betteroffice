@@ -30,7 +30,6 @@ export function CommandMenuItem({ id, icon, label, shortcut, itemRef, onSelect }
   return <button ref={itemRef} type="button" role={checkable ? 'menuitemcheckbox' : 'menuitem'} aria-checked={checkable ? command.active : undefined} aria-keyshortcuts={shortcut} disabled={!command.enabled} aria-label={shortcut ? `${label} ${shortcut}` : label} data-command-id={id} tabIndex={-1} onMouseDown={(event) => event.preventDefault()} onClick={() => { command.run(); onSelect(); }} onMouseOver={(event) => { if (command.enabled) event.currentTarget.style.backgroundColor = '#f5f5f5'; }} onMouseOut={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; }} style={{ ...styles.menuItem, color: command.enabled ? '#242424' : '#b4b4b4' }}><RibbonIcon name={icon} size={18} /><span>{label}</span>{shortcut && <span aria-hidden="true" style={styles.shortcut}>{shortcut}</span>}</button>;
 }
 
-/** Side a submenu opens on so it stays inside the viewport. */
 export function submenuSide(parentRight: number, submenuWidth: number, viewportWidth: number, margin = 4): 'left' | 'right' {
   return parentRight + submenuWidth > viewportWidth - margin ? 'left' : 'right';
 }

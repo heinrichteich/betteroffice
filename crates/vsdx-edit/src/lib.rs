@@ -1361,6 +1361,29 @@ mod tests {
     }
 
     #[test]
+    fn delete_shapes_with_a_missing_shape_leaves_the_document_untouched() {
+        let session = session();
+        add_cell_to(&session, "page:1:shape:1", "PinX", Some("1"), None);
+        let before = session.snapshot().unwrap();
+        let result = session.delete_shapes(
+            &EditCtx::local("a"),
+            &[
+                ShapeDelete {
+                    page_id: "page:1".to_owned(),
+                    shape_id: "page:1:shape:1".to_owned(),
+                },
+                ShapeDelete {
+                    page_id: "page:1".to_owned(),
+                    shape_id: "missing".to_owned(),
+                },
+            ],
+        );
+        assert!(matches!(result, Err(EditError::ShapeNotFound(shape_id)) if shape_id == "missing"));
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(!session.can_undo());
+    }
+
+    #[test]
     fn set_cell_formulas_undoes_every_shape_together() {
         let session = session();
         for shape_id in ["page:1:shape:1", "page:1:shape:2"] {

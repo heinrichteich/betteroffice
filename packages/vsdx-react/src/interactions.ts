@@ -6,7 +6,6 @@ export type RotateHandle = 'rotate';
 interface FrameBounds { x: number; y: number; width: number; height: number; }
 export interface DragStart { canvas: ModelPoint; model: ModelPoint; resize: boolean; handle?: ResizeHandle; rotate?: boolean; pin: ModelPoint; locPin?: ModelPoint; locPinAtSize?: (width: number, height: number) => ModelPoint; size: { width: number; height: number }; parentTransforms?: readonly Affine[]; angle?: number; flipX?: boolean; flipY?: boolean; pointerId?: number; startX?: number; startY?: number; thresholdPassed?: boolean; }
 const MIN_SHAPE_INCHES = 0.01;
-/** Fluent 2 colorNeutralStrokeAccessible. */
 export const SELECTION_STROKE = '#616161';
 export const SELECTION_HANDLE_FILL = '#ffffff';
 export const SELECTION_HANDLE_CSS = 7;
@@ -18,7 +17,6 @@ export const CANVAS_KEYBOARD_DPI = 96;
 export const CANVAS_KEYBOARD_NUDGE_MULTIPLIER = 10;
 export type CanvasKeyboardIntent = { kind: 'undo' } | { kind: 'redo' } | { kind: 'delete' } | { kind: 'escape' } | { kind: 'selectAll' } | { kind: 'nudge'; dx: number; dy: number };
 export interface CanvasKeyboardEventLike { key: string; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean; altKey?: boolean; target?: unknown; }
-/** One screen pixel in model inches at the given zoom. */
 export const keyboardNudgeStep = (zoom: number): number => {
   const safe = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
   return 1 / (CANVAS_KEYBOARD_DPI * safe);
@@ -38,7 +36,6 @@ export const isEditableKeyboardTarget = (target: unknown): boolean => {
   }
   return false;
 };
-/** Y is up. */
 export const canvasKeyboardIntent = (event: CanvasKeyboardEventLike, zoom: number): CanvasKeyboardIntent | null => {
   if (isEditableKeyboardTarget(event.target)) return null;
   const ctrl = Boolean(event.ctrlKey);
@@ -167,7 +164,6 @@ export const resolveRotationAngle = (start: DragStart, release: ModelPoint, snap
   return snapRotationAngle((start.angle ?? 0) + delta, snap);
 };
 const applyForward = (transform: Affine, point: ModelPoint): ModelPoint => ({ x: transform.a * point.x + transform.c * point.y + transform.e, y: transform.b * point.x + transform.d * point.y + transform.f });
-/** Expresses a page-axis nudge as the drag that would cover the same screen distance. */
 export const resolveNudgeGeometry = (start: DragStart, dx: number, dy: number): { x: number; y: number; width: number; height: number } => resolveDragGeometry({ ...start, canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 } }, { x: dx, y: dy });
 export const previewOutline = (start: DragStart, release: ModelPoint, paintTransform: Affine, snap = false): ModelPoint[] => {
   const geometry = resolveDragGeometry(start, release);

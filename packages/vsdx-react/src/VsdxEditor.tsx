@@ -19,7 +19,6 @@ export type { DragStart };
 
 export interface VsdxShapeSelection { pageId: string; shapeId: string; hit: HitTestResult; }
 export interface VsdxEditorApi { handle: DiagramHandle; refresh: () => void; }
-/** Save edits before changing a session identity or seed, or remount for a new session. */
 export interface VsdxEditorCollaborationOptions {
   clientId: number;
   initialUpdate?: Uint8Array;
@@ -614,7 +613,6 @@ export function canvasLabel(t: TFunction, pageIndex: number, total: number, sele
   return t('pages.canvasLabel', { current: pageIndex + 1, total });
 }
 
-/** Scale-1 corners for paint and hit tests. */
 export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, selection: VsdxShapeSelection): ModelPoint[] | null {
   const placement = findShapePlacement(page.shapes, selection.shapeId);
   if (!placement) return null;

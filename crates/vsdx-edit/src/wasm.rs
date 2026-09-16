@@ -633,10 +633,7 @@ impl VsdxDocument {
             .and_then(json_inner)
     }
 
-    fn delete_shapes(
-        &self,
-        args: DeleteShapesArgs,
-    ) -> crate::EditResult<Vec<crate::ShapeReceipt>> {
+    fn delete_shapes(&self, args: DeleteShapesArgs) -> crate::EditResult<Vec<crate::ShapeReceipt>> {
         self.session.delete_shapes(
             &local_context(),
             &args
