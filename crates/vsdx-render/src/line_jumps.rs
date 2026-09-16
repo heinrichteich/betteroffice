@@ -9,6 +9,9 @@ use crate::display_list::Primitive;
 
 const END_EPSILON: f64 = 1e-9;
 const MAX_STYLE_DEPTH: usize = 8;
+/// Omits later crossings after bounding work for adversarially overlapping segments.
+const MAX_CROSSING_CANDIDATES: usize = 1_000_000;
+const SEGMENT_INDEX_LEAF_SIZE: usize = 8;
 
 /// Page line-jump controls, resolved from the page sheet then the No Style stylesheet.
 pub struct PageJumpSettings {
@@ -99,35 +102,48 @@ pub fn apply_line_jumps(
         return;
     }
     let mut jumps: BTreeMap<usize, Vec<PlacedJump>> = BTreeMap::new();
-    for a in 0..routes.len() {
-        for b in (a + 1)..routes.len() {
-            if !bounds_overlap(&routes[a], &routes[b]) {
-                continue;
+    let segments = route_segments(&routes);
+    let index = SegmentIndex::new(&segments);
+    let mut remaining = MAX_CROSSING_CANDIDATES;
+    for (segment_index, segment) in segments.iter().enumerate() {
+        let completed = index.overlapping(&segments, segment.bounds, &mut |other_index| {
+            if other_index <= segment_index || segments[other_index].route == segment.route {
+                return true;
             }
-            for crossing in crossings(a, &routes[a], b, &routes[b]) {
-                let winner = carrier(
-                    lookup[routes[crossing.a].id.as_str()].code,
-                    lookup[routes[crossing.b].id.as_str()].code,
-                    page_pick(
-                        settings.code,
-                        crossing.dir_a,
-                        crossing.dir_b,
-                        routes[crossing.a].z,
-                        routes[crossing.b].z,
-                    ),
-                );
-                if let Some(winner) = winner {
-                    let index = if winner == Side::A {
-                        crossing.a
-                    } else {
-                        crossing.b
-                    };
-                    let item = &lookup[routes[index].id.as_str()];
-                    if let Some(jump) = placed_jump(item, settings, &crossing, winner == Side::A) {
-                        jumps.entry(index).or_default().push(jump);
-                    }
+            if remaining == 0 {
+                return false;
+            }
+            remaining -= 1;
+            let other = &segments[other_index];
+            let Some(crossing) = crossing(&routes, segment, other) else {
+                return true;
+            };
+            let winner = carrier(
+                lookup[routes[crossing.a].id.as_str()].code,
+                lookup[routes[crossing.b].id.as_str()].code,
+                page_pick(
+                    settings.code,
+                    crossing.dir_a,
+                    crossing.dir_b,
+                    routes[crossing.a].z,
+                    routes[crossing.b].z,
+                ),
+            );
+            if let Some(winner) = winner {
+                let route = if winner == Side::A {
+                    crossing.a
+                } else {
+                    crossing.b
+                };
+                let item = &lookup[routes[route].id.as_str()];
+                if let Some(jump) = placed_jump(item, settings, &crossing, winner == Side::A) {
+                    jumps.entry(route).or_default().push(jump);
                 }
             }
+            true
+        });
+        if !completed {
+            break;
         }
     }
     for (index, mut placed) in jumps {
@@ -147,7 +163,23 @@ struct Route {
     id: String,
     z: u32,
     points: Vec<(f64, f64)>,
+}
+
+struct Segment {
+    route: usize,
+    index: usize,
     bounds: (f64, f64, f64, f64),
+}
+
+struct SegmentIndex {
+    root: Option<Box<SegmentIndexNode>>,
+}
+
+struct SegmentIndexNode {
+    bounds: (f64, f64, f64, f64),
+    entries: Vec<usize>,
+    left: Option<Box<SegmentIndexNode>>,
+    right: Option<Box<SegmentIndexNode>>,
 }
 
 struct Crossing {
@@ -256,13 +288,16 @@ fn collect_routes(
     for primitive in primitives {
         match primitive {
             Primitive::Shape {
-                id, z_order, path, ..
+                id,
+                z_order,
+                path,
+                stroke: Some(_),
+                ..
             } if lookup.contains_key(id.as_str()) => {
                 if let Some(points) = route_points(path) {
                     routes.push(Route {
                         id: id.clone(),
                         z: *z_order,
-                        bounds: route_bounds(&points),
                         points,
                     });
                 }
@@ -308,41 +343,165 @@ fn route_bounds(points: &[(f64, f64)]) -> (f64, f64, f64, f64) {
     )
 }
 
-fn bounds_overlap(a: &Route, b: &Route) -> bool {
-    a.bounds.0 <= b.bounds.2
-        && b.bounds.0 <= a.bounds.2
-        && a.bounds.1 <= b.bounds.3
-        && b.bounds.1 <= a.bounds.3
+fn bounds_overlap(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
+    a.0 <= b.2 && b.0 <= a.2 && a.1 <= b.3 && b.1 <= a.3
 }
 
-fn crossings(a: usize, route_a: &Route, b: usize, route_b: &Route) -> Vec<Crossing> {
-    let mut out = Vec::new();
-    for seg_a in 0..route_a.points.len() - 1 {
-        for seg_b in 0..route_b.points.len() - 1 {
-            let p = route_a.points[seg_a];
-            let q = route_a.points[seg_a + 1];
-            let r = route_b.points[seg_b];
-            let s = route_b.points[seg_b + 1];
-            if let Some((t_a, t_b, x, y)) = segments_cross(p, q, r, s) {
-                out.push(Crossing {
-                    a,
-                    b,
-                    x,
-                    y,
-                    seg_a,
-                    seg_b,
-                    t_a,
-                    t_b,
-                    dir_a: (q.0 - p.0, q.1 - p.1),
-                    dir_b: (s.0 - r.0, s.1 - r.1),
-                });
-            }
+fn route_segments(routes: &[Route]) -> Vec<Segment> {
+    routes
+        .iter()
+        .enumerate()
+        .flat_map(|(route, item)| {
+            item.points
+                .windows(2)
+                .enumerate()
+                .map(move |(index, points)| Segment {
+                    route,
+                    index,
+                    bounds: route_bounds(points),
+                })
+        })
+        .collect()
+}
+
+impl SegmentIndex {
+    fn new(segments: &[Segment]) -> Self {
+        let entries = (0..segments.len()).collect();
+        Self {
+            root: SegmentIndexNode::new(segments, entries),
         }
     }
-    out
+
+    fn overlapping(
+        &self,
+        segments: &[Segment],
+        bounds: (f64, f64, f64, f64),
+        visitor: &mut impl FnMut(usize) -> bool,
+    ) -> bool {
+        if let Some(root) = &self.root {
+            return root.overlapping(segments, bounds, visitor);
+        }
+        true
+    }
 }
 
+impl SegmentIndexNode {
+    fn new(segments: &[Segment], mut entries: Vec<usize>) -> Option<Box<Self>> {
+        if entries.is_empty() {
+            return None;
+        }
+        let bounds = entries.iter().fold(
+            (
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NEG_INFINITY,
+            ),
+            |bounds, &entry| merge_bounds(bounds, segments[entry].bounds),
+        );
+        if entries.len() <= SEGMENT_INDEX_LEAF_SIZE {
+            return Some(Box::new(Self {
+                bounds,
+                entries,
+                left: None,
+                right: None,
+            }));
+        }
+        let split_x = bounds.2 - bounds.0 >= bounds.3 - bounds.1;
+        entries.sort_by(|&a, &b| {
+            let a = segments[a].bounds;
+            let b = segments[b].bounds;
+            let a = if split_x { a.0 + a.2 } else { a.1 + a.3 };
+            let b = if split_x { b.0 + b.2 } else { b.1 + b.3 };
+            a.total_cmp(&b)
+        });
+        let right_entries = entries.split_off(entries.len() / 2);
+        Some(Box::new(Self {
+            bounds,
+            entries: Vec::new(),
+            left: Self::new(segments, entries),
+            right: Self::new(segments, right_entries),
+        }))
+    }
+
+    fn overlapping(
+        &self,
+        segments: &[Segment],
+        bounds: (f64, f64, f64, f64),
+        visitor: &mut impl FnMut(usize) -> bool,
+    ) -> bool {
+        if !bounds_overlap(self.bounds, bounds) {
+            return true;
+        }
+        if self.left.is_none() {
+            for &entry in &self.entries {
+                if bounds_overlap(segments[entry].bounds, bounds) && !visitor(entry) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if let Some(left) = &self.left
+            && !left.overlapping(segments, bounds, visitor)
+        {
+            return false;
+        }
+        if let Some(right) = &self.right {
+            return right.overlapping(segments, bounds, visitor);
+        }
+        true
+    }
+}
+
+fn merge_bounds(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+    (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
+}
+
+fn crossing(routes: &[Route], a: &Segment, b: &Segment) -> Option<Crossing> {
+    let route_a = &routes[a.route];
+    let route_b = &routes[b.route];
+    let p = route_a.points[a.index];
+    let q = route_a.points[a.index + 1];
+    let r = route_b.points[b.index];
+    let s = route_b.points[b.index + 1];
+    let (t_a, t_b, x, y) = segment_intersection(p, q, r, s)?;
+    if route_endpoint(a.index, route_a.points.len() - 2, t_a)
+        || route_endpoint(b.index, route_b.points.len() - 2, t_b)
+    {
+        return None;
+    }
+    Some(Crossing {
+        a: a.route,
+        b: b.route,
+        x,
+        y,
+        seg_a: a.index,
+        seg_b: b.index,
+        t_a,
+        t_b,
+        dir_a: (q.0 - p.0, q.1 - p.1),
+        dir_b: (s.0 - r.0, s.1 - r.1),
+    })
+}
+
+fn route_endpoint(segment: usize, last_segment: usize, t: f64) -> bool {
+    (segment == 0 && t < END_EPSILON) || (segment == last_segment && t > 1.0 - END_EPSILON)
+}
+
+#[cfg(test)]
 fn segments_cross(
+    p: (f64, f64),
+    q: (f64, f64),
+    r: (f64, f64),
+    s: (f64, f64),
+) -> Option<(f64, f64, f64, f64)> {
+    let hit = segment_intersection(p, q, r, s)?;
+    ((END_EPSILON..=1.0 - END_EPSILON).contains(&hit.0)
+        && (END_EPSILON..=1.0 - END_EPSILON).contains(&hit.1))
+    .then_some(hit)
+}
+
+fn segment_intersection(
     p: (f64, f64),
     q: (f64, f64),
     r: (f64, f64),
@@ -359,11 +518,6 @@ fn segments_cross(
     let t = ((r.0 - p.0) * dy_r - (r.1 - p.1) * dx_r) / denom;
     let u = ((r.0 - p.0) * dy_p - (r.1 - p.1) * dx_p) / denom;
     if !(0.0..=1.0).contains(&t) || !(0.0..=1.0).contains(&u) {
-        return None;
-    }
-    if !(END_EPSILON..=1.0 - END_EPSILON).contains(&t)
-        || !(END_EPSILON..=1.0 - END_EPSILON).contains(&u)
-    {
         return None;
     }
     let (x, y) = (p.0 + t * dx_p, p.1 + t * dy_p);
@@ -598,6 +752,14 @@ mod tests {
         }
     }
 
+    fn stroke() -> crate::display_list::Stroke {
+        crate::display_list::Stroke {
+            color: String::new(),
+            width: 0.01,
+            dashed: false,
+        }
+    }
+
     #[test]
     fn crossing_rejects_parallel_and_endpoint_touch() {
         assert!(segments_cross((0.0, 0.0), (2.0, 0.0), (0.0, 1.0), (2.0, 1.0)).is_none());
@@ -697,7 +859,7 @@ mod tests {
                     GeometryPathCommand::Line { x: 2.0, y: 0.0 },
                 ],
                 fill: None,
-                stroke: None,
+                stroke: Some(stroke()),
                 transform: crate::Affine::identity(),
             },
             Primitive::Shape {
@@ -708,7 +870,7 @@ mod tests {
                     GeometryPathCommand::Line { x: 2.0, y: 2.0 },
                 ],
                 fill: None,
-                stroke: None,
+                stroke: Some(stroke()),
                 transform: crate::Affine::identity(),
             },
         ];
@@ -735,5 +897,95 @@ mod tests {
             };
             assert_eq!(path.len(), 2);
         }
+    }
+
+    #[test]
+    fn apply_ignores_crossings_with_invisible_connectors() {
+        let mut primitives = vec![
+            Primitive::Shape {
+                id: "visible".into(),
+                z_order: 0,
+                path: vec![
+                    GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                    GeometryPathCommand::Line { x: 2.0, y: 0.0 },
+                ],
+                fill: None,
+                stroke: Some(stroke()),
+                transform: crate::Affine::identity(),
+            },
+            Primitive::Shape {
+                id: "invisible".into(),
+                z_order: 1,
+                path: vec![
+                    GeometryPathCommand::Move { x: 1.0, y: -1.0 },
+                    GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                ],
+                fill: None,
+                stroke: None,
+                transform: crate::Affine::identity(),
+            },
+        ];
+        let overrides = ["visible", "invisible"]
+            .into_iter()
+            .map(|id| ConnectorJumpOverride {
+                id: id.into(),
+                code: 0,
+                style: 0,
+                dir_x: 0,
+                dir_y: 0,
+            })
+            .collect::<Vec<_>>();
+        apply_line_jumps(&mut primitives, &overrides, &settings(1));
+        let Primitive::Shape { path, .. } = &primitives[0] else {
+            unreachable!()
+        };
+        assert_eq!(path.len(), 2);
+    }
+
+    #[test]
+    fn apply_draws_jump_when_crossing_an_internal_bend() {
+        let mut primitives = vec![
+            Primitive::Shape {
+                id: "bent".into(),
+                z_order: 0,
+                path: vec![
+                    GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                    GeometryPathCommand::Line { x: 1.0, y: 0.0 },
+                    GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                ],
+                fill: None,
+                stroke: Some(stroke()),
+                transform: crate::Affine::identity(),
+            },
+            Primitive::Shape {
+                id: "crossing".into(),
+                z_order: 1,
+                path: vec![
+                    GeometryPathCommand::Move { x: 0.5, y: -0.5 },
+                    GeometryPathCommand::Line { x: 1.5, y: 0.5 },
+                ],
+                fill: None,
+                stroke: Some(stroke()),
+                transform: crate::Affine::identity(),
+            },
+        ];
+        let overrides = ["bent", "crossing"]
+            .into_iter()
+            .map(|id| ConnectorJumpOverride {
+                id: id.into(),
+                code: 0,
+                style: 0,
+                dir_x: 0,
+                dir_y: 0,
+            })
+            .collect::<Vec<_>>();
+        apply_line_jumps(&mut primitives, &overrides, &settings(1));
+        let Primitive::Shape { path, .. } = &primitives[1] else {
+            unreachable!()
+        };
+        assert!(
+            path.iter()
+                .any(|command| matches!(command, GeometryPathCommand::Quad { .. }))
+        );
     }
 }
