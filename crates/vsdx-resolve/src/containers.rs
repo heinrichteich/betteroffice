@@ -236,16 +236,21 @@ fn find_call(text: &str, name: &str) -> Option<usize> {
     let mut search = 0;
     while let Some(offset) = upper[search..].find(name) {
         let start = search + offset;
-        let mut cursor = start + name.len();
-        while text
-            .as_bytes()
-            .get(cursor)
-            .is_some_and(|byte| byte.is_ascii_whitespace())
-        {
-            cursor += 1;
-        }
-        if text.as_bytes().get(cursor) == Some(&b'(') {
-            return Some(start);
+        let inside_ident = text[..start].chars().next_back().is_some_and(|previous| {
+            previous.is_ascii_alphanumeric() || matches!(previous, '.' | '!' | '_')
+        });
+        if !inside_ident {
+            let mut cursor = start + name.len();
+            while text
+                .as_bytes()
+                .get(cursor)
+                .is_some_and(|byte| byte.is_ascii_whitespace())
+            {
+                cursor += 1;
+            }
+            if text.as_bytes().get(cursor) == Some(&b'(') {
+                return Some(start);
+            }
         }
         search = start + name.len();
     }
@@ -473,6 +478,57 @@ mod tests {
             vec![3, 10]
         );
         assert!(dependson_refs("DEPENDSONX(1,Sheet.2!SheetRef())", 1).is_empty());
+    }
+
+    #[test]
+    fn dependson_requires_identifier_boundaries() {
+        assert!(dependson_refs("XDEPENDSON(1,Sheet.2!SheetRef())", 1).is_empty());
+        assert!(dependson_refs("MY_DEPENDSON(1,Sheet.2!SheetRef())", 1).is_empty());
+        assert!(dependson_refs("DEPENDSONX(1,Sheet.2!SheetRef())", 1).is_empty());
+        assert_eq!(
+            dependson_refs("DEPENDSON(1,Sheet.2!SheetRef())", 1),
+            vec![2]
+        );
+        assert_eq!(
+            dependson_refs("SUM( DEPENDSON(1,Sheet.2!SheetRef()))", 1),
+            vec![2]
+        );
+        assert_eq!(
+            dependson_refs(
+                "DEPENDSON(4,Sheet.1!SheetRef()),DEPENDSON(1,Sheet.2!SheetRef())",
+                1
+            ),
+            vec![2]
+        );
+        assert_eq!(
+            dependson_refs("0+DEPENDSON(1,Sheet.2!SheetRef())", 1),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn spurious_dependson_identifiers_do_not_register_membership() {
+        let package = package(
+            vec![
+                page_shape(
+                    1,
+                    Some(7),
+                    vec![ShapeChild::Cell(formula_cell(
+                        "Relationships",
+                        "XDEPENDSON(1,Sheet.2!SheetRef())",
+                        "0",
+                    ))],
+                ),
+                page_shape(2, None, vec![]),
+            ],
+            container_master(),
+        );
+        let containers = Resolver::new(&package)
+            .resolve_page_containers("page")
+            .unwrap();
+        assert_eq!(containers.containers.len(), 1);
+        assert!(containers.members_of(1).is_empty());
+        assert!(containers.containers_of(2).is_empty());
     }
 
     #[test]
