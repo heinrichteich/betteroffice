@@ -9,11 +9,8 @@ use crate::display_list::Primitive;
 
 const END_EPSILON: f64 = 1e-9;
 const MAX_STYLE_DEPTH: usize = 8;
-/// Omits later crossings after bounding work for adversarially overlapping segments.
-const MAX_CROSSING_CANDIDATES: usize = 1_000_000;
 const SEGMENT_INDEX_LEAF_SIZE: usize = 8;
 
-/// Page line-jump controls, resolved from the page sheet then the No Style stylesheet.
 pub struct PageJumpSettings {
     pub code: i32,
     pub style: i32,
@@ -25,7 +22,6 @@ pub struct PageJumpSettings {
     pub dir_y: i32,
 }
 
-/// Per-connector line-jump overrides captured while laying out connector routes.
 pub struct ConnectorJumpOverride {
     pub id: String,
     pub code: i32,
@@ -34,7 +30,6 @@ pub struct ConnectorJumpOverride {
     pub dir_y: i32,
 }
 
-/// Resolves page line-jump controls, falling back to the No Style stylesheet then built-ins.
 pub fn page_jump_settings(
     package: &VsdxPackage,
     resolver: &Resolver<'_>,
@@ -63,7 +58,6 @@ pub fn page_jump_settings(
     }
 }
 
-/// Reads a cached connector override cell, falling back to the No Style stylesheet.
 pub fn connector_override(package: &VsdxPackage, resolved: &ResolvedShape, name: &str) -> i32 {
     crate::paint::number(resolved, name)
         .or_else(|| no_style_number(package, name))
@@ -86,7 +80,6 @@ pub(crate) fn no_style_number(package: &VsdxPackage, name: &str) -> Option<f64> 
     no_style_chain(package, sheet, name, 0)
 }
 
-/// Detects connector crossings and splices the winning bridge into each route path.
 pub fn apply_line_jumps(
     primitives: &mut [Primitive],
     overrides: &[ConnectorJumpOverride],
@@ -104,16 +97,11 @@ pub fn apply_line_jumps(
     let mut jumps: BTreeMap<usize, Vec<PlacedJump>> = BTreeMap::new();
     let segments = route_segments(&routes);
     let index = SegmentIndex::new(&segments);
-    let mut remaining = MAX_CROSSING_CANDIDATES;
     for (segment_index, segment) in segments.iter().enumerate() {
-        let completed = index.overlapping(&segments, segment.bounds, &mut |other_index| {
+        index.overlapping(&segments, segment.bounds, &mut |other_index| {
             if other_index <= segment_index || segments[other_index].route == segment.route {
                 return true;
             }
-            if remaining == 0 {
-                return false;
-            }
-            remaining -= 1;
             let other = &segments[other_index];
             let Some(crossing) = crossing(&routes, segment, other) else {
                 return true;
@@ -142,9 +130,6 @@ pub fn apply_line_jumps(
             }
             true
         });
-        if !completed {
-            break;
-        }
     }
     for (index, mut placed) in jumps {
         if let Some(path) = shape_mut(primitives, &routes[index].id) {
@@ -981,6 +966,58 @@ mod tests {
             .collect::<Vec<_>>();
         apply_line_jumps(&mut primitives, &overrides, &settings(1));
         let Primitive::Shape { path, .. } = &primitives[1] else {
+            unreachable!()
+        };
+        assert!(
+            path.iter()
+                .any(|command| matches!(command, GeometryPathCommand::Quad { .. }))
+        );
+    }
+
+    #[test]
+    fn apply_preserves_late_crossings_after_many_collinear_candidates() {
+        let count = 1_416;
+        let mut primitives = (0..count)
+            .map(|index| Primitive::Shape {
+                id: format!("horizontal-{index}"),
+                z_order: index as u32,
+                path: vec![
+                    GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                    GeometryPathCommand::Line { x: 2.0, y: 0.0 },
+                ],
+                fill: None,
+                stroke: Some(stroke()),
+                transform: crate::Affine::identity(),
+            })
+            .collect::<Vec<_>>();
+        primitives.push(Primitive::Shape {
+            id: "vertical".into(),
+            z_order: count as u32,
+            path: vec![
+                GeometryPathCommand::Move { x: 1.0, y: -1.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+            ],
+            fill: None,
+            stroke: Some(stroke()),
+            transform: crate::Affine::identity(),
+        });
+        let overrides = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Shape { id, .. } => Some(ConnectorJumpOverride {
+                    id: id.clone(),
+                    code: 0,
+                    style: 0,
+                    dir_x: 0,
+                    dir_y: 0,
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        apply_line_jumps(&mut primitives, &overrides, &settings(1));
+
+        let Primitive::Shape { path, .. } = &primitives[count - 1] else {
             unreachable!()
         };
         assert!(
