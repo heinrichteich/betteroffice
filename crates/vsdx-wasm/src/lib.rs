@@ -77,6 +77,28 @@ impl VsdxRenderer {
         serde_json::to_string(&layers).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = validateJson)]
+    pub fn validate_json(&self, document: &VsdxDocument) -> Result<String, JsValue> {
+        let package = document.session().package().map_err(js_error)?;
+        let report = vsdx_validate::validate_package(&package);
+        serde_json::to_string(&report.issues).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = validatePageJson)]
+    pub fn validate_page_json(
+        &self,
+        document: &VsdxDocument,
+        page_index: u32,
+    ) -> Result<String, JsValue> {
+        let package = document.session().package().map_err(js_error)?;
+        let page_part = package
+            .page_part_paths
+            .get(page_index as usize)
+            .ok_or_else(|| JsValue::from_str("page index is outside the document"))?;
+        let issues = vsdx_validate::validate_page(&package, page_part);
+        serde_json::to_string(&issues).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = setLayerVisible)]
     pub fn set_layer_visible(&mut self, page_part: &str, index: u32, visible: bool) {
         self.renderer.set_layer_override(page_part, index, visible);

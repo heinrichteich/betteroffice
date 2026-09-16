@@ -279,6 +279,7 @@ dependencies = [
  "betteroffice-vsdx-eval",
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-resolve",
+ "betteroffice-vsdx-validate",
 ]
 
 [[package]]
@@ -361,6 +362,17 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "betteroffice-vsdx-validate"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-vsdx-formula",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1623,6 +1635,7 @@ dependencies = [
  "betteroffice-vsdx-edit",
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-render",
+ "betteroffice-vsdx-validate",
  "serde_json",
  "wasm-bindgen",
  "yrs",

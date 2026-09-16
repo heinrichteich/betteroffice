@@ -14,6 +14,7 @@ categories = ["parser-implementations"]
 [dependencies]
 vsdx-parse.workspace = true
 vsdx-resolve.workspace = true
+vsdx-validate = { workspace = true }
 vsdx-eval.workspace = true
 vsdx-edit.workspace = true
 
