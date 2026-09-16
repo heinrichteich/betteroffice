@@ -3,11 +3,12 @@ import type { ShapeDataType } from './shapeData';
 import type { DiagramSnapshot, FormulaShapeDraft, ShapeSnapshot } from './types';
 import type { DiagramHandle } from './wasm/loader';
 
-/** One imported table: column names from the first grid row, rows keyed by the key column. */
+/** One imported table: every grid row is kept in `records`; `rows` is the view under the key column. */
 export interface DataTable {
   name: string;
   columns: string[];
   keyColumn: string;
+  records: Array<Record<string, string>>;
   rows: DataTableRow[];
   skippedRows: number;
 }
@@ -81,18 +82,26 @@ export function tableFromGrid(grid: string[][], name: string, keyColumn?: string
   }));
   const resolvedKey = keyColumn ?? columns[0];
   if (!columns.includes(resolvedKey)) throw new Error(`key column "${keyColumn}" is not in data table "${name}"`);
-  const rows: DataTableRow[] = [];
-  let skippedRows = 0;
+  const records: Array<Record<string, string>> = [];
   for (const cells of grid.slice(1)) {
     if (cells.every((cell) => cell.trim() === '')) continue;
     const values: Record<string, string> = {};
     columns.forEach((column, index) => { values[column] = (cells[index] ?? '').trim(); });
-    const key = values[resolvedKey] ?? '';
-    if (key === '') { skippedRows += 1; continue; }
-    if (rows.some((row) => row.key === key)) { skippedRows += 1; continue; }
+    records.push(values);
+  }
+  return keyedTable(name, columns, records, resolvedKey);
+}
+
+function keyedTable(name: string, columns: string[], records: Array<Record<string, string>>, keyColumn: string): DataTable {
+  const rows: DataTableRow[] = [];
+  const seen = new Set<string>();
+  for (const values of records) {
+    const key = values[keyColumn] ?? '';
+    if (key === '' || seen.has(key)) continue;
+    seen.add(key);
     rows.push({ key, values });
   }
-  return { name, columns, keyColumn: resolvedKey, rows, skippedRows };
+  return { name, columns, keyColumn, records, rows, skippedRows: records.length - rows.length };
 }
 
 /** Parse csv text into a table; delimiter is the most common of comma, semicolon, tab. */
@@ -158,18 +167,11 @@ function dedupeColumns(columns: string[]): string[] {
   });
 }
 
-/** Re-key an imported table on another column, dropping keyless and duplicate rows. */
+/** Re-key an imported table on another column; every imported row stays available. */
 export function rekeyTable(table: DataTable, keyColumn: string): DataTable {
   if (!table.columns.includes(keyColumn)) throw new Error(`key column "${keyColumn}" is not in data table "${table.name}"`);
   if (keyColumn === table.keyColumn) return table;
-  const rows: DataTableRow[] = [];
-  let skippedRows = 0;
-  for (const row of table.rows) {
-    const key = row.values[keyColumn] ?? '';
-    if (key === '' || rows.some((entry) => entry.key === key)) { skippedRows += 1; continue; }
-    rows.push({ key, values: row.values });
-  }
-  return { ...table, keyColumn, rows, skippedRows: table.skippedRows + skippedRows };
+  return keyedTable(table.name, table.columns, table.records, keyColumn);
 }
 
 /** Zero-based column index to A1 letters. */
@@ -229,15 +231,21 @@ export function planColumnMapping(shape: ShapeSnapshot | null, table: DataTable)
   return { mapped, unmappedColumns };
 }
 
-/** Bookkeeping shape name for one imported table. */
-export function linkShapeName(tableName: string): string {
-  const sanitized = tableName.replace(/\s+/g, ' ').trim().slice(0, 60) || 'Table';
+/** Identity of an imported table: its kind, file and sheet, independent of the key column. */
+export function bindingSourceId(source: DataBindingSource): string {
+  return JSON.stringify([source.kind, source.name, source.sheet ?? null]);
+}
+
+/** Bookkeeping shape name for one imported table; identity lives in the document, not in this label. */
+export function linkShapeName(source: DataBindingSource): string {
+  const label = source.sheet === null ? source.name : `${source.name} [${source.sheet}]`;
+  const sanitized = label.replace(/\s+/g, ' ').trim().slice(0, 60) || 'Table';
   return `${LINK_SHAPE_PREFIX} ${sanitized}`;
 }
 
 /** Draft cells for the invisible link shape carrying the binding document. */
-export function bindingDocCells(doc: DataBindingDoc, tableName: string): FormulaShapeDraft['cells'] {
-  if (doc.bindings.length > MAX_BIND_CELLS) throw new Error(`data binding for "${tableName}" exceeds ${MAX_BIND_CELLS} links`);
+export function bindingDocCells(doc: DataBindingDoc): FormulaShapeDraft['cells'] {
+  if (doc.bindings.length > MAX_BIND_CELLS) throw new Error(`data binding for "${doc.source.name}" exceeds ${MAX_BIND_CELLS} links`);
   const property = (row: string, cell: string, formula: string) => ({
     locator: { section: 'Property', rowName: row, cellName: cell }, name: cell, formula,
   });
@@ -303,21 +311,15 @@ function bindRowOrder(rowName: string | null): number {
   return Number.isFinite(order) ? order : Number.MAX_SAFE_INTEGER;
 }
 
-/** Locate the link shape for a table anywhere in the snapshot. */
-export function findBindingShape(snapshot: DiagramSnapshot, tableName: string): ShapeSnapshot | null {
-  const wanted = linkShapeName(tableName);
+/** Locate the link shape whose stored source matches, anywhere in the snapshot. */
+export function findBindingShape(snapshot: DiagramSnapshot, source: DataBindingSource): ShapeSnapshot | null {
+  const wanted = bindingSourceId(source);
   for (const page of snapshot.pages) {
-    const found = findNamedShape(page.shapes, wanted);
-    if (found) return found;
-  }
-  return null;
-}
-
-function findNamedShape(shapes: ShapeSnapshot[], name: string): ShapeSnapshot | null {
-  for (const shape of shapes) {
-    if (shape.name === name) return shape;
-    const nested = findNamedShape(shape.children, name);
-    if (nested) return nested;
+    for (const shape of collectShapes(page.shapes)) {
+      if (!shape.name?.startsWith(`${LINK_SHAPE_PREFIX} `)) continue;
+      const doc = parseBindingDoc(shape);
+      if (doc && bindingSourceId(doc.source) === wanted) return shape;
+    }
   }
   return null;
 }
@@ -351,21 +353,25 @@ function collectShapes(shapes: ShapeSnapshot[]): ShapeSnapshot[] {
   return shapes.flatMap((shape) => [shape, ...collectShapes(shape.children)]);
 }
 
-/** Persist the binding document, replacing the previous link shape when present. */
-export function writeBindingDoc(handle: DiagramHandle, snapshot: DiagramSnapshot, tableName: string, doc: DataBindingDoc): string {
-  if (snapshot.pages.length === 0) throw new Error(`cannot store data binding for "${tableName}" in a diagram without pages`);
+/** Persist the binding document: the replacement is built and added before the previous one is dropped. */
+export function writeBindingDoc(handle: DiagramHandle, snapshot: DiagramSnapshot, doc: DataBindingDoc): string {
+  if (snapshot.pages.length === 0) throw new Error(`cannot store data binding for "${doc.source.name}" in a diagram without pages`);
+  const cells = bindingDocCells(doc);
+  const wanted = bindingSourceId(doc.source);
+  const receipt = handle.addShape(snapshot.pages[0].id, { name: linkShapeName(doc.source), cells });
   for (const page of snapshot.pages) {
     for (const shape of collectShapes(page.shapes)) {
-      if (shape.name === linkShapeName(tableName)) handle.deleteShape(page.id, shape.id);
+      if (shape.id === receipt.shapeId || !shape.name?.startsWith(`${LINK_SHAPE_PREFIX} `)) continue;
+      const existing = parseBindingDoc(shape);
+      if (existing && bindingSourceId(existing.source) === wanted) handle.deleteShape(page.id, shape.id);
     }
   }
-  const receipt = handle.addShape(snapshot.pages[0].id, { name: linkShapeName(tableName), cells: bindingDocCells(doc, tableName) });
   return receipt.shapeId;
 }
 
-/** Read the stored binding document for a table; null when never bound. */
-export function readBindingDoc(snapshot: DiagramSnapshot, tableName: string): DataBindingDoc | null {
-  return parseBindingDoc(findBindingShape(snapshot, tableName));
+/** Read the stored binding document for a source; null when never bound. */
+export function readBindingDoc(snapshot: DiagramSnapshot, source: DataBindingSource): DataBindingDoc | null {
+  return parseBindingDoc(findBindingShape(snapshot, source));
 }
 
 function refusalReason(error: unknown): string {
@@ -399,18 +405,17 @@ export function bindRow(handle: DiagramHandle, snapshot: DiagramSnapshot, table:
   const shape = page ? findShapeById(page.shapes, shapeId) : null;
   if (!page || !shape) throw new Error(`shape "${shapeId}" was not found`);
   const { applied, refused, unmappedColumns, appliedRows } = applyRowValues(handle, pageId, shapeId, shape, table, record);
-  const current = readBindingDoc(handle.snapshot(), table.name) ?? { source, bindings: [] };
-  current.source = source;
+  const current = readBindingDoc(handle.snapshot(), source) ?? { source, bindings: [] };
   const binding: ShapeBinding = { shapeId, pagePart: page.sourcePartPath, sourceId: shape.sourceId, shapeName: shape.name, key, status: 'ok', appliedRows };
   const kept = current.bindings.filter((entry) => entry.shapeId !== shapeId);
   kept.push(binding);
-  writeBindingDoc(handle, handle.snapshot(), table.name, { source, bindings: kept });
+  writeBindingDoc(handle, handle.snapshot(), { source, bindings: kept });
   return { binding, applied, refused, unmappedColumns };
 }
 
 /** Re-apply every binding from an updated table; vanished rows keep their values and turn stale. */
 export function refreshBindings(handle: DiagramHandle, snapshot: DiagramSnapshot, table: DataTable, source: DataBindingSource): RefreshReport {
-  const stored = readBindingDoc(snapshot, table.name);
+  const stored = readBindingDoc(snapshot, source);
   if (!stored) throw new Error(`data table "${table.name}" has no bindings to refresh`);
   const report: RefreshReport = { updated: [], stale: [], removed: [], refused: [], unmappedColumns: [] };
   const kept: ShapeBinding[] = [];
@@ -434,17 +439,17 @@ export function refreshBindings(handle: DiagramHandle, snapshot: DiagramSnapshot
       if (!report.unmappedColumns.includes(column)) report.unmappedColumns.push(column);
     }
   }
-  writeBindingDoc(handle, handle.snapshot(), table.name, { source, bindings: kept });
+  writeBindingDoc(handle, handle.snapshot(), { source, bindings: kept });
   return report;
 }
 
 /** Drop a shape's binding; its values stay untouched. */
-export function unbindRow(handle: DiagramHandle, snapshot: DiagramSnapshot, tableName: string, shapeId: string): boolean {
-  const stored = readBindingDoc(snapshot, tableName);
+export function unbindRow(handle: DiagramHandle, snapshot: DiagramSnapshot, source: DataBindingSource, shapeId: string): boolean {
+  const stored = readBindingDoc(snapshot, source);
   if (!stored) return false;
   const kept = stored.bindings.filter((binding) => binding.shapeId !== shapeId);
   if (kept.length === stored.bindings.length) return false;
-  writeBindingDoc(handle, handle.snapshot(), tableName, { source: stored.source, bindings: kept });
+  writeBindingDoc(handle, handle.snapshot(), { source: stored.source, bindings: kept });
   return true;
 }
 

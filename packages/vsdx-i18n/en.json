@@ -90,7 +90,7 @@
     "importAction": "Import",
     "noTable": "Import a spreadsheet or CSV file to link its rows to shapes.",
     "tableSummary": "{rows} rows, {columns} columns from {name}",
-    "skippedRows": "{count} rows had no key and were skipped.",
+    "skippedRows": "{count} rows have no unique {column} value; choose another key column to reach them.",
     "linkHeading": "Link a row to the selected shape",
     "noSelection": "Select a shape on the canvas first.",
     "rowLabel": "Table row",

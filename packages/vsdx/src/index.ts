@@ -3,7 +3,7 @@ export type { CanvasImageResolver, ModelPoint, PageCanvasLike, PaintPageOptions 
 export { formatOptions, quoteShapeDataValue, shapeDataRows, shapeDataTypeFromValue, shapeDataValueFormula, unquoteFormula, visibleShapeDataRows } from './shapeData';
 export type { ShapeDataRow, ShapeDataType } from './shapeData';
 export {
-  bindingMarksForShape, bindRow, bindingValueFormula, columnLetters, findBindingShape, findBoundShape, linkShapeName,
+  bindingMarksForShape, bindRow, bindingSourceId, bindingValueFormula, columnLetters, findBindingShape, findBoundShape, linkShapeName,
   bindingDocCells, parseBindingDoc, planColumnMapping, readBindingDoc, readGridFromWorkbook,
   refreshBindings, rekeyTable, tableFromCsv, tableFromGrid, tableFromWorkbook, unbindRow, writeBindingDoc,
 } from './dataBinding';

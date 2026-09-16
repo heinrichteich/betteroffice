@@ -4,8 +4,8 @@ import { resolve } from 'node:path';
 import {
   bindingMarksForShape, bindRow, bindingValueFormula, columnLetters, findBindingShape, initWasm, linkShapeName,
   openDiagram, parseBindingDoc, planColumnMapping, readBindingDoc, readGridFromWorkbook,
-  refreshBindings, rekeyTable, shapeDataRows, tableFromCsv, tableFromGrid, unbindRow,} from './index';
-import type { DataBindingSource, DataTable, DiagramHandle, FormulaShapeDraft } from './index';
+  refreshBindings, rekeyTable, shapeDataRows, tableFromCsv, tableFromGrid, unbindRow, writeBindingDoc,} from './index';
+import type { DataBindingSource, DataTable, DiagramHandle, FormulaShapeDraft, ShapeBinding } from './index';
 
 const root = resolve(import.meta.dir, '../../..');
 let foundation: Uint8Array;
@@ -68,7 +68,7 @@ describe('table import', () => {
     expect(table.skippedRows).toBe(0);
   });
 
-  test('trims cells, drops blank rows and duplicate keys', () => {
+  test('trims cells, drops blank rows and keeps unkeyable rows out of the view', () => {
     const table = tableFromGrid([
       ['Device', 'Owner'],
       ['  SRV-01  ', ' Team Atlas '],
@@ -79,6 +79,7 @@ describe('table import', () => {
     expect(table.rows.length).toBe(1);
     expect(table.rows[0].values.Owner).toBe('Team Atlas');
     expect(table.skippedRows).toBe(2);
+    expect(table.records.length).toBe(3);
   });
 
   test('dedupes columns and names blank headers', () => {
@@ -111,6 +112,21 @@ describe('table import', () => {
     expect(() => rekeyTable(deviceTable(), 'Missing')).toThrow('key column');
   });
 
+  test('re-keying recovers rows the first column could not key', () => {
+    const table = tableFromGrid([
+      ['Device', 'Owner'],
+      ['SRV-01', 'Team Atlas'],
+      ['', 'Team Beacon'],
+      ['SRV-01', 'Team Cartwheel'],
+    ], 'Devices');
+    expect(table.rows.map((row) => row.key)).toEqual(['SRV-01']);
+    expect(table.skippedRows).toBe(2);
+    const rekeyed = rekeyTable(table, 'Owner');
+    expect(rekeyed.rows.map((row) => row.key)).toEqual(['Team Atlas', 'Team Beacon', 'Team Cartwheel']);
+    expect(rekeyed.skippedRows).toBe(0);
+    expect(rekeyTable(rekeyed, 'Device').rows.map((row) => row.key)).toEqual(['SRV-01']);
+  });
+
   test('maps typed value formulas and keeps free text visible', () => {
     expect(bindingValueFormula('number', '12')).toBe('12');
     expect(bindingValueFormula('number', 'R7')).toBe('"R7"');
@@ -128,8 +144,9 @@ describe('table import', () => {
   });
 
   test('sanitizes link shape names', () => {
-    expect(linkShapeName('  Devices 2026  ')).toBe('BO_DataLink Devices 2026');
-    expect(linkShapeName('')).toBe('BO_DataLink Table');
+    expect(linkShapeName({ ...SOURCE, name: '  Devices 2026  ' })).toBe('BO_DataLink Devices 2026');
+    expect(linkShapeName({ ...SOURCE, name: '' })).toBe('BO_DataLink Table');
+    expect(linkShapeName({ ...SOURCE, kind: 'xlsx', name: 'Devices', sheet: 'Q1' })).toBe('BO_DataLink Devices [Q1]');
   });
 });
 
@@ -163,7 +180,7 @@ describe('row binding', () => {
       const shape = diagram.snapshot().pages[0].shapes.find((candidate) => candidate.id === shapeId)!;
       const values = Object.fromEntries(shapeDataRows(shape).map((row) => [row.rowName, row.displayValue]));
       expect(values).toMatchObject({ Device: 'SRV-01', Owner: 'Team Atlas', Rack: 'R7', Count: '12' });
-      const doc = readBindingDoc(diagram.snapshot(), 'Devices');
+      const doc = readBindingDoc(diagram.snapshot(), SOURCE);
       expect(doc?.bindings.map((binding) => binding.key)).toEqual(['SRV-01']);
       expect(doc?.bindings[0].appliedRows.sort()).toEqual(['Count', 'Device', 'Owner', 'Rack']);
     } finally { diagram.dispose(); }
@@ -174,7 +191,7 @@ describe('row binding', () => {
     try {
       expect(() => bindRow(diagram, diagram.snapshot(), deviceTable(), SOURCE, pageId, shapeId, 'SRV-99')).toThrow('not in data table');
       expect(() => bindRow(diagram, diagram.snapshot(), deviceTable(), SOURCE, pageId, 'page:1:shape:999', 'SRV-01')).toThrow('was not found');
-      expect(readBindingDoc(diagram.snapshot(), 'Devices')).toBeNull();
+      expect(readBindingDoc(diagram.snapshot(), SOURCE)).toBeNull();
     } finally { diagram.dispose(); }
   });
 
@@ -217,9 +234,9 @@ describe('row binding', () => {
     const { diagram, pageId, shapeId } = openWithDeviceShape(31005);
     try {
       bindRow(diagram, diagram.snapshot(), deviceTable(), SOURCE, pageId, shapeId, 'SRV-01');
-      expect(unbindRow(diagram, diagram.snapshot(), 'Devices', shapeId)).toBe(true);
-      expect(unbindRow(diagram, diagram.snapshot(), 'Devices', shapeId)).toBe(false);
-      expect(readBindingDoc(diagram.snapshot(), 'Devices')?.bindings).toEqual([]);
+      expect(unbindRow(diagram, diagram.snapshot(), SOURCE, shapeId)).toBe(true);
+      expect(unbindRow(diagram, diagram.snapshot(), SOURCE, shapeId)).toBe(false);
+      expect(readBindingDoc(diagram.snapshot(), SOURCE)?.bindings).toEqual([]);
       const shape = diagram.snapshot().pages[0].shapes.find((candidate) => candidate.id === shapeId)!;
       expect(shapeDataRows(shape).find((row) => row.rowName === 'Owner')?.displayValue).toBe('Team Atlas');
     } finally { diagram.dispose(); }
@@ -257,8 +274,8 @@ describe('refresh', () => {
       const shape = diagram.snapshot().pages[0].shapes.find((candidate) => candidate.id === shapeId)!;
       const values = Object.fromEntries(shapeDataRows(shape).map((row) => [row.rowName, row.displayValue]));
       expect(values).toMatchObject({ Device: 'SRV-01', Owner: 'Team Atlas', Rack: 'R7', Count: '12' });
-      expect(readBindingDoc(diagram.snapshot(), 'Devices')?.bindings[0].status).toBe('stale');
-      expect(bindingMarksForShape(readBindingDoc(diagram.snapshot(), 'Devices'), shapeId)).toEqual({ linked: ['Device', 'Owner', 'Rack', 'Count'], stale: true });
+      expect(readBindingDoc(diagram.snapshot(), SOURCE)?.bindings[0].status).toBe('stale');
+      expect(bindingMarksForShape(readBindingDoc(diagram.snapshot(), SOURCE), shapeId)).toEqual({ linked: ['Device', 'Owner', 'Rack', 'Count'], stale: true });
     } finally { diagram.dispose(); }
   });
 
@@ -274,7 +291,57 @@ describe('refresh', () => {
       diagram.deleteShape(pageId, first.shapeId);
       const report = refreshBindings(diagram, diagram.snapshot(), table, SOURCE);
       expect(report.removed).toEqual([{ shapeId: first.shapeId, key: 'SRV-01', reason: 'shape is gone' }]);
-      expect(readBindingDoc(diagram.snapshot(), 'Devices')?.bindings.map((binding) => binding.key)).toEqual(['SRV-02']);
+      expect(readBindingDoc(diagram.snapshot(), SOURCE)?.bindings.map((binding) => binding.key)).toEqual(['SRV-02']);
+    } finally { diagram.dispose(); }
+  });
+});
+
+describe('link document identity', () => {
+  test('tables whose names share the truncated label keep separate documents', () => {
+    const diagram = openDiagram(foundation, { clientId: 31012 });
+    try {
+      const pageId = diagram.snapshot().pages[0].id;
+      const first = diagram.addShape(pageId, { name: 'First', cells: propertyShapeCells([{ row: 'Device', value: '' }]) });
+      const second = diagram.addShape(pageId, { name: 'Second', cells: propertyShapeCells([{ row: 'Device', value: '' }]) });
+      const table = tableFromGrid([['Device'], ['SRV-01'], ['SRV-02']], 'Devices');
+      const shared = 'a'.repeat(60);
+      const one: DataBindingSource = { kind: 'csv', name: `${shared}-one.csv`, sheet: null, keyColumn: 'Device' };
+      const two: DataBindingSource = { ...one, name: `${shared}-two.csv` };
+      expect(linkShapeName(one)).toBe(linkShapeName(two));
+      bindRow(diagram, diagram.snapshot(), table, one, pageId, first.shapeId, 'SRV-01');
+      bindRow(diagram, diagram.snapshot(), table, two, pageId, second.shapeId, 'SRV-02');
+      expect(readBindingDoc(diagram.snapshot(), one)?.bindings.map((binding) => binding.key)).toEqual(['SRV-01']);
+      expect(readBindingDoc(diagram.snapshot(), two)?.bindings.map((binding) => binding.key)).toEqual(['SRV-02']);
+    } finally { diagram.dispose(); }
+  });
+
+  test('two sheets of one workbook keep separate documents', () => {
+    const diagram = openDiagram(foundation, { clientId: 31013 });
+    try {
+      const pageId = diagram.snapshot().pages[0].id;
+      const first = diagram.addShape(pageId, { name: 'First', cells: propertyShapeCells([{ row: 'Device', value: '' }]) });
+      const second = diagram.addShape(pageId, { name: 'Second', cells: propertyShapeCells([{ row: 'Device', value: '' }]) });
+      const table = tableFromGrid([['Device'], ['SRV-01'], ['SRV-02']], 'devices.xlsx');
+      const q1: DataBindingSource = { kind: 'xlsx', name: 'devices.xlsx', sheet: 'Q1', keyColumn: 'Device' };
+      const q2: DataBindingSource = { ...q1, sheet: 'Q2' };
+      bindRow(diagram, diagram.snapshot(), table, q1, pageId, first.shapeId, 'SRV-01');
+      bindRow(diagram, diagram.snapshot(), table, q2, pageId, second.shapeId, 'SRV-02');
+      expect(readBindingDoc(diagram.snapshot(), q1)?.bindings.map((binding) => binding.shapeId)).toEqual([first.shapeId]);
+      expect(readBindingDoc(diagram.snapshot(), q2)?.bindings.map((binding) => binding.shapeId)).toEqual([second.shapeId]);
+      expect(refreshBindings(diagram, diagram.snapshot(), table, q1).updated.length).toBe(1);
+      expect(readBindingDoc(diagram.snapshot(), q2)?.bindings.map((binding) => binding.shapeId)).toEqual([second.shapeId]);
+    } finally { diagram.dispose(); }
+  });
+
+  test('a replacement over the link limit leaves the stored document intact', () => {
+    const { diagram, pageId, shapeId } = openWithDeviceShape(31014);
+    try {
+      bindRow(diagram, diagram.snapshot(), deviceTable(), SOURCE, pageId, shapeId, 'SRV-01');
+      const oversized: ShapeBinding[] = Array.from({ length: 2001 }, (_, index) => ({
+        shapeId: `absent:${index}`, pagePart: '', sourceId: 0, shapeName: null, key: `K${index}`, status: 'ok', appliedRows: [],
+      }));
+      expect(() => writeBindingDoc(diagram, diagram.snapshot(), { source: SOURCE, bindings: oversized })).toThrow('exceeds 2000 links');
+      expect(readBindingDoc(diagram.snapshot(), SOURCE)?.bindings.map((binding) => binding.key)).toEqual(['SRV-01']);
     } finally { diagram.dispose(); }
   });
 });
@@ -290,7 +357,7 @@ describe('round-trip', () => {
     const reopened = openDiagram(saved, { clientId: 31010 });
     try {
       const snapshot = reopened.snapshot();
-      const doc = readBindingDoc(snapshot, 'Devices');
+      const doc = readBindingDoc(snapshot, SOURCE);
       expect(doc?.source).toEqual(SOURCE);
       expect(doc?.bindings.length).toBe(1);
       expect(doc?.bindings[0].key).toBe('SRV-02');
@@ -298,13 +365,13 @@ describe('round-trip', () => {
       expect(shape).toBeDefined();
       const values = Object.fromEntries(shapeDataRows(shape!).map((row) => [row.rowName, row.displayValue]));
       expect(values).toMatchObject({ Device: 'SRV-02', Owner: 'Team Beacon', Rack: 'R8', Count: '8' });
-      expect(findBindingShape(snapshot, 'Devices')).not.toBeNull();
-      const reparsed = parseBindingDoc(findBindingShape(snapshot, 'Devices'));
+      expect(findBindingShape(snapshot, SOURCE)).not.toBeNull();
+      const reparsed = parseBindingDoc(findBindingShape(snapshot, SOURCE));
       expect(reparsed?.bindings[0].appliedRows.sort()).toEqual(['Count', 'Device', 'Owner', 'Rack']);
       const refreshed = refreshBindings(reopened, reopened.snapshot(), deviceTable(), SOURCE);
       expect(refreshed.stale).toEqual([]);
       expect(refreshed.updated.length).toBe(4);
-      expect(readBindingDoc(reopened.snapshot(), 'Devices')?.bindings[0].shapeId).toBe(shape!.id);
+      expect(readBindingDoc(reopened.snapshot(), SOURCE)?.bindings[0].shapeId).toBe(shape!.id);
     } finally { reopened.dispose(); }
   });
 });

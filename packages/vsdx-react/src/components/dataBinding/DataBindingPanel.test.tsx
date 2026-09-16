@@ -157,6 +157,40 @@ test('imports csv, links a row, and refreshes the binding', async () => {
   expect(mutated).toBe(3);
 });
 
+test('re-importing an updated table refreshes the bound shape data', async () => {
+  const { handle, addTarget } = makeHandle();
+  const targetId = addTarget('Test Server', false);
+  const errors: unknown[] = [];
+  let mutated = 0;
+  const panel = () => (
+    <DataBindingPanel
+      handle={handle as never}
+      snapshot={handle.snapshot()}
+      selection={{ pageId: 'page:1', shapeId: targetId }}
+      onMutated={() => { mutated += 1; }}
+      onError={(error) => errors.push(error)}
+      t={t}
+    />
+  );
+  const view = render(panel());
+  const input = () => view.getByLabelText(t('dataBinding.fileLabel')) as HTMLInputElement;
+  fireEvent.change(input(), { target: { files: [csvFile()] } });
+  await view.findByText(t('dataBinding.tableSummary', { rows: 2, columns: 2, name: 'devices.csv' }));
+  fireEvent.click(view.getByText(t('dataBinding.linkAction')));
+  await view.findByText(t('dataBinding.bindingsHeading'));
+  view.rerender(panel());
+
+  const updated = new File(['Device,Owner\nSRV-01,Team Cartwheel\nSRV-02,Team Beacon\n'], 'devices.csv', { type: 'text/csv' });
+  fireEvent.change(input(), { target: { files: [updated] } });
+  await view.findByRole('status');
+  const owner = () => handle.snapshot().pages[0].shapes.find((shape) => shape.id === targetId)!
+    .cells.find((cell) => cell.locator.row !== null && 'name' in cell.locator.row && cell.locator.row.name === 'Owner');
+  expect(owner()?.formula).toBe('"Team Cartwheel"');
+  expect(view.getByRole('status').textContent).toContain(t('dataBinding.refreshed', { updated: 2 }));
+  expect(mutated).toBe(2);
+  expect(errors).toEqual([]);
+});
+
 test('surfaces guard refusals and unmapped columns instead of swallowing them', async () => {
   const { handle, addTarget } = makeHandle();
   const targetId = addTarget('Guarded Box', true);

@@ -1,5 +1,5 @@
 import { bindRow, readBindingDoc, refreshBindings, rekeyTable, tableFromCsv, unbindRow } from '@betteroffice/vsdx';
-import type { DataBindingSource, DataTable, DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
+import type { DataBindingSource, DataTable, DiagramHandle, DiagramSnapshot, RefreshReport } from '@betteroffice/vsdx';
 import { createT, en } from '@betteroffice/vsdx-i18n';
 import type { TFunction } from '@betteroffice/vsdx-i18n';
 import { useMemo, useState } from 'react';
@@ -22,7 +22,7 @@ export interface DataBindingPanelProps {
   loadXlsxTable?: (file: File) => Promise<LoadedTable>;
   onMutated: () => void;
   onError: (error: unknown) => void;
-  onTableChange?: (table: DataTable | null) => void;
+  onTableChange?: (loaded: LoadedTable | null) => void;
   t?: TFunction;
   className?: string;
 }
@@ -51,25 +51,40 @@ export function DataBindingPanel({ handle, snapshot, selection, loadXlsxTable, o
   const [rowKey, setRowKey] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
   const ready = handle !== null && snapshot !== null;
-  const doc = table && snapshot ? readBindingDoc(snapshot, table.name) : null;
+  const doc = table && source && snapshot ? readBindingDoc(snapshot, source) : null;
 
   const fail = (error: unknown) => { onError(error); };
+  const describeRefresh = (report: RefreshReport): string => {
+    const parts = [translate('dataBinding.refreshed', { updated: report.updated.length })];
+    if (report.stale.length > 0) parts.push(translate('dataBinding.staleBindings', { details: report.stale.map((entry) => entry.key).join(', ') }));
+    if (report.removed.length > 0) parts.push(translate('dataBinding.removedBindings', { details: report.removed.map((entry) => entry.key).join(', ') }));
+    if (report.refused.length > 0) parts.push(translate('dataBinding.refusedColumns', { details: report.refused.map((entry) => `${entry.column}: ${entry.reason}`).join('; ') }));
+    if (report.unmappedColumns.length > 0) parts.push(translate('dataBinding.unmappedColumns', { columns: report.unmappedColumns.join(', ') }));
+    return parts.join(' ');
+  };
+
+  const adopt = (loaded: LoadedTable) => {
+    setTable(loaded.table);
+    setSource(loaded.source);
+    setRowKey(loaded.table.rows[0]?.key ?? '');
+    onTableChange?.(loaded);
+    if (!handle || !snapshot) return;
+    const stored = readBindingDoc(snapshot, loaded.source);
+    if (!stored || stored.bindings.length === 0) return;
+    setNotice(describeRefresh(refreshBindings(handle, snapshot, loaded.table, loaded.source)));
+    onMutated();
+  };
+
   const importFile = async (file: File) => {
     setNotice(null);
     try {
       if (/\.xlsx$/i.test(file.name)) {
         if (!loadXlsxTable) throw new Error(translate('dataBinding.xlsxUnavailable'));
-        const loaded = await loadXlsxTable(file);
-        setTable(loaded.table);
-        setSource(loaded.source);
-        setRowKey(loaded.table.rows[0]?.key ?? '');
-        onTableChange?.(loaded.table);
+        adopt(await loadXlsxTable(file));
       } else {
-        const parsed = tableFromCsv(await file.text(), file.name || 'table.csv');
-        setTable(parsed);
-        setSource({ kind: 'csv', name: file.name || 'table.csv', sheet: null, keyColumn: parsed.keyColumn });
-        setRowKey(parsed.rows[0]?.key ?? '');
-        onTableChange?.(parsed);
+        const name = file.name || 'table.csv';
+        const parsed = tableFromCsv(await file.text(), name);
+        adopt({ table: parsed, source: { kind: 'csv', name, sheet: null, keyColumn: parsed.keyColumn } });
       }
     } catch (error) { fail(error); }
   };
@@ -78,9 +93,11 @@ export function DataBindingPanel({ handle, snapshot, selection, loadXlsxTable, o
     if (!table || !source) return;
     try {
       const rekeyed = rekeyTable(table, keyColumn);
+      const next = { ...source, keyColumn };
       setTable(rekeyed);
-      setSource({ ...source, keyColumn });
+      setSource(next);
       setRowKey(rekeyed.rows[0]?.key ?? '');
+      onTableChange?.({ table: rekeyed, source: next });
     } catch (error) { fail(error); }
   };
 
@@ -100,21 +117,15 @@ export function DataBindingPanel({ handle, snapshot, selection, loadXlsxTable, o
   const refresh = () => {
     if (!handle || !snapshot || !table || !source) return;
     try {
-      const report = refreshBindings(handle, snapshot, table, source);
-      const parts = [translate('dataBinding.refreshed', { updated: report.updated.length })];
-      if (report.stale.length > 0) parts.push(translate('dataBinding.staleBindings', { details: report.stale.map((entry) => entry.key).join(', ') }));
-      if (report.removed.length > 0) parts.push(translate('dataBinding.removedBindings', { details: report.removed.map((entry) => entry.key).join(', ') }));
-      if (report.refused.length > 0) parts.push(translate('dataBinding.refusedColumns', { details: report.refused.map((entry) => `${entry.column}: ${entry.reason}`).join('; ') }));
-      if (report.unmappedColumns.length > 0) parts.push(translate('dataBinding.unmappedColumns', { columns: report.unmappedColumns.join(', ') }));
-      setNotice(parts.join(' '));
+      setNotice(describeRefresh(refreshBindings(handle, snapshot, table, source)));
       onMutated();
     } catch (error) { fail(error); }
   };
 
   const unlink = (shapeId: string) => {
-    if (!handle || !snapshot || !table) return;
+    if (!handle || !snapshot || !source) return;
     try {
-      if (unbindRow(handle, snapshot, table.name, shapeId)) onMutated();
+      if (unbindRow(handle, snapshot, source, shapeId)) onMutated();
     } catch (error) { fail(error); }
   };
 
@@ -136,7 +147,7 @@ export function DataBindingPanel({ handle, snapshot, selection, loadXlsxTable, o
           {table && source && (
             <>
               <p style={styles.hint}>{translate('dataBinding.tableSummary', { rows: table.rows.length, columns: table.columns.length, name: table.name })}</p>
-              {table.skippedRows > 0 && <p style={styles.hint}>{translate('dataBinding.skippedRows', { count: table.skippedRows })}</p>}
+              {table.skippedRows > 0 && <p style={styles.hint}>{translate('dataBinding.skippedRows', { count: table.skippedRows, column: table.keyColumn })}</p>}
               <label style={styles.label} htmlFor="data-binding-key">{translate('dataBinding.keyColumnLabel')}</label>
               <select id="data-binding-key" style={styles.input} value={table.keyColumn} onChange={(event) => changeKeyColumn(event.target.value)}>
                 {table.columns.map((column) => <option key={column} value={column}>{column}</option>)}

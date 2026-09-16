@@ -83,7 +83,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [shapesCollapsed, setShapesCollapsed] = useState(false);
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [contextMenu, setContextMenu] = useState<{ top: number; left: number } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ top: number; left: number; pageId: string; shapeId: string } | null>(null);
   const pointerRef = useRef<DragStart | null>(null);
   const dragPreviewRef = useRef<ModelPoint | null>(null);
   const dragSnapRef = useRef(false);
@@ -96,6 +96,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   onErrorRef.current = onError;
   collaborationRef.current = collaboration;
   useEffect(() => { onSelectionChangeRef.current?.(selection); }, [selection]);
+  useEffect(() => {
+    setContextMenu((menu) => (menu && selection && menu.pageId === selection.pageId && menu.shapeId === selection.shapeId ? menu : null));
+  }, [selection]);
 
   const reportError = useCallback((value: unknown) => { const next = value instanceof Error ? value : new Error(String(value)); setError(next.message); onErrorRef.current?.(next); }, []);
   const refresh = useCallback((requestedPage?: number, notify = false) => {
@@ -409,7 +412,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       }
       const active = selectionRef.current;
       if (!active || active.pageId !== next.pageId || active.shapeId !== next.shapeId) setSelection(next);
-      setContextMenu({ top: event.clientY, left: event.clientX });
+      setContextMenu({ top: event.clientY, left: event.clientX, pageId: next.pageId, shapeId: next.shapeId });
     } catch (value) { reportError(value); }
   };
   const commandsRef = useRef<RibbonCommands | null>(null);
@@ -511,7 +514,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
         <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
       </div>
-      {contextMenu && selection && <ShapeContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
+      {contextMenu && selection && contextMenu.pageId === selection.pageId && contextMenu.shapeId === selection.shapeId
+        && <ShapeContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
       {integrity.length > 0 && <section role="alert" style={styles.integrity}><strong>{t('diagnostics.integrityHeading')}</strong>{integrity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</section>}
       {fidelity.length > 0 && <details style={styles.fidelity}><summary>{t('diagnostics.fidelityHeading')}</summary>{fidelity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</details>}
       {error && <div role="alert" style={styles.error}>{error}</div>}

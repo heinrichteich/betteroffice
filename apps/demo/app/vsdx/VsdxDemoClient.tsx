@@ -4,8 +4,8 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { bindingMarksForShape, CollaborationProvider, initWasm, openDiagram, readBindingDoc } from "@betteroffice/vsdx";
-import type { CollaborationUser, DataTable, VsdxFontFace } from "@betteroffice/vsdx";
-import type { DataBindingSelection, VsdxEditorApi, VsdxShapeSelection } from "@betteroffice/vsdx-react";
+import type { CollaborationUser, VsdxFontFace } from "@betteroffice/vsdx";
+import type { DataBindingSelection, LoadedTable, VsdxEditorApi, VsdxShapeSelection } from "@betteroffice/vsdx-react";
 import { loadBundledFontBytes, resolveLastResortFace, resolveMetricCompatFace } from "@betteroffice/fonts";
 import { Logo } from "../components/Logo";
 import { CollaborationControls, COLLAB_RELAY_ORIGIN, useCollabRoom, useDemoRoom, useLeaveRoom, type CollaborationReplica, type CollaborationTransport } from "../collab";
@@ -44,7 +44,7 @@ export function VsdxDemoClient() {
   const [dragging, setDragging] = useState(false);
   const [dataOpen, setDataOpen] = useState(false);
   const [dataError, setDataError] = useState<string | null>(null);
-  const [boundTable, setBoundTable] = useState<DataTable | null>(null);
+  const [boundTable, setBoundTable] = useState<LoadedTable | null>(null);
   const [selection, setSelection] = useState<DataBindingSelection | null>(null);
   const [snapshotVersion, setSnapshotVersion] = useState(0);
   const [editorApi, setEditorApi] = useState<VsdxEditorApi | null>(null);
@@ -119,7 +119,7 @@ export function VsdxDemoClient() {
 
   const dataBindingMarks = useMemo(() => {
     if (!boundTable || !selection || !snapshot) return null;
-    const doc = readBindingDoc(snapshot, boundTable.name);
+    const doc = readBindingDoc(snapshot, boundTable.source);
     if (!doc) return null;
     const marks = bindingMarksForShape(doc, selection.shapeId);
     if (marks.linked.length === 0) return null;

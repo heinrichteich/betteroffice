@@ -57,7 +57,7 @@ The browser React editor renders supported bitmap-only WMF wrappers. Custom brow
 
 Visio drawings (`.vsdx`) and templates (`.vstx`) open in the source-available VSDX core, which is not yet published. Stencils (`.vssx`) and macro-enabled files are not supported.
 
-The editor puts a flat command bar and a searchable thirty-two shape gallery over a focusable canvas with keyboard undo and redo, Delete or Backspace, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus. A Shape Data panel shows and edits the selected shape's custom properties.
+The editor puts a flat command bar and a searchable thirty-two shape gallery over a focusable canvas with keyboard undo and redo, Delete or Backspace, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus. A Shape Data panel shows and edits the selected shape's custom properties. A Data panel imports an `.xlsx` sheet or a `.csv` file and links one of its rows to the selected shape, writing the matching columns into Shape Data; re-importing the table refreshes every linked shape, and a row that has vanished from it keeps its values and is marked stale.
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
