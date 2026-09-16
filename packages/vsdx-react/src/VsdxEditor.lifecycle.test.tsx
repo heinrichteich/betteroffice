@@ -163,7 +163,7 @@ test('a stale paint does not resolve images after a newer paint has taken over',
     api.handle.mediaBytes = (assetId: string) => { mediaBytesCalls.push(assetId); return new Uint8Array(0); };
   }} onError={(error) => { onErrors.push(error); }} />);
   await waitFor(() => expect(refreshApi).toBeDefined());
-  view.container.querySelector('canvas')!.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  view.container.querySelector('canvas[aria-label]')!.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
   paintPageOverride = (_context, _list, _dpr, _scale, options) => {
     const index = call++;
     return new Promise<void>((resolve, reject) => {
@@ -450,7 +450,7 @@ test('drag paints a live preview on the overlay and commits the release geometry
     const originalResize = handle.resizeShape.bind(handle);
     handle.resizeShape = ((...args: [string, string, string, string]) => { resizes.push([...args]); return originalResize(...args); }) as DiagramHandle['resizeShape'];
     await act(async () => { ready!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -515,7 +515,7 @@ test('a drag returning near its start keeps the preview and commit in agreement'
     const originalMove = handle.moveShape.bind(handle);
     handle.moveShape = ((...args: [string, string, string, string]) => { moves.push([...args]); return originalMove(...args); }) as DiagramHandle['moveShape'];
     await act(async () => { ready!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -584,7 +584,7 @@ test('concurrent pointers cannot commit or cancel each other', async () => {
     const originalMove = handle.moveShape.bind(handle);
     handle.moveShape = ((...args: [string, string, string, string]) => { moves.push([...args]); return originalMove(...args); }) as DiagramHandle['moveShape'];
     await act(async () => { ready!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -659,7 +659,7 @@ for (const formulaPins of [false, true]) test(`a handle resize with ${formulaPin
     handle.onUpdate(() => updates.push(handle.snapshot()));
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -736,7 +736,7 @@ test('a rotate grip drag commits the expected angle', async () => {
     }) as DiagramHandle['setCellFormula'];
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -791,7 +791,7 @@ test('a queued rotation preview follows the latest Shift state', async () => {
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -848,7 +848,7 @@ test('hovering handles sets resize and rotation cursors', async () => {
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -889,7 +889,7 @@ test('the overlay paints the selection frame at a zoom other than 1', async () =
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     await act(async () => { ready!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -931,7 +931,7 @@ test('a refused handle resize preserves the pin and size', async () => {
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -988,7 +988,7 @@ test('a handle resize on a move-locked shape commits neither size nor pin', asyn
     handle.resizeShape = ((...args: [string, string, string, string]) => { resizes.push([...args]); return originalResize(...args); }) as DiagramHandle['resizeShape'];
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -1055,7 +1055,7 @@ test('the canvas is focusable and ArrowUp nudges PinY by one screen pixel', asyn
     const originalMove = handle.moveShape.bind(handle);
     handle.moveShape = ((...args: [string, string, string, string]) => { moves.push([...args]); return originalMove(...args); }) as DiagramHandle['moveShape'];
     await act(async () => { ready!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -1097,7 +1097,7 @@ test('Delete removes the selected shape and Escape cancels a drag without a comm
     const originalMove = handle.moveShape.bind(handle);
     handle.moveShape = ((...args: [string, string, string, string]) => { moves.push([...args]); return originalMove(...args); }) as DiagramHandle['moveShape'];
     await act(async () => { ready!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -1157,7 +1157,7 @@ test('typing Delete in the shapes search box keeps the selected shape', async ()
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     await act(async () => { ready!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
     const main = canvases[0] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
     (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
@@ -1342,7 +1342,7 @@ test('a selected control handle paints yellow and drags through the edit session
     const shapeId = (added as unknown as { shapeId: string }).shapeId;
     handle.hitTest = (() => ({ kind: 'shape', shapeId })) as unknown as DiagramHandle['hitTest'];
     await act(async () => { readyControl!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -1442,7 +1442,7 @@ test('a control drag skips guarded cells instead of partially committing', async
     const shapeId = (added as unknown as { shapeId: string }).shapeId;
     handle.hitTest = (() => ({ kind: 'shape', shapeId })) as unknown as DiagramHandle['hitTest'];
     await act(async () => { readyGuarded!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
     const main = canvases[0] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
     (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};

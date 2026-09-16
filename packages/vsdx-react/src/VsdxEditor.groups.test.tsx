@@ -54,7 +54,7 @@ async function clickInsideTheGroup() {
   const hit = handle.hitTest(INSIDE_CHILD.x, INSIDE_CHILD.y);
   const child = bounds(childPoints(handle.layoutPage(0).primitives));
   await act(async () => { ready!.refresh(); });
-  const canvases = view.container.querySelectorAll('canvas');
+  const canvases = (() => { const drawing = view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement; return [drawing, drawing.parentElement?.querySelector('canvas[aria-hidden]') as HTMLCanvasElement]; })();
   const main = canvases[0] as HTMLCanvasElement;
   const overlay = canvases[1] as HTMLCanvasElement;
   main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 816, height: 1056, right: 816, bottom: 1056, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
