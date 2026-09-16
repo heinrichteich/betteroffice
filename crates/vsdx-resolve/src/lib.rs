@@ -1,6 +1,7 @@
 //! Resolved, non-mutating views over `vsdx_parse` sheets.
 
 mod connectivity;
+mod containers;
 mod geometry;
 mod inheritance;
 mod model;
@@ -10,6 +11,7 @@ mod text;
 mod tests;
 
 pub use connectivity::*;
+pub use containers::*;
 pub use geometry::*;
 pub use inheritance::*;
 pub use model::*;

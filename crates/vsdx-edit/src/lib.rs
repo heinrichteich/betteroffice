@@ -959,6 +959,312 @@ mod tests {
         );
     }
 
+    fn container_pair() -> DiagramSession {
+        let session = session();
+        for (shape, pin_x, pin_y, width, height, loc_pin) in [
+            ("page:1:shape:1", "5", "4", "4", "4", "2"),
+            ("page:1:shape:2", "5", "4", "1", "1", "0.5"),
+        ] {
+            for (name, formula) in [
+                ("PinX", pin_x),
+                ("PinY", pin_y),
+                ("Width", width),
+                ("Height", height),
+                ("LocPinX", loc_pin),
+                ("LocPinY", loc_pin),
+            ] {
+                add_shape_cell(&session, shape, name, None, None, Some(formula), None);
+            }
+        }
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "Relationships",
+            None,
+            None,
+            Some("SUM(DEPENDSON(1,Sheet.2!SheetRef()))"),
+            None,
+        );
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "Value",
+            Some("User"),
+            Some(CellRow::Name("msvStructureType".into())),
+            None,
+            Some("Container"),
+        );
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "Value",
+            Some("User"),
+            Some(CellRow::Name("msvSDContainerMargin".into())),
+            None,
+            Some("0.25"),
+        );
+        add_shape_cell(
+            &session,
+            "page:1:shape:2",
+            "Relationships",
+            None,
+            None,
+            Some("SUM(DEPENDSON(4,Sheet.1!SheetRef()))"),
+            None,
+        );
+        session
+    }
+
+    fn shape_formula(session: &DiagramSession, shape: &str, name: &str) -> Option<String> {
+        session.snapshot().unwrap().pages[0]
+            .shapes
+            .iter()
+            .find(|candidate| candidate.id == shape)
+            .and_then(|shape| {
+                shape
+                    .cells
+                    .iter()
+                    .find(|cell| cell.name == name)
+                    .and_then(|cell| cell.formula.clone())
+            })
+    }
+
+    #[test]
+    fn container_move_shifts_members_in_one_undo() {
+        let session = container_pair();
+        let before = session.snapshot().unwrap();
+        let receipts = session
+            .move_container(&EditCtx::local("a"), "page:1", "page:1:shape:1", 1.0, 2.0)
+            .unwrap();
+        assert_eq!(receipts.len(), 4);
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "PinX").as_deref(),
+            Some("6")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "PinY").as_deref(),
+            Some("6")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:2", "PinX").as_deref(),
+            Some("6")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:2", "PinY").as_deref(),
+            Some("6")
+        );
+        assert!(session.undo());
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn container_move_refusal_moves_nothing() {
+        let session = container_pair();
+        add_shape_cell(
+            &session,
+            "page:1:shape:2",
+            "LockMoveX",
+            None,
+            None,
+            Some("1"),
+            None,
+        );
+        let before = session.snapshot().unwrap();
+        assert!(
+            session
+                .move_container(&EditCtx::local("a"), "page:1", "page:1:shape:1", 1.0, 2.0)
+                .is_err()
+        );
+        assert_eq!(session.snapshot().unwrap(), before);
+    }
+
+    #[test]
+    fn container_move_rejects_non_containers() {
+        let session = container_pair();
+        assert!(
+            session
+                .move_container(&EditCtx::local("a"), "page:1", "page:1:shape:2", 1.0, 2.0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn member_move_expands_container_with_margin() {
+        let session = container_pair();
+        let receipts = session
+            .move_container_member(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:2",
+                "8".to_owned(),
+                "4".to_owned(),
+            )
+            .unwrap();
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:2", "PinX").as_deref(),
+            Some("8")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Width").as_deref(),
+            Some("5.75")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "PinX").as_deref(),
+            Some("5")
+        );
+        assert!(receipts.len() >= 3);
+        assert!(session.undo());
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Width").as_deref(),
+            Some("4")
+        );
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn member_move_inside_leaves_container_bounds() {
+        let session = container_pair();
+        let receipts = session
+            .move_container_member(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:2",
+                "5.5".to_owned(),
+                "4".to_owned(),
+            )
+            .unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Width").as_deref(),
+            Some("4")
+        );
+    }
+
+    #[test]
+    fn locked_container_skips_autofit() {
+        let session = container_pair();
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "Value",
+            Some("User"),
+            Some(CellRow::Name("msvSDContainerLocked".into())),
+            None,
+            Some("1"),
+        );
+        let receipts = session
+            .move_container_member(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:2",
+                "8".to_owned(),
+                "4".to_owned(),
+            )
+            .unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Width").as_deref(),
+            Some("4")
+        );
+    }
+
+    #[test]
+    fn autofit_container_shrinks_to_member_extent_with_margin() {
+        let session = container_pair();
+        session
+            .autofit_container(&EditCtx::local("a"), "page:1", "page:1:shape:1")
+            .unwrap();
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Width").as_deref(),
+            Some("1.5")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Height").as_deref(),
+            Some("1.5")
+        );
+    }
+
+    #[test]
+    fn autofit_container_uses_formula_loc_pin_at_the_requested_size() {
+        let session = container_pair();
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "LocPinX",
+            None,
+            None,
+            Some("Width*0.5"),
+            None,
+        );
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "LocPinY",
+            None,
+            None,
+            Some("Height*0.5"),
+            None,
+        );
+        session
+            .autofit_container(&EditCtx::local("a"), "page:1", "page:1:shape:1")
+            .unwrap();
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "PinX").as_deref(),
+            Some("5")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "PinY").as_deref(),
+            Some("4")
+        );
+    }
+
+    #[test]
+    fn rotated_members_are_enclosed_by_autofit_and_move() {
+        let session = container_pair();
+        add_shape_cell(
+            &session,
+            "page:1:shape:2",
+            "Angle",
+            None,
+            None,
+            Some("0.7853981633974483"),
+            None,
+        );
+        session
+            .autofit_container(&EditCtx::local("a"), "page:1", "page:1:shape:1")
+            .unwrap();
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Width").as_deref(),
+            Some("1.9142135623730958"),
+        );
+
+        let session = container_pair();
+        add_shape_cell(
+            &session,
+            "page:1:shape:2",
+            "Angle",
+            None,
+            None,
+            Some("0.7853981633974483"),
+            None,
+        );
+        session
+            .move_container_member(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:2",
+                "8".to_owned(),
+                "4".to_owned(),
+            )
+            .unwrap();
+        let width = shape_formula(&session, "page:1:shape:1", "Width")
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        assert!(width > 5.9);
+    }
+
     #[test]
     fn resize_refusal_leaves_both_axes_unchanged() {
         let session = session();
