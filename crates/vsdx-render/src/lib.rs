@@ -4272,7 +4272,7 @@ mod tests {
     #[test]
     fn line_jump_bridges_bent_connector_legs() {
         let mut bent = free_connector(1, (0.0, 0.0), (2.0, 2.0));
-        with_cell(&mut bent, "RoutStyle", "1");
+        with_cell(&mut bent, "ShapeRouteStyle", "1");
         let package = jump_package(
             vec![bent, free_connector(2, (1.0, -1.0), (1.0, 1.0))],
             &[("LineJumpCode", "1")],
