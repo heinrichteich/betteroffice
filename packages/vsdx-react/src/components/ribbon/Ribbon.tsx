@@ -93,7 +93,14 @@ function ShapePanel({ t }: { t: TFunction }) {
   </div>;
 }
 
-export function Ribbon({ t, hasSelection = false }: { t: TFunction; hasSelection?: boolean }) {
+export interface RibbonConnectorToggle { active: boolean; disabled: boolean; onToggle: () => void; }
+
+function ConnectorToggle({ t, connector }: { t: TFunction; connector: RibbonConnectorToggle }) {
+  const label = `${t('ribbon.commands.connector')} (Alt+3)`;
+  return <button type="button" disabled={connector.disabled} aria-label={label} aria-pressed={connector.active} title={label} onMouseDown={(event) => event.preventDefault()} onClick={() => connector.onToggle()} style={{ ...styles.button, color: connector.disabled ? '#9aa5b4' : '#27364a', background: connector.active ? '#dbeafe' : 'transparent', cursor: connector.disabled ? 'default' : 'pointer' }}><RibbonIcon name="connector" /></button>;
+}
+
+export function Ribbon({ t, hasSelection = false, connector }: { t: TFunction; hasSelection?: boolean; connector?: RibbonConnectorToggle }) {
   const visibleTabs: readonly RibbonTab[] = hasSelection ? [...baseTabs, 'shape'] : baseTabs;
   const [active, setActive] = useState<RibbonTab>(hasSelection ? 'shape' : 'home');
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -121,7 +128,7 @@ export function Ribbon({ t, hasSelection = false }: { t: TFunction; hasSelection
       return <button ref={(node) => { tabRefs.current[index] = node; }} key={tab} id={`vsdx-ribbon-tab-${tab}`} type="button" role="tab" aria-selected={selected} aria-controls={`vsdx-ribbon-panel-${tab}`} tabIndex={selected ? 0 : -1} onClick={() => select(tab)} onKeyDown={(event) => onKeyDown(event, index)} style={styles.tab}><span style={{ ...styles.tabLabel, borderBottomColor: selected ? '#0f6cbd' : 'transparent', color: '#242424', fontWeight: selected ? 600 : 400 }}>{t(`ribbon.tabs.${tab}`)}</span></button>;
     })}</div>
     <div id={`vsdx-ribbon-panel-${active}`} role="tabpanel" aria-labelledby={`vsdx-ribbon-tab-${active}`} style={styles.panel}>
-      {active === 'home' ? <HomePanel t={t} /> : active === 'shape' ? <ShapePanel t={t} /> : active === 'file' ? <div style={styles.surface}><RibbonRun label={t('ribbon.groups.file')}><CommandButton id="download" icon="download" label={t('ribbon.commands.download')} /></RibbonRun></div> : <div style={styles.surface}><RibbonRun label={t('ribbon.groups.insert')}><CommandButton id="addShape" icon="add" label={t('ribbon.commands.addShape')} /></RibbonRun></div>}
+      {active === 'home' ? <HomePanel t={t} /> : active === 'shape' ? <ShapePanel t={t} /> : active === 'file' ? <div style={styles.surface}><RibbonRun label={t('ribbon.groups.file')}><CommandButton id="download" icon="download" label={t('ribbon.commands.download')} /></RibbonRun></div> : <div style={styles.surface}><RibbonRun label={t('ribbon.groups.insert')}><CommandButton id="addShape" icon="add" label={t('ribbon.commands.addShape')} />{connector ? <ConnectorToggle t={t} connector={connector} /> : null}</RibbonRun></div>}
     </div>
   </section>;
 }

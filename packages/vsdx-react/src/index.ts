@@ -1,5 +1,8 @@
 export { VsdxEditor } from './VsdxEditor';
 export type { VsdxEditorApi, VsdxEditorCollaborationOptions, VsdxEditorProps, VsdxShapeSelection } from './VsdxEditor';
+export { connectorTargetForPoint, nearestPointOnShape, placementConnectionPoints } from './VsdxEditor';
+export { AUTO_CONNECT_FADE_MS, AUTO_CONNECT_GAP_PX, AUTO_CONNECT_HALO_PX, AUTO_CONNECT_HIT_PX, AUTO_CONNECT_SIDES, AUTO_CONNECT_SIZE_PX, CONNECTOR_GLUE_MATCH_INCHES, CONNECTOR_SNAP_INCHES, QUICK_SHAPE_GAP_INCHES, QUICK_SHAPE_IDS, ancestorChain, applyAffineToPoint, arrowheadPolygon, autoConnectArrowAt, autoConnectArrowCenter, autoConnectArrowCss, autoConnectArrowsForShape, autoConnectHaloHit, autoConnectMetrics, boundsAffine, classifyConnectorEndpoint, composeAffine, connectionPointsForShape, connectorDraft, connectorEndpointGlue, connectorEndpointGlueForPlacedPoints, connectorGlue, connectorRouteFromFrame, dropTargetForPlacedPoints, dropTargetForPoint, formatInches, globalAutoConnectArrows, globalAutoConnectHaloHit, globalConnectionPoints, globalQuickShapePlacement, hoverPointAt, isConnectorShape, modelToPage, movedShapePoints, nearestConnectionPoint, nearestConnectionPointAnywhere, paintAutoConnectOverlay, paintConnectorEndpoint, paintConnectorOverlay, placedPointTargets, quickShapePlacement, reroutePreviewForMove, routeConnector, sceneBoundsOf, sceneTransformForAncestors } from './connector';
+export type { AutoConnectArrow, AutoConnectOverlayState, AutoConnectSide, ChildExtent, ConnectionPoint, ConnectorDragEndpoint, ConnectorEndpointGlue, ConnectorOverlayRoute, ConnectorOverlayScene, ConnectorSide, MovedShapeGeometry, PlacedPointTarget, QuickShapePlacement, SceneBounds } from './connector';
 export { Ribbon } from './components/ribbon/Ribbon';
 export { CommandMenu, CommandMenuItem } from './components/ribbon/CommandMenu';
 export type { CommandMenuEntry } from './components/ribbon/CommandMenu';
@@ -9,6 +12,8 @@ export { MINI_TOOLBAR_CANDIDATES, ShapeMiniToolbar, miniToolbarPosition, resolve
 export type { MiniToolbarRect, MiniToolbarSize, MiniToolbarViewport, ShapeMiniToolbarProps } from './components/ribbon/ShapeMiniToolbar';
 export { CanvasContextMenu } from './components/ribbon/CanvasContextMenu';
 export type { CanvasContextMenuProps } from './components/ribbon/CanvasContextMenu';
+
+export type { RibbonConnectorToggle } from './components/ribbon/Ribbon';
 export { RibbonIcon } from './components/ribbon/RibbonIcon';
 export type { RibbonIconName } from './components/ribbon/RibbonIcon';
 export { RibbonCommandsContext, RibbonCommandsProvider, addShapeWithText, copySelection, createRibbonCommands, duplicateEntry, findShapePlacement, isCellWriteBlocked, isDeleteBlocked, pasteEntry, useRibbonCommands } from './components/ribbon/commands';

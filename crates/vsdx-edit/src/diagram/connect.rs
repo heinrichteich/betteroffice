@@ -5,9 +5,9 @@ use vsdx_resolve::{ConnectorEndpoint, Resolver};
 use yrs::{Doc, Map, MapPrelim, Out, ReadTxn, Transact, WriteTxn};
 
 use super::{
-    ShapeOrigin, connection_point_exists, glue_text_valid, insert_shape, largest_shape_id,
+    connection_point_exists, glue_text_valid, insert_shape, largest_shape_id,
     map_ref, map_string, materialize_shape, required_map, required_string, shape_from_snapshot,
-    shape_origin, valid_glue_target, validate_shape_draft,
+    valid_glue_target, validate_shape_draft,
 };
 use crate::{
     CONNECTS, ConnectorGlue, DiagramSession, EditCtx, EditError, EditResult, PAGES, PageSnapshot,
@@ -363,15 +363,6 @@ fn snapshot_shape_sources(page: &PageSnapshot) -> BTreeMap<&str, u32> {
         pending.extend(shape.children.iter());
     }
     sources
-}
-
-/// Omits glue whose endpoints were deleted, including by concurrent edits.
-pub(super) fn page_glue(page: &PageSnapshot, glue: &[GlueRecord]) -> Vec<PageGlue> {
-    let sources = snapshot_shape_sources(page);
-    glue.iter()
-        .filter(|record| record.page_id == page.id)
-        .filter_map(|record| record.project(&sources))
-        .collect()
 }
 
 pub(super) fn materialize_page_glue(

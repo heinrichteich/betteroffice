@@ -21,10 +21,10 @@
     "saved": "Saved",
     "dirty": "Unsaved changes",
     "tabs": { "file": "File", "home": "Home", "insert": "Insert", "shape": "Shape", "design": "Design", "review": "Review", "view": "View", "help": "Help" },
-    "groups": { "file": "File", "history": "History", "clipboard": "Clipboard", "font": "Font", "paragraph": "Paragraph", "insert": "Insert", "shape": "Shape", "arrange": "Arrange" },
+    "groups": { "file": "File", "history": "History", "clipboard": "Clipboard", "font": "Font", "paragraph": "Paragraph", "insert": "Insert", "shape": "Shape", "arrange": "Arrange", "connector": "Connector" },
     "commands": {
       "undo": "Undo", "redo": "Redo", "delete": "Delete selected", "cut": "Cut", "copy": "Copy", "paste": "Paste", "duplicate": "Duplicate", "fillColor": "Fill color", "lineColor": "Line color", "lineWeight": "Line weight", "linePattern": "Line pattern",
-      "bringToFront": "Bring to Front", "bringForward": "Bring Forward", "sendBackward": "Send Backward", "sendToBack": "Send to Back", "rotateLeft": "Rotate left", "rotateRight": "Rotate right", "flipHorizontal": "Flip horizontal", "flipVertical": "Flip vertical", "addShape": "Add shape", "download": "Download"
+      "bringToFront": "Bring to Front", "bringForward": "Bring Forward", "sendBackward": "Send Backward", "sendToBack": "Send to Back", "rotateLeft": "Rotate left", "rotateRight": "Rotate right", "flipHorizontal": "Flip horizontal", "flipVertical": "Flip vertical", "addShape": "Add shape", "download": "Download", "connector": "Connector"
     }
   },
   "contextMenu": { "label": "Shape actions", "canvasLabel": "Canvas actions", "miniToolbarLabel": "Shape formatting" },
@@ -45,6 +45,7 @@
     "searchPlaceholder": "Search shapes",
     "categoriesLabel": "Shape categories",
     "standardShapes": "Standard Shapes",
+    "quickShapes": "Quick Shapes",
     "empty": "No shapes found",
     "shape": {
       "rectangle": "Rectangle",
