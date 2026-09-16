@@ -1,18 +1,17 @@
 use crate::{GeometryIssue, Lookup, RealizedGeometry, ResolvedSection};
 use ooxml_drawingml::GeometryPathCommand;
 
-/// Realizes a Geometry section in the shape's local drawing units. `Rel*` coordinates
-/// are fractions of `width` and `height`, giving absolute points in local space.
+/// Realizes local geometry, scaling relative coordinates by width and height.
 pub fn realize_geometry(section: &ResolvedSection, width: f64, height: f64) -> RealizedGeometry {
-    let mut out = RealizedGeometry::default();
-    if !section.unsupported_controls.is_empty() {
-        out.issues.extend(
-            section
-                .unsupported_controls
-                .iter()
-                .cloned()
-                .map(GeometryIssue::UnsupportedSectionControl),
-        );
+    let mut out = RealizedGeometry {
+        controls: section.controls,
+        ..Default::default()
+    };
+    for control in &section.unsupported_controls {
+        out.issues
+            .push(GeometryIssue::UnsupportedSectionControl(control.clone()));
+    }
+    if out.controls.no_show && out.issues.is_empty() {
         return out;
     }
     let mut current = (0.0, 0.0);
@@ -65,6 +64,10 @@ pub fn realize_geometry(section: &ResolvedSection, width: f64, height: f64) -> R
             }
             (values.len() == names.len()).then_some(values)
         };
+        if ty == "Close" {
+            push_checked(&mut out, GeometryPathCommand::Close, ty);
+            continue;
+        }
         let xy = match (value("X"), value("Y")) {
             (Some(x), Some(y)) => (x, y),
             _ => {
@@ -728,19 +731,40 @@ fn cubic_arc_segment(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn geometry_realizes_two_digit_rows_in_numeric_order() {
-        let keyed = |key: &str, ty: &str, cells: Vec<Cell>| {
-            (
-                key.to_owned(),
-                ResolvedRow {
-                    key: key.into(),
-                    ..resolved_row(ty, cells)
-                },
-            )
-        };
+    fn close_row_closes_the_path_and_reports_no_issue() {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                keyed("IX:1", "MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                keyed("IX:2", "LineTo", vec![cell("X", "1"), cell("Y", "0")]),
+                keyed("IX:3", "LineTo", vec![cell("X", "1"), cell("Y", "1")]),
+                keyed("IX:4", "Close", vec![cell("NoShow", "0")]),
+            ]),
+        };
+        let realized = realize_geometry(&section, 1.0, 1.0);
+        assert_eq!(
+            realized.commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                GeometryPathCommand::Close,
+            ]
+        );
+        assert!(realized.issues.is_empty());
+    }
+
+    #[test]
+    fn geometry_realizes_two_digit_rows_in_numeric_order() {
+        let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -774,6 +798,15 @@ mod tests {
             other_attrs: vec![],
         }
     }
+    fn keyed(key: &str, ty: &str, cells: Vec<Cell>) -> (String, ResolvedRow) {
+        (
+            key.to_owned(),
+            ResolvedRow {
+                key: key.into(),
+                ..resolved_row(ty, cells)
+            },
+        )
+    }
     fn resolved_row(ty: &str, cells: Vec<Cell>) -> ResolvedRow {
         ResolvedRow {
             key: "IX:0".into(),
@@ -799,6 +832,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -834,6 +868,7 @@ mod tests {
             let section = ResolvedSection {
                 index: None,
                 unsupported_controls: Vec::new(),
+                controls: crate::GeometrySectionControls::default(),
                 name: "Geometry".into(),
                 deleted: false,
                 row_order: vec![],
@@ -860,6 +895,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -893,6 +929,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -933,6 +970,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -968,6 +1006,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1006,6 +1045,7 @@ mod tests {
             let section = ResolvedSection {
                 index: None,
                 unsupported_controls: Vec::new(),
+                controls: crate::GeometrySectionControls::default(),
                 name: "Geometry".into(),
                 deleted: false,
                 row_order: vec![],
@@ -1075,6 +1115,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1131,6 +1172,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1158,6 +1200,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1192,6 +1235,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1222,6 +1266,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1252,6 +1297,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1301,6 +1347,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1334,6 +1381,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1373,6 +1421,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1411,6 +1460,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1459,6 +1509,7 @@ mod tests {
             let section = ResolvedSection {
                 index: None,
                 unsupported_controls: Vec::new(),
+                controls: crate::GeometrySectionControls::default(),
                 name: "Geometry".into(),
                 deleted: false,
                 row_order: vec![],
@@ -1484,6 +1535,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1508,6 +1560,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1574,6 +1627,7 @@ mod tests {
             let section = ResolvedSection {
                 index: None,
                 unsupported_controls: Vec::new(),
+                controls: crate::GeometrySectionControls::default(),
                 name: "Geometry".into(),
                 deleted: false,
                 row_order: vec![],
@@ -1590,6 +1644,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1616,6 +1671,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1648,6 +1704,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1719,19 +1776,124 @@ mod tests {
     }
 
     #[test]
-    fn geometry_realizes_two_digit_rows_in_numeric_order_without_row_order() {
-        let keyed = |key: &str, ty: &str, cells: Vec<Cell>| {
-            (
-                key.to_owned(),
-                ResolvedRow {
-                    key: key.into(),
-                    ..resolved_row(ty, cells)
-                },
-            )
+    fn geometry_section_controls_select_paint_without_issues() {
+        use crate::GeometrySectionControls;
+        let rows = || {
+            BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row("LineTo", vec![cell("X", "1"), cell("Y", "0")]),
+                ),
+            ])
         };
+        fn controlled(no_fill: bool, no_line: bool, no_show: bool) -> GeometrySectionControls {
+            GeometrySectionControls {
+                no_fill,
+                no_line,
+                no_show,
+            }
+        }
+        for (controls, no_fill, no_line, no_show) in [
+            (controlled(true, false, false), true, false, false),
+            (controlled(false, true, false), false, true, false),
+            (controlled(true, true, false), true, true, false),
+        ] {
+            let section = ResolvedSection {
+                index: None,
+                unsupported_controls: Vec::new(),
+                controls,
+                name: "Geometry".into(),
+                deleted: false,
+                row_order: vec![],
+                rows: rows(),
+            };
+            let geometry = realize_geometry(&section, 1.0, 1.0);
+            assert_eq!(geometry.controls.no_fill, no_fill);
+            assert_eq!(geometry.controls.no_line, no_line);
+            assert_eq!(geometry.controls.no_show, no_show);
+            assert!(geometry.issues.is_empty());
+            assert_eq!(geometry.commands.len(), 2);
+        }
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: controlled(false, false, true),
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: rows(),
+        };
+        let geometry = realize_geometry(&section, 1.0, 1.0);
+        assert!(geometry.controls.no_show);
+        assert!(geometry.issues.is_empty());
+        assert!(geometry.commands.is_empty());
+    }
+
+    #[test]
+    fn geometry_unevaluable_control_draws_and_reports_uncertainty() {
+        let section = ResolvedSection {
+            index: None,
+            unsupported_controls: vec!["NoFill".into()],
+            controls: crate::GeometrySectionControls::default(),
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row("LineTo", vec![cell("X", "1"), cell("Y", "0")]),
+                ),
+            ]),
+        };
+        let geometry = realize_geometry(&section, 1.0, 1.0);
+        assert!(!geometry.controls.no_fill);
+        assert_eq!(geometry.commands.len(), 2);
+        assert_eq!(
+            geometry.issues,
+            vec![GeometryIssue::UnsupportedSectionControl("NoFill".into())]
+        );
+    }
+
+    #[test]
+    fn geometry_section_unknown_controls_stay_unsupported() {
+        let section = ResolvedSection {
+            index: None,
+            unsupported_controls: vec!["NoSuchControl".into()],
+            controls: crate::GeometrySectionControls::default(),
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([(
+                "IX:0".into(),
+                resolved_row("MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+            )]),
+        };
+        let geometry = realize_geometry(&section, 1.0, 1.0);
+        assert!(!geometry.controls.no_fill);
+        assert!(!geometry.controls.no_line);
+        assert!(!geometry.controls.no_show);
+        assert_eq!(
+            geometry.issues,
+            vec![GeometryIssue::UnsupportedSectionControl(
+                "NoSuchControl".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn geometry_realizes_two_digit_rows_in_numeric_order_without_row_order() {
+        let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],

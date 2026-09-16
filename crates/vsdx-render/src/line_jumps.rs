@@ -846,6 +846,7 @@ mod tests {
                 fill: None,
                 stroke: Some(stroke()),
                 transform: crate::Affine::identity(),
+                diagnostics: Vec::new(),
             },
             Primitive::Shape {
                 id: "b".into(),
@@ -857,6 +858,7 @@ mod tests {
                 fill: None,
                 stroke: Some(stroke()),
                 transform: crate::Affine::identity(),
+                diagnostics: Vec::new(),
             },
         ];
         let overrides = vec![
@@ -897,6 +899,7 @@ mod tests {
                 fill: None,
                 stroke: Some(stroke()),
                 transform: crate::Affine::identity(),
+                diagnostics: Vec::new(),
             },
             Primitive::Shape {
                 id: "invisible".into(),
@@ -908,6 +911,7 @@ mod tests {
                 fill: None,
                 stroke: None,
                 transform: crate::Affine::identity(),
+                diagnostics: Vec::new(),
             },
         ];
         let overrides = ["visible", "invisible"]
@@ -941,6 +945,7 @@ mod tests {
                 fill: None,
                 stroke: Some(stroke()),
                 transform: crate::Affine::identity(),
+                diagnostics: Vec::new(),
             },
             Primitive::Shape {
                 id: "crossing".into(),
@@ -952,6 +957,7 @@ mod tests {
                 fill: None,
                 stroke: Some(stroke()),
                 transform: crate::Affine::identity(),
+                diagnostics: Vec::new(),
             },
         ];
         let overrides = ["bent", "crossing"]
@@ -988,6 +994,7 @@ mod tests {
                 fill: None,
                 stroke: Some(stroke()),
                 transform: crate::Affine::identity(),
+                diagnostics: Vec::new(),
             })
             .collect::<Vec<_>>();
         primitives.push(Primitive::Shape {
@@ -1000,6 +1007,7 @@ mod tests {
             fill: None,
             stroke: Some(stroke()),
             transform: crate::Affine::identity(),
+            diagnostics: Vec::new(),
         });
         let overrides = primitives
             .iter()

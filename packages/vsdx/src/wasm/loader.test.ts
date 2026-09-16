@@ -95,8 +95,32 @@ describe('VSDX wasm boundary', () => {
 
   test('decodes wasm text diagnostic categories using wire casing', () => {
     const diagram = openDiagram(textAccounting, { clientId: 9011 });
-    const diagnostics = diagram.layoutPage(0).primitives.flatMap(primitive => primitive.kind === 'textBox' ? primitive.paragraphs.flatMap(paragraph => paragraph.runs.flatMap(run => run.diagnostics)) : []);
+    const diagnostics = diagram.layoutPage(0).primitives.flatMap(primitive => primitive.kind === 'textBox' ? primitive.paragraphs.flatMap(paragraph => paragraph.runs.flatMap(run => run.diagnostics ?? [])) : []);
     expect(diagnostics).toContainEqual(expect.objectContaining({ category: 'fidelity', code: 'unregistered-font' }));
+    diagram.dispose();
+  });
+
+  test('exports a vector PDF with one page per diagram page', () => {
+    const diagram = openDiagram(textAccounting, { clientId: 9012 });
+    try {
+      const pdf = diagram.exportPdf();
+      const text = new TextDecoder('latin1').decode(pdf);
+      expect(text.startsWith('%PDF-1.4')).toBe(true);
+      expect(text.endsWith('%%EOF')).toBe(true);
+      expect(text.match(/\/Type \/Page /g)?.length).toBe(diagram.snapshot().pages.length);
+      expect(text).toContain('BT');
+      expect(text).toContain('Tj');
+    } finally {
+      diagram.dispose();
+    }
+  });
+
+  test('omits diagnostics from runs laid out with a registered face', async () => {
+    const bytes = new Uint8Array(await readFile(resolve(root, 'packages/fonts/assets/LiberationSans-Bold.ttf')));
+    const diagram = openDiagram(demo, { clientId: 9013, fonts: [{ family: 'Arial', bold: true, bytes }] });
+    const runs = diagram.layoutPage(0).primitives.flatMap(primitive => primitive.kind === 'textBox' ? primitive.paragraphs.flatMap(paragraph => paragraph.runs) : []);
+    expect(runs.length).toBeGreaterThan(0);
+    expect(runs.every(run => run.diagnostics === undefined)).toBe(true);
     diagram.dispose();
   });
 
@@ -244,6 +268,49 @@ describe('VSDX wasm boundary', () => {
     ]));
     expect(reopened.snapshot().pages[0].shapes.find(shape => shape.id === 'page:1:shape:2')).toEqual(expect.objectContaining({ sourceId: 2 }));
     reopened.dispose();
+    await expectUntouchedParts(foundation, saved, editedPart);
+  });
+
+  test('persists a glued connector through save and reopen', async () => {
+    const pageId = 'page:1';
+    const editedPart = 'visio/pages/page1.xml';
+    const diagram = openDiagram(foundation, { clientId: 9017 });
+    const rect = (pinX: string) => ({ name: 'Rect', cells: [
+      { locator: { cellName: 'Width' }, formula: '1' },
+      { locator: { cellName: 'Height' }, formula: '1' },
+      { locator: { cellName: 'PinX' }, formula: pinX },
+      { locator: { cellName: 'PinY' }, formula: '1' },
+      { locator: { cellName: 'LocPinX' }, formula: '0' },
+      { locator: { cellName: 'LocPinY' }, formula: '0' },
+    ] });
+    const from = diagram.addShape(pageId, rect('1'));
+    const to = diagram.addShape(pageId, rect('5'));
+    const receipt = diagram.addConnector(pageId, { name: 'Connector', cells: [
+      { locator: { cellName: 'OneD' }, formula: '1' },
+      { locator: { cellName: 'BeginX' }, formula: '1' },
+      { locator: { cellName: 'BeginY' }, formula: '2' },
+      { locator: { cellName: 'EndX' }, formula: '4' },
+      { locator: { cellName: 'EndY' }, formula: '2' },
+    ] }, { shapeId: from.shapeId }, { shapeId: to.shapeId, toCell: 'PinX' });
+    const live = diagram.layoutPage(0);
+    expect(live.primitives).toContainEqual(expect.objectContaining({
+      id: `${diagram.snapshot().pages[0].sourcePartPath}:4`, kind: 'shape',
+      path: [{ type: 'move', x: 1, y: 1 }, { type: 'line', x: 5, y: 1 }],
+    }));
+    const saved = diagram.save();
+    diagram.dispose();
+
+    const reopened = openDiagram(saved, { clientId: 9018 });
+    expect(reopened.layoutPage(0)).toEqual(live);
+    const savedConnector = reopened.snapshot().pages[0].shapes.find(shape => shape.id === 'page:1:shape:4');
+    expect(savedConnector).toEqual(expect.objectContaining({ name: 'Connector' }));
+    expect(receipt.shapeId).not.toBe(savedConnector!.id);
+    reopened.deleteShape(pageId, savedConnector!.id);
+    const deleted = reopened.save();
+    reopened.dispose();
+    const archive = await JSZip.loadAsync(deleted);
+    const pageXml = await archive.file(editedPart)!.async('text');
+    expect(pageXml).not.toMatch(/FromSheet="4"|ToSheet="4"/);
     await expectUntouchedParts(foundation, saved, editedPart);
   });
 
@@ -510,6 +577,31 @@ describe('VSDX wasm boundary', () => {
     await expectUntouchedParts(foundation, saved, editedPart);
   });
 
+  test('shape bounds emit one complete update and undo all four cells', () => {
+    const diagram = openDiagram(demo, { clientId: 9080 });
+    const peer = openDiagram(demo, { clientId: 9081 });
+    try {
+      const before = diagram.snapshot();
+      const observed: ReturnType<typeof diagram.snapshot>[] = [];
+      const stop = diagram.onUpdate((update) => { peer.applyUpdate(update); observed.push(peer.snapshot()); });
+      const receipts = diagram.setShapeBounds('page:1', 'page:1:shape:20', '2', '3', '4', '5');
+      expect(receipts.map((receipt) => receipt.after)).toEqual(['2', '3', '4', '5']);
+      expect(observed).toEqual([diagram.snapshot()]);
+      expect(diagram.undo().applied).toBe(true);
+      expect(diagram.snapshot()).toEqual(before);
+      expect(diagram.canUndo()).toBe(false);
+      stop();
+      diagram.setCellFormula('page:1', 'page:1:shape:20', { cellName: 'PinY' }, 'GUARD(3)');
+      const locked = diagram.snapshot();
+      expect(() => diagram.setShapeBounds('page:1', 'page:1:shape:20', '6', '7', '8', '9')).toThrow('GUARD');
+      expect(diagram.snapshot()).toEqual(locked);
+      expect(diagram.resizeLocPin('page:1', 'page:1:shape:20', 8, 10)).toEqual({ x: 2.8, y: 0.575 });
+      diagram.setCellFormula('page:1', 'page:1:shape:20', { cellName: 'LocPinX' }, 'Width*0.5');
+      diagram.setCellFormula('page:1', 'page:1:shape:20', { cellName: 'LocPinY' }, 'Height*0.5');
+      expect(diagram.resizeLocPin('page:1', 'page:1:shape:20', 8, 10)).toEqual({ x: 4, y: 5 });
+    } finally { diagram.dispose(); peer.dispose(); }
+  });
+
   test('aborts a guarded move batch without changing the save bytes', () => {
     const pageId = 'page:1';
     const shapeId = 'page:1:shape:1';
@@ -593,6 +685,42 @@ function flattenShapes<T extends { children: T[] }>(shapes: T[]): T[] {
 function findGroupWithSiblings<T extends { children: T[] }>(shapes: T[]): T | undefined {
   return flattenShapes(shapes).find(shape => shape.children.length > 1);
 }
+
+test('each geometry section selects and moves the same shape', async () => {
+  const archive = await JSZip.loadAsync(foundation);
+  const section = (index: number, control: string, offset: number) => {
+    const rows = [[0, 0], [1, 0], [1, 1], [0, 1]].map(([x, y], row) =>
+      `<Row IX="${row}" T="${row === 0 ? 'MoveTo' : 'LineTo'}"><Cell N="X" V="${x + offset}"/><Cell N="Y" V="${y}"/></Row>`
+    ).join('');
+    return `<Section N="Geometry" IX="${index}"><Cell N="${control}" V="1"/>${rows}</Section>`;
+  };
+  const cells = Object.entries({
+    Width: 1, Height: 1, PinX: 1, PinY: 1, LocPinX: 0, LocPinY: 0,
+    FillPattern: 1, LinePattern: 1, LineWeight: 0.02,
+  }).map(([name, value]) => `<Cell N="${name}" V="${value}"/>`).join('');
+  archive.file('visio/pages/page1.xml',
+    '<PageContents xmlns="http://schemas.microsoft.com/office/visio/2012/main"><Shapes><Shape ID="1">' +
+    cells + '<Cell N="FillForegnd" F="RGB(1,2,3)"/><Cell N="LineColor" F="RGB(4,5,6)"/>' +
+    section(10, 'NoFill', 2) + section(2, 'NoLine', 0) + '</Shape></Shapes></PageContents>'
+  );
+  const pages = await archive.file('visio/pages/pages.xml')!.async('string');
+  archive.file('visio/pages/pages.xml', pages.replace('</PageSheet>', '<Cell N="PageHeight" V="8"/></PageSheet>'));
+  const diagram = openDiagram(await archive.generateAsync({ type: 'uint8array' }));
+  try {
+    const page = diagram.snapshot().pages[0];
+    const shapeId = page.shapes[0].id;
+    const frame = diagram.layoutPage(0);
+    expect(frame.primitives).toHaveLength(2);
+    const hit = (x: number, y: number) => diagram.hitTest(x * 96, (8 - y) * 96);
+    const selection = hit(1.5, 1.5);
+    expect(selection).toEqual({ kind: 'shape', shapeId });
+    expect(hit(3.5, 1)).toEqual(selection);
+    diagram.moveShape(page.id, selection!.shapeId, '2', '2');
+    expect(diagram.layoutPage(0).primitives).toHaveLength(2);
+    expect(hit(2.5, 2.5)).toEqual(selection);
+    expect(hit(4.5, 2)).toEqual(selection);
+  } finally { diagram.dispose(); }
+});
 
 test('hit testing returns a shape ID accepted by editing commands', () => {
   const diagram = openDiagram(demo, { clientId: 9080 });
