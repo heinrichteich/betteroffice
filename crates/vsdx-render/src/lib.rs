@@ -4664,48 +4664,60 @@ mod tests {
     }
 
     #[test]
-    fn explore_corpus_resolves_every_shape_transform() {
-        let Ok(directory) = std::env::var("VSDX_EXPLORE_DIR") else {
-            eprintln!("warning: skipping VSDX explore transform test; VSDX_EXPLORE_DIR is unset");
-            return;
-        };
-        let mut paths = std::fs::read_dir(&directory)
-            .unwrap()
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "vsdx" || extension == "vstx")
-            })
-            .collect::<Vec<_>>();
-        paths.sort();
-        assert!(!paths.is_empty(), "expected VSDX explore files");
+    fn every_shape_transform_resolves() {
         let renderer = Renderer::default();
-        let mut unresolvable = 0usize;
-        for path in &paths {
-            let package = vsdx_parse::parse_vsdx(&std::fs::read(path).unwrap()).unwrap();
-            for page in &package.page_part_paths {
-                let list = renderer.layout_page(&package, page).unwrap();
-                unresolvable += unresolvable_transforms(&list.primitives);
+        let totals = |bytes: &[u8]| {
+            let package = vsdx_parse::parse_vsdx(bytes).unwrap();
+            package
+                .page_part_paths
+                .iter()
+                .map(|page| {
+                    transform_totals(&renderer.layout_page(&package, page).unwrap().primitives)
+                })
+                .fold((0usize, 0usize), |sum, page| {
+                    (sum.0 + page.0, sum.1 + page.1)
+                })
+        };
+        let mut files = 1usize;
+        let (painted, mut unresolvable) = totals(include_bytes!(
+            "../../vsdx-parse/tests/fixtures/transform-sources.vsdx"
+        ));
+        assert_eq!(painted, 5, "painted transform-source shapes");
+        for variable in ["VSDX_CORPUS_DIR", "VSDX_EXPLORE_DIR"] {
+            let Ok(directory) = std::env::var(variable) else {
+                continue;
+            };
+            let mut paths = std::fs::read_dir(&directory)
+                .unwrap()
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "vsdx" || extension == "vstx")
+                })
+                .collect::<Vec<_>>();
+            paths.sort();
+            assert!(!paths.is_empty(), "expected VSDX files in {variable}");
+            files += paths.len();
+            for path in &paths {
+                unresolvable += totals(&std::fs::read(path).unwrap()).1;
             }
         }
-        eprintln!(
-            "VSDX explore transforms: files={} unresolvable={unresolvable}",
-            paths.len(),
-        );
+        eprintln!("VSDX transforms: files={files} unresolvable={unresolvable}");
         assert_eq!(unresolvable, 0, "unresolvable transforms");
     }
 
-    fn unresolvable_transforms(primitives: &[Primitive]) -> usize {
+    fn transform_totals(primitives: &[Primitive]) -> (usize, usize) {
         primitives
             .iter()
             .map(|primitive| match primitive {
+                Primitive::Shape { .. } => (1, 0),
                 Primitive::Placeholder { reason, .. } => {
-                    usize::from(reason == "unresolvable transform")
+                    (0, usize::from(reason == "unresolvable transform"))
                 }
-                Primitive::Group { primitives, .. } => unresolvable_transforms(primitives),
-                _ => 0,
+                Primitive::Group { primitives, .. } => transform_totals(primitives),
+                _ => (0, 0),
             })
-            .sum()
+            .fold((0, 0), |sum, item| (sum.0 + item.0, sum.1 + item.1))
     }
 
     #[test]

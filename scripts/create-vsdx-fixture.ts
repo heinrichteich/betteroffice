@@ -78,6 +78,12 @@ async function writeTestFixtures(): Promise<void> {
     'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Shape'>${xform(1, 1, 1, 1, 0, 0, 0, 0, 0)}${rect}<Text><cp IX='0'/><pp IX='0'/></Text></Shape><Shape ID='2' Type='Shape'>${xform(1, 1, 2, 1, 0, 0, 0, 0, 0)}${rect}<Section N='Field'><Row IX='0'><Cell N='Value' V='field value'/></Row></Section><Text><fld IX='0'/></Text></Shape><Shape ID='3' Type='Shape' TextStyle='1'>${xform(1, 1, 3, 1, 0, 0, 0, 0, 0)}${rect}<Text><cp IX='0'/>style text</Text></Shape><Shape ID='4' Type='Shape' Master='1' MasterShape='10'>${xform(1, 1, 4, 1, 0, 0, 0, 0, 0)}${rect}</Shape></Shapes></PageContents>`,
     'visio/masters/master1.xml': `<MasterContents ${ns}><Shapes><Shape ID='10' Type='Shape'><Text>master text</Text></Shape></Shapes></MasterContents>`,
   });
+
+  await writeZip(path.join(root, 'crates/vsdx-parse/tests/fixtures/transform-sources.vsdx'), {
+    ...parts,
+    'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Shape'>${xform(2, 1, 3, 4, 1, 0.5, 0.5235987755982988, 1, 0)}${rect}</Shape><Shape ID='2' Type='Shape' Master='1' MasterShape='10'>${rect}</Shape><Shape ID='3' Type='Group'>${xform(4, 4, 6, 6, 2, 2, 0.7853981633974483, 0, 1)}<Shapes><Shape ID='4' Type='Shape'>${xform(1, 1, 1, 1, 0.5, 0.5, 0, 0, 0)}${rect}</Shape><Shape ID='5' Type='Shape' Master='1' MasterShape='10'>${rect}</Shape></Shapes></Shape><Shape ID='6' Type='Shape'><Cell N='Width' F='1+1' V='2'/><Cell N='Height' F='Width/2' V='1'/><Cell N='PinX' F='2*4' V='8'/><Cell N='PinY' V='2'/><Cell N='LocPinX' F='Width*0.5' V='1'/><Cell N='LocPinY' F='Height*0.5' V='0.5'/><Cell N='Angle' V='0'/>${rect}</Shape></Shapes></PageContents>`,
+    'visio/masters/master1.xml': `<MasterContents ${ns}><Shapes><Shape ID='10' Type='Shape'>${xform(1.5, 0.75, 2, 2, 0.75, 0.375, 0, 0, 0)}${rect}</Shape></Shapes></MasterContents>`,
+  });
 }
 
 type BenchmarkFixtureOptions = {
