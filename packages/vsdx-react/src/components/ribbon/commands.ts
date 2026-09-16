@@ -87,12 +87,10 @@ export function numericCellValue(shape: ShapeSnapshot, name: string, fallback?: 
   return parsed;
 }
 
-/** True when a ShapeSheet lock cell evaluates to the enabled value 1. */
 export function lockCellEnabled(shape: ShapeSnapshot | null, name: string): boolean {
   return Number(cellValue(shape, name)) === 1;
 }
 
-/** True when the stored formula for a cell carries a GUARD interception. */
 export function cellIsGuarded(shape: ShapeSnapshot | null, name: string): boolean {
   return (cellFormula(shape, name) ?? '').toUpperCase().includes('GUARD');
 }
@@ -105,8 +103,7 @@ function singleSetatrefTarget(formula: string): string | undefined {
   return target;
 }
 
-/** Mirrors the mutation policy: a GUARD on any SETATREF hop refuses the gesture,
-and an unresolvable redirect errors, so both read as blocked before a control runs. */
+/** Blocked when a GUARD sits on the cell or on any SETATREF hop to it. */
 function guardChainBlocked(shape: ShapeSnapshot | null, name: string): boolean {
   if (!shape) return false;
   const seen = new Set<string>();
@@ -125,7 +122,6 @@ function guardChainBlocked(shape: ShapeSnapshot | null, name: string): boolean {
   return true;
 }
 
-/** True when a delete would be refused by LockDelete or a GUARD on it. */
 export function isDeleteBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   return lockCellEnabled(shape, 'LockDelete') || guardChainBlocked(shape, 'LockDelete');
@@ -133,14 +129,12 @@ export function isDeleteBlocked(shape: ShapeSnapshot | null): boolean {
 
 export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'LockHeight', 'LockAspect'] as const;
 
-/** True when a handle resize would be refused by a lock or a GUARD on its pin or size. */
 export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   if (HANDLE_RESIZE_LOCKS.some((lock) => lockCellEnabled(shape, lock))) return true;
   return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => guardChainBlocked(shape, cell));
 }
 
-/** True when a single-cell write would be refused by a GUARD on that cell. */
 export function isCellWriteBlocked(shape: ShapeSnapshot | null, cellName: string): boolean {
   if (!shape) return false;
   return guardChainBlocked(shape, cellName);

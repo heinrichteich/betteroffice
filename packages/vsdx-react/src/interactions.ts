@@ -38,7 +38,6 @@ export const isEditableKeyboardTarget = (target: unknown): boolean => {
   }
   return false;
 };
-/** Pure key-to-intent mapping for the editor canvas. Y is up, so ArrowUp yields +dy. */
 export const canvasKeyboardIntent = (event: CanvasKeyboardEventLike, zoom: number): CanvasKeyboardIntent | null => {
   if (isEditableKeyboardTarget(event.target)) return null;
   const ctrl = Boolean(event.ctrlKey);
@@ -156,7 +155,6 @@ export const resolveRotationAngle = (start: DragStart, release: ModelPoint, snap
   return snapRotationAngle((start.angle ?? 0) + delta, snap);
 };
 const applyForward = (transform: Affine, point: ModelPoint): ModelPoint => ({ x: transform.a * point.x + transform.c * point.y + transform.e, y: transform.b * point.x + transform.d * point.y + transform.f });
-/** Expresses a page-axis nudge as the drag that would cover the same screen distance. */
 export const resolveNudgeGeometry = (start: DragStart, dx: number, dy: number): { x: number; y: number; width: number; height: number } => resolveDragGeometry({ ...start, canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 } }, { x: dx, y: dy });
 export const previewOutline = (start: DragStart, release: ModelPoint, paintTransform: Affine, snap = false): ModelPoint[] => {
   const geometry = resolveDragGeometry(start, release);

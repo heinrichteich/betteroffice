@@ -29,7 +29,6 @@ export const SHAPE_CONTEXT_ENTRIES: ReadonlyArray<CommandMenuEntry> = [
 
 const SHAPE_CONTEXT_DIVIDERS: ReadonlySet<RibbonCommandId> = new Set(['delete']);
 
-/** Right-click menu for the selected shape, sharing the ribbon menus' keyboard behaviour. */
 export function ShapeContextMenu({ t, position, onClose, onCloseAndFocus }: ShapeContextMenuProps) {
   return <CommandMenu menuLabel={t('contextMenu.label')} entries={SHAPE_CONTEXT_ENTRIES} position={position} dividerAfter={SHAPE_CONTEXT_DIVIDERS} label={(id) => t(`ribbon.commands.${id}`)} onClose={onClose} onCloseAndFocus={onCloseAndFocus} />;
 }

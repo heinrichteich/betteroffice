@@ -229,6 +229,27 @@ test('a formula-backed LocPin resizes as a fraction so the commit keeps the oppo
   expect(Math.max(...corners.map((corner) => corner.x))).toBeCloseTo(7, 10);
 });
 
+test('a non-centred LocPin formula keeps its resolved offset so the opposite edge stays fixed', () => {
+  for (const formula of ['Width*0.25', 'Width-0.25']) {
+    const shape = placementShape([
+      { cellName: 'PinX', formula: '5', value: '5' },
+      { cellName: 'PinY', formula: '2', value: '2' },
+      { cellName: 'Width', formula: '2', value: '2' },
+      { cellName: 'Height', formula: '1', value: '1' },
+      { cellName: 'LocPinX', formula, value: formula === 'Width*0.25' ? '0.5' : '1.75' },
+      { cellName: 'LocPinY', formula: 'Height*0.5', value: '0.5' },
+    ]);
+    const page = { shapes: [shape], sourcePartPath: 'page' };
+    const start = dragStartForPlacement(page, shape, frame);
+    expect(start.locPin?.x).toBeCloseTo(formula === 'Width*0.25' ? 0.5 : 1.75, 10);
+    expect(start.locPin?.y).toBeUndefined();
+    const drag = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, ...start };
+    const grown = resolveDragGeometry(drag, { x: 1, y: 0 });
+    expect(grown.width).toBeCloseTo(3, 10);
+    expect(grown.x).toBeCloseTo(5, 10);
+  }
+});
+
 test('a literal LocPin stays absolute through a handle resize', () => {
   const shape = placementShape([
     { cellName: 'PinX', formula: '5', value: '5' },

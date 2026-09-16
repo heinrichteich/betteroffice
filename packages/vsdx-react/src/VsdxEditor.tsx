@@ -538,17 +538,19 @@ export function hasLocPinCell(shape: ShapeSnapshot, name: string): boolean {
   return shape.cells.some((item) => item.locator.section === null && item.locator.row === null && item.locator.cellName === name);
 }
 
-export function locPinTracksDimension(shape: ShapeSnapshot, name: string, dimension: string): boolean {
+export function locPinIsCenteredDefault(shape: ShapeSnapshot, name: string, dimension: string): boolean {
   const formula = cellFormula(shape, name);
   if (typeof formula !== 'string' || formula.includes('!')) return false;
-  return new RegExp(`\\b${dimension}\\b`, 'i').test(formula);
+  const compact = formula.replace(/^=\s*/, '').replace(/\s+/g, '').toUpperCase();
+  const axis = dimension.toUpperCase();
+  return compact === `${axis}*0.5` || compact === `${axis}*.5` || compact === `${axis}/2`;
 }
 
 export function dragStartForPlacement(page: { shapes: readonly ShapeSnapshot[]; sourcePartPath: string }, shape: ShapeSnapshot, frame: PageDisplayList): Omit<DragStart, 'canvas' | 'model' | 'resize' | 'pointerId' | 'startX' | 'startY'> {
   const width = numericCellValue(shape, 'Width');
   const height = numericCellValue(shape, 'Height');
-  const locPinX = locPinTracksDimension(shape, 'LocPinX', 'Width') || !hasLocPinCell(shape, 'LocPinX') ? undefined : numericCellValue(shape, 'LocPinX', width / 2);
-  const locPinY = locPinTracksDimension(shape, 'LocPinY', 'Height') || !hasLocPinCell(shape, 'LocPinY') ? undefined : numericCellValue(shape, 'LocPinY', height / 2);
+  const locPinX = locPinIsCenteredDefault(shape, 'LocPinX', 'Width') || !hasLocPinCell(shape, 'LocPinX') ? undefined : numericCellValue(shape, 'LocPinX', width / 2);
+  const locPinY = locPinIsCenteredDefault(shape, 'LocPinY', 'Height') || !hasLocPinCell(shape, 'LocPinY') ? undefined : numericCellValue(shape, 'LocPinY', height / 2);
   return {
     parentTransforms: shapeParentTransforms(frame.primitives, `${page.sourcePartPath}:${shape.sourceId}`) ?? [],
     angle: numericCellValue(shape, 'Angle', 0),
@@ -560,7 +562,6 @@ export function dragStartForPlacement(page: { shapes: readonly ShapeSnapshot[]; 
   };
 }
 
-/** Current selection corners in scale-1 canvas coordinates for overlay paint and hit tests. */
 export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, selection: VsdxShapeSelection): ModelPoint[] | null {
   const placement = findShapePlacement(page.shapes, selection.shapeId);
   if (!placement) return null;

@@ -73,7 +73,14 @@ test('exposes two stencils covering every shape', () => {
   expect(shapeStencils.map((stencil) => stencil.id)).toEqual(['standard', 'arrows']);
   expect(shapeStencils[0].shapes).toEqual(standardShapes);
   expect(shapeStencils[1].shapes).toEqual(arrowShapes);
-  expect(arrowShapes).toHaveLength(37);
+  expect(arrowShapes.map((shape) => shape.id)).toEqual([
+    'arrowRight', 'arrowLeft', 'arrowUp', 'arrowDown', 'arrowDoubleHorizontal', 'arrowDoubleVertical',
+    'curvedArrowRight', 'curvedArrowLeft', 'curvedArrowUp', 'curvedArrowDown',
+    'lineArrowRight', 'lineArrowLeft', 'lineArrowUp', 'lineArrowDown',
+    'lineHorizontal', 'lineVertical', 'lineDiagonal', 'lineElbow',
+    'bentArrow', 'uTurnArrow', 'sharpBent', 'stripedArrow', 'notched', 'blockArrow',
+    'circularArrow', 'quadArrow', 'leftRightUp', 'arcedLine',
+  ]);
 });
 
 test('draws every arrow preview from its draft geometry', () => {
