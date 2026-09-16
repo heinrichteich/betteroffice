@@ -10,6 +10,7 @@ export interface DiagramHandle {
   snapshot(): DiagramSnapshot;
   registerFont(face: VsdxFontFace): number;
   layoutPage(pageIndex: number): PageDisplayList;
+  exportPdf(): Uint8Array;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(assetId: string): Uint8Array;
   setCellFormula(pageId: string, shapeId: string, locator: CellLocator, formula: string): CellFormulaReceipt;
@@ -117,6 +118,7 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
       while (shapes.length) { const shape = shapes.pop()!; hitIds.set(`${page.sourcePartPath}:${shape.sourceId}`, shape.id); shapes.push(...shape.children); }
       return list;
     },
+    exportPdf: () => wasm(() => renderer.exportPdf(doc).slice()),
     hitTest: (x, y) => {
       const hit = json<HitTestResult | null>(() => renderer.hitTestJson(x, y));
       const shapeId = hit && hitIds.get(hit.shapeId);

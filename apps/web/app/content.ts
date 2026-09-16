@@ -67,7 +67,7 @@ export const EDITORS = [
   {
     name: "Diagrams",
     format: "vsdx",
-    desc: "VSDX editor with a tabbed ribbon, a standard-shape gallery, a page tab strip and a zoom status bar, for moving, resizing with handles and Shift-drag, adding and deleting shapes, setting fill and line colour, and saving diagrams, with keyboard undo and redo, Delete, arrow-key nudge with a larger Shift step, Ctrl+A to select every shape on the page, and Escape to clear the selection or cancel a drag, working anywhere in the editor except text fields and open menus, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus. No connector-drag UI.",
+    desc: "VSDX editor with a tabbed ribbon, a standard-shape gallery, a page tab strip and a zoom status bar, for moving, resizing with handles and Shift-drag, adding and deleting shapes, setting fill and line colour, and saving diagrams, with keyboard undo and redo, Delete, arrow-key nudge with a larger Shift step, Ctrl+A to select every shape on the page, and Escape to clear the selection or cancel a drag, working anywhere in the editor except text fields and open menus, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus. No connector-drag UI. Exports diagrams to vector PDF, one page per diagram page at the page's own size.",
     status: "source preview",
   },
 ];
@@ -107,7 +107,7 @@ export const PACKAGES = [
   {
     name: "@betteroffice/vsdx",
     sourceOnly: true,
-    desc: "VSDX core — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, saving, and collaboration.",
+    desc: "VSDX core — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, saving, PDF export, and collaboration.",
   },
   {
     name: "@betteroffice/vsdx-react",

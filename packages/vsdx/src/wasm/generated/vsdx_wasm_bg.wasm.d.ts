@@ -4,6 +4,7 @@ export const memory: WebAssembly.Memory;
 export const __wbg_vsdxrenderer_free: (a: number, b: number) => void;
 export const parseVsdxJson: (a: number, b: number) => [number, number, number, number];
 export const rendererVersion: () => [number, number];
+export const vsdxrenderer_exportPdf: (a: number, b: number) => [number, number, number, number];
 export const vsdxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxrenderer_layoutPageJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxrenderer_new: () => number;
