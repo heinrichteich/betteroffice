@@ -10,7 +10,6 @@ export interface ShapeContextMenuProps {
   onCloseAndFocus: () => void;
 }
 
-/** Shape operations offered on right-click, in Visio's relative order. */
 export const SHAPE_CONTEXT_ENTRIES: ReadonlyArray<CommandMenuEntry> = [
   { id: 'delete', icon: 'delete' },
   {

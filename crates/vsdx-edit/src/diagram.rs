@@ -950,10 +950,7 @@ impl DiagramSession {
         Ok(receipts)
     }
 
-    /// Evaluates LocPinX/Y against a proposed size, in inches.
-    ///
-    /// Unevaluatable and Pin-dependent formulas hold their current value, which
-    /// is what the committed snapshot renders for them.
+    /// Probes LocPin at a proposed size.
     pub fn loc_pin_at_size(
         &self,
         page_id: &str,

@@ -186,6 +186,10 @@ impl DiagramSession {
     pub fn can_redo(&self) -> bool {
         self.undo.borrow().can_redo()
     }
+    #[cfg(test)]
+    pub(crate) fn undo_depth(&self) -> usize {
+        self.undo.borrow().undo_depth()
+    }
     pub fn add_undo_barrier(&self) {
         self.undo.borrow_mut().add_undo_barrier()
     }
@@ -1272,6 +1276,7 @@ mod tests {
                 },
             )
             .unwrap();
+        assert_eq!(session.undo_depth(), 1);
         assert!(session.undo());
         let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
         for name in ["Width", "Height", "PinX", "PinY"] {
@@ -1314,6 +1319,7 @@ mod tests {
                 ],
             )
             .unwrap();
+        assert_eq!(session.undo_depth(), 1);
         assert!(session.undo());
         let shapes = &session.snapshot().unwrap().pages[0].shapes;
         for shape in shapes {
@@ -1354,6 +1360,7 @@ mod tests {
                 ],
             )
             .unwrap();
+        assert_eq!(session.undo_depth(), 1);
         assert!(session.snapshot().unwrap().pages[0].shapes.is_empty());
         assert!(session.undo());
         assert_eq!(session.snapshot().unwrap().pages[0].shapes.len(), 2);
@@ -1408,6 +1415,7 @@ mod tests {
                 ],
             )
             .unwrap();
+        assert_eq!(session.undo_depth(), 1);
         assert!(session.undo());
         let shapes = &session.snapshot().unwrap().pages[0].shapes;
         for shape in shapes {
