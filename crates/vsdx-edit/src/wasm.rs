@@ -130,6 +130,21 @@ struct ConnectorGlueArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RoutePointArgs {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetConnectorRouteArgs {
+    page_id: String,
+    shape_id: String,
+    points: Vec<RoutePointArgs>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AddConnectorArgs {
     page_id: String,
     draft: FormulaShapeDraft,
@@ -361,6 +376,11 @@ impl VsdxDocument {
         self.add_connector_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = setConnectorRouteJson)]
+    pub fn set_connector_route_json(&self, args: &str) -> Result<String, JsValue> {
+        self.set_connector_route_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = save)]
     pub fn save(&self) -> Result<Vec<u8>, JsValue> {
         self.save_inner().map_err(js_error)
@@ -516,6 +536,19 @@ impl VsdxDocument {
                     to_cell: args.to.to_cell,
                 },
             )
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn set_connector_route_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: SetConnectorRouteArgs = parse_args_inner(args)?;
+        let points = args
+            .points
+            .iter()
+            .map(|point| (point.x, point.y))
+            .collect::<Vec<_>>();
+        self.session
+            .set_connector_route(&local_context(), &args.page_id, &args.shape_id, &points)
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }

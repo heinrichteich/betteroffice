@@ -13,6 +13,9 @@ pub struct VsdxDisplayList {
     /// The only transform from Visio inches/Y-up into canvas pixels/Y-down.
     pub paint_transform: PaintTransform,
     pub primitives: Vec<Primitive>,
+    /// Selection chrome for 1D connectors, keyed by primitive id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connectors: Vec<ConnectorChrome>,
 }
 
 impl<'de> Deserialize<'de> for VsdxDisplayList {
@@ -28,6 +31,8 @@ impl<'de> Deserialize<'de> for VsdxDisplayList {
             height: f32,
             paint_transform: PaintTransform,
             primitives: Vec<Primitive>,
+            #[serde(default)]
+            connectors: Vec<ConnectorChrome>,
         }
 
         let wire = WireDisplayList::deserialize(deserializer)?;
@@ -43,6 +48,7 @@ impl<'de> Deserialize<'de> for VsdxDisplayList {
             height: wire.height,
             paint_transform: wire.paint_transform,
             primitives: wire.primitives,
+            connectors: wire.connectors,
         })
     }
 }
@@ -347,6 +353,23 @@ pub struct CaretStop {
     pub x: f32,
     pub y: f32,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConnectorEndpointGlue {
+    Free,
+    Shape,
+    Point,
+}
+
+/// How a connector endpoint is glued, for selection chrome.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorChrome {
+    pub id: String,
+    pub begin: ConnectorEndpointGlue,
+    pub end: ConnectorEndpointGlue,
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }

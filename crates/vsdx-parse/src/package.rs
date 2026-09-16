@@ -44,6 +44,8 @@ pub struct SemanticCellEdit {
     pub gesture: MutationGesture,
     pub formula: Option<String>,
     pub value: Option<String>,
+    /// Row type for cells that create their container row.
+    pub row_type: Option<String>,
 }
 
 /// The user action that requested a ShapeSheet mutation.
@@ -113,6 +115,7 @@ struct NewContainerCell {
     section: Option<String>,
     section_index: Option<u32>,
     row: Option<CellRow>,
+    row_type: Option<String>,
     name: String,
     formula: String,
     value: Option<String>,
@@ -491,6 +494,88 @@ pub(crate) fn save_cell_edits(
     save_cell_edits_with_new_cells(package, edits, &[], &[], &[])
 }
 
+struct ContainerCell {
+    name: String,
+    formula: String,
+    value: Option<String>,
+}
+
+struct ContainerRow {
+    row: Option<CellRow>,
+    row_type: Option<String>,
+    cells: Vec<ContainerCell>,
+}
+
+struct ContainerGroup {
+    part_path: String,
+    owner_span: crate::SourceSpan,
+    section: Option<String>,
+    section_index: Option<u32>,
+    rows: Vec<ContainerRow>,
+}
+
+/// Merges container cells that share an insertion point into one section block.
+fn group_container_cells(cells: &[NewContainerCell]) -> Vec<ContainerGroup> {
+    let mut groups: Vec<ContainerGroup> = Vec::new();
+    for cell in cells {
+        let group = match groups.iter_mut().find(|group| {
+            group.part_path == cell.part_path
+                && group.owner_span == cell.owner_span
+                && group.section == cell.section
+                && group.section_index == cell.section_index
+        }) {
+            Some(group) => group,
+            None => {
+                groups.push(ContainerGroup {
+                    part_path: cell.part_path.clone(),
+                    owner_span: cell.owner_span,
+                    section: cell.section.clone(),
+                    section_index: cell.section_index,
+                    rows: Vec::new(),
+                });
+                groups.last_mut().expect("group was just pushed")
+            }
+        };
+        match group
+            .rows
+            .iter_mut()
+            .find(|row| row.row == cell.row && row.row_type == cell.row_type)
+        {
+            Some(row) => row.cells.push(ContainerCell {
+                name: cell.name.clone(),
+                formula: cell.formula.clone(),
+                value: cell.value.clone(),
+            }),
+            None => group.rows.push(ContainerRow {
+                row: cell.row.clone(),
+                row_type: cell.row_type.clone(),
+                cells: vec![ContainerCell {
+                    name: cell.name.clone(),
+                    formula: cell.formula.clone(),
+                    value: cell.value.clone(),
+                }],
+            }),
+        }
+    }
+    for group in &mut groups {
+        for row in &mut group.rows {
+            row.cells.sort_by(|left, right| left.name.cmp(&right.name));
+        }
+        group
+            .rows
+            .sort_by(|left, right| row_sort_key(&left.row).cmp(&row_sort_key(&right.row)));
+    }
+    groups
+}
+
+fn row_sort_key(row: &Option<CellRow>) -> (u8, u32, &str) {
+    match row {
+        Some(CellRow::Index(index)) => (0, *index, ""),
+        Some(CellRow::Name(name)) => (1, 0, name),
+        None => (2, 0, ""),
+    }
+}
+
 fn save_cell_edits_with_new_cells(
     package: &VsdxPackage,
     edits: &[CellEdit],
@@ -732,21 +817,21 @@ fn save_cell_edits_with_new_cells(
             .ok_or(VsdxError::PatchLimit { kind: "editBytes" })?;
         validated.push((part.path.as_str(), SpanEdit { span, replacement }));
     }
-    for new_cell in new_container_cells {
+    for group in group_container_cells(new_container_cells) {
         let part = package
             .parts
             .iter()
-            .find(|part| part.path == new_cell.part_path)
+            .find(|part| part.path == group.part_path)
             .ok_or_else(|| VsdxError::InvalidCellEdit {
-                part: new_cell.part_path.clone(),
+                part: group.part_path.clone(),
                 message: "part does not exist".to_owned(),
             })?;
         let owner = part
             .spans
             .iter()
-            .find(|span| span.span == new_cell.owner_span)
+            .find(|span| span.span == group.owner_span)
             .ok_or_else(|| VsdxError::InvalidCellEdit {
-                part: new_cell.part_path.clone(),
+                part: group.part_path.clone(),
                 message: "local container owner does not exist".to_owned(),
             })?;
         let quote = owner
@@ -755,54 +840,62 @@ fn save_cell_edits_with_new_cells(
             .next()
             .map(|attribute| attribute.quote)
             .ok_or_else(|| VsdxError::InvalidCellEdit {
-                part: new_cell.part_path.clone(),
+                part: group.part_path.clone(),
                 message: "local container owner has no attribute quote style".to_owned(),
             })?;
         let (span, closes_owner) = container_insertion_point(
             part,
             owner,
-            new_cell.section.as_deref(),
-            new_cell.row.as_ref(),
+            group.section.as_deref(),
+            group.rows.first().and_then(|row| row.row.as_ref()),
         )?;
         let mut replacement = Vec::new();
         if closes_owner {
             replacement.push(b'>');
         }
-        if let Some(section) = &new_cell.section {
+        if let Some(section) = &group.section {
             replacement.extend_from_slice(b"<Section N=");
             push_quoted(&mut replacement, section, quote)?;
-            if let Some(index) = new_cell.section_index {
+            if let Some(index) = group.section_index {
                 replacement.extend_from_slice(b" IX=");
                 push_quoted(&mut replacement, &index.to_string(), quote)?;
             }
             replacement.push(b'>');
         }
-        if let Some(row) = &new_cell.row {
-            replacement.extend_from_slice(b"<Row ");
-            match row {
-                CellRow::Index(_) => replacement.extend_from_slice(b"IX="),
-                CellRow::Name(_) => replacement.extend_from_slice(b"N="),
+        for row in &group.rows {
+            if let Some(row_key) = &row.row {
+                replacement.extend_from_slice(b"<Row ");
+                match row_key {
+                    CellRow::Index(_) => replacement.extend_from_slice(b"IX="),
+                    CellRow::Name(_) => replacement.extend_from_slice(b"N="),
+                }
+                let row_value = match row_key {
+                    CellRow::Index(index) => index.to_string(),
+                    CellRow::Name(name) => name.clone(),
+                };
+                push_quoted(&mut replacement, &row_value, quote)?;
+                if let Some(row_type) = &row.row_type {
+                    replacement.extend_from_slice(b" T=");
+                    push_quoted(&mut replacement, row_type, quote)?;
+                }
+                replacement.push(b'>');
             }
-            let row_value = match row {
-                CellRow::Index(index) => index.to_string(),
-                CellRow::Name(name) => name.clone(),
-            };
-            push_quoted(&mut replacement, &row_value, quote)?;
-            replacement.push(b'>');
+            for cell in &row.cells {
+                replacement.extend_from_slice(b"<Cell N=");
+                push_quoted(&mut replacement, &cell.name, quote)?;
+                replacement.extend_from_slice(b" F=");
+                push_quoted(&mut replacement, &cell.formula, quote)?;
+                if let Some(value) = &cell.value {
+                    replacement.extend_from_slice(b" V=");
+                    push_quoted(&mut replacement, value, quote)?;
+                }
+                replacement.extend_from_slice(b"/>");
+            }
+            if row.row.is_some() {
+                replacement.extend_from_slice(b"</Row>");
+            }
         }
-        replacement.extend_from_slice(b"<Cell N=");
-        push_quoted(&mut replacement, &new_cell.name, quote)?;
-        replacement.extend_from_slice(b" F=");
-        push_quoted(&mut replacement, &new_cell.formula, quote)?;
-        if let Some(value) = &new_cell.value {
-            replacement.extend_from_slice(b" V=");
-            push_quoted(&mut replacement, value, quote)?;
-        }
-        replacement.extend_from_slice(b"/>");
-        if new_cell.row.is_some() {
-            replacement.extend_from_slice(b"</Row>");
-        }
-        if new_cell.section.is_some() {
+        if group.section.is_some() {
             replacement.extend_from_slice(b"</Section>");
         }
         if closes_owner {
@@ -899,6 +992,7 @@ pub fn save_semantic_cell_edits(
                     section,
                     section_index: edit.locator.section_index,
                     row,
+                    row_type: edit.row_type.clone(),
                     name: edit.locator.cell_name.clone(),
                     formula: formula.clone(),
                     value: edit.value.clone(),
@@ -2255,6 +2349,7 @@ mod tests {
                     cell_name: "Width".to_owned(),
                 },
                 gesture: MutationGesture::CellEdit,
+                row_type: None,
                 formula: Some("4".to_owned()),
                 value: Some("4".to_owned()),
             }],
@@ -2280,6 +2375,7 @@ mod tests {
                 cell_name: name.to_owned(),
             },
             gesture: MutationGesture::CellEdit,
+            row_type: None,
             formula: Some("9".to_owned()),
             value: None,
         };
@@ -2309,6 +2405,7 @@ mod tests {
                     cell_name: "Width".to_owned(),
                 },
                 gesture: MutationGesture::CellEdit,
+                row_type: None,
                 formula: Some("4".to_owned()),
                 value: None,
             }],
@@ -2330,6 +2427,7 @@ mod tests {
                     cell_name: "Value".to_owned(),
                 },
                 gesture: MutationGesture::CellEdit,
+                row_type: None,
                 formula: Some("4".to_owned()),
                 value: None,
             }],
@@ -2358,6 +2456,7 @@ mod tests {
                     cell_name: "Width".to_owned(),
                 },
                 gesture: MutationGesture::CellEdit,
+                row_type: None,
                 formula: None,
                 value: Some("4".to_owned()),
             }],
@@ -2438,6 +2537,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parse_vsdx(&saved).unwrap().part_bytes(&path).unwrap(), b"<PageContents><Shapes><Shape ID='1'><Section N='User'><Row IX='1'/><Row IX='2'><Cell N='Value' F='4' V='4'/></Row><Row IX='3'/></Section></Shape></Shapes></PageContents>");
+    }
+
+    #[test]
+    fn groups_typed_container_rows_into_one_section() {
+        let source =
+            b"<PageContents><Shapes><Shape ID='1'><Cell N='Keep'/></Shape></Shapes></PageContents>";
+        let (package, path) = package_with_page_xml(source);
+        let page_id = package.page_part_ids[&path];
+        let edit = |row: u32, name: &str, row_type: &str| SemanticCellEdit {
+            locator: CellLocator {
+                sheet: CellSheet::Page(page_id),
+                shape_id: Some(1),
+                section: Some("Geometry".to_owned()),
+                section_index: None,
+                row: Some(CellRow::Index(row)),
+                cell_name: name.to_owned(),
+            },
+            gesture: MutationGesture::CellEdit,
+            row_type: Some(row_type.to_owned()),
+            formula: Some("1".to_owned()),
+            value: None,
+        };
+        let saved = save_semantic_cell_edits(
+            &package,
+            &[
+                edit(0, "X", "MoveTo"),
+                edit(0, "Y", "MoveTo"),
+                edit(1, "X", "LineTo"),
+                edit(1, "Y", "LineTo"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            parse_vsdx(&saved).unwrap().part_bytes(&path).unwrap(),
+            b"<PageContents><Shapes><Shape ID='1'><Cell N='Keep'/><Section N='Geometry'><Row IX='0' T='MoveTo'><Cell N='X' F='1'/><Cell N='Y' F='1'/></Row><Row IX='1' T='LineTo'><Cell N='X' F='1'/><Cell N='Y' F='1'/></Row></Section></Shape></Shapes></PageContents>"
+        );
     }
 
     #[test]
@@ -3012,6 +3147,7 @@ mod tests {
                 cell_name: "Value".to_owned(),
             },
             gesture: MutationGesture::CellEdit,
+            row_type: None,
             formula: Some("4".to_owned()),
             value: Some("4".to_owned()),
         }
@@ -3193,6 +3329,7 @@ mod tests {
                 &[SemanticCellEdit {
                     locator,
                     gesture: MutationGesture::CellEdit,
+                    row_type: None,
                     formula: Some("2".to_owned()),
                     value: Some(new_value.to_owned()),
                 }],

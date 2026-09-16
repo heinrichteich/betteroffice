@@ -6,6 +6,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
 import { RibbonCommandsProvider, findShapePlacement, numericCellValue } from './components/ribbon/commands';
+import { dragSegmentRoute, hitSegmentDot, paintConnectorChrome, previewChrome, selectedConnectorChrome } from './connectorChrome';
+import type { ChromePoint } from './connectorChrome';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
@@ -60,6 +62,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [model, setModel] = useState<EditorModel>({ snapshot: null, pageIndex: 0, frame: null });
   const modelRef = useRef(model);
   const [selection, setSelection] = useState<VsdxShapeSelection | null>(null);
+  const selectionRef = useRef<VsdxShapeSelection | null>(null);
+  selectionRef.current = selection;
   const [dirty, setDirty] = useState(false);
   const sessionSwitchBlocked = dirty && sessionRef.current.file === file &&
     (sessionRef.current.clientId !== requestedClientId || sessionRef.current.initialUpdate !== requestedInitialUpdate);
@@ -70,6 +74,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
   const pointerRef = useRef<DragStart | null>(null);
+  const segmentDragRef = useRef<SegmentDrag | null>(null);
   const [loading, setLoading] = useState(Boolean(file));
   onReadyRef.current = onReady;
   onChangeRef.current = onChange;
@@ -181,22 +186,53 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     return () => controller.abort();
   }, [model.frame, reportError, t, zoom]);
 
-  useEffect(() => {
-    const canvas = overlayCanvasRef.current; const frame = model.frame;
-    if (!canvas || !frame) return;
+  const paintOverlay = useCallback(() => {
+    const canvas = overlayCanvasRef.current; const current = modelRef.current;
+    const frame = current.frame; const page = current.snapshot?.pages[current.pageIndex];
+    const selection = selectionRef.current;
+    if (!canvas || !frame || !page || !selection) return;
     const context = canvas.getContext('2d'); if (!context) return;
-    const dpr = window.devicePixelRatio || 1; sizeCanvasForPage(canvas, frame, dpr, zoom); context.clearRect(0, 0, canvas.width, canvas.height);
-  }, [model.frame, selection, zoom]);
+    const dpr = window.devicePixelRatio || 1;
+    sizeCanvasForPage(canvas, frame, dpr, zoom); context.clearRect(0, 0, canvas.width, canvas.height);
+    const chrome = selectedConnectorChrome(frame, page, selection);
+    if (!chrome) return;
+    const drag = segmentDragRef.current;
+    paintConnectorChrome(context, frame, drag && drag.selection.shapeId === selection.shapeId
+      ? previewChrome(chrome, drag.preview ?? drag.vertices)
+      : chrome, dpr, zoom);
+  }, [zoom]);
+
+  useEffect(() => {
+    paintOverlay();
+  }, [paintOverlay, model.frame, model.snapshot, model.pageIndex, selection, zoom]);
 
   const onPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
     if (!handle || !frame || !page) return;
-    pointerRef.current = null;
+    pointerRef.current = null; segmentDragRef.current = null;
     try {
       const point = canvasPointerPosition(event, frame);
       handle.layoutPage(model.pageIndex);
       const hit = handle.hitTest(point.canvas.x, point.canvas.y);
-      setSelection(hit ? { pageId: page.id, shapeId: hit.shapeId, hit } : null);
+      const nextSelection = hit ? { pageId: page.id, shapeId: hit.shapeId, hit } : null;
+      setSelection(nextSelection);
+      if (nextSelection) {
+        const chrome = selectedConnectorChrome(frame, page, nextSelection);
+        const segment = chrome?.draggable ? hitSegmentDot(chrome, point.model, grabTolerance(event.currentTarget, frame)) : null;
+        if (chrome && segment !== null && chrome.draggable) {
+          const vertices = chrome.draggable;
+          segmentDragRef.current = {
+            selection: nextSelection,
+            vertices,
+            segment,
+            anchor: { x: chrome.segments[segment].mid.x, y: chrome.segments[segment].mid.y },
+            grab: { x: point.model.x - chrome.segments[segment].mid.x, y: point.model.y - chrome.segments[segment].mid.y },
+            preview: null,
+          };
+          event.currentTarget.setPointerCapture(event.pointerId);
+          return;
+        }
+      }
       const placement = hit ? findShapePlacement(page.shapes, hit.shapeId) : null;
       pointerRef.current = hit && placement ? {
         ...point,
@@ -212,6 +248,19 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     } catch (value) { reportError(value); }
   };
   const onPointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
+    const drag = segmentDragRef.current; segmentDragRef.current = null;
+    if (drag) {
+      const handle = handleRef.current;
+      try {
+        if (handle && drag.preview && !sameRoutePoints(drag.preview, drag.vertices)) {
+          handle.setConnectorRoute(drag.selection.pageId, drag.selection.shapeId, drag.preview);
+          refresh(undefined, true);
+          return;
+        }
+      } catch (value) { reportError(value); }
+      paintOverlay();
+      return;
+    }
     const pointer = pointerRef.current; pointerRef.current = null;
     const handle = handleRef.current; const selected = selection; const frame = model.frame;
     if (!pointer || !handle || !selected || !frame) return;
@@ -223,6 +272,25 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       else handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
       refresh(undefined, true);
     } catch (value) { reportError(value); }
+  };
+  const onPointerMove = (event: PointerEvent<HTMLCanvasElement>) => {
+    const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
+    if (!frame || !page) return;
+    const drag = segmentDragRef.current;
+    try {
+      const point = canvasPointerPosition(event, frame);
+      if (drag) {
+        const anchor = { x: drag.anchor.x + drag.grab.x, y: drag.anchor.y + drag.grab.y };
+        drag.preview = dragSegmentRoute(drag.vertices, drag.segment, anchor, point.model);
+        event.currentTarget.style.cursor = 'grabbing';
+        paintOverlay();
+        return;
+      }
+      const selection = selectionRef.current;
+      const chrome = selection ? selectedConnectorChrome(frame, page, selection) : null;
+      const hover = chrome?.draggable ? hitSegmentDot(chrome, point.model, grabTolerance(event.currentTarget, frame)) : null;
+      event.currentTarget.style.cursor = hover !== null && hover !== undefined ? 'grab' : '';
+    } catch { event.currentTarget.style.cursor = ''; }
   };
   const insertShape = useCallback((shape: StandardShape) => {
     const handle = handleRef.current; const current = modelRef.current; const frame = current.frame;
@@ -258,7 +326,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
       <div style={styles.canvasFrame}>
-        <canvas ref={mainCanvasRef} onPointerDown={onPointerDown} onPointerUp={onPointerUp} onPointerCancel={() => { pointerRef.current = null; }} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
+        <canvas ref={mainCanvasRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={() => { pointerRef.current = null; segmentDragRef.current = null; paintOverlay(); }} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
         <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
         {selection && <output style={styles.selection}>{t('shapes.selected', { name: selection.shapeId })}</output>}
       </div>
@@ -291,6 +359,17 @@ export function inchFormula(value: number): string {
 }
 
 export interface DragStart { canvas: ModelPoint; model: ModelPoint; resize: boolean; pin: ModelPoint; size: { width: number; height: number }; parentTransforms?: readonly Affine[]; angle?: number; flipX?: boolean; flipY?: boolean; }
+
+export interface SegmentDrag { selection: VsdxShapeSelection; vertices: ChromePoint[]; segment: number; anchor: ChromePoint; grab: ChromePoint; preview: ChromePoint[] | null; }
+
+export function grabTolerance(canvas: HTMLCanvasElement, frame: PageDisplayList): number {
+  const rect = canvas.getBoundingClientRect();
+  return 12 * frame.width / Math.max(rect.width, 1);
+}
+
+export function sameRoutePoints(left: readonly ChromePoint[], right: readonly ChromePoint[]): boolean {
+  return left.length === right.length && left.every((point, index) => Math.hypot(point.x - right[index].x, point.y - right[index].y) < 1e-9);
+}
 
 export function resolveDragGeometry(start: DragStart, release: ModelPoint): { x: number; y: number; width: number; height: number } {
   const toParent = (point: ModelPoint) => (start.parentTransforms ?? []).reduce((local, transform) => canvasPointToModel(transform, local.x, local.y), point);

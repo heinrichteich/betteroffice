@@ -13,13 +13,14 @@ use yrs::{
 };
 
 use crate::{
-    CONNECTS, CellFormulaReceipt, CellSnapshot, ConnectorGlue, DiagramSession, DiagramSnapshot,
-    EditCtx, EditError, EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES,
-    ShapeDraft, ShapeReceipt, ShapeSnapshot,
+    CONNECTS, CellFormulaReceipt, CellSnapshot, ConnectorGlue, ConnectorRouteReceipt,
+    DiagramSession, DiagramSnapshot, EditCtx, EditError, EditResult, META, PAGE_ORDER, PAGES,
+    PageSnapshot, SHEETS, STORIES, ShapeDraft, ShapeReceipt, ShapeSnapshot,
 };
 
 const SCHEMA_VERSION: f64 = 1.0;
 pub(crate) const MAX_SHAPE_NESTING: usize = 256;
+const MAX_CONNECTOR_ROUTE_POINTS: usize = 256;
 type SectionRows<'a> = Vec<(
     (String, Option<u32>),
     Vec<(Option<CellRow>, Vec<&'a CellSnapshot>)>,
@@ -839,6 +840,161 @@ fn seed_cell(
     }
 }
 
+/// Seeds a hand-routed Geometry cell with no baseline or cached value.
+fn seed_route_cell(
+    cells: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    locator: &CellLocator,
+    formula: &str,
+    row_type: &str,
+) {
+    let key = locator_key(locator);
+    let cell = cells.insert(txn, key.as_str(), MapPrelim::default());
+    cell.insert(txn, "name", locator.cell_name.as_str());
+    if let Some(section) = &locator.section {
+        cell.insert(txn, "section", section.as_str());
+    }
+    if let Some(CellRow::Index(index)) = &locator.row {
+        cell.insert(txn, "rowIndex", *index as f64);
+    }
+    cell.insert(txn, "rowType", row_type);
+    cell.insert(txn, "formula", formula);
+}
+
+struct GeometryRow {
+    row_type: Option<String>,
+    has_x: bool,
+    has_y: bool,
+}
+
+fn allow_route_cell(
+    context: &CrdtMutationContext,
+    locator: CellLocator,
+    formula: &str,
+) -> EditResult<()> {
+    match decide_mutation(
+        context,
+        locator.clone(),
+        MutationGesture::CellEdit,
+        formula.to_owned(),
+        &ParseLimits::default(),
+    ) {
+        MutationOutcome::Allowed { target, .. } if target == locator => Ok(()),
+        MutationOutcome::Allowed { .. } => Err(EditError::InvalidState(
+            "connector route edit bypasses formula redirect".to_owned(),
+        )),
+        MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+            Err(EditError::InvalidState(reason))
+        }
+    }
+}
+
+/// A 1D shape resolves the way the glue resolver decides it: explicit OneD wins,
+/// otherwise all four endpoint cells must resolve.
+fn connector_route_shape(shape: &vsdx_resolve::ResolvedShape) -> bool {
+    match route_shape_number(shape, "OneD") {
+        Some(value) => value != 0.0,
+        None => ["BeginX", "BeginY", "EndX", "EndY"]
+            .into_iter()
+            .all(|name| route_shape_number(shape, name).is_some()),
+    }
+}
+
+fn route_shape_number(shape: &vsdx_resolve::ResolvedShape, name: &str) -> Option<f64> {
+    let Lookup::Found(cell) = shape.cell(name)? else {
+        return None;
+    };
+    route_cell_number(Some(&cell.cell), shape)
+}
+
+fn route_cell_number(cell: Option<&Cell>, shape: &vsdx_resolve::ResolvedShape) -> Option<f64> {
+    let cell = cell?;
+    if let Some(formula) = cell.formula.as_deref()
+        && let vsdx_eval::Evaluation::Evaluated(result) = evaluate(
+            formula.trim_start_matches('='),
+            shape,
+            &ParseLimits::default(),
+        )
+        && let vsdx_eval::Value::Number(number) = result.value
+        && number.number.is_finite()
+    {
+        return Some(number.number);
+    }
+    cell.value
+        .as_deref()?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
+struct RouteFrame {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64,
+}
+
+impl RouteFrame {
+    fn unproject(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let determinant = self.a * self.d - self.b * self.c;
+        if !determinant.is_finite() || determinant.abs() < 1e-12 {
+            return None;
+        }
+        let x = x - self.e;
+        let y = y - self.f;
+        let local = (
+            (self.d * x - self.c * y) / determinant,
+            (self.a * y - self.b * x) / determinant,
+        );
+        (local.0.is_finite() && local.1.is_finite()).then_some(local)
+    }
+}
+
+/// The connector's local frame, mirroring the resolver's unparented bounds affine.
+fn connector_route_frame(shape: &vsdx_resolve::ResolvedShape) -> Option<RouteFrame> {
+    let pin_x = route_shape_number(shape, "PinX")?;
+    let pin_y = route_shape_number(shape, "PinY")?;
+    let width = route_shape_number(shape, "Width")?;
+    let height = route_shape_number(shape, "Height")?;
+    if ![pin_x, pin_y, width, height]
+        .into_iter()
+        .all(|value| (value as f32).is_finite())
+        || width == 0.0
+        || height == 0.0
+    {
+        return None;
+    }
+    let loc_pin_x = route_shape_number(shape, "LocPinX").unwrap_or(width / 2.0);
+    let loc_pin_y = route_shape_number(shape, "LocPinY").unwrap_or(height / 2.0);
+    let angle = route_shape_number(shape, "Angle").unwrap_or(0.0);
+    let flip_x = route_shape_number(shape, "FlipX").is_some_and(|value| value != 0.0);
+    let flip_y = route_shape_number(shape, "FlipY").is_some_and(|value| value != 0.0);
+    let (sin, cos) = angle.sin_cos();
+    let (flip_x, flip_y) = (
+        if flip_x { -1.0 } else { 1.0 },
+        if flip_y { -1.0 } else { 1.0 },
+    );
+    Some(RouteFrame {
+        a: cos * flip_x,
+        b: sin * flip_x,
+        c: -sin * flip_y,
+        d: cos * flip_y,
+        e: pin_x - cos * (flip_x * loc_pin_x) + sin * (flip_y * loc_pin_y),
+        f: pin_y - sin * (flip_x * loc_pin_x) - cos * (flip_y * loc_pin_y),
+    })
+}
+
+fn decimal(value: f64) -> String {
+    if value == 0.0 {
+        "0".to_owned()
+    } else {
+        value.to_string()
+    }
+}
+
 impl DiagramSession {
     pub fn snapshot(&self) -> EditResult<DiagramSnapshot> {
         snapshot_doc(&self.doc)
@@ -1140,6 +1296,145 @@ impl DiagramSession {
             shape_id: id,
             from_index: None,
             to_index: Some(index),
+        })
+    }
+
+    /// Rewrites a 1D connector's filed route from scene-space points in one transaction.
+    pub fn set_connector_route(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        points: &[(f64, f64)],
+    ) -> EditResult<ConnectorRouteReceipt> {
+        if points.len() < 2 || points.len() > MAX_CONNECTOR_ROUTE_POINTS {
+            return Err(EditError::InvalidState(
+                "connector route needs between 2 and 256 points".to_owned(),
+            ));
+        }
+        if points.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
+            return Err(EditError::InvalidState(
+                "connector route points must be finite".to_owned(),
+            ));
+        }
+        let mut txn = self.transact_for(context);
+        let context_for_policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
+        let shape = map_ref(&sheets, &txn, shape_id)?;
+        if map_string(&shape, &txn, "parentId").is_some() {
+            return Err(EditError::InvalidState(
+                "nested connector routes are not hand-routable".to_owned(),
+            ));
+        }
+        let page_number = page_id
+            .trim_start_matches("page:")
+            .parse()
+            .unwrap_or_default();
+        let source_id = map_number(&shape, &txn, "sourceId").unwrap_or_default() as u32;
+        let cells = map_map(&shape, &txn, "cells")?;
+        let references = local_references(&cells, &txn)?;
+        if !connector_route_shape(&references) {
+            return Err(EditError::InvalidState(
+                "shape is not a 1D connector".to_owned(),
+            ));
+        }
+        let frame = connector_route_frame(&references).ok_or_else(|| {
+            EditError::InvalidState("connector frame cells do not resolve".to_owned())
+        })?;
+        let local = points
+            .iter()
+            .map(|point| frame.unproject(point.0, point.1))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                EditError::InvalidState("connector frame is not invertible".to_owned())
+            })?;
+        let mut rows = std::collections::BTreeMap::new();
+        for value in cells.iter(&txn).filter_map(|(_, value)| match value {
+            Out::YMap(cell) => Some(cell),
+            _ => None,
+        }) {
+            let locator = cell_locator(&value, &txn, 0, 0)?;
+            if locator.section.as_deref() != Some("Geometry") {
+                continue;
+            }
+            if locator.section_index.is_some() {
+                return Err(EditError::InvalidState(
+                    "indexed connector Geometry sections are not hand-routable".to_owned(),
+                ));
+            }
+            let Some(CellRow::Index(index)) = locator.row else {
+                continue;
+            };
+            let entry = rows.entry(index).or_insert(GeometryRow {
+                row_type: map_string(&value, &txn, "rowType"),
+                has_x: false,
+                has_y: false,
+            });
+            match locator.cell_name.as_str() {
+                "X" => entry.has_x = true,
+                "Y" => entry.has_y = true,
+                _ => {}
+            }
+        }
+        let last = local.last().expect("route has at least two points");
+        for (index, point) in local.iter().enumerate() {
+            let index = index as u32;
+            let row_type = rows.get(&index).and_then(|row| row.row_type.clone());
+            let row_type =
+                row_type.unwrap_or_else(|| (if index == 0 { "MoveTo" } else { "LineTo" }).into());
+            for (name, value) in [("X", point.0), ("Y", point.1)] {
+                let locator = CellLocator {
+                    sheet: CellSheet::Page(page_number),
+                    shape_id: Some(source_id),
+                    section: Some("Geometry".into()),
+                    section_index: None,
+                    row: Some(CellRow::Index(index)),
+                    cell_name: name.into(),
+                };
+                let formula = decimal(value);
+                allow_route_cell(&context_for_policy, locator.clone(), &formula)?;
+                match cell_map(&mut txn, page_id, shape_id, &locator) {
+                    Ok(cell) => {
+                        cell.insert(&mut txn, "formula", formula.as_str());
+                    }
+                    Err(EditError::CellNotFound(_)) => {
+                        seed_route_cell(&cells, &mut txn, &locator, &formula, &row_type);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        for (index, row) in rows
+            .iter()
+            .filter(|(index, _)| **index >= local.len() as u32)
+        {
+            for (name, used, value) in [("X", row.has_x, last.0), ("Y", row.has_y, last.1)] {
+                if !used {
+                    continue;
+                }
+                let locator = CellLocator {
+                    sheet: CellSheet::Page(page_number),
+                    shape_id: Some(source_id),
+                    section: Some("Geometry".into()),
+                    section_index: None,
+                    row: Some(CellRow::Index(*index)),
+                    cell_name: name.into(),
+                };
+                let formula = decimal(value);
+                allow_route_cell(&context_for_policy, locator.clone(), &formula)?;
+                cell_map(&mut txn, page_id, shape_id, &locator)?.insert(
+                    &mut txn,
+                    "formula",
+                    formula.as_str(),
+                );
+            }
+        }
+        Ok(ConnectorRouteReceipt {
+            page_id: page_id.to_owned(),
+            shape_id: shape_id.to_owned(),
+            points: local.len() as u32,
         })
     }
 
@@ -2580,6 +2875,7 @@ fn semantic_cell_edits(doc: &Doc) -> EditResult<Vec<vsdx_parse::SemanticCellEdit
                         gesture: gesture_for_cell(&locator.cell_name),
                         formula: Some(formula),
                         value,
+                        row_type: map_string(&cell, &txn, "rowType"),
                     });
                 }
             }

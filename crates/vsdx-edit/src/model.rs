@@ -88,6 +88,15 @@ pub struct ShapeReceipt {
     pub to_index: Option<u32>,
 }
 
+/// A hand-routed connector path written in scene-space points.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorRouteReceipt {
+    pub page_id: String,
+    pub shape_id: String,
+    pub points: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeDraft {

@@ -2334,7 +2334,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             connector_route_debug(&session, 4),
-            "[Move { x: 8.0, y: 3.0 }, Line { x: 5.0, y: 1.0 }]"
+            "[Move { x: 8.0, y: 3.0 }, Line { x: 5.0, y: 3.0 }, Line { x: 5.0, y: 1.0 }]"
         );
     }
 
@@ -2388,7 +2388,7 @@ mod tests {
         assert_eq!(glue[0].to.as_ref().unwrap().shape_id, 2);
         assert_eq!(
             connector_route_debug(&session, 3),
-            "[Move { x: 1.0, y: 2.0 }, Line { x: 5.0, y: 1.0 }]"
+            "[Move { x: 1.0, y: 2.0 }, Line { x: 5.0, y: 2.0 }, Line { x: 5.0, y: 1.0 }]"
         );
     }
 
@@ -3207,5 +3207,200 @@ mod tests {
         left.apply_update_v1(&right_update).unwrap();
         right.apply_update_v1(&left_update).unwrap();
         assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+    }
+
+    fn route_fixture() -> DiagramSession {
+        DiagramSession::open(
+            include_bytes!("../../vsdx-parse/tests/fixtures/connector-route-style.vsdx"),
+            31,
+        )
+        .unwrap()
+    }
+
+    fn route_cells(session: &DiagramSession, shape: &str) -> Vec<(u32, String, Option<String>)> {
+        let mut cells = session.snapshot().unwrap().pages[0]
+            .shapes
+            .iter()
+            .find(|candidate| candidate.id == shape)
+            .unwrap()
+            .cells
+            .iter()
+            .filter(|cell| cell.locator.section.as_deref() == Some("Geometry"))
+            .map(|cell| {
+                let row = match cell.locator.row {
+                    Some(CellRow::Index(index)) => index,
+                    _ => u32::MAX,
+                };
+                (row, cell.locator.cell_name.clone(), cell.formula.clone())
+            })
+            .collect::<Vec<_>>();
+        cells.sort();
+        cells
+    }
+
+    #[test]
+    fn set_connector_route_rewrites_filed_geometry() {
+        let session = route_fixture();
+        let receipt = session
+            .set_connector_route(
+                &EditCtx::local("test"),
+                "page:1",
+                "page:1:shape:1",
+                &[(1.0, 1.0), (2.5, 1.0), (2.5, 3.0), (4.0, 3.0)],
+            )
+            .unwrap();
+        assert_eq!(receipt.points, 4);
+        assert_eq!(
+            route_cells(&session, "page:1:shape:1"),
+            vec![
+                (0, "X".to_owned(), Some("0".to_owned())),
+                (0, "Y".to_owned(), Some("0".to_owned())),
+                (1, "X".to_owned(), Some("1.5".to_owned())),
+                (1, "Y".to_owned(), Some("0".to_owned())),
+                (2, "X".to_owned(), Some("1.5".to_owned())),
+                (2, "Y".to_owned(), Some("2".to_owned())),
+                (3, "X".to_owned(), Some("3".to_owned())),
+                (3, "Y".to_owned(), Some("2".to_owned())),
+            ]
+        );
+        let saved = session.save().unwrap();
+        let reparsed = vsdx_parse::parse_vsdx(&saved).unwrap();
+        let shape = reparsed.page_contents["visio/pages/page1.xml"]
+            .shapes()
+            .next()
+            .unwrap();
+        let rows = shape
+            .sections()
+            .find(|section| section.name == "Geometry")
+            .unwrap()
+            .rows()
+            .map(|row| {
+                (
+                    row.row_type.clone(),
+                    row.cells()
+                        .map(|cell| (cell.name.clone(), cell.formula.clone()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].0.as_deref(), Some("MoveTo"));
+        assert!(
+            rows[1..]
+                .iter()
+                .all(|row| row.0.as_deref() == Some("LineTo"))
+        );
+    }
+
+    #[test]
+    fn set_connector_route_round_trips_through_peers() {
+        let left = route_fixture();
+        let right =
+            DiagramSession::open_from_update(&left.encode_state_as_update_v1(), 32).unwrap();
+        left.set_connector_route(
+            &EditCtx::local("left"),
+            "page:1",
+            "page:1:shape:1",
+            &[(1.0, 1.0), (4.0, 1.0), (4.0, 3.0)],
+        )
+        .unwrap();
+        let update = left
+            .encode_diff_v1(&right.encode_state_vector_v1())
+            .unwrap();
+        right.apply_update_v1(&update).unwrap();
+        assert_eq!(
+            route_cells(&left, "page:1:shape:1"),
+            route_cells(&right, "page:1:shape:1")
+        );
+    }
+
+    #[test]
+    fn set_connector_route_collapses_surplus_rows() {
+        let session = route_fixture();
+        session
+            .set_connector_route(
+                &EditCtx::local("test"),
+                "page:1",
+                "page:1:shape:1",
+                &[(1.0, 1.0), (2.0, 2.0), (3.0, 2.0), (4.0, 3.0), (4.0, 3.0)],
+            )
+            .unwrap();
+        session
+            .set_connector_route(
+                &EditCtx::local("test"),
+                "page:1",
+                "page:1:shape:1",
+                &[(1.0, 1.0), (4.0, 3.0)],
+            )
+            .unwrap();
+        let cells = route_cells(&session, "page:1:shape:1");
+        assert_eq!(cells.len(), 10);
+        for (_, _, formula) in cells.iter().skip(4) {
+            assert!(formula.as_deref() == Some("3") || formula.as_deref() == Some("2"));
+        }
+    }
+
+    #[test]
+    fn set_connector_route_refuses_shapes_without_endpoints() {
+        let session = DiagramSession::open(
+            include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
+            33,
+        )
+        .unwrap();
+        assert_eq!(
+            session
+                .set_connector_route(
+                    &EditCtx::local("test"),
+                    "page:1",
+                    "page:1:shape:1",
+                    &[(0.0, 0.0), (1.0, 1.0)],
+                )
+                .unwrap_err()
+                .to_string(),
+            "invalid diagram state: shape is not a 1D connector"
+        );
+        assert_eq!(
+            session
+                .set_connector_route(
+                    &EditCtx::local("test"),
+                    "page:1",
+                    "page:1:shape:1",
+                    &[(0.0, 0.0)],
+                )
+                .unwrap_err()
+                .to_string(),
+            "invalid diagram state: connector route needs between 2 and 256 points"
+        );
+    }
+
+    #[test]
+    fn set_connector_route_honours_guarded_geometry() {
+        let guarded = session();
+        for name in ["OneD", "BeginX", "BeginY", "EndX", "EndY"] {
+            add_cell(&guarded, name, Some("1"), None);
+        }
+        for name in ["PinX", "PinY", "Width", "Height"] {
+            add_cell(&guarded, name, Some("1"), None);
+        }
+        add_cell_at(
+            &guarded,
+            "X",
+            Some("Geometry"),
+            Some(CellRow::Index(0)),
+            Some("GUARD(0)"),
+            None,
+        );
+        assert_eq!(
+            guarded
+                .set_connector_route(
+                    &EditCtx::local("test"),
+                    "page:1",
+                    "page:1:shape:1",
+                    &[(0.0, 0.0), (1.0, 1.0)],
+                )
+                .unwrap_err()
+                .to_string(),
+            "invalid diagram state: GUARD protects the requested cell"
+        );
     }
 }

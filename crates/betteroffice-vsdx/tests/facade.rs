@@ -128,6 +128,7 @@ fn edit(
         gesture,
         formula: Some(formula.to_owned()),
         value: None,
+        row_type: None,
     }
 }
 
@@ -450,6 +451,7 @@ fn saves_a_semantic_cell_edit_without_source_spans() {
             gesture: MutationGesture::CellEdit,
             formula: Some("42".to_owned()),
             value: None,
+            row_type: None,
         }])
         .unwrap();
     let saved = Diagram::open(&saved).unwrap();

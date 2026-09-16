@@ -1,6 +1,6 @@
 import initWasmModule, { VsdxDocument, VsdxRenderer, rendererVersion } from './generated/vsdx_wasm.js';
 import type { InitInput } from './generated/vsdx_wasm.js';
-import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectorGlue, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, VsdxFontFace } from '../types';
+import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectorGlue, ConnectorRoutePoint, ConnectorRouteReceipt, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, VsdxFontFace } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; initialUpdate?: Uint8Array; }
@@ -19,6 +19,7 @@ export interface DiagramHandle {
   reorderPage(pageId: string, toIndex: number): ShapeReceipt;
   addShape(pageId: string, draft: FormulaShapeDraft): ShapeReceipt;
   addConnector(pageId: string, draft: FormulaShapeDraft, from: ConnectorGlue, to: ConnectorGlue): ShapeReceipt;
+  setConnectorRoute(pageId: string, shapeId: string, points: ConnectorRoutePoint[]): ConnectorRouteReceipt;
   deleteShape(pageId: string, shapeId: string): ShapeReceipt;
   save(): Uint8Array;
   canUndo(): boolean; canRedo(): boolean; undo(): HistoryResult; redo(): HistoryResult;
@@ -129,6 +130,7 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     reorderPage: (pageId, toIndex) => json(() => doc.reorderPageJson(JSON.stringify({ pageId, toIndex })), true),
     addShape: (pageId, draft) => json(() => doc.addShapeJson(JSON.stringify({ pageId, draft })), true),
     addConnector: (pageId, draft, from, to) => json(() => doc.addConnectorJson(JSON.stringify({ pageId, draft, from, to })), true),
+    setConnectorRoute: (pageId, shapeId, points) => json(() => doc.setConnectorRouteJson(JSON.stringify({ pageId, shapeId, points })), true),
     deleteShape: (pageId, shapeId) => json(() => doc.deleteShapeJson(JSON.stringify({ pageId, shapeId })), true),
     save: () => wasm(() => doc.save().slice()),
     canUndo: () => wasm(() => doc.canUndo()), canRedo: () => wasm(() => doc.canRedo()), undo: () => json(() => doc.undoJson(), true), redo: () => json(() => doc.redoJson(), true),
