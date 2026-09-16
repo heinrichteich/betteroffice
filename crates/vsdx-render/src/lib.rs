@@ -704,6 +704,7 @@ impl Renderer {
         {
             return self.layout_connector(
                 package,
+                resolver,
                 connectivity,
                 references,
                 page_part,
@@ -713,6 +714,7 @@ impl Renderer {
                 resolved,
                 &sections,
                 state,
+                transforms,
             );
         }
         let Some(bounds) = bounds(package, references, resolved, shape.id) else {
@@ -917,6 +919,7 @@ impl Renderer {
     fn layout_connector(
         &self,
         package: &VsdxPackage,
+        resolver: &Resolver<'_>,
         connectivity: &vsdx_resolve::PageConnectivity,
         references: Option<&PageShapeReferences>,
         page_part: &str,
@@ -926,6 +929,7 @@ impl Renderer {
         resolved: &ResolvedShape,
         sections: &[&vsdx_resolve::ResolvedSection],
         state: &mut State,
+        transforms: &BTreeMap<u32, SceneTransform>,
     ) -> Result<(), RenderError> {
         let visible = sections.iter().filter(|section| !section.controls.no_show);
         if !sections.is_empty() && visible.clone().next().is_none() {
@@ -991,10 +995,15 @@ impl Renderer {
             needs_fill,
             needs_stroke,
         );
+        let style = connector_route_style(package, resolver, page_part, resolved);
+        let path = connector_geometry(
+            package, references, resolved, shape.id, transforms, begin, end,
+        )
+        .unwrap_or_else(|| connector_route(begin, end, style));
         state.primitives.push(Primitive::Shape {
             id: id.clone(),
             z_order,
-            path: connector_route(begin, end, paint::number(resolved, "RoutStyle")),
+            path,
             fill: outcome.fill,
             stroke: outcome.stroke,
             transform: Affine::identity(),
@@ -1615,25 +1624,123 @@ struct Bounds {
     loc_pin_y: f64,
     angle: f64,
 }
-/// Routes RoutStyle != 0 with one horizontal-first bend, otherwise directly.
+/// No style, straight and center-to-center run directly, vertical starters bend vertical-first, other right-angle styles bend horizontal-first.
 fn connector_route(
     begin: ScenePoint,
     end: ScenePoint,
-    route_style: Option<f64>,
+    route_style: f64,
 ) -> Vec<ooxml_drawingml::GeometryPathCommand> {
     use ooxml_drawingml::GeometryPathCommand::{Line, Move};
     let mut path = vec![Move {
         x: begin.x,
         y: begin.y,
     }];
-    if route_style.is_some_and(|style| style != 0.0) && begin.x != end.x && begin.y != end.y {
-        path.push(Line {
-            x: end.x,
-            y: begin.y,
-        });
+    let straight = route_style == 0.0 || route_style == 2.0 || route_style == 16.0;
+    if !straight && begin.x != end.x && begin.y != end.y {
+        if matches!(route_style as i64, 3 | 5 | 7 | 10 | 12 | 14 | 17 | 19 | 22) {
+            path.push(Line {
+                x: begin.x,
+                y: end.y,
+            });
+        } else {
+            path.push(Line {
+                x: end.x,
+                y: begin.y,
+            });
+        }
     }
     path.push(Line { x: end.x, y: end.y });
     path
+}
+/// Per-shape ShapeRouteStyle wins, zero means the page RouteStyle, absent page means no routing intent.
+fn connector_route_style(
+    package: &VsdxPackage,
+    resolver: &Resolver<'_>,
+    page_part: &str,
+    resolved: &ResolvedShape,
+) -> f64 {
+    if let Some(style) = paint::number(resolved, "ShapeRouteStyle")
+        && style != 0.0
+    {
+        return style;
+    }
+    page_dimension(resolver, package, page_part, "RouteStyle").unwrap_or(0.0)
+}
+/// Filed connector waypoints in scene space, or nothing when the file route is unusable.
+fn connector_geometry(
+    package: &VsdxPackage,
+    references: Option<&PageShapeReferences>,
+    resolved: &ResolvedShape,
+    shape_id: u32,
+    transforms: &BTreeMap<u32, SceneTransform>,
+    begin: ScenePoint,
+    end: ScenePoint,
+) -> Option<Vec<ooxml_drawingml::GeometryPathCommand>> {
+    let transform = transforms.get(&shape_id)?;
+    let size = bounds(package, references, resolved, shape_id)?;
+    if ![size.width, size.height].into_iter().all(f64::is_finite) {
+        return None;
+    }
+    let mut sections = resolved
+        .sections
+        .values()
+        .filter(|section| section.name == "Geometry" && !section.deleted)
+        .collect::<Vec<_>>();
+    if sections.is_empty() {
+        return None;
+    }
+    sections.sort_by_key(|section| section.index.unwrap_or(0));
+    let mut geometry = vsdx_resolve::RealizedGeometry::default();
+    for section in sections {
+        let realized = realize_geometry(section, size.width, size.height);
+        geometry.commands.extend(realized.commands);
+        geometry.issues.extend(realized.issues);
+    }
+    if geometry.commands.is_empty()
+        || !geometry.issues.is_empty()
+        || geometry
+            .commands
+            .iter()
+            .all(|command| matches!(command, ooxml_drawingml::GeometryPathCommand::Move { .. }))
+        || geometry
+            .commands
+            .iter()
+            .any(|command| matches!(command, ooxml_drawingml::GeometryPathCommand::Close))
+    {
+        return None;
+    }
+    if !matches!(
+        geometry.commands.first(),
+        Some(ooxml_drawingml::GeometryPathCommand::Move { .. })
+    ) {
+        geometry.commands.insert(
+            0,
+            ooxml_drawingml::GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+        );
+    }
+    if geometry
+        .commands
+        .iter()
+        .filter(|command| matches!(command, ooxml_drawingml::GeometryPathCommand::Move { .. }))
+        .nth(1)
+        .is_some()
+    {
+        return None;
+    }
+    let matrix = affine(transform.local);
+    for command in &mut geometry.commands {
+        transform_affine(command, matrix);
+    }
+    if !geometry.commands.iter().all(command_finite) {
+        return None;
+    }
+    let mut path = geometry.commands;
+    path[0] = ooxml_drawingml::GeometryPathCommand::Move {
+        x: begin.x,
+        y: begin.y,
+    };
+    path.push(ooxml_drawingml::GeometryPathCommand::Line { x: end.x, y: end.y });
+    Some(path)
 }
 fn bounds_finite(bounds: Bounds) -> bool {
     [
@@ -4171,6 +4278,265 @@ mod tests {
         let list = Renderer::default().layout_page(&package, "page").unwrap();
         assert_eq!(apex(jump_path(&list, 1), 'y', 0.025), Some((1.0, 0.025)));
         assert_eq!(jump_path(&list, 2).len(), 2);
+    }
+
+    #[test]
+    fn connector_route_styles_bend_or_run_straight() {
+        use GeometryPathCommand::{Line, Move};
+        let begin = ScenePoint { x: 1.0, y: 1.0 };
+        let end = ScenePoint { x: 4.0, y: 3.0 };
+        let horizontal = vec![
+            Move { x: 1.0, y: 1.0 },
+            Line { x: 4.0, y: 1.0 },
+            Line { x: 4.0, y: 3.0 },
+        ];
+        let vertical = vec![
+            Move { x: 1.0, y: 1.0 },
+            Line { x: 1.0, y: 3.0 },
+            Line { x: 4.0, y: 3.0 },
+        ];
+        let direct = vec![Move { x: 1.0, y: 1.0 }, Line { x: 4.0, y: 3.0 }];
+        for style in [1.0, 4.0, 6.0, 8.0, 9.0, 21.0] {
+            assert_eq!(connector_route(begin, end, style), horizontal);
+        }
+        for style in [3.0, 5.0, 7.0, 10.0, 12.0, 14.0, 17.0, 19.0, 22.0] {
+            assert_eq!(connector_route(begin, end, style), vertical);
+        }
+        for style in [0.0, 2.0, 16.0] {
+            assert_eq!(connector_route(begin, end, style), direct);
+        }
+        for style in [-1.0, 23.0, 1e30, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(connector_route(begin, end, style), horizontal);
+        }
+        let aligned = ScenePoint { x: 1.0, y: 3.0 };
+        assert_eq!(
+            connector_route(begin, aligned, 1.0),
+            vec![Move { x: 1.0, y: 1.0 }, Line { x: 1.0, y: 3.0 }]
+        );
+    }
+
+    fn unglued_connector(style: Option<&str>) -> Shape {
+        let mut connector = shape(1, 1.0, 1.0);
+        connector.children.retain(
+            |child| !matches!(child, ShapeChild::Section(section) if section.name == "Geometry"),
+        );
+        connector.children.extend([
+            ShapeChild::Cell(cell("OneD", "1")),
+            ShapeChild::Cell(cell("BeginX", "1")),
+            ShapeChild::Cell(cell("BeginY", "1")),
+            ShapeChild::Cell(cell("EndX", "4")),
+            ShapeChild::Cell(cell("EndY", "3")),
+        ]);
+        if let Some(style) = style {
+            with_cell(&mut connector, "ShapeRouteStyle", style);
+        }
+        connector
+    }
+
+    fn connector_path(package: &VsdxPackage, page: &str) -> Vec<GeometryPathCommand> {
+        let list = Renderer::default().layout_page(package, page).unwrap();
+        list.primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Shape { id, path, .. } if id == &format!("{page}:1") => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn right_angle_shape_route_style_bends_unglued_connector() {
+        use GeometryPathCommand::{Line, Move};
+        let list = render(vec![unglued_connector(Some("1"))]);
+        let Primitive::Shape { path, .. } = shape_primitive(&list, 1) else {
+            unreachable!()
+        };
+        assert_eq!(
+            *path,
+            vec![
+                Move { x: 1.0, y: 1.0 },
+                Line { x: 4.0, y: 1.0 },
+                Line { x: 4.0, y: 3.0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn page_route_style_applies_without_shape_override() {
+        use GeometryPathCommand::{Line, Move};
+        let mut package = package(vec![unglued_connector(None)]);
+        package
+            .page_sheets
+            .get_mut(&1)
+            .unwrap()
+            .children
+            .push(SheetChild::Cell(cell("RouteStyle", "5")));
+        assert_eq!(
+            connector_path(&package, "page"),
+            vec![
+                Move { x: 1.0, y: 1.0 },
+                Line { x: 1.0, y: 3.0 },
+                Line { x: 4.0, y: 3.0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn one_d_shape_without_any_route_style_runs_straight() {
+        use GeometryPathCommand::{Line, Move};
+        let package = package(vec![unglued_connector(None)]);
+        assert_eq!(
+            connector_path(&package, "page"),
+            vec![Move { x: 1.0, y: 1.0 }, Line { x: 4.0, y: 3.0 }]
+        );
+    }
+
+    #[test]
+    fn filed_connector_geometry_wins_over_synthesized_route() {
+        use GeometryPathCommand::{Line, Move};
+        let mut connector = unglued_connector(Some("2"));
+        connector.children.push(ShapeChild::Section(Section {
+            name: "Geometry".into(),
+            index: None,
+            del: false,
+            children: vec![
+                row(2, "LineTo", vec![cell("X", "0.5"), cell("Y", "0")]),
+                row(3, "LineTo", vec![cell("X", "0.5"), cell("Y", "2")]),
+            ]
+            .into_iter()
+            .map(SectionChild::Row)
+            .collect(),
+            other_attrs: vec![],
+        }));
+        let list = render(vec![connector]);
+        let Primitive::Shape { path, .. } = shape_primitive(&list, 1) else {
+            unreachable!()
+        };
+        assert_eq!(
+            *path,
+            vec![
+                Move { x: 1.0, y: 1.0 },
+                Line { x: 1.5, y: 1.0 },
+                Line { x: 1.5, y: 3.0 },
+                Line { x: 4.0, y: 3.0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn filed_connector_geometry_without_segments_falls_back_to_synthesized_route() {
+        use GeometryPathCommand::{Line, Move};
+        let mut connector = unglued_connector(Some("1"));
+        connector.children.push(ShapeChild::Section(Section {
+            name: "Geometry".into(),
+            index: None,
+            del: false,
+            children: vec![row(0, "MoveTo", vec![cell("X", "0"), cell("Y", "0")])]
+                .into_iter()
+                .map(SectionChild::Row)
+                .collect(),
+            other_attrs: vec![],
+        }));
+        let list = render(vec![connector]);
+        let Primitive::Shape { path, .. } = shape_primitive(&list, 1) else {
+            unreachable!()
+        };
+        assert_eq!(
+            *path,
+            vec![
+                Move { x: 1.0, y: 1.0 },
+                Line { x: 4.0, y: 1.0 },
+                Line { x: 4.0, y: 3.0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn closed_filed_connector_geometry_falls_back_to_synthesized_route() {
+        use GeometryPathCommand::{Line, Move};
+        let mut connector = unglued_connector(Some("1"));
+        connector.children.push(ShapeChild::Section(Section {
+            name: "Geometry".into(),
+            index: None,
+            del: false,
+            children: vec![
+                row(0, "MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                row(1, "LineTo", vec![cell("X", "0.5"), cell("Y", "0")]),
+                row(2, "Close", vec![]),
+            ]
+            .into_iter()
+            .map(SectionChild::Row)
+            .collect(),
+            other_attrs: vec![],
+        }));
+        let list = render(vec![connector]);
+        let Primitive::Shape { path, .. } = shape_primitive(&list, 1) else {
+            unreachable!()
+        };
+        assert_eq!(
+            *path,
+            vec![
+                Move { x: 1.0, y: 1.0 },
+                Line { x: 4.0, y: 1.0 },
+                Line { x: 4.0, y: 3.0 },
+            ]
+        );
+    }
+
+    fn route_fixture_path(page: &str) -> Vec<GeometryPathCommand> {
+        let source = include_bytes!("../../vsdx-parse/tests/fixtures/connector-route-style.vsdx");
+        let package = vsdx_parse::parse_vsdx(source).unwrap();
+        connector_path(&package, page)
+    }
+
+    #[test]
+    fn shape_route_style_overrides_page_in_fixture() {
+        use GeometryPathCommand::{Line, Move};
+        assert_eq!(
+            route_fixture_path("visio/pages/page1.xml"),
+            vec![
+                Move { x: 1.0, y: 1.0 },
+                Line { x: 4.0, y: 1.0 },
+                Line { x: 4.0, y: 3.0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn page_route_style_applies_in_fixture() {
+        use GeometryPathCommand::{Line, Move};
+        assert_eq!(
+            route_fixture_path("visio/pages/page2.xml"),
+            vec![
+                Move { x: 1.0, y: 1.0 },
+                Line { x: 1.0, y: 3.0 },
+                Line { x: 4.0, y: 3.0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn straight_shape_route_style_runs_direct_in_fixture() {
+        use GeometryPathCommand::{Line, Move};
+        assert_eq!(
+            route_fixture_path("visio/pages/page3.xml"),
+            vec![Move { x: 1.0, y: 1.0 }, Line { x: 4.0, y: 3.0 }]
+        );
+    }
+
+    #[test]
+    fn two_subpath_filed_connector_geometry_falls_back_to_synthesized_route() {
+        use GeometryPathCommand::{Line, Move};
+        assert_eq!(
+            route_fixture_path("visio/pages/page4.xml"),
+            vec![
+                Move { x: 1.0, y: 1.0 },
+                Line { x: 4.0, y: 1.0 },
+                Line { x: 4.0, y: 3.0 },
+            ]
+        );
     }
 
     #[test]
