@@ -10,6 +10,8 @@ export interface ShapeDataPanelProps {
   onError: (error: unknown) => void;
   t: TFunction;
   className?: string;
+  linkedRowNames?: ReadonlyArray<string> | ReadonlySet<string>;
+  staleRowNames?: ReadonlyArray<string> | ReadonlySet<string>;
 }
 
 const styles: Record<string, CSSProperties> = {
@@ -20,11 +22,17 @@ const styles: Record<string, CSSProperties> = {
   label: { overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', color: '#424242', fontWeight: 600, fontSize: 12 },
   input: { width: '100%', height: 30, padding: '0 8px', border: '1px solid #bdbdbd', borderRadius: 3, outline: 0, color: '#242424', font: '400 13px ui-sans-serif, system-ui, sans-serif', boxSizing: 'border-box' },
   checkRow: { display: 'flex', alignItems: 'center', gap: 8 },
+  labelRow: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 },
+  badge: { flex: 'none', padding: '1px 6px', borderRadius: 8, fontSize: 10, fontWeight: 600, lineHeight: '16px' },
+  linkedBadge: { background: '#e8f1fd', color: '#0f6cbd' },
+  staleBadge: { background: '#fdf3e3', color: '#8a5100' },
   empty: { margin: '20px 14px', color: '#616161', textAlign: 'center' },
 };
 
-export function ShapeDataPanel({ shape, onCommit, onError, t, className }: ShapeDataPanelProps) {
+export function ShapeDataPanel({ shape, onCommit, onError, t, className, linkedRowNames, staleRowNames }: ShapeDataPanelProps) {
   const rows = visibleShapeDataRows(shape);
+  const linked = new Set(linkedRowNames ?? []);
+  const stale = new Set(staleRowNames ?? []);
   return (
     <aside className={className} style={styles.root} aria-label={t('shapeData.title')}>
       <header style={styles.header}><span>{t('shapeData.title')}</span></header>
@@ -32,18 +40,33 @@ export function ShapeDataPanel({ shape, onCommit, onError, t, className }: Shape
       : rows.length === 0 ? <p style={styles.empty}>{t('shapeData.empty')}</p>
       : (
         <ul style={styles.list}>
-          {rows.map((row) => (
-            <li key={row.rowName ?? `IX:${row.rowIndex}`} style={styles.field}>
-              <label
-                style={styles.label}
-                title={row.prompt ?? row.label}
-                htmlFor={`shape-data-${row.rowName ?? `ix-${row.rowIndex}`}`}
-              >
-                {row.label}
-              </label>
-              <ShapeDataValueInput row={row} onCommit={onCommit} onError={onError} t={t} />
-            </li>
-          ))}
+          {rows.map((row) => {
+            const key = row.rowName ?? (row.rowIndex !== null ? `IX:${row.rowIndex}` : '');
+            const isStale = (row.rowName !== null && stale.has(row.rowName)) || stale.has(key);
+            const isLinked = isStale || (row.rowName !== null && linked.has(row.rowName)) || linked.has(key);
+            return (
+              <li key={row.rowName ?? `IX:${row.rowIndex}`} style={styles.field}>
+                <span style={styles.labelRow}>
+                  <label
+                    style={styles.label}
+                    title={row.prompt ?? row.label}
+                    htmlFor={`shape-data-${row.rowName ?? `ix-${row.rowIndex}`}`}
+                  >
+                    {row.label}
+                  </label>
+                  {isLinked && (
+                    <span
+                      style={{ ...styles.badge, ...(isStale ? styles.staleBadge : styles.linkedBadge) }}
+                      title={isStale ? t('shapeData.staleTitle') : t('shapeData.linkedTitle')}
+                    >
+                      {isStale ? t('shapeData.stale') : t('shapeData.linked')}
+                    </span>
+                  )}
+                </span>
+                <ShapeDataValueInput row={row} onCommit={onCommit} onError={onError} t={t} />
+              </li>
+            );
+          })}
         </ul>
       )}
     </aside>

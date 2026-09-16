@@ -3,7 +3,9 @@
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CollaborationProvider, initWasm, openDiagram, type CollaborationUser, type VsdxFontFace } from "@betteroffice/vsdx";
+import { bindingMarksForShape, CollaborationProvider, initWasm, openDiagram, readBindingDoc } from "@betteroffice/vsdx";
+import type { CollaborationUser, DataTable, VsdxFontFace } from "@betteroffice/vsdx";
+import type { DataBindingSelection, VsdxEditorApi, VsdxShapeSelection } from "@betteroffice/vsdx-react";
 import { loadBundledFontBytes, resolveLastResortFace, resolveMetricCompatFace } from "@betteroffice/fonts";
 import { Logo } from "../components/Logo";
 import { CollaborationControls, COLLAB_RELAY_ORIGIN, useCollabRoom, useDemoRoom, useLeaveRoom, type CollaborationReplica, type CollaborationTransport } from "../collab";
@@ -12,6 +14,11 @@ import { readLocalDiagram } from "../../lib/localDiagram";
 
 const VsdxEditor = dynamic(
   () => import("@betteroffice/vsdx-react").then((module) => module.VsdxEditor),
+  { ssr: false },
+);
+
+const DataBindingPanel = dynamic(
+  () => import("@betteroffice/vsdx-react").then((module) => module.DataBindingPanel),
   { ssr: false },
 );
 
@@ -35,6 +42,12 @@ export function VsdxDemoClient() {
   const [openError, setOpenError] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [dataOpen, setDataOpen] = useState(false);
+  const [dataError, setDataError] = useState<string | null>(null);
+  const [boundTable, setBoundTable] = useState<DataTable | null>(null);
+  const [selection, setSelection] = useState<DataBindingSelection | null>(null);
+  const [snapshotVersion, setSnapshotVersion] = useState(0);
+  const [editorApi, setEditorApi] = useState<VsdxEditorApi | null>(null);
   const openSequence = useRef(0);
   const dragDepth = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -58,6 +71,13 @@ export function VsdxDemoClient() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    setEditorApi(null);
+    setSelection(null);
+    setBoundTable(null);
+    setDataError(null);
+  }, [source?.id]);
 
   // Ordered by selection, not by completion: a slower earlier pick must not land on a later one.
   const openChosenFile = useCallback(async (picked: File) => {
@@ -88,6 +108,38 @@ export function VsdxDemoClient() {
     [collab.clientId, room, source],
   );
 
+  const snapshot = useMemo(() => {
+    if (!editorApi || !source) return null;
+    try {
+      return editorApi.handle.snapshot();
+    } catch {
+      return null;
+    }
+  }, [editorApi, snapshotVersion, source]);
+
+  const dataBindingMarks = useMemo(() => {
+    if (!boundTable || !selection || !snapshot) return null;
+    const doc = readBindingDoc(snapshot, boundTable.name);
+    if (!doc) return null;
+    const marks = bindingMarksForShape(doc, selection.shapeId);
+    if (marks.linked.length === 0) return null;
+    return { linked: marks.linked, stale: marks.stale ? marks.linked : [] };
+  }, [boundTable, selection, snapshot]);
+
+  const loadXlsxTable = useCallback(async (file: File) => {
+    const loader = await import("../../lib/vsdxDataTable");
+    return loader.loadXlsxTable(file);
+  }, []);
+
+  const handleDataMutated = useCallback(() => {
+    editorApi?.refresh();
+    setSnapshotVersion((version) => version + 1);
+  }, [editorApi]);
+
+  const handleSelectionChange = useCallback((next: VsdxShapeSelection | null) => {
+    setSelection(next ? { pageId: next.pageId, shapeId: next.shapeId } : null);
+  }, []);
+
   const collaboration = useMemo(
     () => session.status === "shared" && source?.seed
       ? { clientId: session.clientId, initialUpdate: source.seed, onReplica: collab.onReplica, presence: collab.provider ?? undefined }
@@ -109,6 +161,15 @@ export function VsdxDemoClient() {
         {source && <span className="max-w-[180px] overflow-hidden text-[12.5px] text-ellipsis whitespace-nowrap text-mute">{source.name}</span>}
         <div className="flex flex-none items-center gap-2">
           <button
+            type="button"
+            onClick={() => setDataOpen((open) => !open)}
+            disabled={!source || !fonts}
+            aria-label="Toggle the data linking panel"
+            aria-pressed={dataOpen}
+            className="inline-flex h-8 cursor-pointer items-center rounded-[5px] border border-hairline-strong bg-white px-[11px] text-[12.5px] text-fg transition-colors duration-[140ms] ease-[ease] hover:bg-surface disabled:cursor-default disabled:opacity-50"
+          >
+            Data
+          </button>          <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
             disabled={opening || !fonts}
@@ -164,7 +225,31 @@ export function VsdxDemoClient() {
         }}
         onDrop={onDrop}
       >
-        {loadError ? <p className="m-auto text-mute" role="alert">Failed to load the demo diagram: {loadError}</p> : source && fonts && session.status !== "loading" ? <VsdxEditor key={`${room ?? "private"}:${source.id}`} file={source.file} fonts={fonts} collaboration={collaboration} /> : <p className="m-auto text-mute">Loading diagram…</p>}
+        {loadError ? <p className="m-auto text-mute" role="alert">Failed to load the demo diagram: {loadError}</p> : source && fonts && session.status !== "loading" ? <VsdxEditor key={`${room ?? "private"}:${source.id}`} file={source.file} fonts={fonts} collaboration={collaboration} onReady={setEditorApi} onChange={() => setSnapshotVersion((version) => version + 1)} onSelectionChange={handleSelectionChange} dataBindingMarks={dataBindingMarks} /> : <p className="m-auto text-mute">Loading diagram…</p>}
+        {dataOpen && editorApi && snapshot && (
+          <div className="absolute top-3 right-3 bottom-3 z-10 flex flex-col" data-testid="vsdx-data-drawer">
+            {dataError && (
+              <div className="mb-2 flex max-w-[264px] items-center gap-2 rounded-md border border-[#f3c7cf] bg-[#fdecef] px-3 py-2 text-[12.5px] text-danger" role="alert">
+                <span className="min-w-0 flex-1 overflow-hidden text-ellipsis">{dataError}</span>
+                <button type="button" onClick={() => setDataError(null)} aria-label="Dismiss data error" className="cursor-pointer rounded bg-transparent px-1 text-[14px] leading-none text-danger hover:bg-danger/10">
+                  ×
+                </button>
+              </div>
+            )}
+            <div className="min-h-0 flex-1 shadow-lg">
+              <DataBindingPanel
+                key={source?.id ?? "nodata"}
+                handle={editorApi.handle}
+                snapshot={snapshot}
+                selection={selection}
+                loadXlsxTable={loadXlsxTable}
+                onMutated={handleDataMutated}
+                onError={(error) => setDataError(error instanceof Error ? error.message : String(error))}
+                onTableChange={setBoundTable}
+              />
+            </div>
+          </div>
+        )}
         {dragging && (
           <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center bg-white/70 p-8" role="status">
             <div className="grid w-[min(440px,100%)] place-items-center rounded-md border-2 border-dashed border-acc bg-white px-8 py-10 text-center">

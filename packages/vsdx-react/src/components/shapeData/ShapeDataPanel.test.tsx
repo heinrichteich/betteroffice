@@ -97,3 +97,25 @@ test('reports commit failures instead of throwing', () => {
   expect(errors.length).toBe(1);
   expect(String(errors[0])).toContain('GUARD');
 });
+
+test('marks linked and stale rows without changing unlinked ones', () => {
+  const commits: Array<{ row: ShapeDataRow; formula: string }> = [];
+  const view = render(<ShapeDataPanel
+    shape={shape([
+      cell('Property', 'Device', 'Label', null, 'Device'),
+      cell('Property', 'Device', 'Value', '"Amp"', 'Amp'),
+      cell('Property', 'Owner', 'Label', null, 'Owner'),
+      cell('Property', 'Owner', 'Value', '"Team"', 'Team'),
+      cell('Property', 'Rack', 'Label', null, 'Rack'),
+      cell('Property', 'Rack', 'Value', '"R7"', 'R7'),
+    ])}
+    onCommit={(row, formula) => commits.push({ row, formula })}
+    onError={() => {}}
+    t={t}
+    linkedRowNames={['Device', 'Owner']}
+    staleRowNames={['Owner']}
+  />);
+  expect(view.getByText(t('shapeData.linked'))).toBeDefined();
+  expect(view.getByText(t('shapeData.stale'))).toBeDefined();
+  expect(view.queryByText(t('shapeData.empty'))).toBe(null);
+});

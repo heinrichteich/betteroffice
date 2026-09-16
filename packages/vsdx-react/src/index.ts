@@ -13,6 +13,8 @@ export { ShapesPanel } from './components/shapes/ShapesPanel';
 export type { ShapesPanelProps } from './components/shapes/ShapesPanel';
 export { ShapeDataPanel } from './components/shapeData/ShapeDataPanel';
 export type { ShapeDataPanelProps } from './components/shapeData/ShapeDataPanel';
+export { DataBindingPanel } from './components/dataBinding/DataBindingPanel';
+export type { DataBindingPanelProps, DataBindingSelection, LoadedTable } from './components/dataBinding/DataBindingPanel';
 export { standardShapeById, standardShapes } from './components/shapes/shapeLibrary';
 export type { StandardShape } from './components/shapes/shapeLibrary';
 export { MAX_ZOOM, MIN_ZOOM, StatusBar, ZOOM_STOPS, clampZoom, sliderPositionForZoom, zoomForSliderPosition } from './components/statusbar';

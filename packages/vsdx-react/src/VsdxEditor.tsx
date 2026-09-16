@@ -37,6 +37,8 @@ export interface VsdxEditorProps {
   onReady?: (api: VsdxEditorApi) => void;
   onChange?: () => void;
   onError?: (error: Error) => void;
+  onSelectionChange?: (selection: VsdxShapeSelection | null) => void;
+  dataBindingMarks?: { linked: ReadonlyArray<string> | ReadonlySet<string>; stale: ReadonlyArray<string> | ReadonlySet<string> } | null;
   leftPanel?: ReactNode;
   rightPanel?: ReactNode;
   statusBar?: ReactNode;
@@ -44,13 +46,15 @@ export interface VsdxEditorProps {
 
 interface EditorModel { snapshot: DiagramSnapshot | null; pageIndex: number; frame: PageDisplayList | null; }
 
-export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, className, onReady, onChange, onError, leftPanel, rightPanel, statusBar }: VsdxEditorProps) {
+export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, className, onReady, onChange, onError, onSelectionChange, dataBindingMarks, leftPanel, rightPanel, statusBar }: VsdxEditorProps) {
   const strings = useMemo(() => deepMerge(en, i18n) as typeof en, [i18n]);
   const t = useMemo(() => createT(strings), [strings]);
   const handleRef = useRef<DiagramHandle | null>(null);
   const onReadyRef = useRef(onReady);
   const onChangeRef = useRef(onChange);
   const onErrorRef = useRef(onError);
+  const onSelectionChangeRef = useRef(onSelectionChange);
+  onSelectionChangeRef.current = onSelectionChange;
   const collaborationRef = useRef(collaboration);
   const attachedCollaborationRef = useRef<VsdxEditorCollaborationOptions | undefined>(undefined);
   const mainCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -91,6 +95,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   onChangeRef.current = onChange;
   onErrorRef.current = onError;
   collaborationRef.current = collaboration;
+  useEffect(() => { onSelectionChangeRef.current?.(selection); }, [selection]);
 
   const reportError = useCallback((value: unknown) => { const next = value instanceof Error ? value : new Error(String(value)); setError(next.message); onErrorRef.current?.(next); }, []);
   const refresh = useCallback((requestedPage?: number, notify = false) => {
@@ -511,7 +516,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       {fidelity.length > 0 && <details style={styles.fidelity}><summary>{t('diagnostics.fidelityHeading')}</summary>{fidelity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</details>}
       {error && <div role="alert" style={styles.error}>{error}</div>}
     </main>
-    {rightPanel === undefined ? <ShapeDataPanel shape={selectedShape} onCommit={commitShapeData} onError={reportError} t={t} /> : rightPanel}
+    {rightPanel === undefined ? <ShapeDataPanel shape={selectedShape} onCommit={commitShapeData} onError={reportError} t={t} linkedRowNames={dataBindingMarks?.linked} staleRowNames={dataBindingMarks?.stale} /> : rightPanel}
     </div>
     {statusBar === undefined ? <StatusBar pages={model.snapshot?.pages ?? []} activeIndex={model.pageIndex} onSelectPage={(index) => refresh(index)} onReorderPage={reorderPage} zoom={zoom} onZoomChange={setZoom} onFitToWindow={fitToWindow} t={t} /> : statusBar}
     </RibbonCommandsProvider>

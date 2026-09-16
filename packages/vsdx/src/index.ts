@@ -2,6 +2,15 @@ export { canvasPointToModel, modelPointToCanvas, paintPage, sizeCanvasForPage } 
 export type { CanvasImageResolver, ModelPoint, PageCanvasLike, PaintPageOptions } from './render/canvas';
 export { formatOptions, quoteShapeDataValue, shapeDataRows, shapeDataTypeFromValue, shapeDataValueFormula, unquoteFormula, visibleShapeDataRows } from './shapeData';
 export type { ShapeDataRow, ShapeDataType } from './shapeData';
+export {
+  bindingMarksForShape, bindRow, bindingValueFormula, columnLetters, findBindingShape, findBoundShape, linkShapeName,
+  bindingDocCells, parseBindingDoc, planColumnMapping, readBindingDoc, readGridFromWorkbook,
+  refreshBindings, rekeyTable, tableFromCsv, tableFromGrid, tableFromWorkbook, unbindRow, writeBindingDoc,
+} from './dataBinding';
+export type {
+  BindOutcome, BindingRefusal, ColumnMapping, DataBindingDoc, DataBindingSource, DataTable,
+  DataTableRow, RefreshReport, ShapeBinding, WorkbookTableReader,
+} from './dataBinding';
 export { CollaborationError, CollaborationProvider } from './collaboration';
 export type { CollaborationErrorCode, CollaborationErrorListener, CollaborationProviderOptions, CollaborationReplica, CollaborationStatus, CollaborationStatusChange, CollaborationStatusListener, CollaborationTransport, CollaborationTransportEvent, CollaborationUser, VsdxPresence, VsdxPresenceCursor, VsdxPresenceListener, VsdxPresencePeer, VsdxPresenceState, VsdxPresenceUser } from './collaboration';
 export { PRESENCE_LABEL_DURATION_MS, presenceColorForClientId } from './collaboration';

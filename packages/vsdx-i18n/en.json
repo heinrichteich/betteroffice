@@ -76,6 +76,37 @@
     "title": "Shape Data",
     "noSelection": "Select a shape to see its data.",
     "empty": "This shape has no visible data.",
-    "valueLabel": "Value"
+    "valueLabel": "Value",
+    "linked": "Linked",
+    "linkedTitle": "This value comes from a linked data row.",
+    "stale": "Stale",
+    "staleTitle": "Its data row is gone from the table; the value is kept."
+  },
+  "dataBinding": {
+    "title": "Data",
+    "importHeading": "Import a table",
+    "fileLabel": "Table file (.xlsx or .csv)",
+    "keyColumnLabel": "Key column",
+    "importAction": "Import",
+    "noTable": "Import a spreadsheet or CSV file to link its rows to shapes.",
+    "tableSummary": "{rows} rows, {columns} columns from {name}",
+    "skippedRows": "{count} rows had no key and were skipped.",
+    "linkHeading": "Link a row to the selected shape",
+    "noSelection": "Select a shape on the canvas first.",
+    "rowLabel": "Table row",
+    "linkAction": "Link row",
+    "linkedTo": "Linked to row {key}.",
+    "appliedColumns": "Updated {columns}.",
+    "refusedColumns": "Refused: {details}.",
+    "unmappedColumns": "No Shape Data field for: {columns}.",
+    "bindingsHeading": "Links",
+    "noBindings": "No rows linked yet.",
+    "unlinkAction": "Unlink",
+    "refreshAction": "Refresh from table",
+    "refreshed": "{updated} values updated.",
+    "staleBindings": "Stale links (row gone, values kept): {details}.",
+    "removedBindings": "Removed links: {details}.",
+    "noBindingsToRefresh": "There is nothing to refresh yet.",
+    "xlsxUnavailable": "Opening .xlsx needs the spreadsheet engine, which is unavailable here."
   }
 }
