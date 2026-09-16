@@ -63,13 +63,16 @@ test('only the active tab is selected and arrow keys move it', () => {
   view.unmount();
 });
 
-test('shape tab appears on selection, activates itself, and disappears with the selection', () => {
+test('selecting a shape adds the shape tab but keeps home active', () => {
   const diagram = stubDiagram(['one']);
   const view = renderRibbon(diagram, null);
   expect(view.queryByRole('tab', { name: 'Shape' })).toBeNull();
   view.rerender(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selectionFor('one')} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} hasSelection={true} /></RibbonCommandsProvider>);
-  const shape = view.getByRole('tab', { name: 'Shape' });
-  expect(shape.getAttribute('aria-selected')).toBe('true');
+  expect(view.getByRole('tab', { name: 'Shape' })).not.toBeNull();
+  expect(view.getByRole('tab', { name: 'Home' }).getAttribute('aria-selected')).toBe('true');
+  expect(view.getByTestId('vsdx-ribbon-home-panel')).not.toBeNull();
+  fireEvent.click(view.getByRole('tab', { name: 'Shape' }));
+  expect(view.getByRole('tab', { name: 'Shape' }).getAttribute('aria-selected')).toBe('true');
   expect(view.getByTestId('vsdx-ribbon-shape-panel')).not.toBeNull();
   view.rerender(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={null} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} hasSelection={false} /></RibbonCommandsProvider>);
   expect(view.queryByRole('tab', { name: 'Shape' })).toBeNull();

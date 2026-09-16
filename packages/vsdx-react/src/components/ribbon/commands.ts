@@ -77,6 +77,17 @@ function colorFormula(value = '#000000'): string {
 /** Matches a GUARD function call without matching reference names containing guard. */
 const GUARD_CALL = /(^|[^A-Z0-9_.])GUARD\s*\(/i;
 
+/** Matches a SETATREF function call without matching reference names containing it. */
+const SETATREF_CALL = /(^|[^A-Z0-9_.])SETATREF\s*\(/i;
+
+/** Matches SETATREF-adjacent transforms the mutation policy cannot apply. */
+const SETATREF_TRANSFORM_CALL = /(^|[^A-Z0-9_.])SETATREF(EXPR|EVAL)\s*\(/i;
+
+/** Bare same-shape root-cell reference a SETATREF redirect can resolve to. */
+const BARE_CELL_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+const MAX_SETATREF_HOPS = 10;
+
 export function numberValue(value: string | undefined): number {
   const result = Number(value ?? '0');
   return Number.isFinite(result) ? result : 0;
@@ -115,10 +126,32 @@ export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
   return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => cellIsGuarded(shape, cell));
 }
 
-/** True when a single-cell write would be refused by a GUARD on that cell. */
+/** Sole SETATREF redirect target, or undefined when the formula is not one. */
+function soleSetatrefTarget(formula: string): string | undefined {
+  const text = formula.trim().replace(/^=/, '').trim();
+  const match = /^SETATREF\s*\(\s*(.+?)\s*\)$/is.exec(text);
+  return match?.[1];
+}
+
+/** True when a single-cell write would be refused by the mutation policy. */
 export function isCellWriteBlocked(shape: ShapeSnapshot | null, cellName: string): boolean {
   if (!shape) return false;
-  return cellIsGuarded(shape, cellName);
+  const visited = new Set<string>();
+  let current = cellName;
+  for (let hops = 0; hops <= MAX_SETATREF_HOPS; hops += 1) {
+    if (visited.has(current)) return true;
+    visited.add(current);
+    const formula = cellFormula(shape, current);
+    if (formula === undefined) return false;
+    if (GUARD_CALL.test(formula)) return true;
+    if (SETATREF_TRANSFORM_CALL.test(formula)) return true;
+    const target = soleSetatrefTarget(formula);
+    if (target === undefined) return SETATREF_CALL.test(formula);
+    if (hops === MAX_SETATREF_HOPS) return true;
+    if (!BARE_CELL_NAME.test(target) || !findCell(shape, target)) return true;
+    current = target;
+  }
+  return true;
 }
 
 export function createRibbonCommands(
@@ -155,10 +188,10 @@ export function createRibbonCommands(
     undo: { id: 'undo', enabled: Boolean(handle?.canUndo()), run: execute((currentHandle) => { currentHandle.undo(); }) },
     redo: { id: 'redo', enabled: Boolean(handle?.canRedo()), run: execute((currentHandle) => { currentHandle.redo(); }) },
     delete: { id: 'delete', enabled: selected && !isDeleteBlocked(shape), run: execute((currentHandle, currentSelection) => { currentHandle.deleteShape(currentSelection!.pageId, currentSelection!.shapeId); }, true) },
-    fillColor: { id: 'fillColor', enabled: selected, value: color(cellValue(shape, 'FillForegnd'), '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
-    lineColor: { id: 'lineColor', enabled: selected, value: color(cellValue(shape, 'LineColor'), '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },
-    lineWeight: { id: 'lineWeight', enabled: selected, value: cellFormula(shape, 'LineWeight'), run: (value?: string) => { if (value) formula('LineWeight', value)(); } },
-    linePattern: { id: 'linePattern', enabled: selected, value: cellFormula(shape, 'LinePattern'), run: (value?: string) => { if (value) formula('LinePattern', value)(); } },
+    fillColor: { id: 'fillColor', enabled: selected && !isCellWriteBlocked(shape, 'FillForegnd'), value: color(cellValue(shape, 'FillForegnd'), '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
+    lineColor: { id: 'lineColor', enabled: selected && !isCellWriteBlocked(shape, 'LineColor'), value: color(cellValue(shape, 'LineColor'), '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },
+    lineWeight: { id: 'lineWeight', enabled: selected && !isCellWriteBlocked(shape, 'LineWeight'), value: cellFormula(shape, 'LineWeight'), run: (value?: string) => { if (value) formula('LineWeight', value)(); } },
+    linePattern: { id: 'linePattern', enabled: selected && !isCellWriteBlocked(shape, 'LinePattern'), value: cellFormula(shape, 'LinePattern'), run: (value?: string) => { if (value) formula('LinePattern', value)(); } },
     bringToFront: { id: 'bringToFront', enabled: selected && current!.index < topIndex, run: reorderTo((placement) => placement.siblings.length - 1, (placement) => placement.index < placement.siblings.length - 1) },
     bringForward: { id: 'bringForward', enabled: selected && current!.index < topIndex, run: reorderTo((placement) => placement.index + 1, (placement) => placement.index < placement.siblings.length - 1) },
     sendBackward: { id: 'sendBackward', enabled: selected && current!.index > 0, run: reorderTo((placement) => placement.index - 1, (placement) => placement.index > 0) },

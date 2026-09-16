@@ -1,5 +1,8 @@
-import { expect, mock, test } from 'bun:test';
+import { beforeAll, expect, mock, test } from 'bun:test';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import type { DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
+import { initWasm, openDiagram } from '@betteroffice/vsdx';
 import { createRibbonCommands, findShapePlacement, numericCellValue } from './commands';
 
 function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
@@ -21,6 +24,18 @@ function handle(state: DiagramSnapshot, history = { undo: true, redo: false }) {
 }
 
 const selected = { pageId: 'page', shapeId: 'two', hit: { kind: 'shape' as const, shapeId: 'two' } };
+
+const repoRoot = resolve(import.meta.dir, '../../../../..');
+let guardFixture: Uint8Array;
+
+beforeAll(async () => {
+  const [wasm, fixture] = await Promise.all([
+    readFile(resolve(import.meta.dir, '../../../../vsdx/src/wasm/generated/vsdx_wasm_bg.wasm')),
+    readFile(resolve(repoRoot, 'crates/vsdx-parse/tests/fixtures/guard-format.vsdx')),
+  ]);
+  await initWasm(wasm);
+  guardFixture = fixture;
+});
 
 test('exposes history from the handle and refreshes after mutations', () => {
   const state = snapshot(); const historyState = { undo: true, redo: false }; const diagram = handle(state, historyState); const refresh = mock(() => {});
@@ -58,7 +73,7 @@ test('locks and guards disable the operations the mutation policy would refuse',
 });
 
 test('a GUARD substring inside a reference name disables nothing', () => {
-  const state = snapshot({ LockDelete: 'User.GuardDelete', Angle: 'User.GuardAngle', FlipX: 'User.GuardFlip', FlipY: 'User.GuardFlip' });
+  const state = snapshot({ LockDelete: 'User.GuardDelete', Angle: 'User.GuardAngle', FlipX: 'User.GuardFlip', FlipY: 'User.GuardFlip', FillForegnd: 'User.GuardFill', LineColor: 'User.GuardLine', LineWeight: 'User.GuardWeight', LinePattern: 'User.GuardPattern' });
   const diagram = handle(state);
   const commands = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {});
   expect(commands.delete.enabled).toBe(true);
@@ -66,6 +81,82 @@ test('a GUARD substring inside a reference name disables nothing', () => {
   expect(commands.rotateRight.enabled).toBe(true);
   expect(commands.flipHorizontal.enabled).toBe(true);
   expect(commands.flipVertical.enabled).toBe(true);
+  expect(commands.fillColor.enabled).toBe(true);
+  expect(commands.lineColor.enabled).toBe(true);
+  expect(commands.lineWeight.enabled).toBe(true);
+  expect(commands.linePattern.enabled).toBe(true);
+});
+
+test('format commands follow the same guard predicate as rotate and flip', () => {
+  const guarded = snapshot({ FillForegnd: 'GUARD(RGB(1,2,3))', LineColor: '=GUARD(RGB(4,5,6))', LineWeight: 'GUARD(0.01 in)', LinePattern: 'guard(1)', Angle: '0' });
+  const blocked = createRibbonCommands(handle(guarded), selected, 'page', () => {}, () => {}, () => {});
+  expect(blocked.fillColor.enabled).toBe(false);
+  expect(blocked.lineColor.enabled).toBe(false);
+  expect(blocked.lineWeight.enabled).toBe(false);
+  expect(blocked.linePattern.enabled).toBe(false);
+  expect(blocked.rotateLeft.enabled).toBe(true);
+  const plain = snapshot({ FillForegnd: 'RGB(1,2,3)', LineColor: 'RGB(4,5,6)', LineWeight: '0.01 in', LinePattern: '1', Angle: '0' });
+  const open = createRibbonCommands(handle(plain), selected, 'page', () => {}, () => {}, () => {});
+  expect(open.fillColor.enabled).toBe(true);
+  expect(open.lineColor.enabled).toBe(true);
+  expect(open.lineWeight.enabled).toBe(true);
+  expect(open.linePattern.enabled).toBe(true);
+});
+
+test('a SETATREF redirect to a guarded cell disables the control', () => {
+  const redirected = snapshot({ FillForegnd: 'RGB(1,2,3)', LineColor: 'SETATREF(LineTarget)', LineTarget: 'GUARD(RGB(4,5,6))' });
+  const blocked = createRibbonCommands(handle(redirected), selected, 'page', () => {}, () => {}, () => {});
+  expect(blocked.lineColor.enabled).toBe(false);
+  expect(blocked.fillColor.enabled).toBe(true);
+  const chained = snapshot({ LineColor: 'SETATREF(A)', A: 'SETATREF(B)', B: 'GUARD(RGB(4,5,6))' });
+  expect(createRibbonCommands(handle(chained), selected, 'page', () => {}, () => {}, () => {}).lineColor.enabled).toBe(false);
+  const open = snapshot({ LineColor: 'SETATREF(LineTarget)', LineTarget: 'RGB(4,5,6)' });
+  expect(createRibbonCommands(handle(open), selected, 'page', () => {}, () => {}, () => {}).lineColor.enabled).toBe(true);
+  const openChain = snapshot({ LineColor: '=SETATREF(A)', A: 'SETATREF(B)', B: 'RGB(4,5,6)' });
+  expect(createRibbonCommands(handle(openChain), selected, 'page', () => {}, () => {}, () => {}).lineColor.enabled).toBe(true);
+});
+
+test('an unresolvable SETATREF redirect disables the control the policy would refuse', () => {
+  for (const cells of [
+    { LineColor: 'SETATREF(Missing)' },
+    { LineColor: 'SETATREF(Sheet.2!LineColor)' },
+    { LineColor: 'SETATREF(LineColor)' },
+    { LineColor: 'SETATREF(LineTarget)+1' },
+    { LineColor: 'IF(1,SETATREF(LineTarget),0)', LineTarget: 'RGB(4,5,6)' },
+  ] as Record<string, string>[]) {
+    const commands = createRibbonCommands(handle(snapshot(cells)), selected, 'page', () => {}, () => {}, () => {});
+    expect(commands.lineColor.enabled).toBe(false);
+  }
+});
+
+test('the guard fixture disables guarded controls end to end', () => {
+  const diagram = openDiagram(guardFixture, { clientId: 7701 });
+  try {
+    const state = diagram.snapshot();
+    const pageId = state.pages[0].id;
+    const [guarded, redirected, plain] = state.pages[0].shapes.map((shape) => shape.id);
+    const select = (shapeId: string) => ({ pageId, shapeId, hit: { kind: 'shape' as const, shapeId } });
+    const guardedCommands = createRibbonCommands(diagram, select(guarded), pageId, () => {}, () => {}, () => {});
+    expect(guardedCommands.fillColor.enabled).toBe(false);
+    expect(guardedCommands.rotateLeft.enabled).toBe(false);
+    expect(guardedCommands.rotateRight.enabled).toBe(false);
+    expect(guardedCommands.delete.enabled).toBe(false);
+    expect(guardedCommands.lineWeight.enabled).toBe(true);
+    const redirectedCommands = createRibbonCommands(diagram, select(redirected), pageId, () => {}, () => {}, () => {});
+    expect(redirectedCommands.lineColor.enabled).toBe(false);
+    expect(redirectedCommands.fillColor.enabled).toBe(true);
+    const plainCommands = createRibbonCommands(diagram, select(plain), pageId, () => {}, () => {}, () => {});
+    expect(plainCommands.fillColor.enabled).toBe(true);
+    expect(plainCommands.lineColor.enabled).toBe(true);
+    expect(plainCommands.lineWeight.enabled).toBe(true);
+    expect(plainCommands.linePattern.enabled).toBe(true);
+    expect(plainCommands.rotateLeft.enabled).toBe(true);
+    expect(plainCommands.delete.enabled).toBe(true);
+    expect(() => diagram.setCellFormula(pageId, guarded, { cellName: 'FillForegnd' }, 'RGB(1,2,3)')).toThrow('GUARD protects the requested cell');
+    expect(() => diagram.setCellFormula(pageId, redirected, { cellName: 'LineColor' }, 'RGB(1,2,3)')).toThrow('GUARD protects the requested cell');
+  } finally {
+    diagram.dispose();
+  }
 });
 
 test('does not reorder forward past the topmost shape', () => {

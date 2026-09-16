@@ -93,14 +93,10 @@ function ShapePanel({ t }: { t: TFunction }) {
 
 export function Ribbon({ t, hasSelection = false }: { t: TFunction; hasSelection?: boolean }) {
   const visibleTabs: readonly RibbonTab[] = hasSelection ? [...baseTabs, 'shape'] : baseTabs;
-  const [active, setActive] = useState<RibbonTab>(hasSelection ? 'shape' : 'home');
+  const [active, setActive] = useState<RibbonTab>('home');
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const previousSelection = useRef(hasSelection);
   useEffect(() => {
-    const previous = previousSelection.current;
-    previousSelection.current = hasSelection;
-    if (hasSelection && !previous) setActive('shape');
-    else if (!hasSelection && previous) setActive((current) => (current === 'shape' ? 'home' : current));
+    if (!hasSelection) setActive((current) => (current === 'shape' ? 'home' : current));
   }, [hasSelection]);
   const select = (next: RibbonTab) => setActive(next);
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {

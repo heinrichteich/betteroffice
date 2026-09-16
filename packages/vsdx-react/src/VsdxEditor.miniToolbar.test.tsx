@@ -200,6 +200,31 @@ test('an outside press and a menu action close the toolbar with the menu', () =>
   }
 });
 
+test('guarded fill and line hide the mini toolbar swatches', () => {
+  const guarded = renderShapeMenu({ cells: [cell('FillForegnd', 'GUARD(RGB(255,0,0))'), cell('LineColor', 'GUARD(RGB(0,0,255))'), cell('Angle', '0'), cell('FlipX', '0'), cell('FlipY', '0')] });
+  expect(toolbar()).toBeNull();
+  expect(shapeMenu()).not.toBeNull();
+  guarded.view.unmount();
+  const open = renderShapeMenu();
+  try {
+    expect(toolbar()).not.toBeNull();
+  } finally {
+    open.view.unmount();
+  }
+});
+
+test('a SETATREF redirect to a guarded cell hides only that swatch', () => {
+  const redirected = renderShapeMenu({ cells: [cell('FillForegnd', 'RGB(255,0,0)'), cell('LineColor', 'SETATREF(LineTarget)'), cell('LineTarget', 'GUARD(RGB(0,0,255))')] });
+  try {
+    const bar = toolbar();
+    expect(bar).not.toBeNull();
+    expect(bar?.querySelector('[data-command-id="fillColor"]')).not.toBeNull();
+    expect(bar?.querySelector('[data-command-id="lineColor"]')).toBeNull();
+  } finally {
+    redirected.view.unmount();
+  }
+});
+
 test('commands that do not exist or are disabled are not shown', () => {
   function PartialHost({ commands }: { commands: Partial<Record<RibbonCommandId, RibbonCommand | undefined>> }) {
     const ref = { current: null } as RefObject<HTMLDivElement | null>;

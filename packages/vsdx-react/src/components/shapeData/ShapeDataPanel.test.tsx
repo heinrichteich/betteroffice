@@ -97,3 +97,20 @@ test('reports commit failures instead of throwing', () => {
   expect(errors.length).toBe(1);
   expect(String(errors[0])).toContain('GUARD');
 });
+
+test('a refused edit reverts the field to the committed value', () => {
+  const errors: unknown[] = [];
+  const view = render(<ShapeDataPanel
+    shape={shape([cell('Property', 'Device', 'Value', '"Amp"', 'Amp')])}
+    onCommit={() => { throw new Error('GUARD protects the requested cell'); }}
+    onError={(error) => errors.push(error)}
+    t={t}
+  />);
+  const input = view.getByDisplayValue('Amp') as HTMLInputElement;
+  fireEvent.change(input, { target: { value: 'Mixer' } });
+  expect(input.value).toBe('Mixer');
+  fireEvent.blur(input);
+  expect(errors.length).toBe(1);
+  expect(view.queryByDisplayValue('Mixer')).toBe(null);
+  expect((view.getByDisplayValue('Amp') as HTMLInputElement).value).toBe('Amp');
+});

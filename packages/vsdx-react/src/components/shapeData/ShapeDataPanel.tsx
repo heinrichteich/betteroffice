@@ -52,9 +52,10 @@ export function ShapeDataPanel({ shape, onCommit, onError, t, className }: Shape
 
 function ShapeDataValueInput({ row, onCommit, onError, t }: { row: ShapeDataRow; onCommit: (row: ShapeDataRow, formula: string) => void; onError: (error: unknown) => void; t: TFunction }) {
   const id = `shape-data-${row.rowName ?? `ix-${row.rowIndex}`}`;
+  const [reverted, setReverted] = useState(0);
   const commit = (formula: string) => {
     try { onCommit(row, formula); }
-    catch (error) { onError(error); }
+    catch (error) { onError(error); setReverted((value) => value + 1); }
   };
   if (row.type === 'boolean') {
     const checked = row.displayValue !== '' && row.displayValue !== '0' && !/^false$/i.test(row.displayValue);
@@ -80,7 +81,7 @@ function ShapeDataValueInput({ row, onCommit, onError, t }: { row: ShapeDataRow;
       </select>
     );
   }
-  return <ShapeDataTextInput key={`${row.rowName ?? row.rowIndex}:${row.displayValue}`} id={id} row={row} onCommit={commit} t={t} />;
+  return <ShapeDataTextInput key={`${row.rowName ?? row.rowIndex}:${row.displayValue}:${reverted}`} id={id} row={row} onCommit={commit} t={t} />;
 }
 
 function ShapeDataTextInput({ id, row, onCommit, t }: { id: string; row: ShapeDataRow; onCommit: (formula: string) => void; t: TFunction }) {
