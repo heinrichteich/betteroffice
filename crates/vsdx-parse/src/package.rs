@@ -2301,6 +2301,40 @@ fn targets_by_type(relationships: &[Relationship], kind: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn collects_themes_from_both_relationship_types_and_scheme_ids() {
+        fn theme(name: &str, accent: &str, scheme: Option<&str>) -> Vec<u8> {
+            let ext = scheme.map_or(String::new(), |value| {
+                format!(
+                    "<a:extLst><a:ext uri='{{x}}'><vt:schemeID xmlns:vt='http://schemas.microsoft.com/office/visio/2012/main' schemeEnum='{value}'/></a:ext></a:extLst>"
+                )
+            });
+            format!(
+                "<a:theme xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main' name='{name}'><a:themeElements><a:clrScheme name='{name}'><a:accent1><a:srgbClr val='{accent}'/></a:accent1>{ext}</a:clrScheme></a:themeElements></a:theme>"
+            )
+            .into_bytes()
+        }
+        let package = rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec()),
+            ("visio/document.xml".to_owned(), b"<VisioDocument/>".to_vec()),
+            ("visio/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/theme' Target='theme/theme1.xml'/><Relationship Id='r2' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme' Target='theme/theme2.xml'/></Relationships>"#.to_vec()),
+            ("visio/theme/theme1.xml".to_owned(), theme("First", "AAAAAA", Some("5"))),
+            ("visio/theme/theme2.xml".to_owned(), theme("Second", "BBBBBB", None)),
+        ])
+        .unwrap();
+        let parsed = parse_vsdx(&package).unwrap();
+        let accent = |index: u32| {
+            parsed
+                .themes
+                .get(&index)
+                .map(|theme| theme.color_scheme.accent1.clone())
+        };
+        assert_eq!(accent(1).as_deref(), Some("AAAAAA"));
+        assert_eq!(accent(2).as_deref(), Some("BBBBBB"));
+        assert_eq!(accent(5).as_deref(), Some("AAAAAA"));
+    }
+
+    #[test]
     fn opens_parts_that_carry_no_relationship_part() {
         let content_types = ("[Content_Types].xml".to_owned(), br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec());
         let root_rels = ("_rels/.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec());
