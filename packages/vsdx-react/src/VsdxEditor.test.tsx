@@ -3,7 +3,7 @@ import type { DiagramSnapshot, PageDisplayList, PageLayer, PageSnapshot } from '
 import { collectDiagnostics, selectionHiddenByLayers, stillSelectable } from './VsdxEditor';
 
 const frame: PageDisplayList = {
-  contractVersion: 5,
+  contractVersion: 6,
   width: 1,
   height: 1,
   paintTransform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },

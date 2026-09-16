@@ -195,7 +195,7 @@ test('reports renderer-resolved colours for palette-indexed fills and lines', ()
   expect(indexed.fillColor.value).toBe('#112233');
   expect(indexed.lineColor.value).toBe('#445566');
   const frame = {
-    contractVersion: 5 as const,
+    contractVersion: 6 as const,
     width: 8,
     height: 11,
     paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 },

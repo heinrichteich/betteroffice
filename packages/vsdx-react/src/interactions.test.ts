@@ -318,7 +318,7 @@ test('canvas keyboard produces no intent from editable targets', () => {
   expect(canvasKeyboardIntent({ key: 'Escape', target: editable }, 1)).toBeNull();
 });
 
-const textFrame: PageDisplayList = { contractVersion: 5, width: 816, height: 1056, paintTransform: pagePaintTransform, primitives: [] };
+const textFrame: PageDisplayList = { contractVersion: 6, width: 816, height: 1056, paintTransform: pagePaintTransform, primitives: [] };
 
 function textBox(transform?: Affine): TextBoxPrimitive {
   return {

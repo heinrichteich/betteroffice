@@ -262,7 +262,7 @@ fn stop_number(
     }
     cell.value.as_deref()?.parse().ok()
 }
-fn resolved_number(
+pub(crate) fn resolved_number(
     package: &VsdxPackage,
     references: Option<&PageShapeReferences>,
     shape: &ResolvedShape,
@@ -306,7 +306,7 @@ fn value<'a>(shape: &'a ResolvedShape, name: &str) -> Option<&'a str> {
 fn default_colour(package: &VsdxPackage) -> String {
     crate::palette_colour(package, 0.0).unwrap_or_else(|| "#000000".into())
 }
-fn colour(
+pub(crate) fn colour(
     package: &VsdxPackage,
     references: Option<&PageShapeReferences>,
     shape: &ResolvedShape,

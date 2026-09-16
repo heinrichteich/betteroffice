@@ -8,7 +8,10 @@ use crate::patch::{
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
 use crate::sheet::{parse_records, parse_sheet};
 use crate::xml::{ParseBudget, XmlElement, XmlNode, parse_xml};
-use crate::{CellAttribute, ConnectsChild, ParseLimits, Shape, Sheet, SheetChild, VsdxError};
+use crate::{
+    CellAttribute, ConnectsChild, ParseLimits, Shape, Sheet, SheetChild, ThemeEffectColor,
+    ThemeEffectStyle, ThemeEffects, ThemeOuterShadow, ThemeVariationScheme, VsdxError,
+};
 use ooxml_drawingml::Theme;
 
 /// Identifies the ShapeSheet containing a semantic cell.
@@ -257,16 +260,16 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
     });
     let page_contents = parse_part_sheets(&page_part_paths, &mut xml_parts, &mut budget)?;
     let master_contents = parse_part_sheets(&master_part_paths, &mut xml_parts, &mut budget)?;
-    let themes = theme_part_paths
-        .iter()
-        .enumerate()
-        .map(|(index, path)| {
-            let root = xml_parts
-                .get(path)
-                .ok_or_else(|| VsdxError::MissingPart(path.clone()))?;
-            Ok(((index + 1) as u32, parse_theme(root, path)?))
-        })
-        .collect::<Result<_, VsdxError>>()?;
+    let mut themes = BTreeMap::new();
+    let mut theme_effects = BTreeMap::new();
+    for (index, path) in theme_part_paths.iter().enumerate() {
+        let root = xml_parts
+            .get(path)
+            .ok_or_else(|| VsdxError::MissingPart(path.clone()))?;
+        let key = (index + 1) as u32;
+        themes.insert(key, parse_theme(root, path)?);
+        theme_effects.insert(key, parse_theme_effects(root));
+    }
     let sheet_part_paths: HashSet<&str> = std::iter::once(document_path.as_str())
         .chain(pages_part_path.iter().map(String::as_str))
         .chain(masters_part_path.iter().map(String::as_str))
@@ -296,6 +299,7 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         master_part_paths,
         theme_part_paths,
         themes,
+        theme_effects,
         windows_part_path,
         relationships,
         document_sheet,
@@ -346,6 +350,118 @@ fn parse_theme(root: &XmlElement, part: &str) -> Result<Theme, VsdxError> {
         theme.color_scheme.set(slot, value.to_owned());
     }
     Ok(theme)
+}
+
+fn parse_theme_effects(root: &XmlElement) -> ThemeEffects {
+    let mut effects = ThemeEffects::default();
+    let Some(elements) = root.children_named("themeElements").next() else {
+        return effects;
+    };
+    for ext in elements
+        .children_named("extLst")
+        .flat_map(|list| list.children_named("ext"))
+    {
+        if let Some(scheme) = ext.children_named("themeScheme").next()
+            && let Some(id) = scheme
+                .children_named("schemeID")
+                .find_map(|id| id.attribute("schemeEnum"))
+                .and_then(|id| id.parse().ok())
+        {
+            effects.scheme_id = Some(id);
+        }
+        for scheme in ext.children_named("variationStyleSchemeLst") {
+            for variant in scheme.children_named("variationStyleScheme") {
+                effects.variation_schemes.push(ThemeVariationScheme {
+                    embellishment: variant
+                        .attribute("embellishment")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0),
+                    effect_indexes: variant
+                        .children_named("varStyle")
+                        .filter_map(|style| style.attribute("effectIdx"))
+                        .filter_map(|index| index.parse().ok())
+                        .collect(),
+                });
+            }
+        }
+        for schemes in ext.children_named("variationClrSchemeLst") {
+            for scheme in schemes.children_named("variationClrScheme") {
+                let mut colors = Vec::new();
+                for position in 1..=7 {
+                    let name = format!("varColor{position}");
+                    colors.push(scheme.children_named(&name).next().and_then(|slot| {
+                        slot.children.iter().find_map(|child| match child {
+                            XmlNode::Element(value) => {
+                                let hex = value
+                                    .attribute("lastClr")
+                                    .or_else(|| value.attribute("val"))?;
+                                (value.local_name() == "srgbClr").then(|| hex.to_ascii_uppercase())
+                            }
+                            XmlNode::Text(_) => None,
+                        })
+                    }));
+                }
+                effects.variation_colors.push(colors);
+            }
+        }
+    }
+    if let Some(styles) = elements
+        .children_named("fmtScheme")
+        .next()
+        .and_then(|scheme| scheme.children_named("effectStyleLst").next())
+    {
+        for style in styles.children_named("effectStyle") {
+            let list = style.children_named("effectLst").next();
+            effects.effect_styles.push(ThemeEffectStyle {
+                outer_shadow: list.and_then(|list| {
+                    list.children_named("outerShdw")
+                        .next()
+                        .map(parse_outer_shadow)
+                }),
+                has_bevel: style.children_named("sp3d").next().is_some(),
+            });
+        }
+    }
+    effects
+}
+
+fn parse_outer_shadow(style: &XmlElement) -> ThemeOuterShadow {
+    let number = |name: &str| {
+        style
+            .attribute(name)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0)
+    };
+    let mut shadow = ThemeOuterShadow {
+        blur_emu: number("blurRad"),
+        dist_emu: number("dist"),
+        direction_60k: number("dir"),
+        color: ThemeEffectColor::Placeholder,
+        alpha_1000pct: None,
+    };
+    let Some(color) = style.children.iter().find_map(|child| match child {
+        XmlNode::Element(value) if matches!(value.local_name(), "srgbClr" | "schemeClr") => {
+            Some(value)
+        }
+        _ => None,
+    }) else {
+        return shadow;
+    };
+    shadow.color = match color.local_name() {
+        "srgbClr" => color
+            .attribute("val")
+            .map(|hex| ThemeEffectColor::Srgb(hex.to_ascii_uppercase()))
+            .unwrap_or_default(),
+        _ => color
+            .attribute("val")
+            .map(|slot| ThemeEffectColor::Scheme(slot.to_owned()))
+            .unwrap_or_default(),
+    };
+    shadow.alpha_1000pct = color
+        .children_named("alpha")
+        .find_map(|alpha| alpha.attribute("val"))
+        .and_then(|value| value.parse().ok());
+    shadow
 }
 
 fn catalog_part_ids(
@@ -3653,6 +3769,47 @@ mod tests {
             parse_theme(&root, part),
             Err(VsdxError::MalformedXml { message, .. }) if message == "theme is missing themeElements/clrScheme"
         ));
+    }
+
+    #[test]
+    fn parses_theme_shadow_and_variant_effects() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<a:theme xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main' xmlns:vt='http://schemas.microsoft.com/office/visio/2012/theme'><a:themeElements><a:fmtScheme><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst><a:outerShdw blurRad="38100" dist="25420" dir="5400000"><a:srgbClr val="A5A5A5"><a:alpha val="60000"/></a:srgbClr></a:outerShdw></a:effectLst></a:effectStyle><a:effectStyle><a:effectLst/><a:sp3d/></a:effectStyle></a:effectStyleLst></a:fmtScheme><a:extLst><a:ext><vt:themeScheme><vt:schemeID schemeEnum="34"/></vt:themeScheme></a:ext><a:ext><vt:variationStyleSchemeLst><vt:variationStyleScheme embellishment="2"><vt:varStyle fillIdx="2" lineIdx="2" effectIdx="2" fontIdx="2"/></vt:variationStyleScheme></vt:variationStyleSchemeLst></a:ext><a:ext><vt:variationClrSchemeLst><vt:variationClrScheme><vt:varColor1><a:srgbClr val="268FEE"/></vt:varColor1></vt:variationClrScheme></vt:variationClrSchemeLst></a:ext></a:extLst></a:themeElements></a:theme>"#,
+            "visio/theme/theme1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let effects = parse_theme_effects(&root);
+        assert_eq!(effects.scheme_id, Some(34));
+        assert_eq!(effects.effect_styles.len(), 3);
+        assert_eq!(effects.effect_styles[0].outer_shadow, None);
+        let shadow = effects.effect_styles[1].outer_shadow.as_ref().unwrap();
+        assert_eq!(shadow.blur_emu, 38100);
+        assert_eq!(shadow.dist_emu, 25420);
+        assert_eq!(shadow.direction_60k, 5400000);
+        assert_eq!(
+            shadow.color,
+            ThemeEffectColor::Srgb("A5A5A5".to_owned())
+        );
+        assert_eq!(shadow.alpha_1000pct, Some(60000));
+        assert!(effects.effect_styles[2].has_bevel);
+        assert_eq!(effects.variation_schemes.len(), 1);
+        assert_eq!(effects.variation_schemes[0].embellishment, 2);
+        assert_eq!(effects.variation_schemes[0].effect_indexes, vec![2]);
+        assert_eq!(
+            effects.variation_colors,
+            vec![vec![
+                Some("268FEE".to_owned()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            ]]
+        );
     }
 
     #[test]

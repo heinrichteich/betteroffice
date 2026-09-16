@@ -5,7 +5,7 @@ import { canvasPointerPosition, inchFormula, resolveDragGeometry, selectionCorne
 import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
 
 const frame: PageDisplayList = {
-  contractVersion: 5,
+  contractVersion: 6,
   width: 816,
   height: 1056,
   paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 },
