@@ -38,6 +38,7 @@ export class VsdxDocument {
 export class VsdxRenderer {
     free(): void;
     [Symbol.dispose](): void;
+    exportPdf(document: VsdxDocument): Uint8Array;
     hitTestJson(x: number, y: number): string;
     layoutPageJson(document: VsdxDocument, page_index: number): string;
     constructor();
@@ -55,6 +56,7 @@ export interface InitOutput {
     readonly __wbg_vsdxrenderer_free: (a: number, b: number) => void;
     readonly parseVsdxJson: (a: number, b: number) => [number, number, number, number];
     readonly rendererVersion: () => [number, number];
+    readonly vsdxrenderer_exportPdf: (a: number, b: number) => [number, number, number, number];
     readonly vsdxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxrenderer_layoutPageJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxrenderer_new: () => number;

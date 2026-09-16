@@ -277,6 +277,7 @@ dependencies = [
  "betteroffice-vsdx-edit",
  "betteroffice-vsdx-eval",
  "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-render",
  "betteroffice-vsdx-resolve",
 ]
 

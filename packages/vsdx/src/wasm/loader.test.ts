@@ -100,6 +100,21 @@ describe('VSDX wasm boundary', () => {
     diagram.dispose();
   });
 
+  test('exports a vector PDF with one page per diagram page', () => {
+    const diagram = openDiagram(textAccounting, { clientId: 9012 });
+    try {
+      const pdf = diagram.exportPdf();
+      const text = new TextDecoder('latin1').decode(pdf);
+      expect(text.startsWith('%PDF-1.4')).toBe(true);
+      expect(text.endsWith('%%EOF')).toBe(true);
+      expect(text.match(/\/Type \/Page /g)?.length).toBe(diagram.snapshot().pages.length);
+      expect(text).toContain('BT');
+      expect(text).toContain('Tj');
+    } finally {
+      diagram.dispose();
+    }
+  });
+
   test('encodes only missing document changes when a remote state vector is provided', () => {
     const source = openDiagram(foundation, { clientId: 9040 });
     const peer = openDiagram(foundation, { clientId: 9041, initialUpdate: source.encodeStateAsUpdate() });
