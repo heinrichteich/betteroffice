@@ -979,12 +979,32 @@ fn embed_unit(
 
 fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolver) -> Vec<Mark> {
     let formatting = field(Some(run), "formatting");
-    let run_style = styles.run_style_own(
-        formatting.and_then(|formatting| string(field(Some(formatting), "styleId"))),
-    );
+    let style_id = string(field(formatting, "styleId"));
+    let run_style = styles.run_style_own(style_id);
     let inherited = merge_text_formatting(style_formatting, run_style.as_ref());
     let merged = merge_text_formatting(inherited.as_ref(), formatting);
-    formatting_to_marks(merged.as_ref())
+    let mut marks = formatting_to_marks(merged.as_ref());
+    let hyperlink_style = style_id.is_some_and(is_hyperlink_style_name)
+        || style_id
+            .and_then(|id| styles.style(id))
+            .and_then(|style| string(field(Some(style), "name")))
+            .is_some_and(is_hyperlink_style_name);
+    if hyperlink_style {
+        for (property, name) in [("color", "textColor"), ("underline", "underline")] {
+            if field(formatting, property).is_none()
+                && field(run_style.as_ref(), property).is_some()
+                && let Some(mark) = marks.iter_mut().find(|mark| mark.name == name)
+            {
+                mark.attrs
+                    .push(("inheritedHyperlink".to_owned(), Value::Bool(true)));
+            }
+        }
+    }
+    marks
+}
+
+fn is_hyperlink_style_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Hyperlink") || name.eq_ignore_ascii_case("FollowedHyperlink")
 }
 
 fn emu_to_pixels(value: f64) -> f64 {
@@ -1075,7 +1095,8 @@ fn image_payload(image: &Value) -> JsonObject {
         "distRight": number(field(wrap, "distR")).map(emu_to_pixels),
         "position": position.map(|_| json!({
             "horizontal": axis(horizontal),
-            "vertical": axis(vertical)
+            "vertical": axis(vertical),
+            "relativeHeight": nullish(field(position, "relativeHeight"))
         })),
         "borderWidth": border_width,
         "borderColor": border_color,
@@ -1086,6 +1107,7 @@ fn image_payload(image: &Value) -> JsonObject {
         "cropRight": nullish(field(field(Some(image), "crop"), "right")),
         "cropBottom": nullish(field(field(Some(image), "crop"), "bottom")),
         "cropLeft": nullish(field(field(Some(image), "crop"), "left")),
+        "shapeType": nullish(field(Some(image), "shapeType")),
         "opacity": nullish(field(Some(image), "opacity")),
         "effectExtentTop": number(field(field(Some(image), "padding"), "top"))
             .filter(|value| *value != 0.0)
@@ -1316,6 +1338,13 @@ fn run_content_to_units(
             image_payload(field(Some(content), "image").unwrap_or(&Value::Null)),
             hidden_marks(marks),
             None,
+            1,
+        )],
+        "horizontalRule" => vec![embed_unit(
+            "horizontalRule",
+            map_from_value(json!({"rule": field(Some(content), "rule")})),
+            marks,
+            comment_id,
             1,
         )],
         "shape" => vec![embed_unit(
@@ -1682,13 +1711,7 @@ fn note_ref_mark_types(run: &Value) -> Vec<Value> {
         .collect()
 }
 
-fn run_boundary(
-    run: &Value,
-    style_formatting: Option<&Value>,
-    styles: &StyleResolver,
-    source: &BTreeMap<String, String>,
-) -> Option<Value> {
-    let units = run_to_units(run, style_formatting, styles, None, &[], source);
+fn run_boundary(run: &Value, units: &[InlineUnit]) -> Option<Value> {
     if units
         .iter()
         .any(|unit| matches!(&unit.content, UnitContent::Embed { kind, .. } if kind != "noteRef"))
@@ -1783,6 +1806,10 @@ fn paragraph_attrs(
             "alignment",
             "spaceBefore",
             "spaceAfter",
+            "spaceBeforeLines",
+            "spaceAfterLines",
+            "beforeAutospacing",
+            "afterAutospacing",
             "lineSpacing",
             "lineSpacingRule",
             "indentRight",
@@ -1871,6 +1898,10 @@ fn paragraph_attrs(
             "alignment",
             "spaceBefore",
             "spaceAfter",
+            "spaceBeforeLines",
+            "spaceAfterLines",
+            "beforeAutospacing",
+            "afterAutospacing",
             "lineSpacing",
             "lineSpacingRule",
             "indentRight",
@@ -2056,20 +2087,22 @@ fn paragraph_units(
                 }
             }
             "run" => {
-                let boundary = run_boundary(content, style_formatting.as_ref(), styles, source);
-                if let (Some(boundaries), Some(boundary)) = (&mut boundaries, boundary) {
-                    boundaries.push(boundary);
-                } else {
-                    boundaries = None;
-                }
-                units.extend(run_to_units(
+                let run_units = run_to_units(
                     content,
                     style_formatting.as_ref(),
                     styles,
                     comment_id,
                     &[],
                     source,
-                ));
+                );
+                if let Some(run_boundaries) = &mut boundaries {
+                    if let Some(boundary) = run_boundary(content, &run_units) {
+                        run_boundaries.push(boundary);
+                    } else {
+                        boundaries = None;
+                    }
+                }
+                units.extend(run_units);
             }
             "hyperlink" => {
                 boundaries = None;
@@ -2950,19 +2983,21 @@ fn visit_story(
         units: Vec::new(),
         comment_coverage: Vec::new(),
     });
+    let empty_story;
     let blocks = if source_blocks.is_empty() {
-        vec![json!({ "type": "paragraph", "content": [] })]
+        empty_story = [json!({ "type": "paragraph", "content": [] })];
+        &empty_story[..]
     } else {
-        source_blocks.to_vec()
+        source_blocks
     };
     let mut table_index = 0usize;
     let mut sdt_index = 0usize;
     let mut paragraph_index = 0usize;
     let mut last_kind = None;
     for block in blocks {
-        match string(field(Some(&block), "type")).unwrap_or_default() {
+        match string(field(Some(block), "type")).unwrap_or_default() {
             "paragraph" => {
-                let (leading_breaks, trailing_breaks) = paragraph_flow_breaks(&block);
+                let (leading_breaks, trailing_breaks) = paragraph_flow_breaks(block);
                 if options.include_page_breaks {
                     for kind in leading_breaks {
                         context.plans[plan_index].units.push(embed_unit(
@@ -2975,12 +3010,12 @@ fn visit_story(
                     }
                 }
                 let (units, mut ppr) =
-                    paragraph_units(&block, &context.styles, None, &context.source_json);
+                    paragraph_units(block, &context.styles, None, &context.source_json);
                 let fallback = format!("{story_id}:p{paragraph_index}");
                 ppr.insert(
                     "paraId".to_owned(),
                     Value::String(
-                        string(field(Some(&block), "paraId"))
+                        string(field(Some(block), "paraId"))
                             .filter(|value| !value.is_empty())
                             .unwrap_or(&fallback)
                             .to_owned(),
@@ -3007,7 +3042,7 @@ fn visit_story(
             "table" => {
                 let current_table = table_index;
                 table_index += 1;
-                let table = project_table(&block, &context.styles, context.theme.as_ref());
+                let table = project_table(block, &context.styles, context.theme.as_ref());
                 let rows: Vec<Value> = table
                     .rows
                     .iter()
@@ -3075,7 +3110,7 @@ fn visit_story(
                 sdt_index += 1;
                 let child_story = format!("{story_id}:sdt{current_sdt}");
                 let mut properties = sdt_properties_attrs(
-                    field(Some(&block), "properties").unwrap_or(&Value::Null),
+                    field(Some(block), "properties").unwrap_or(&Value::Null),
                     &context.source_json,
                 );
                 properties.insert("story".to_owned(), Value::String(child_story.clone()));
@@ -3089,7 +3124,7 @@ fn visit_story(
                 visit_story(
                     context,
                     child_story,
-                    array(field(Some(&block), "content")),
+                    array(field(Some(block), "content")),
                     StoryOptions {
                         include_page_breaks: options.include_page_breaks,
                         append_body_tail: false,
@@ -3287,8 +3322,9 @@ pub(crate) fn referenced_fonts(
 
 pub(crate) fn seed_parsed_docx(
     document: &EditingDoc,
-    envelope: docx_parse::S9WireEnvelope,
+    mut envelope: docx_parse::S9WireEnvelope,
 ) -> Result<Vec<String>, String> {
+    envelope.document.package.media_entries.clear();
     let mut referenced_fonts = BTreeSet::new();
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
@@ -3621,6 +3657,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resolved_images_and_fonts_survive_media_projection() {
+        let src = "data:image/png;base64,AQID";
+        for with_field in [false, true] {
+            let mut envelope = parse_docx_for_edit(include_bytes!(
+                "../../../apps/demo/public/betteroffice-demo.docx"
+            ))
+            .unwrap();
+            let mut content = vec![json!({
+                "type": "run",
+                "formatting": {"fontFamily": {"ascii": "Image Caption"}},
+                "content": [{"type": "drawing", "image": {
+                    "type": "image", "rId": "rIdImage", "src": src,
+                    "size": {"width": 914400, "height": 457200},
+                    "wrap": {"type": "inline"}
+                }}]
+            })];
+            if with_field {
+                content.push(json!({
+                    "type": "simpleField", "instruction": " PAGE ", "fieldType": "PAGE",
+                    "content": [{"type": "run", "content": [{"type": "text", "text": "1"}]}]
+                }));
+            }
+            envelope.document.package.document.content = serde_json::from_value(json!([{
+                "type": "paragraph", "paraId": "image", "content": content
+            }]))
+            .unwrap();
+            envelope.document.package.media_entries = vec![(
+                "word/media/image.png".to_owned(),
+                docx_parse::media::MediaFile {
+                    path: "word/media/image.png".to_owned(),
+                    filename: Some("image.png".to_owned()),
+                    mime_type: "image/png".to_owned(),
+                    base64: "AQID".to_owned(),
+                    data_url: src.to_owned(),
+                },
+            )];
+            let mut without_media = envelope.clone();
+            without_media.document.package.media_entries.clear();
+            let with_media_doc = EditingDoc::new(7);
+            let without_media_doc = EditingDoc::new(7);
+            let fonts = seed_parsed_docx(&with_media_doc, envelope).unwrap();
+            assert_eq!(
+                fonts,
+                seed_parsed_docx(&without_media_doc, without_media).unwrap()
+            );
+            assert!(fonts.iter().any(|font| font == "Image Caption"));
+            assert_eq!(
+                with_media_doc.encode_state_as_update_v1(),
+                without_media_doc.encode_state_as_update_v1()
+            );
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+                &with_media_doc,
+                "body",
+                &crate::bridge::RenderEnv::default(),
+            )
+            .unwrap();
+            let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!("image paragraph must remain a paragraph");
+            };
+            assert!(paragraph.runs.iter().any(|run| {
+                matches!(run, docx_layout::types::Run::Image(image)
+                    if image.src == src && image.width == 96.0 && image.height == 48.0)
+            }));
+        }
+    }
+
+    #[test]
     fn source_json_preserves_wire_order_with_js_number_formatting() {
         let ordered: OrderedValue =
             serde_json::from_str(r#"{"type":"shape","z":1.0,"nested":{"b":2,"a":3}}"#).unwrap();
@@ -3702,14 +3805,47 @@ mod tests {
                 "formatting": { "styleId": "FootnoteReference" },
                 "content": [{ "type": content_type }, { "type": content_type }],
             });
-            assert!(run_to_units(&run, None, &styles, None, &[], &BTreeMap::new()).is_empty());
-            let boundary = run_boundary(&run, None, &styles, &BTreeMap::new()).unwrap();
+            let units = run_to_units(&run, None, &styles, None, &[], &BTreeMap::new());
+            assert!(units.is_empty());
+            let boundary = run_boundary(&run, &units).unwrap();
             assert_eq!(
                 boundary.get("noteMarks"),
                 Some(&json!([note_type, note_type]))
             );
             assert_eq!(boundary.get("text"), Some(&Value::String(String::new())));
         }
+    }
+
+    #[test]
+    fn reused_run_units_keep_comments_out_of_saved_boundaries() {
+        let (units, ppr) = paragraph_units(
+            &json!({"content": [
+                {"type": "commentRangeStart", "id": 7},
+                {"type": "run", "formatting": {"bold": true}, "content": [
+                    {"type": "text", "text": "A"},
+                    {"type": "tab"},
+                    {"type": "softHyphen"}
+                ]},
+                {"type": "commentRangeEnd", "id": 7},
+                {"type": "run", "content": [{"type": "footnoteRef", "id": 12}]}
+            ]}),
+            &StyleResolver::new(None),
+            None,
+            &BTreeMap::new(),
+        );
+        assert_eq!(units.len(), 4);
+        assert!(
+            units[..3]
+                .iter()
+                .all(|unit| unit.comment_id.as_deref() == Some("7"))
+        );
+        assert!(units[3].comment_id.is_none());
+        assert_eq!(units[3].pm_size, 1);
+        let boundaries = ppr["_originalRunBoundaries"].as_array().unwrap();
+        assert_eq!(boundaries.len(), 2);
+        assert_eq!(boundaries[0]["text"], "A\t\u{00ad}");
+        assert_eq!(boundaries[0]["marksKey"], "bold:{}");
+        assert_eq!(boundaries[1]["text"], "12");
     }
 
     #[test]

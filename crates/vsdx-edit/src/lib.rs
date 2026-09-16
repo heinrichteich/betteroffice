@@ -25,6 +25,7 @@ pub(crate) const META: &str = "vsdx:meta";
 pub(crate) const PAGE_ORDER: &str = "vsdx:page-order";
 pub(crate) const PAGES: &str = "vsdx:pages";
 pub(crate) const SHEETS: &str = "vsdx:sheets";
+pub(crate) const CONNECTS: &str = "vsdx:connects";
 pub(crate) const STORIES: &str = "vsdx:stories";
 pub(crate) const REMOTE_ORIGIN: &str = "vsdx:remote";
 pub(crate) const HYDRATE_ORIGIN: &str = "vsdx:hydrate";
@@ -217,7 +218,7 @@ fn hydrate_doc(doc: &Doc, bytes: &[u8]) -> EditResult<()> {
     txn.apply_update(update)
         .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
     txn.get_or_insert_array(PAGE_ORDER);
-    for root in [META, PAGES, SHEETS, STORIES] {
+    for root in [META, PAGES, SHEETS, CONNECTS, STORIES] {
         txn.get_or_insert_map(root);
     }
     Ok(())
@@ -304,6 +305,7 @@ mod tests {
         let sheets = txn.get_or_insert_map(SHEETS);
         let order = txn.get_or_insert_array(PAGE_ORDER);
         txn.get_or_insert_map(STORIES);
+        txn.get_or_insert_map(CONNECTS);
         for page_id in ["page:1", "page:2"] {
             order.push_back(&mut txn, page_id);
             let page = pages.insert(&mut txn, page_id, MapPrelim::default());
@@ -831,6 +833,77 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn shape_bounds_refusal_preserves_all_cells_and_emits_no_update() {
+        for (name, formula) in [
+            ("PinX", "GUARD(1)"),
+            ("LockMoveY", "1"),
+            ("LockHeight", "1"),
+        ] {
+            let session = session();
+            for cell in ["PinX", "PinY", "Width", "Height"] {
+                add_cell(&session, cell, Some("1"), None);
+            }
+            add_cell(&session, name, Some(formula), None);
+            let before = session.snapshot().unwrap();
+            let vector = session.encode_state_vector_v1();
+            assert!(
+                session
+                    .set_shape_bounds(
+                        &EditCtx::local("a"),
+                        "page:1",
+                        "page:1:shape:1",
+                        ["2", "3", "4", "5"].map(str::to_owned)
+                    )
+                    .is_err()
+            );
+            assert_eq!(session.snapshot().unwrap(), before);
+            assert_eq!(session.encode_state_vector_v1(), vector);
+        }
+    }
+
+    #[test]
+    fn shape_bounds_undo_restores_all_four_cells() {
+        let session = session();
+        for cell in ["PinX", "PinY", "Width", "Height"] {
+            add_cell(&session, cell, Some("1"), None);
+        }
+        let before = session.snapshot().unwrap();
+        let receipts = session
+            .set_shape_bounds(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                ["2", "3", "4", "5"].map(str::to_owned),
+            )
+            .unwrap();
+        assert_eq!(receipts.map(|receipt| receipt.after), ["2", "3", "4", "5"]);
+        assert!(session.undo());
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn resize_loc_pin_evaluates_formulas_without_mutating() {
+        let session = session();
+        for (name, formula) in [
+            ("Width", "2"),
+            ("Height", "3"),
+            ("LocPinX", "Width*0.5+0.25"),
+            ("LocPinY", "0.75"),
+        ] {
+            add_cell(&session, name, Some(formula), None);
+        }
+        let before = session.snapshot().unwrap();
+        assert_eq!(
+            session
+                .resize_loc_pin("page:1", "page:1:shape:1", 4.0, 6.0)
+                .unwrap(),
+            [2.25, 0.75]
+        );
+        assert_eq!(session.snapshot().unwrap(), before);
     }
 
     #[test]
@@ -1803,6 +1876,82 @@ mod tests {
                 .cells
                 .iter()
                 .any(|cell| { cell.name == "Y" && cell.formula.as_deref() == Some("3") })
+        );
+    }
+
+    #[test]
+    fn group_subshape_snapshot_and_story_match_render_resolution() {
+        let source = include_bytes!("../../vsdx-parse/tests/fixtures/group-master-shape.vsdx");
+        let package = vsdx_parse::parse_vsdx(source).unwrap();
+        let page = &package.page_part_paths[0];
+        let resolver = vsdx_resolve::Resolver::new(&package);
+        let resolved = resolver.resolve_page_shapes(page).unwrap();
+        let session = DiagramSession::open(source, 7).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let group = &snapshot.pages[0].shapes[0];
+        let source_group = package.page_contents[page].shapes().next().unwrap();
+        let mut source_children = source_group.shapes();
+        let direct = source_children.next().unwrap();
+        let nested = source_children.next().unwrap().shapes().next().unwrap();
+        let txn = session.doc.transact();
+        let stories = txn.get_map(STORIES).unwrap();
+        for (child, shape) in [
+            (&group.children[0], direct),
+            (&group.children[1].children[0], nested),
+        ] {
+            for (name, expected) in [("PinX", "1"), ("Width", "2"), ("PageValue", "23")] {
+                let cell = child
+                    .cells
+                    .iter()
+                    .find(|cell| cell.name == name && cell.locator.section.is_none())
+                    .unwrap();
+                assert_eq!(cell.value.as_deref(), Some(expected));
+                let vsdx_resolve::Lookup::Found(render_cell) =
+                    &resolved[&child.source_id].cells[name]
+                else {
+                    panic!("missing {name}")
+                };
+                assert_eq!(cell.value, render_cell.cell.value);
+            }
+            let Some(yrs::Out::Any(Any::String(story))) = stories.get(&txn, &child.id) else {
+                panic!("missing story")
+            };
+            assert_eq!(story.as_ref(), "group label");
+            let tokens = resolver
+                .resolve_text_in_context(
+                    shape,
+                    &package.page_contents[page],
+                    &resolved[&child.source_id],
+                )
+                .unwrap();
+            let vsdx_resolve::ResolvedTextToken::CharacterRun { properties, .. } = &tokens[0]
+            else {
+                panic!("missing character run")
+            };
+            let vsdx_resolve::Lookup::Found(size) = &properties["Size"] else {
+                panic!("missing font size")
+            };
+            assert_eq!(size.cell.value.as_deref(), Some("0.25"));
+            assert_eq!(size.provenance, vsdx_resolve::Provenance::Page);
+            let snapshot_size = child
+                .cells
+                .iter()
+                .find(|cell| {
+                    cell.name == "Size" && cell.locator.section.as_deref() == Some("Character")
+                })
+                .unwrap();
+            assert_eq!(snapshot_size.value, size.cell.value);
+            assert_eq!(
+                tokens[1],
+                vsdx_resolve::ResolvedTextToken::Literal("group label".into())
+            );
+        }
+        let renderer = vsdx_render::Renderer::default();
+        assert_eq!(
+            renderer.layout_page(&package, page).unwrap(),
+            renderer
+                .layout_page(&session.package().unwrap(), page)
+                .unwrap()
         );
     }
 

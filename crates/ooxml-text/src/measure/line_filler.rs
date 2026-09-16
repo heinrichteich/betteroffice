@@ -23,10 +23,8 @@
 //!   `exact`, floored `atLeast` or sub-single box moves the pair rather than
 //!   overflowing the box. An image-grown line overrides both and the
 //!   identity still holds.
-//! - An image taller than the ruled text height grows the line box. Alone on
-//!   the line it takes the text descent as a buffer above and below; flowing
-//!   with text it seats on the baseline — full height above, only the text
-//!   descent below. The reported `descent` stays text metrics either way.
+//! - A tall inline image sits on the baseline with text descent below it.
+//!   Block images retain a descent buffer above and below their footprint.
 //! - Float geometry is probed per line at the running Y with a fixed
 //!   default-font-size estimate, never the line's real metrics, which are
 //!   unknown until the line closes. That running Y advances by each line's
@@ -125,6 +123,7 @@ struct LineContribution {
     logical_order: u32,
     shaped_cluster: bool,
     is_space: bool,
+    is_fit_space: bool,
 }
 
 /// Fill state: the paragraph's finished lines, the line in progress, and the
@@ -560,6 +559,7 @@ impl Filler<'_> {
             logical_order: run_index.saturating_mul(1_000_000),
             shaped_cluster: false,
             is_space: false,
+            is_fit_space: false,
         });
     }
 
@@ -592,6 +592,7 @@ impl Filler<'_> {
                     .saturating_add(cluster.logical_order),
                 shaped_cluster: true,
                 is_space: cluster.is_space,
+                is_fit_space: cluster.is_fit_space,
             });
         }
     }
@@ -607,7 +608,7 @@ impl Filler<'_> {
                 .cur
                 .contributions
                 .iter()
-                .rposition(|part| !part.is_space)
+                .rposition(|part| !part.is_fit_space)
                 .map_or(0, |i| i + 1);
             let parts = &mut self.cur.contributions[..end];
             let visible_width = parts.iter().map(|part| part.advance).sum::<f32>();
@@ -656,7 +657,12 @@ impl Filler<'_> {
             let image_h = self.cur.max_image_height_px;
             let buffer = content.descent;
             descent = buffer;
-            if self.cur.head_run == self.cur.tail_run {
+            if self.cur.head_run == self.cur.tail_run
+                && matches!(
+                    self.p.prepared.get(self.cur.head_run as usize),
+                    Some(PreparedRun::OwnLineImage(_))
+                )
+            {
                 line_height = image_h + buffer * 2.0;
                 ascent = image_h + buffer;
             } else {
@@ -886,7 +892,7 @@ fn utf16_at(t: &PreparedText, i: usize) -> u32 {
 fn visible_span_width(chars: &[CharAdv], letter_spacing: f32) -> f32 {
     let end = chars
         .iter()
-        .rposition(|cluster| !cluster.is_space)
+        .rposition(|cluster| !cluster.is_fit_space)
         .map_or(0, |i| i + 1);
     span_width(&chars[..end], letter_spacing)
 }
@@ -1006,6 +1012,7 @@ mod tests {
                     utf16_len: 1,
                     advance: 10.0,
                     is_space: false,
+                    is_fit_space: false,
                     level: 0,
                     logical_order: 0,
                     font_size_pt: 12.0,
@@ -1017,6 +1024,7 @@ mod tests {
                     utf16_len: 2,
                     advance: 10.0,
                     is_space: false,
+                    is_fit_space: false,
                     level: 0,
                     logical_order: 1,
                     font_size_pt: 12.0,
@@ -1028,6 +1036,7 @@ mod tests {
                     utf16_len: 1,
                     advance: 10.0,
                     is_space: false,
+                    is_fit_space: false,
                     level: 0,
                     logical_order: 2,
                     font_size_pt: 12.0,
