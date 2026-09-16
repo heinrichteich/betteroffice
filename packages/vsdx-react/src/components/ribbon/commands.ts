@@ -94,7 +94,40 @@ export function lockCellEnabled(shape: ShapeSnapshot | null, name: string): bool
 
 /** True when the stored formula for a cell carries a GUARD interception. */
 export function cellIsGuarded(shape: ShapeSnapshot | null, name: string): boolean {
-  return (cellFormula(shape, name) ?? '').toUpperCase().includes('GUARD');
+  return hasGuardCall(cellFormula(shape, name) ?? '');
+}
+
+function hasGuardCall(formula: string): boolean {
+  let index = 0;
+  while (index < formula.length && formula[index] === '=') index += 1;
+  const isIdentChar = (char: string) => /[A-Za-z0-9_.!]/.test(char);
+  while (index < formula.length) {
+    const char = formula[index];
+    if (char === '"') {
+      index += 1;
+      while (index < formula.length) {
+        if (formula[index] === '"') {
+          if (formula[index + 1] === '"') { index += 2; continue; }
+          index += 1;
+          break;
+        }
+        index += 1;
+      }
+      continue;
+    }
+    if (/[A-Za-z_]/.test(char)) {
+      let end = index + 1;
+      while (end < formula.length && isIdentChar(formula[end])) end += 1;
+      const candidate = formula.slice(index, end);
+      let cursor = end;
+      while (cursor < formula.length && /\s/.test(formula[cursor])) cursor += 1;
+      if (cursor < formula.length && formula[cursor] === '(' && candidate.toUpperCase() === 'GUARD') return true;
+      index = end;
+      continue;
+    }
+    index += 1;
+  }
+  return false;
 }
 
 /** True when a delete would be refused by LockDelete or a GUARD on it. */
@@ -152,8 +185,8 @@ export function createRibbonCommands(
     undo: { id: 'undo', enabled: Boolean(handle?.canUndo()), run: execute((currentHandle) => { currentHandle.undo(); }) },
     redo: { id: 'redo', enabled: Boolean(handle?.canRedo()), run: execute((currentHandle) => { currentHandle.redo(); }) },
     delete: { id: 'delete', enabled: selected && !isDeleteBlocked(shape), run: execute((currentHandle, currentSelection) => { currentHandle.deleteShape(currentSelection!.pageId, currentSelection!.shapeId); }, true) },
-    fillColor: { id: 'fillColor', enabled: selected, value: color(cellValue(shape, 'FillForegnd'), '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
-    lineColor: { id: 'lineColor', enabled: selected, value: color(cellValue(shape, 'LineColor'), '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },
+    fillColor: { id: 'fillColor', enabled: selected && !isCellWriteBlocked(shape, 'FillForegnd'), value: color(cellValue(shape, 'FillForegnd'), '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
+    lineColor: { id: 'lineColor', enabled: selected && !isCellWriteBlocked(shape, 'LineColor'), value: color(cellValue(shape, 'LineColor'), '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },
     lineWeight: { id: 'lineWeight', enabled: selected, value: cellFormula(shape, 'LineWeight'), run: (value?: string) => { if (value) formula('LineWeight', value)(); } },
     linePattern: { id: 'linePattern', enabled: selected, value: cellFormula(shape, 'LinePattern'), run: (value?: string) => { if (value) formula('LinePattern', value)(); } },
     bringToFront: { id: 'bringToFront', enabled: selected && current!.index < topIndex, run: reorderTo((placement) => placement.siblings.length - 1, (placement) => placement.index < placement.siblings.length - 1) },
