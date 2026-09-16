@@ -3,9 +3,12 @@
 mod display_list;
 mod layout;
 mod paint;
+mod svg;
+mod vector;
 
 pub use display_list::*;
 pub use layout::{PIXELS_PER_INCH, final_paint_transform, to_canvas, to_canvas_length};
+pub use vector::{TextFragment, text_fragments};
 
 use std::collections::{BTreeMap, HashMap};
 

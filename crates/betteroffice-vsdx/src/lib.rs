@@ -16,6 +16,7 @@ use vsdx_resolve::{PageConnectivity, ResolveError, ResolvedShape, Resolver, shap
 pub enum Error {
     Parse(VsdxError),
     Resolve(ResolveError),
+    Render(String),
     Policy(String),
 }
 
@@ -49,6 +50,29 @@ impl Diagram {
     }
     pub fn package(&self) -> &VsdxPackage {
         &self.package
+    }
+    /// Renders every diagram page to one SVG string per page, sized from the PageSheet.
+    pub fn export_svg(&self) -> Result<Vec<String>> {
+        vsdx_render::Renderer::default()
+            .export_svg(&self.package)
+            .map_err(|error| Error::Render(error.to_string()))
+    }
+    /// Renders one diagram page to an SVG string sized from the PageSheet.
+    pub fn export_svg_page(&self, page_index: usize) -> Result<String> {
+        vsdx_render::Renderer::default()
+            .export_svg_page(&self.package, page_index)
+            .map_err(|error| Error::Render(error.to_string()))
+    }
+    /// Renders one diagram page to PNG at `scale` times the 96 dpi display list.
+    #[cfg(feature = "raster")]
+    pub fn export_png(&self, page_index: usize, scale: f32) -> Result<vsdx_raster::RenderedPage> {
+        vsdx_raster::render_page(
+            &vsdx_render::Renderer::default(),
+            &self.package,
+            page_index,
+            scale,
+        )
+        .map_err(Error::Render)
     }
     /// Applies formula edits sequentially, recomputing caches and enforcing current locks.
     pub fn save_cell_edits(&self, edits: &[SemanticCellEdit]) -> Result<Vec<u8>> {
@@ -355,6 +379,7 @@ impl MutationContext for PackageMutationContext<'_> {
                 Error::Policy(reason) => format!("cannot evaluate {lock}: {reason}"),
                 Error::Parse(error) => error.to_string(),
                 Error::Resolve(error) => error.to_string(),
+                Error::Render(error) => error,
             })?
             .ok_or_else(|| {
                 format!("cannot evaluate {lock}: it is outside the display evaluation profile")

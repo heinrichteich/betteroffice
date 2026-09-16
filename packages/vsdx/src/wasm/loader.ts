@@ -10,6 +10,8 @@ export interface DiagramHandle {
   snapshot(): DiagramSnapshot;
   registerFont(face: VsdxFontFace): number;
   layoutPage(pageIndex: number): PageDisplayList;
+  exportSvg(): string[];
+  exportPng(pageIndex: number, scale?: number): Uint8Array;
   pageLayers(pageIndex: number): PageLayer[];
   setLayerVisible(pagePartPath: string, layerIndex: number, visible: boolean): void;
   clearLayerVisibility(): void;
@@ -126,6 +128,12 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
       const shapes = [...page.shapes];
       while (shapes.length) { const shape = shapes.pop()!; hitIds.set(`${page.sourcePartPath}:${shape.sourceId}`, shape.id); shapes.push(...shape.children); }
       return list;
+    },
+    exportSvg: () => json<string[]>(() => renderer.exportSvgJson(doc)),
+    exportPng: (pageIndex, scale = 2) => {
+      if (!Number.isInteger(pageIndex) || pageIndex < 0) throw new Error('VSDX page index must be a non-negative integer');
+      if (!Number.isFinite(scale) || scale <= 0) throw new Error('VSDX PNG scale must be a positive number');
+      return wasm(() => renderer.exportPng(doc, pageIndex, scale).slice());
     },
     hitTest: (x, y) => {
       const hit = json<HitTestResult | null>(() => renderer.hitTestJson(x, y));
