@@ -7,7 +7,8 @@ export interface CellSnapshot { locator: SnapshotCellLocator; name: string; form
 export interface ShapeSnapshot { id: string; sourceId: number; name: string | null; cells: CellSnapshot[]; children: ShapeSnapshot[]; }
 export interface PageLayer { index: number; name: string; visible: boolean; print: boolean; lock: boolean; active: boolean; color: string; status: string; }
 export interface PageSnapshot { id: string; sourcePartPath: string; name: string | null; shapes: ShapeSnapshot[]; }
-export interface DiagramSnapshot { pages: PageSnapshot[]; }
+export interface PaletteEntry { index: number; color: string; }
+export interface DiagramSnapshot { pages: PageSnapshot[]; palette?: PaletteEntry[]; }
 export interface CellFormulaReceipt { pageId: string; shapeId: string; cellName: string; before: string | null; after: string; }
 export interface ShapeReceipt { pageId: string; shapeId: string; fromIndex: number | null; toIndex: number | null; }
 export interface TextReceipt { pageId: string; shapeId: string; before: string; after: string; }

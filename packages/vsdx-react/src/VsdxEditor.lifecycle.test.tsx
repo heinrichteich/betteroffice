@@ -163,7 +163,7 @@ test('a stale paint does not resolve images after a newer paint has taken over',
     api.handle.mediaBytes = (assetId: string) => { mediaBytesCalls.push(assetId); return new Uint8Array(0); };
   }} onError={(error) => { onErrors.push(error); }} />);
   await waitFor(() => expect(refreshApi).toBeDefined());
-  view.container.querySelector('canvas[aria-label]')!.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  (view.container.querySelector('canvas[aria-label]') as HTMLCanvasElement).getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
   paintPageOverride = (_context, _list, _dpr, _scale, options) => {
     const index = call++;
     return new Promise<void>((resolve, reject) => {
@@ -1038,7 +1038,7 @@ test('a handle resize on a move-locked shape commits neither size nor pin', asyn
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
-test('the canvas is focusable and ArrowUp nudges PinY by one screen pixel', async () => {
+test('the canvas is focusable and ArrowUp nudges PinY by the coarse model step', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
   canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
@@ -1076,7 +1076,7 @@ test('the canvas is focusable and ArrowUp nudges PinY by one screen pixel', asyn
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(moves).toHaveLength(1);
     expect(Number(moves[0][3])).toBeGreaterThan(pinY);
-    expect(Number(moves[0][3])).toBeCloseTo(pinY + 1 / 96, 6);
+    expect(Number(moves[0][3])).toBeCloseTo(pinY + 10 / 96, 6);
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 

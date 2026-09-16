@@ -14,8 +14,8 @@ use yrs::{
 
 use crate::{
     CONNECTS, CellFormulaReceipt, CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx,
-    EditError, EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES, ShapeDraft,
-    ShapeReceipt, ShapeSnapshot, TextReceipt,
+    EditError, EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, PaletteEntry, SHEETS, STORIES,
+    ShapeDraft, ShapeReceipt, ShapeSnapshot, TextReceipt,
 };
 
 mod connect;
@@ -54,6 +54,9 @@ pub(crate) fn seed_doc(
     );
     meta.insert(&mut txn, "pageWidth", 0.0);
     meta.insert(&mut txn, "pageHeight", 0.0);
+    if let Ok(palette) = serde_json::to_string(&document_palette(&package.colors)) {
+        meta.insert(&mut txn, "paletteJson", palette);
+    }
     let order = txn.get_or_insert_array(PAGE_ORDER);
     let pages = txn.get_or_insert_map(PAGES);
     let sheets = txn.get_or_insert_map(SHEETS);
@@ -97,6 +100,39 @@ pub(crate) fn seed_doc(
         }
     }
     Ok(())
+}
+
+/// Document colour table projected for swatches; mirrors vsdx-render palette matching.
+pub(crate) fn document_palette(colors: &[vsdx_parse::XmlRecord]) -> Vec<PaletteEntry> {
+    let mut palette = Vec::new();
+    for record in colors {
+        let Some(index) = record.attributes.iter().find_map(|(name, value)| {
+            matches!(name.as_str(), "IX" | "Index")
+                .then(|| value.parse::<i64>().ok())
+                .flatten()
+        }) else {
+            continue;
+        };
+        let Some(color) = record
+            .attributes
+            .iter()
+            .find_map(|(name, value)| {
+                matches!(name.as_str(), "RGB" | "Color" | "Value").then_some(value)
+            })
+            .map(|value| value.trim_start_matches('#'))
+            .filter(|value| value.len() == 6 && value.chars().all(|ch| ch.is_ascii_hexdigit()))
+            .map(|value| format!("#{value}"))
+        else {
+            continue;
+        };
+        if palette
+            .iter()
+            .all(|entry: &PaletteEntry| entry.index != index)
+        {
+            palette.push(PaletteEntry { index, color });
+        }
+    }
+    palette
 }
 
 pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage> {
@@ -2118,6 +2154,12 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
     let order = required_array(&txn, PAGE_ORDER)?;
     let pages = required_map(&txn, PAGES)?;
     let sheets = required_map(&txn, SHEETS)?;
+    let palette = txn
+        .get_map(META)
+        .as_ref()
+        .and_then(|meta| map_string(meta, &txn, "paletteJson"))
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default();
     let mut result = Vec::new();
     validate_acyclic_parents(&sheets, &txn)?;
     for index in 0..order.len(&txn) {
@@ -2154,7 +2196,10 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
             shapes,
         });
     }
-    Ok(DiagramSnapshot { pages: result })
+    Ok(DiagramSnapshot {
+        pages: result,
+        palette,
+    })
 }
 
 fn snapshot_shape<T: ReadTxn>(
@@ -3522,5 +3567,40 @@ mod tests {
             page.replace("<Text>renamed</Text>", ""),
             String::from_utf8(part(GROUP_MASTER_TEXT, PAGE_PART)).unwrap()
         );
+    }
+
+    #[test]
+    fn document_palette_resolves_indexed_entries() {
+        let colors: Vec<vsdx_parse::XmlRecord> = serde_json::from_value(serde_json::json!([
+            {"name": "ColorEntry", "attributes": [["IX", "1"], ["RGB", "0000FF"]]},
+            {"name": "ColorEntry", "attributes": [["Index", "2"], ["Color", "#00FF00"]]},
+            {"name": "ColorEntry", "attributes": [["IX", "7"], ["RGB", "zzzzzz"]]},
+            {"name": "ColorEntry", "attributes": [["RGB", "FF0000"]]},
+            {"name": "ColorEntry", "attributes": [["IX", "1"], ["RGB", "FFFFFF"]]},
+        ]))
+        .unwrap();
+        assert_eq!(
+            document_palette(&colors),
+            vec![
+                PaletteEntry {
+                    index: 1,
+                    color: "#0000FF".into()
+                },
+                PaletteEntry {
+                    index: 2,
+                    color: "#00FF00".into()
+                },
+            ]
+        );
+        let legacy: DiagramSnapshot = serde_json::from_str(r#"{"pages":[]}"#).unwrap();
+        assert!(legacy.palette.is_empty());
+    }
+
+    #[test]
+    fn snapshot_carries_the_document_palette() {
+        let source = include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx");
+        let session = DiagramSession::open(source, 3).unwrap();
+        let expected = document_palette(&vsdx_parse::parse_vsdx(source).unwrap().colors);
+        assert_eq!(session.snapshot().unwrap().palette, expected);
     }
 }

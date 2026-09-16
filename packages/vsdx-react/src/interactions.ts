@@ -20,12 +20,12 @@ export const ROTATION_SNAP_STEP = Math.PI / 12;
 export const CANVAS_KEYBOARD_DPI = 96;
 export const CANVAS_KEYBOARD_NUDGE_MULTIPLIER = 10;
 export type CanvasKeyboardIntent = { kind: 'undo' } | { kind: 'redo' } | { kind: 'delete' } | { kind: 'escape' } | { kind: 'rotateRight' } | { kind: 'rotateLeft' } | { kind: 'save' } | { kind: 'nudge'; dx: number; dy: number };
-export interface CanvasKeyboardEventLike { key: string; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean; altKey?: boolean; target?: unknown; }
-/** One screen pixel in model inches at the given zoom. */
-export const keyboardNudgeStep = (zoom: number): number => {
-  const safe = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
-  return 1 / (CANVAS_KEYBOARD_DPI * safe);
+
+/** Fine nudge distance in model inches, independent of zoom. */
+export const keyboardNudgeStep = (_zoom?: number): number => {
+  return 1 / CANVAS_KEYBOARD_DPI;
 };
+export interface CanvasKeyboardEventLike { key: string; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean; altKey?: boolean; target?: unknown; }
 export const isEditableKeyboardTarget = (target: unknown): boolean => {
   if (!target || typeof target !== 'object') return false;
   const element = target as { tagName?: unknown; isContentEditable?: unknown; contentEditable?: unknown; closest?: unknown };
@@ -48,7 +48,7 @@ export const isOwnedBrowserShortcut = (event: CanvasKeyboardEventLike): boolean 
   return lower === 'r' || lower === 'l' || lower === 's';
 };
 /** Pure key-to-intent mapping for the editor canvas. Y is up, so ArrowUp yields +dy. */
-export const canvasKeyboardIntent = (event: CanvasKeyboardEventLike, zoom: number): CanvasKeyboardIntent | null => {
+export const canvasKeyboardIntent = (event: CanvasKeyboardEventLike, zoom?: number): CanvasKeyboardIntent | null => {
   if (isEditableKeyboardTarget(event.target)) return null;
   const ctrl = Boolean(event.ctrlKey);
   const meta = Boolean(event.metaKey);
@@ -69,7 +69,7 @@ export const canvasKeyboardIntent = (event: CanvasKeyboardEventLike, zoom: numbe
   }
   if (mod || alt) return null;
   if (key === 'Delete' || key === 'Backspace') return { kind: 'delete' };
-  const step = keyboardNudgeStep(zoom) * (shift ? CANVAS_KEYBOARD_NUDGE_MULTIPLIER : 1);
+  const step = keyboardNudgeStep(zoom) * (shift ? 1 : CANVAS_KEYBOARD_NUDGE_MULTIPLIER);
   if (key === 'ArrowLeft') return { kind: 'nudge', dx: -step, dy: 0 };
   if (key === 'ArrowRight') return { kind: 'nudge', dx: step, dy: 0 };
   if (key === 'ArrowUp') return { kind: 'nudge', dx: 0, dy: step };
