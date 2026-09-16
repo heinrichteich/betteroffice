@@ -242,8 +242,10 @@ mod tests {
             "visio/document.xml".to_owned(),
             br#"<VisioDocument><CommentList><CommentEntry Author="PRIVATE_AUTHOR">PRIVATE_COMMENT</CommentEntry></CommentList></VisioDocument>"#.to_vec(),
         )]).unwrap();
-        let error = redact_local(&source).err().expect("Visio must be rejected");
-        assert!(error.contains("Visio redaction is not supported"));
+        let error = redact_local(&source)
+            .err()
+            .expect("missing package metadata must be rejected");
+        assert!(error.contains("unsupported or ambiguous Visio format"));
     }
 
     fn fixture() -> Vec<u8> {
