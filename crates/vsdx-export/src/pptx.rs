@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 
 use vsdx_parse::VsdxPackage;
-use vsdx_render::Primitive;
+use vsdx_render::{Primitive, VsdxDisplayList};
 
 use crate::ExportError;
 use crate::Page;
 use crate::geom::{
-    Placed, cust_geom, dml_paragraphs, emu, escape, fill_xml, line_xml, place_rect, sniff_image,
+    Placed, cust_geom, dml_paragraphs, emu, escape, fill_xml, flat, line_xml, place_rect,
+    sniff_image,
 };
 
 struct Media {
@@ -27,14 +28,12 @@ pub fn build(pages: &[Page], package: &VsdxPackage) -> Result<Vec<u8>, ExportErr
         )?;
     }
     let max_w = pages
-        .iter()
+        .first()
         .map(|page| emu(page.width_in))
-        .max()
         .unwrap_or(11_433_600);
     let max_h = pages
-        .iter()
+        .first()
         .map(|page| emu(page.height_in))
-        .max()
         .unwrap_or(8_575_200);
     let mut parts: Vec<(String, Vec<u8>)> = vec![
         (
@@ -69,7 +68,13 @@ pub fn build(pages: &[Page], package: &VsdxPackage) -> Result<Vec<u8>, ExportErr
         let used = used_media(&page.list.primitives, &index_by_asset);
         parts.push((
             format!("ppt/slides/slide{number}.xml"),
-            slide_xml(page, &index_by_asset)?,
+            slide_xml(
+                page,
+                &index_by_asset,
+                (max_w as f64 / emu(page.width_in) as f64)
+                    .min(max_h as f64 / emu(page.height_in) as f64),
+                max_h as f64 / 914400.0,
+            )?,
         ));
         parts.push((
             format!("ppt/slides/_rels/slide{number}.xml.rels"),
@@ -100,7 +105,9 @@ fn collect_media(
                 let Some(bytes) = package.part_bytes(asset_id) else {
                     continue;
                 };
-                let (ext, content_type) = sniff_image(asset_id, bytes);
+                let Some((ext, content_type)) = sniff_image(asset_id, bytes) else {
+                    continue;
+                };
                 let part = format!("ppt/media/image{}.{ext}", media.len() + 1);
                 index_by_asset.insert(asset_id.clone(), media.len());
                 media.push(Media {
@@ -113,27 +120,6 @@ fn collect_media(
         }
     }
     Ok(())
-}
-
-fn flat<'a>(primitives: &'a [Primitive], out: &mut Vec<&'a Primitive>) {
-    let mut ordered: Vec<&Primitive> = primitives.iter().collect();
-    ordered.sort_by_key(|primitive| z_order(primitive));
-    for primitive in ordered {
-        match primitive {
-            Primitive::Group { primitives, .. } => flat(primitives, out),
-            _ => out.push(primitive),
-        }
-    }
-}
-
-fn z_order(primitive: &Primitive) -> u32 {
-    match primitive {
-        Primitive::Shape { z_order, .. }
-        | Primitive::Image { z_order, .. }
-        | Primitive::TextBox { z_order, .. }
-        | Primitive::Placeholder { z_order, .. }
-        | Primitive::Group { z_order, .. } => *z_order,
-    }
 }
 
 fn used_media(primitives: &[Primitive], index_by_asset: &BTreeMap<String, usize>) -> Vec<usize> {
@@ -161,13 +147,13 @@ fn used_media(primitives: &[Primitive], index_by_asset: &BTreeMap<String, usize>
 fn slide_xml(
     page: &Page,
     index_by_asset: &BTreeMap<String, usize>,
+    scale: f64,
+    page_height: f64,
 ) -> Result<Vec<u8>, ExportError> {
-    let page_height = page.height_in;
+    let list = scale_list(&page.list, scale);
     let mut shapes = String::new();
     let mut next_id: u32 = 2;
-    let mut ordered = Vec::new();
-    flat(&page.list.primitives, &mut ordered);
-    for primitive in ordered {
+    for primitive in &flat(&list.primitives) {
         match primitive {
             Primitive::Shape {
                 id,
@@ -272,15 +258,116 @@ fn slide_xml(
     .into_bytes())
 }
 
+fn scale_list(list: &VsdxDisplayList, scale: f64) -> VsdxDisplayList {
+    let mut list = list.clone();
+    list.width *= scale as f32;
+    list.height *= scale as f32;
+    scale_primitives(&mut list.primitives, scale);
+    list
+}
+
+fn scale_primitives(primitives: &mut [Primitive], scale: f64) {
+    for primitive in primitives {
+        match primitive {
+            Primitive::Shape { path, stroke, .. } => {
+                for command in path {
+                    scale_command(command, scale);
+                }
+                if let Some(stroke) = stroke {
+                    stroke.width *= scale as f32;
+                }
+            }
+            Primitive::Image {
+                x,
+                y,
+                width,
+                height,
+                transform,
+                ..
+            }
+            | Primitive::TextBox {
+                x,
+                y,
+                width,
+                height,
+                transform,
+                ..
+            } => {
+                *x *= scale as f32;
+                *y *= scale as f32;
+                *width *= scale as f32;
+                *height *= scale as f32;
+                transform.e *= scale as f32;
+                transform.f *= scale as f32;
+            }
+            Primitive::Placeholder {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => {
+                *x *= scale as f32;
+                *y *= scale as f32;
+                *width *= scale as f32;
+                *height *= scale as f32;
+            }
+            Primitive::Group {
+                primitives,
+                transform,
+                ..
+            } => {
+                scale_primitives(primitives, scale);
+                transform.e *= scale as f32;
+                transform.f *= scale as f32;
+            }
+        }
+    }
+}
+
+fn scale_command(command: &mut ooxml_drawingml::GeometryPathCommand, scale: f64) {
+    use ooxml_drawingml::GeometryPathCommand as Command;
+    match command {
+        Command::Move { x, y } | Command::Line { x, y } => {
+            *x *= scale;
+            *y *= scale;
+        }
+        Command::Quad { cpx, cpy, x, y } => {
+            *cpx *= scale;
+            *cpy *= scale;
+            *x *= scale;
+            *y *= scale;
+        }
+        Command::Cubic {
+            cp1x,
+            cp1y,
+            cp2x,
+            cp2y,
+            x,
+            y,
+        } => {
+            *cp1x *= scale;
+            *cp1y *= scale;
+            *cp2x *= scale;
+            *cp2y *= scale;
+            *x *= scale;
+            *y *= scale;
+        }
+        Command::Close => {}
+    }
+}
+
 fn xfrm(placed: &Placed) -> String {
+    let flip_h = if placed.flip_h { " flipH=\"1\"" } else { "" };
+    let flip_v = if placed.flip_v { " flipV=\"1\"" } else { "" };
     if placed.rot == 0 {
         format!(
-            "<a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm>",
+            "<a:xfrm{flip_h}{flip_v}><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm>",
             placed.x, placed.y, placed.w, placed.h
         )
     } else {
         format!(
-            "<a:xfrm rot=\"{}\"><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm>",
+            "<a:xfrm rot=\"{}\"{flip_h}{flip_v}><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm>",
             placed.rot, placed.x, placed.y, placed.w, placed.h
         )
     }
@@ -395,4 +482,29 @@ fn core_xml() -> Vec<u8> {
 
 fn app_xml(pages: &[Page]) -> Vec<u8> {
     format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\"><Application>BetterOffice</Application><PresentationFormat>On-screen Show (4:3)</PresentationFormat><Slides>{}</Slides></Properties>", pages.len()).into_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mixed_page_sizes_scale_to_the_presentation_canvas() {
+        let list = VsdxDisplayList {
+            contract_version: vsdx_render::CONTRACT_VERSION,
+            width: 1920.0,
+            height: 960.0,
+            paint_transform: vsdx_render::PaintTransform {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: 0.0,
+                f: 0.0,
+            },
+            primitives: Vec::new(),
+        };
+        let scaled = scale_list(&list, 0.5);
+        assert_eq!((scaled.width, scaled.height), (960.0, 480.0));
+    }
 }

@@ -1,5 +1,5 @@
 use ooxml_drawingml::GeometryPathCommand;
-use vsdx_render::{Affine, Paint, Stroke, TextParagraph, TextRun};
+use vsdx_render::{Affine, Paint, Primitive, Stroke, TextParagraph, TextRun};
 
 pub const EMU_PER_INCH: f64 = 914400.0;
 const EMU_PER_DEGREE: f64 = 60000.0;
@@ -34,6 +34,8 @@ pub struct Placed {
     pub w: i64,
     pub h: i64,
     pub rot: i64,
+    pub flip_h: bool,
+    pub flip_v: bool,
 }
 
 pub fn place_rect(
@@ -72,20 +74,22 @@ pub fn place_rect(
         .iter()
         .map(|corner| corner.1)
         .fold(f32::NEG_INFINITY, f32::max);
-    let rotation = affine_rotation(transform)?;
+    let (rotation, flip_h, flip_v) = affine_placement(transform)?;
     Some(Placed {
         x: emu(f64::from(min_x)),
         y: emu(page_height - f64::from(max_y)),
         w: emu(f64::from(max_x - min_x)).max(1),
         h: emu(f64::from(max_y - min_y)).max(1),
         rot: rotation,
+        flip_h,
+        flip_v,
     })
 }
 
-fn affine_rotation(transform: Affine) -> Option<i64> {
+fn affine_placement(transform: Affine) -> Option<(i64, bool, bool)> {
     const EPSILON: f32 = 1e-6;
     if transform.b.abs() <= EPSILON && transform.c.abs() <= EPSILON {
-        return Some(0);
+        return Some((0, transform.a < -EPSILON, transform.d < -EPSILON));
     }
     let scale = (f64::from(transform.a) * f64::from(transform.a)
         + f64::from(transform.b) * f64::from(transform.b))
@@ -100,7 +104,130 @@ fn affine_rotation(transform: Affine) -> Option<i64> {
     if !matches {
         return None;
     }
-    Some((-sin.atan2(cos).to_degrees() * EMU_PER_DEGREE).round() as i64)
+    Some((
+        (-sin.atan2(cos).to_degrees() * EMU_PER_DEGREE).round() as i64,
+        transform.a * transform.d - transform.b * transform.c < -EPSILON,
+        false,
+    ))
+}
+
+pub fn flat(primitives: &[Primitive]) -> Vec<Primitive> {
+    let mut out = Vec::new();
+    flat_with_transform(primitives, Affine::identity(), &mut out);
+    out
+}
+
+fn flat_with_transform(primitives: &[Primitive], parent: Affine, out: &mut Vec<Primitive>) {
+    let mut ordered: Vec<&Primitive> = primitives.iter().collect();
+    ordered.sort_by_key(z_order);
+    for primitive in ordered {
+        let mut primitive = primitive.clone();
+        match &mut primitive {
+            Primitive::Group {
+                primitives,
+                transform,
+                ..
+            } => flat_with_transform(primitives, parent.compose(*transform), out),
+            _ => {
+                bake_transform(&mut primitive, parent);
+                out.push(primitive);
+            }
+        }
+    }
+}
+
+fn z_order(primitive: &&Primitive) -> u32 {
+    match primitive {
+        Primitive::Shape { z_order, .. }
+        | Primitive::Image { z_order, .. }
+        | Primitive::TextBox { z_order, .. }
+        | Primitive::Placeholder { z_order, .. }
+        | Primitive::Group { z_order, .. } => *z_order,
+    }
+}
+
+fn bake_transform(primitive: &mut Primitive, matrix: Affine) {
+    match primitive {
+        Primitive::Shape {
+            path, transform, ..
+        } => {
+            for command in path {
+                transform_command(command, matrix);
+            }
+            *transform = Affine::identity();
+        }
+        Primitive::Image { transform, .. } | Primitive::TextBox { transform, .. } => {
+            *transform = matrix.compose(*transform);
+        }
+        Primitive::Placeholder {
+            x,
+            y,
+            width,
+            height,
+            ..
+        } => transform_rect(x, y, width, height, matrix),
+        Primitive::Group { .. } => {}
+    }
+}
+
+fn transform_command(command: &mut GeometryPathCommand, matrix: Affine) {
+    match command {
+        GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
+            let (px, py) = matrix.apply_point(*x as f32, *y as f32);
+            (*x, *y) = (f64::from(px), f64::from(py));
+        }
+        GeometryPathCommand::Quad { cpx, cpy, x, y } => {
+            let (px, py) = matrix.apply_point(*cpx as f32, *cpy as f32);
+            (*cpx, *cpy) = (f64::from(px), f64::from(py));
+            let (px, py) = matrix.apply_point(*x as f32, *y as f32);
+            (*x, *y) = (f64::from(px), f64::from(py));
+        }
+        GeometryPathCommand::Cubic {
+            cp1x,
+            cp1y,
+            cp2x,
+            cp2y,
+            x,
+            y,
+        } => {
+            let (px, py) = matrix.apply_point(*cp1x as f32, *cp1y as f32);
+            (*cp1x, *cp1y) = (f64::from(px), f64::from(py));
+            let (px, py) = matrix.apply_point(*cp2x as f32, *cp2y as f32);
+            (*cp2x, *cp2y) = (f64::from(px), f64::from(py));
+            let (px, py) = matrix.apply_point(*x as f32, *y as f32);
+            (*x, *y) = (f64::from(px), f64::from(py));
+        }
+        GeometryPathCommand::Close => {}
+    }
+}
+
+fn transform_rect(x: &mut f32, y: &mut f32, width: &mut f32, height: &mut f32, matrix: Affine) {
+    let corners = [
+        matrix.apply_point(*x, *y),
+        matrix.apply_point(*x + *width, *y),
+        matrix.apply_point(*x, *y + *height),
+        matrix.apply_point(*x + *width, *y + *height),
+    ];
+    let min_x = corners
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f32::INFINITY, f32::min);
+    let max_x = corners
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = corners
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f32::INFINITY, f32::min);
+    let max_y = corners
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f32::NEG_INFINITY, f32::max);
+    *x = min_x;
+    *y = min_y;
+    *width = max_x - min_x;
+    *height = max_y - min_y;
 }
 
 pub struct CustGeom {
@@ -357,20 +484,91 @@ pub fn wml_runs(paragraphs: &[TextParagraph]) -> String {
     out
 }
 
-pub fn sniff_image(asset_id: &str, bytes: &[u8]) -> (&'static str, &'static str) {
+pub fn sniff_image(asset_id: &str, bytes: &[u8]) -> Option<(&'static str, &'static str)> {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n']) {
-        ("png", "image/png")
+        Some(("png", "image/png"))
     } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        ("jpg", "image/jpeg")
+        Some(("jpg", "image/jpeg"))
     } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        ("gif", "image/gif")
+        Some(("gif", "image/gif"))
     } else if bytes.starts_with(b"BM") {
-        ("bmp", "image/bmp")
+        Some(("bmp", "image/bmp"))
     } else if asset_id.ends_with(".png") {
-        ("png", "image/png")
+        Some(("png", "image/png"))
     } else if asset_id.ends_with(".jpg") || asset_id.ends_with(".jpeg") {
-        ("jpg", "image/jpeg")
+        Some(("jpg", "image/jpeg"))
+    } else if asset_id.ends_with(".emf") {
+        Some(("emf", "image/x-emf"))
+    } else if asset_id.ends_with(".wmf") {
+        Some(("wmf", "image/x-wmf"))
     } else {
-        ("bin", "application/octet-stream")
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flat_composes_group_transforms() {
+        let primitives = vec![Primitive::Group {
+            id: "group".into(),
+            z_order: 0,
+            transform: Affine {
+                a: 0.0,
+                b: 1.0,
+                c: -1.0,
+                d: 0.0,
+                e: 4.0,
+                f: 5.0,
+            },
+            primitives: vec![Primitive::TextBox {
+                id: "text".into(),
+                z_order: 0,
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+                paragraphs: Vec::new(),
+                lines: Vec::new(),
+                transform: Affine::identity(),
+            }],
+        }];
+        let flattened = flat(&primitives);
+        let [Primitive::TextBox { transform, .. }] = flattened.as_slice() else {
+            panic!("text expected");
+        };
+        assert_eq!(transform.apply_point(1.0, 2.0), (2.0, 6.0));
+    }
+
+    #[test]
+    fn reflected_rect_emits_flip_flag() {
+        let placed = place_rect(
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            Affine {
+                a: -1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: 1.0,
+                f: 0.0,
+            },
+            1.0,
+        )
+        .unwrap();
+        assert!(placed.flip_h);
+        assert!(!placed.flip_v);
+    }
+
+    #[test]
+    fn emf_uses_renderable_content_type() {
+        assert_eq!(
+            sniff_image("visio/media/image.emf", &[]),
+            Some(("emf", "image/x-emf"))
+        );
     }
 }

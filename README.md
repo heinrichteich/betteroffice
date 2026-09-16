@@ -47,6 +47,10 @@
 | [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | npm | drop-in React .pptx editor |
 | [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) | PyPI | Python API for reading, editing, saving, and laying out PPTX presentations |
 
+### Diagrams — `.vsdx`
+
+VSDX support is available from source: the Rust and WebAssembly engine parses, renders, edits, saves, and exports Visio diagrams to native PowerPoint and Word shapes. The React editor and live demo support standard-shape editing, arranging, rotation, flips, colours, and save; text editing, stencil loading, resize handles, and connector routing are not yet provided.
+
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
 [crates.io](https://docs.betteroffice.dev/docs/rust),

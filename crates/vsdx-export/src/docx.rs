@@ -6,7 +6,7 @@ use vsdx_render::{Primitive, VsdxDisplayList};
 use crate::ExportError;
 use crate::Page;
 use crate::geom::{
-    cust_geom, emu, escape, fill_xml, has_text, line_xml, place_rect, sniff_image, wml_runs,
+    cust_geom, emu, escape, fill_xml, flat, has_text, line_xml, place_rect, sniff_image, wml_runs,
 };
 use crate::metadata::shape_data;
 
@@ -39,7 +39,7 @@ pub fn build(pages: &[Page], package: &VsdxPackage) -> Result<Vec<u8>, ExportErr
         ),
         (
             "word/document.xml".to_owned(),
-            document_xml(pages, &data, &media, &index_by_asset)?,
+            document_xml(pages, &data, &index_by_asset)?,
         ),
         ("word/styles.xml".to_owned(), styles_xml()),
         ("docProps/core.xml".to_owned(), core_xml()),
@@ -69,7 +69,9 @@ fn collect_media(
                 let Some(bytes) = package.part_bytes(asset_id) else {
                     continue;
                 };
-                let (ext, content_type) = sniff_image(asset_id, bytes);
+                let Some((ext, content_type)) = sniff_image(asset_id, bytes) else {
+                    continue;
+                };
                 let part = format!("word/media/image{}.{ext}", media.len() + 1);
                 index_by_asset.insert(asset_id.clone(), media.len());
                 media.push(Media {
@@ -222,12 +224,11 @@ fn fit_scale(page: &Page) -> f64 {
 fn document_xml(
     pages: &[Page],
     data: &[crate::ShapeDatum],
-    media: &[Media],
     index_by_asset: &BTreeMap<String, usize>,
 ) -> Result<Vec<u8>, ExportError> {
     let mut body = String::new();
-    let mut doc_id: u32 = 1;
-    for page in pages {
+    for (index, page) in pages.iter().enumerate() {
+        let doc_id = index as u32 + 1;
         let name = escape(&page.name);
         body.push_str(&format!(
             "<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t xml:space=\"preserve\">Page {name}</w:t></w:r></w:p>"
@@ -238,23 +239,12 @@ fn document_xml(
         let width = emu(f64::from(list.width) / 96.0).max(1);
         let height = emu(page_height).max(1);
         let mut members = String::new();
-        let mut ordered = Vec::new();
-        flat(&list.primitives, &mut ordered);
-        for primitive in ordered {
-            members.push_str(&member_xml(primitive, page_height)?);
+        for primitive in flat(&list.primitives) {
+            members.push_str(&member_xml(&primitive, page_height, index_by_asset)?);
         }
         body.push_str(&format!(
             "<w:p><w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\"><wp:extent cx=\"{width}\" cy=\"{height}\"/><wp:docPr id=\"{doc_id}\" name=\"{name}\"/><a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup\"><wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{width}\" cy=\"{height}\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"{width}\" cy=\"{height}\"/></a:xfrm></wpg:grpSpPr>{members}</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"
         ));
-        doc_id += 1;
-        for primitive in flat_images(&list.primitives) {
-            body.push_str(&image_paragraph(
-                primitive,
-                &mut doc_id,
-                media,
-                index_by_asset,
-            )?);
-        }
         let rows: Vec<&crate::ShapeDatum> = data
             .iter()
             .filter(|datum| datum.page == page.name)
@@ -270,40 +260,11 @@ fn document_xml(
     Ok(format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\" xmlns:wpg=\"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup\" xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"><w:body>{body}<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr></w:body></w:document>").into_bytes())
 }
 
-fn flat<'a>(primitives: &'a [Primitive], out: &mut Vec<&'a Primitive>) {
-    let mut ordered: Vec<&Primitive> = primitives.iter().collect();
-    ordered.sort_by_key(|primitive| match primitive {
-        Primitive::Shape { z_order, .. }
-        | Primitive::Image { z_order, .. }
-        | Primitive::TextBox { z_order, .. }
-        | Primitive::Placeholder { z_order, .. }
-        | Primitive::Group { z_order, .. } => *z_order,
-    });
-    for primitive in ordered {
-        match primitive {
-            Primitive::Group { primitives, .. } => flat(primitives, out),
-            Primitive::Image { .. } => {}
-            _ => out.push(primitive),
-        }
-    }
-}
-
-fn flat_images(primitives: &[Primitive]) -> Vec<&Primitive> {
-    let mut out = Vec::new();
-    let mut visit: Vec<&[Primitive]> = vec![primitives];
-    while let Some(list) = visit.pop() {
-        for primitive in list {
-            match primitive {
-                Primitive::Group { primitives, .. } => visit.push(primitives),
-                Primitive::Image { .. } => out.push(primitive),
-                _ => {}
-            }
-        }
-    }
-    out
-}
-
-fn member_xml(primitive: &Primitive, page_height: f64) -> Result<String, ExportError> {
+fn member_xml(
+    primitive: &Primitive,
+    page_height: f64,
+    index_by_asset: &BTreeMap<String, usize>,
+) -> Result<String, ExportError> {
     match primitive {
         Primitive::Shape {
             path, fill, stroke, ..
@@ -356,59 +317,65 @@ fn member_xml(primitive: &Primitive, page_height: f64) -> Result<String, ExportE
                 emu(f64::from(*height)).max(1),
             ))
         }
-        Primitive::Image { .. } | Primitive::Group { .. } => Ok(String::new()),
+        Primitive::Image {
+            id,
+            x,
+            y,
+            width,
+            height,
+            asset_id,
+            transform,
+            ..
+        } => {
+            let Some(media_index) = index_by_asset.get(asset_id) else {
+                return Ok(image_placeholder(id, *x, *y, *width, *height, page_height));
+            };
+            let Some(placed) = place_rect(*x, *y, *width, *height, *transform, page_height) else {
+                return Ok(String::new());
+            };
+            let name = escape(id);
+            let embed = format!("rId{}", media_index + 2);
+            Ok(format!(
+                "<pic:pic><pic:nvPicPr><pic:cNvPr id=\"0\" name=\"{name}\"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed=\"{embed}\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>",
+                wps_xfrm(&placed)
+            ))
+        }
+        Primitive::Group { .. } => Ok(String::new()),
     }
 }
 
-fn take_id(next_id: &mut u32) -> u32 {
-    let id = (*next_id).max(1);
-    *next_id = next_id.saturating_add(1).max(1);
-    id
+fn image_placeholder(
+    id: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    page_height: f64,
+) -> String {
+    let name = escape(id);
+    format!(
+        "<wps:wsp><wps:cNvSpPr txBox=\"1\"/><wps:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln w=\"12700\"><a:prstDash val=\"dash\"/></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>Unsupported image: {name}</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>",
+        emu(f64::from(x)),
+        emu(page_height - f64::from(y) - f64::from(height)),
+        emu(f64::from(width)).max(1),
+        emu(f64::from(height)).max(1)
+    )
 }
 
 fn wps_xfrm(placed: &crate::geom::Placed) -> String {
+    let flip_h = if placed.flip_h { " flipH=\"1\"" } else { "" };
+    let flip_v = if placed.flip_v { " flipV=\"1\"" } else { "" };
     if placed.rot == 0 {
         format!(
-            "<a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm>",
+            "<a:xfrm{flip_h}{flip_v}><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm>",
             placed.x, placed.y, placed.w, placed.h
         )
     } else {
         format!(
-            "<a:xfrm rot=\"{}\"><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm>",
+            "<a:xfrm rot=\"{}\"{flip_h}{flip_v}><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm>",
             placed.rot, placed.x, placed.y, placed.w, placed.h
         )
     }
-}
-
-fn image_paragraph(
-    primitive: &Primitive,
-    doc_id: &mut u32,
-    media: &[Media],
-    index_by_asset: &BTreeMap<String, usize>,
-) -> Result<String, ExportError> {
-    let Primitive::Image {
-        id,
-        width,
-        height,
-        asset_id,
-        ..
-    } = primitive
-    else {
-        return Ok(String::new());
-    };
-    let Some(media_index) = index_by_asset.get(asset_id) else {
-        return Ok(String::new());
-    };
-    let _ = &media[*media_index];
-    let embed = format!("rId{}", media_index + 2);
-    let name = escape(id);
-    let scale = (CONTENT_WIDTH_IN / f64::from(*width).max(0.01)).min(1.0);
-    let w = emu(f64::from(*width) * scale).max(1);
-    let h = emu(f64::from(*height) * scale).max(1);
-    let id_value = take_id(doc_id);
-    Ok(format!(
-        "<w:p><w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\"><wp:extent cx=\"{w}\" cy=\"{h}\"/><wp:docPr id=\"{id_value}\" name=\"{name}\"/><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"><pic:pic><pic:nvPicPr><pic:cNvPr id=\"{id_value}\" name=\"{name}\"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed=\"{embed}\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{w}\" cy=\"{h}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"
-    ))
 }
 
 fn table_xml(rows: &[&crate::ShapeDatum]) -> String {
@@ -502,4 +469,33 @@ fn core_xml() -> Vec<u8> {
 
 fn app_xml() -> Vec<u8> {
     "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\"><Application>BetterOffice</Application></Properties>".to_owned().into_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vsdx_render::Affine;
+
+    #[test]
+    fn image_member_keeps_its_placement() {
+        let image = Primitive::Image {
+            id: "image".into(),
+            z_order: 1,
+            asset_id: "asset".into(),
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+            transform: Affine {
+                e: 5.0,
+                f: 0.0,
+                ..Affine::identity()
+            },
+        };
+        let mut media = BTreeMap::new();
+        media.insert("asset".into(), 0);
+        let xml = member_xml(&image, 8.0, &media).unwrap();
+        assert!(xml.contains("<pic:pic>"));
+        assert!(xml.contains("x=\"5486400\""));
+    }
 }
