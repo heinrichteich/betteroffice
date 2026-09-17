@@ -10,12 +10,15 @@ pub use vsdx_resolve::{
     PROPERTY_SECTION, ShapeDataProperty, ShapeDataType, ShapeDataValue,
     shape_data as resolve_shape_data,
 };
-use vsdx_resolve::{PageConnectivity, ResolveError, ResolvedShape, Resolver, shape_data};
+use vsdx_resolve::{
+    PageConnectivity, PageContainers, ResolveError, ResolvedShape, Resolver, shape_data,
+};
 
 #[derive(Debug)]
 pub enum Error {
     Parse(VsdxError),
     Resolve(ResolveError),
+    Render(String),
     Policy(String),
 }
 
@@ -49,6 +52,12 @@ impl Diagram {
     }
     pub fn package(&self) -> &VsdxPackage {
         &self.package
+    }
+    /// Renders every diagram page to a vector PDF with selectable text.
+    pub fn export_pdf(&self) -> Result<Vec<u8>> {
+        vsdx_render::Renderer::default()
+            .export_pdf(&self.package)
+            .map_err(|error| Error::Render(error.to_string()))
     }
     /// Applies formula edits sequentially, recomputing caches and enforcing current locks.
     pub fn save_cell_edits(&self, edits: &[SemanticCellEdit]) -> Result<Vec<u8>> {
@@ -355,6 +364,7 @@ impl MutationContext for PackageMutationContext<'_> {
                 Error::Policy(reason) => format!("cannot evaluate {lock}: {reason}"),
                 Error::Parse(error) => error.to_string(),
                 Error::Resolve(error) => error.to_string(),
+                Error::Render(reason) => reason,
             })?
             .ok_or_else(|| {
                 format!("cannot evaluate {lock}: it is outside the display evaluation profile")
@@ -428,6 +438,9 @@ impl<'a> Page<'a> {
     }
     pub fn connectivity(&self) -> Result<PageConnectivity> {
         Ok(Resolver::new(&self.diagram.package).resolve_page_connectivity(self.part)?)
+    }
+    pub fn containers(&self) -> Result<PageContainers> {
+        Ok(Resolver::new(&self.diagram.package).resolve_page_containers(self.part)?)
     }
 }
 

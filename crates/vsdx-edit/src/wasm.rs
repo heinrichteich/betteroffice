@@ -76,6 +76,18 @@ struct SetCellFormulaArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SetControlHandleArgs {
+    page_id: String,
+    shape_id: String,
+    row: String,
+    #[serde(default)]
+    x_formula: Option<String>,
+    #[serde(default)]
+    y_formula: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MoveShapeArgs {
     page_id: String,
     shape_id: String,
@@ -154,6 +166,24 @@ struct AddConnectorArgs {
     draft: FormulaShapeDraft,
     from: crate::ConnectorGlue,
     to: crate::ConnectorGlue,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddFreeConnectorArgs {
+    page_id: String,
+    draft: FormulaShapeDraft,
+    from: crate::ConnectorGlue,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddConnectedShapeArgs {
+    page_id: String,
+    shape_draft: FormulaShapeDraft,
+    connector_draft: FormulaShapeDraft,
+    from: crate::ConnectorGlue,
+    to_cell: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -345,6 +375,11 @@ impl VsdxDocument {
         self.set_cell_formula_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = setControlHandleJson)]
+    pub fn set_control_handle_json(&self, args: &str) -> Result<String, JsValue> {
+        self.set_control_handle_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = moveShapeJson)]
     pub fn move_shape_json(&self, args: &str) -> Result<String, JsValue> {
         self.move_shape_json_inner(args).map_err(js_error)
@@ -397,6 +432,16 @@ impl VsdxDocument {
     #[wasm_bindgen(js_name = addConnectorJson)]
     pub fn add_connector_json(&self, args: &str) -> Result<String, JsValue> {
         self.add_connector_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = addFreeConnectorJson)]
+    pub fn add_free_connector_json(&self, args: &str) -> Result<String, JsValue> {
+        self.add_free_connector_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = addConnectedShapeJson)]
+    pub fn add_connected_shape_json(&self, args: &str) -> Result<String, JsValue> {
+        self.add_connected_shape_json_inner(args).map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = setShapeTextJson)]
@@ -492,6 +537,21 @@ impl VsdxDocument {
             .and_then(json_inner)
     }
 
+    fn set_control_handle_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: SetControlHandleArgs = parse_args_inner(args)?;
+        self.session
+            .set_control_handle(
+                &local_context(),
+                &args.page_id,
+                &args.shape_id,
+                &args.row,
+                args.x_formula,
+                args.y_formula,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
     fn move_shape(&self, args: MoveShapeArgs) -> crate::EditResult<[crate::CellFormulaReceipt; 2]> {
         self.session.move_shape(
             &local_context(),
@@ -575,6 +635,32 @@ impl VsdxDocument {
                 &draft,
                 &args.from,
                 &args.to,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn add_free_connector_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddFreeConnectorArgs = parse_args_inner(args)?;
+        let draft = args.draft.try_into().map_err(str::to_owned)?;
+        self.session
+            .add_free_connector(&local_context(), &args.page_id, &draft, &args.from)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn add_connected_shape_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddConnectedShapeArgs = parse_args_inner(args)?;
+        let shape_draft = args.shape_draft.try_into().map_err(str::to_owned)?;
+        let connector_draft = args.connector_draft.try_into().map_err(str::to_owned)?;
+        self.session
+            .add_connected_shape(
+                &local_context(),
+                &args.page_id,
+                &shape_draft,
+                &connector_draft,
+                &args.from,
+                args.to_cell.as_deref(),
             )
             .map_err(|error| error.to_string())
             .and_then(json_inner)

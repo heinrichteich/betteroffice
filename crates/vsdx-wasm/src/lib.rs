@@ -104,6 +104,12 @@ impl VsdxRenderer {
         };
         serde_json::to_string(&result).map_err(js_error)
     }
+
+    #[wasm_bindgen(js_name = exportPdf)]
+    pub fn export_pdf(&self, document: &VsdxDocument) -> Result<Vec<u8>, JsValue> {
+        let package = document.session().package().map_err(js_error)?;
+        self.renderer.export_pdf(&package).map_err(js_error)
+    }
 }
 
 impl Default for VsdxRenderer {

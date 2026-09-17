@@ -5,7 +5,9 @@ export class VsdxDocument {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
+    addConnectedShapeJson(args: string): string;
     addConnectorJson(args: string): string;
+    addFreeConnectorJson(args: string): string;
     addShapeJson(args: string): string;
     applyUpdateJson(update: Uint8Array): string;
     canRedo(): boolean;
@@ -30,6 +32,7 @@ export class VsdxDocument {
     resizeShapeJson(args: string): string;
     save(): Uint8Array;
     setCellFormulaJson(args: string): string;
+    setControlHandleJson(args: string): string;
     setShapeBoundsJson(args: string): string;
     setShapeTextJson(args: string): string;
     shapeTextJson(args: string): string;
@@ -44,6 +47,7 @@ export class VsdxRenderer {
     free(): void;
     [Symbol.dispose](): void;
     clearLayerVisibility(): void;
+    exportPdf(document: VsdxDocument): Uint8Array;
     hitTestJson(x: number, y: number): string;
     layoutPageJson(document: VsdxDocument, page_index: number): string;
     constructor();
@@ -64,6 +68,7 @@ export interface InitOutput {
     readonly parseVsdxJson: (a: number, b: number) => [number, number, number, number];
     readonly rendererVersion: () => [number, number];
     readonly vsdxrenderer_clearLayerVisibility: (a: number) => void;
+    readonly vsdxrenderer_exportPdf: (a: number, b: number) => [number, number, number, number];
     readonly vsdxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxrenderer_layoutPageJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxrenderer_new: () => number;
@@ -71,7 +76,9 @@ export interface InitOutput {
     readonly vsdxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly vsdxrenderer_setLayerVisible: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly __wbg_vsdxdocument_free: (a: number, b: number) => void;
+    readonly vsdxdocument_addConnectedShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_addConnectorJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly vsdxdocument_addFreeConnectorJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_canRedo: (a: number) => number;
@@ -94,6 +101,7 @@ export interface InitOutput {
     readonly vsdxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_save: (a: number) => [number, number, number, number];
     readonly vsdxdocument_setCellFormulaJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly vsdxdocument_setControlHandleJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_setShapeBoundsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_setShapeTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_shapeTextJson: (a: number, b: number, c: number) => [number, number, number, number];

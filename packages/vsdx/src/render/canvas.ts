@@ -21,7 +21,7 @@ export function modelPointToCanvas(paintTransform: Affine, x: number, y: number,
 }
 const paintRequests = new WeakMap<CanvasRenderingContext2D, object>();
 export async function paintPage(ctx: CanvasRenderingContext2D, list: PageDisplayList, dpr = 1, scale = 1, options: PaintPageOptions = {}): Promise<void> {
-  if (list.contractVersion !== 5) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
+  if (list.contractVersion !== 6) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
   const request = {};
   paintRequests.set(ctx, request);
   const images = new Map<string, CanvasImageSource | null>();
@@ -74,9 +74,10 @@ function paintStyle(ctx: CanvasRenderingContext2D, paint: Paint, box: { x: numbe
   if (paint.stops.length === 0) return first;
   const radians = ((paint.angleDeg ?? 0) * Math.PI) / 180;
   const centerX = box.x + box.width / 2, centerY = box.y + box.height / 2;
-  const radius = Math.hypot(box.width, box.height) / 2;
+  const cos = Math.cos(radians), sin = Math.sin(radians);
+  const radius = (Math.abs(box.width * cos) + Math.abs(box.height * sin)) / 2;
   if (!Number.isFinite(radius) || radius === 0) return first;
-  const gradient = ctx.createLinearGradient(centerX - Math.cos(radians) * radius, centerY - Math.sin(radians) * radius, centerX + Math.cos(radians) * radius, centerY + Math.sin(radians) * radius);
+  const gradient = ctx.createLinearGradient(centerX - cos * radius, centerY - sin * radius, centerX + cos * radius, centerY + sin * radius);
   for (const stop of paint.stops) gradient.addColorStop(Math.max(0, Math.min(1, stop.position)), stop.color);
   return gradient;
 }

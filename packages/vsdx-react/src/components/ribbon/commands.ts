@@ -1,13 +1,13 @@
 import { createContext, createElement, useContext, useMemo } from 'react';
 import type { ReactNode } from 'react';
-import type { DiagramHandle, DiagramSnapshot, PageSnapshot, ShapeSnapshot } from '@betteroffice/vsdx';
+import type { DiagramHandle, DiagramSnapshot, PageDisplayList, PagePrimitive, PageSnapshot, ShapePrimitive, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { VsdxShapeSelection } from '../../VsdxEditor';
 import { standardShapeById } from '../shapes/shapeLibrary';
 
 export type RibbonCommandId =
   | 'undo' | 'redo' | 'delete' | 'fillColor' | 'lineColor' | 'lineWeight' | 'linePattern'
   | 'bringToFront' | 'bringForward' | 'sendBackward' | 'sendToBack'
-  | 'rotateLeft' | 'rotateRight' | 'flipHorizontal' | 'flipVertical' | 'addShape' | 'download';
+  | 'rotateLeft' | 'rotateRight' | 'flipHorizontal' | 'flipVertical' | 'addShape' | 'download' | 'pageBreaks';
 
 export interface RibbonCommand { id: RibbonCommandId; run: (value?: string) => void; enabled: boolean; active?: boolean; value?: string; }
 export type RibbonCommands = Record<RibbonCommandId, RibbonCommand>;
@@ -19,11 +19,16 @@ export interface RibbonCommandsProviderProps {
   snapshot: DiagramSnapshot | null;
   pageId?: string;
   selection: VsdxShapeSelection | null;
+  frame?: PageDisplayList | null;
   onMutation: () => void;
   onError: (error: unknown) => void;
   onDownload: (bytes: Uint8Array) => void;
+  pageBreaks?: PageBreakToggle;
   children: ReactNode;
 }
+
+/** Whether the page-break overlay is shown, and how to flip it. */
+export interface PageBreakToggle { shown: boolean; toggle: () => void; }
 
 export interface ShapePlacement { shape: ShapeSnapshot; index: number; siblings: readonly ShapeSnapshot[]; }
 
@@ -75,22 +80,45 @@ function colorFormula(value = '#000000'): string {
 }
 
 /** Matches a GUARD function call without matching reference names containing guard. */
-const GUARD_CALL = /(^|[^A-Z0-9_.])GUARD\s*\(/i;
-
-/** Matches a SETATREF function call without matching reference names containing it. */
-const SETATREF_CALL = /(^|[^A-Z0-9_.])SETATREF\s*\(/i;
-
-/** Matches SETATREF-adjacent transforms the mutation policy cannot apply. */
-const SETATREF_TRANSFORM_CALL = /(^|[^A-Z0-9_.])SETATREF(EXPR|EVAL)\s*\(/i;
-
-/** Bare same-shape root-cell reference a SETATREF redirect can resolve to. */
-const BARE_CELL_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-const MAX_SETATREF_HOPS = 10;
+export const GUARD_CALL = /(^|[^A-Z0-9_.])GUARD\s*\(/i;
 
 export function numberValue(value: string | undefined): number {
   const result = Number(value ?? '0');
   return Number.isFinite(result) ? result : 0;
+}
+
+/** Largest LinePattern index Visio documents. 0 clears the stroke, 1 is solid. */
+export const LINE_PATTERN_MAX = 23;
+
+/** Selectable dash pattern indexes. Only 0 and 1 have stable Visio-wide meanings. */
+export const LINE_PATTERN_VALUES: readonly string[] = Array.from({ length: LINE_PATTERN_MAX + 1 }, (_, index) => String(index));
+
+const LINE_WEIGHT_PATTERN = /^(-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*(in|dl|cm|mm|pt|pica|ft|m)?$/i;
+
+/** Validated line weight, or null when the text is not a positive length. */
+export function parseLineWeightInput(raw: string): string | null {
+  const match = raw.trim().match(LINE_WEIGHT_PATTERN);
+  if (!match) return null;
+  const magnitude = Number(match[1]);
+  if (!Number.isFinite(magnitude) || magnitude <= 0) return null;
+  const unit = (match[2] ?? '').toLowerCase();
+  return unit ? `${match[1]} ${unit}` : match[1];
+}
+
+/** Validated line pattern index, or null when outside 0..LINE_PATTERN_MAX. */
+export function parseLinePatternInput(raw: string): string | null {
+  const text = raw.trim();
+  if (!/^\d+$/.test(text)) return null;
+  const index = Number(text);
+  return Number.isSafeInteger(index) && index >= 0 && index <= LINE_PATTERN_MAX ? String(index) : null;
+}
+
+/** True when a raw ribbon value would change the stored formula. */
+export function isFormulaChange(current: string | undefined, raw: string, parse: (value: string) => string | null): boolean {
+  const next = parse(raw);
+  if (next === null) return false;
+  const baseline = current !== undefined ? parse(current) : null;
+  return baseline === null ? raw.trim() !== (current ?? '') : next !== baseline;
 }
 
 export function numericCellValue(shape: ShapeSnapshot, name: string, fallback?: number): number {
@@ -111,10 +139,40 @@ export function cellIsGuarded(shape: ShapeSnapshot | null, name: string): boolea
   return GUARD_CALL.test(cellFormula(shape, name) ?? '');
 }
 
+const SETATREF_REDIRECT = /^\s*=?\s*setatref\s*\(\s*([^()]*?)\s*\)\s*$/i;
+
+/** Matches any SETATREF call without matching reference names containing setatref. */
+const SETATREF_CALL = /(^|[^A-Z0-9_.])SETATREF[A-Z]*\s*\(/i;
+
+function singleSetatrefTarget(formula: string): string | undefined {
+  const target = SETATREF_REDIRECT.exec(formula)?.[1].trim();
+  if (!target || target.includes(',') || target.includes('!') || target.includes('.')) return undefined;
+  return target;
+}
+
+/** Blocked when a GUARD sits on the cell or on any SETATREF hop to it. */
+function guardChainBlocked(shape: ShapeSnapshot | null, name: string): boolean {
+  if (!shape) return false;
+  const seen = new Set<string>();
+  let current = name;
+  for (let hop = 0; hop <= 10; hop += 1) {
+    if (seen.has(current)) return true;
+    seen.add(current);
+    const formula = cellFormula(shape, current);
+    if (formula === undefined) return false;
+    if (cellIsGuarded(shape, current)) return true;
+    const target = singleSetatrefTarget(formula);
+    if (target === undefined) return SETATREF_CALL.test(formula);
+    if (!findCell(shape, target)) return true;
+    current = target;
+  }
+  return true;
+}
+
 /** True when a delete would be refused by LockDelete or a GUARD on it. */
 export function isDeleteBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
-  return lockCellEnabled(shape, 'LockDelete') || cellIsGuarded(shape, 'LockDelete');
+  return lockCellEnabled(shape, 'LockDelete') || guardChainBlocked(shape, 'LockDelete');
 }
 
 export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'LockHeight', 'LockAspect'] as const;
@@ -123,35 +181,40 @@ export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'Lock
 export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   if (HANDLE_RESIZE_LOCKS.some((lock) => lockCellEnabled(shape, lock))) return true;
-  return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => cellIsGuarded(shape, cell));
-}
-
-/** Sole SETATREF redirect target, or undefined when the formula is not one. */
-function soleSetatrefTarget(formula: string): string | undefined {
-  const text = formula.trim().replace(/^=/, '').trim();
-  const match = /^SETATREF\s*\(\s*(.+?)\s*\)$/is.exec(text);
-  return match?.[1];
+  return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => guardChainBlocked(shape, cell));
 }
 
 /** True when a single-cell write would be refused by the mutation policy. */
 export function isCellWriteBlocked(shape: ShapeSnapshot | null, cellName: string): boolean {
   if (!shape) return false;
-  const visited = new Set<string>();
-  let current = cellName;
-  for (let hops = 0; hops <= MAX_SETATREF_HOPS; hops += 1) {
-    if (visited.has(current)) return true;
-    visited.add(current);
-    const formula = cellFormula(shape, current);
-    if (formula === undefined) return false;
-    if (GUARD_CALL.test(formula)) return true;
-    if (SETATREF_TRANSFORM_CALL.test(formula)) return true;
-    const target = soleSetatrefTarget(formula);
-    if (target === undefined) return SETATREF_CALL.test(formula);
-    if (hops === MAX_SETATREF_HOPS) return true;
-    if (!BARE_CELL_NAME.test(target) || !findCell(shape, target)) return true;
-    current = target;
+  return guardChainBlocked(shape, cellName);
+}
+
+/** A shape's own geometry primitive; text boxes share its id, so kind is part of the match. */
+function findShapePrimitive(primitives: readonly PagePrimitive[], id: string, depth = 0): ShapePrimitive | null {
+  if (depth >= 256) return null;
+  for (const primitive of primitives) {
+    if (primitive.kind === 'shape' && primitive.id === id) return primitive;
+    if (primitive.kind === 'group') {
+      const nested = findShapePrimitive(primitive.primitives, id, depth + 1);
+      if (nested) return nested;
+    }
   }
-  return true;
+  return null;
+}
+
+/** Rendered stroke/fill colours for a shape, when the display list resolves one. */
+export function frameSwatch(
+  frame: PageDisplayList | null | undefined,
+  page: PageSnapshot | null,
+  shape: ShapeSnapshot | null,
+): { fill?: string; line?: string } {
+  if (!frame || !page || !shape) return {};
+  const primitive = findShapePrimitive(frame.primitives, `${page.sourcePartPath}:${shape.sourceId}`);
+  if (!primitive) return {};
+  const fill = primitive.fill?.kind === 'solid' && /^#[0-9a-f]{6}$/i.test(primitive.fill.color) ? primitive.fill.color : undefined;
+  const line = primitive.stroke && /^#[0-9a-f]{6}$/i.test(primitive.stroke.color) ? primitive.stroke.color : undefined;
+  return { fill, line };
 }
 
 export function createRibbonCommands(
@@ -160,7 +223,9 @@ export function createRibbonCommands(
   pageId: string | undefined,
   onMutation: () => void,
   onError: (error: unknown) => void,
-  onDownload: (bytes: Uint8Array) => void
+  onDownload: (bytes: Uint8Array) => void,
+  frame?: PageDisplayList | null,
+  pageBreaks?: PageBreakToggle
 ): RibbonCommands {
   const execute = (operation: (current: DiagramHandle, selected: VsdxShapeSelection | null) => void, needsSelection = false) => () => {
     if (!handle || (needsSelection && !selection)) return;
@@ -170,6 +235,8 @@ export function createRibbonCommands(
   const current = placementIn(pages, selection);
   const shape = current?.shape ?? null;
   const selected = Boolean(current && selection);
+  const activePage = selection ? pages.find((page) => page.id === selection.pageId) ?? null : null;
+  const swatch = frameSwatch(frame, activePage, shape);
   const topIndex = current ? current.siblings.length - 1 : 0;
   const livePlacement = (currentHandle: DiagramHandle, currentSelection: VsdxShapeSelection | null) => placementIn(currentHandle.snapshot().pages, currentSelection);
   const formula = (cellName: string, value: string) => execute((currentHandle, currentSelection) => {
@@ -188,10 +255,24 @@ export function createRibbonCommands(
     undo: { id: 'undo', enabled: Boolean(handle?.canUndo()), run: execute((currentHandle) => { currentHandle.undo(); }) },
     redo: { id: 'redo', enabled: Boolean(handle?.canRedo()), run: execute((currentHandle) => { currentHandle.redo(); }) },
     delete: { id: 'delete', enabled: selected && !isDeleteBlocked(shape), run: execute((currentHandle, currentSelection) => { currentHandle.deleteShape(currentSelection!.pageId, currentSelection!.shapeId); }, true) },
-    fillColor: { id: 'fillColor', enabled: selected && !isCellWriteBlocked(shape, 'FillForegnd'), value: color(cellValue(shape, 'FillForegnd'), '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
-    lineColor: { id: 'lineColor', enabled: selected && !isCellWriteBlocked(shape, 'LineColor'), value: color(cellValue(shape, 'LineColor'), '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },
-    lineWeight: { id: 'lineWeight', enabled: selected && !isCellWriteBlocked(shape, 'LineWeight'), value: cellFormula(shape, 'LineWeight'), run: (value?: string) => { if (value) formula('LineWeight', value)(); } },
-    linePattern: { id: 'linePattern', enabled: selected && !isCellWriteBlocked(shape, 'LinePattern'), value: cellFormula(shape, 'LinePattern'), run: (value?: string) => { if (value) formula('LinePattern', value)(); } },
+    fillColor: { id: 'fillColor', enabled: selected && !isCellWriteBlocked(shape, 'FillForegnd'), value: swatch.fill ?? color(cellValue(shape, 'FillForegnd'), '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
+    lineColor: { id: 'lineColor', enabled: selected && !isCellWriteBlocked(shape, 'LineColor'), value: swatch.line ?? color(cellValue(shape, 'LineColor'), '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },
+    lineWeight: {
+      id: 'lineWeight', enabled: selected && !isCellWriteBlocked(shape, 'LineWeight'), value: cellFormula(shape, 'LineWeight'), run: (value?: string) => {
+        if (value === undefined) return;
+        const next = parseLineWeightInput(value);
+        if (next === null || !isFormulaChange(cellFormula(shape, 'LineWeight'), value, parseLineWeightInput)) return;
+        formula('LineWeight', next)();
+      },
+    },
+    linePattern: {
+      id: 'linePattern', enabled: selected && !isCellWriteBlocked(shape, 'LinePattern'), value: cellFormula(shape, 'LinePattern'), run: (value?: string) => {
+        if (value === undefined) return;
+        const next = parseLinePatternInput(value);
+        if (next === null || !isFormulaChange(cellFormula(shape, 'LinePattern'), value, parseLinePatternInput)) return;
+        formula('LinePattern', next)();
+      },
+    },
     bringToFront: { id: 'bringToFront', enabled: selected && current!.index < topIndex, run: reorderTo((placement) => placement.siblings.length - 1, (placement) => placement.index < placement.siblings.length - 1) },
     bringForward: { id: 'bringForward', enabled: selected && current!.index < topIndex, run: reorderTo((placement) => placement.index + 1, (placement) => placement.index < placement.siblings.length - 1) },
     sendBackward: { id: 'sendBackward', enabled: selected && current!.index > 0, run: reorderTo((placement) => placement.index - 1, (placement) => placement.index > 0) },
@@ -208,16 +289,17 @@ export function createRibbonCommands(
         if (!page) throw new Error(`vsdx page ${pageId ?? ''} is no longer part of the diagram`);
         const rectangle = standardShapeById('rectangle');
         if (!rectangle) throw new Error('vsdx standard rectangle shape is unavailable');
-        currentHandle.addShape(page.id, rectangle.draft(1, 1, 1, 1));
+        currentHandle.addShape(page.id, rectangle.draft(1, 1, rectangle.defaultSize.width, rectangle.defaultSize.height));
       }),
     },
     download: { id: 'download', enabled: Boolean(handle), run: () => { if (!handle) return; try { onDownload(handle.save()); } catch (error) { onError(error); } } },
+    pageBreaks: { id: 'pageBreaks', enabled: Boolean(frame && pageBreaks), active: Boolean(pageBreaks?.shown), run: () => pageBreaks?.toggle() },
   } as RibbonCommands;
   return commands;
 }
 
-export function RibbonCommandsProvider({ handle, snapshot, pageId, selection, onMutation, onError, onDownload, children }: RibbonCommandsProviderProps) {
-  const commands = useMemo(() => createRibbonCommands(handle, selection, pageId, onMutation, onError, onDownload), [handle, snapshot, pageId, selection, onMutation, onError, onDownload]);
+export function RibbonCommandsProvider({ handle, snapshot, pageId, selection, frame, onMutation, onError, onDownload, pageBreaks, children }: RibbonCommandsProviderProps) {
+  const commands = useMemo(() => createRibbonCommands(handle, selection, pageId, onMutation, onError, onDownload, frame, pageBreaks), [handle, snapshot, pageId, selection, frame, onMutation, onError, onDownload, pageBreaks]);
   return createElement(RibbonCommandsContext.Provider, { value: commands }, children);
 }
 

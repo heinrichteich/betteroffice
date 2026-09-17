@@ -1,8 +1,4 @@
-//! Visio `Control` section handles: the yellow diamonds that reshape a shape.
-//!
-//! Handles are resolved from the `Control` section; the [`control_handles`]
-//! caller supplies evaluated cell values so masters, pages and live edits
-//! share one visibility rule.
+//! Yellow control-handle positions from the Visio `Control` section.
 
 use serde::{Deserialize, Serialize};
 
@@ -39,11 +35,7 @@ fn is_locked(behavior: f64) -> bool {
     behavior.is_finite() && (behavior.round() as i64).rem_euclid(5) == 1
 }
 
-/// Resolves the control handles of a shape.
-///
-/// `value` evaluates a ShapeSheet cell such as `Control.Row_1.X`; rows
-/// without a finite `X`/`Y` position are skipped. Behaviour cells default to
-/// proportional when absent. Callers skip hidden handles.
+/// Resolves control handles, skipping rows without a finite X/Y position.
 pub fn control_handles(
     shape: &ResolvedShape,
     value: impl Fn(&str) -> Option<f64> + Copy,

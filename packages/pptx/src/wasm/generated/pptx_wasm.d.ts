@@ -77,6 +77,8 @@ export class PptxRenderer {
 
 export function compileSlideJson(slide_json: string): string;
 
+export function decodeTiffPng(data: Uint8Array): Uint8Array;
+
 export function parsePptxJson(data: Uint8Array): string;
 
 export function rendererVersion(): string;
@@ -87,6 +89,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_pptxrenderer_free: (a: number, b: number) => void;
     readonly compileSlideJson: (a: number, b: number) => [number, number, number, number];
+    readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly parsePptxJson: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalDiffSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
