@@ -56,6 +56,7 @@ test('replays positioned text runs at their line caret positions', async () => {
   expect(log).toContain('scale:1,-1');
   expect(log).toContain('textBaseline=top');
   expect(log.filter(entry => entry.startsWith('fillText:'))).toEqual(['fillText:left,30,20', 'fillText:right,60,45']);
+  expect(log.some(entry => entry.startsWith('clip'))).toBe(false);
 });
 
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 768 };

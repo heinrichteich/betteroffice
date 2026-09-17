@@ -72,6 +72,11 @@ function ArrangeRun({ t }: { t: TFunction }) {
   </RibbonRun>;
 }
 
+function FormatRun({ t }: { t: TFunction }) {
+  const label = (id: RibbonCommandId) => t(`ribbon.commands.${id}`);
+  return <RibbonRun label={t('ribbon.groups.shape')}><ColorButton id="fillColor" icon="fill" label={label('fillColor')} /><ColorButton id="lineColor" icon="line" label={label('lineColor')} /><LineFormulaControl id="lineWeight" icon="weight" label={label('lineWeight')} /><LineFormulaControl id="linePattern" icon="pattern" label={label('linePattern')} /></RibbonRun>;
+}
+
 function HomePanel({ t }: { t: TFunction }) {
   const label = (id: RibbonCommandId) => t(`ribbon.commands.${id}`);
   return <div style={styles.surface} data-testid="vsdx-ribbon-home-panel">
@@ -79,7 +84,7 @@ function HomePanel({ t }: { t: TFunction }) {
     <Divider />
     <RibbonRun label={t('ribbon.groups.insert')}><CommandButton id="delete" icon="delete" label={label('delete')} /><CommandButton id="addShape" icon="add" label={label('addShape')} /></RibbonRun>
     <Divider />
-    <RibbonRun label={t('ribbon.groups.shape')}><ColorButton id="fillColor" icon="fill" label={label('fillColor')} /><ColorButton id="lineColor" icon="line" label={label('lineColor')} /><LineFormulaControl id="lineWeight" icon="weight" label={label('lineWeight')} /><LineFormulaControl id="linePattern" icon="pattern" label={label('linePattern')} /></RibbonRun>
+    <FormatRun t={t} />
     <Divider />
     <ArrangeRun t={t} />
   </div>;
@@ -87,6 +92,8 @@ function HomePanel({ t }: { t: TFunction }) {
 
 function ShapePanel({ t }: { t: TFunction }) {
   return <div style={styles.surface} data-testid="vsdx-ribbon-shape-panel">
+    <FormatRun t={t} />
+    <Divider />
     <ArrangeRun t={t} />
   </div>;
 }
@@ -94,14 +101,13 @@ function ShapePanel({ t }: { t: TFunction }) {
 export function Ribbon({ t, hasSelection = false }: { t: TFunction; hasSelection?: boolean }) {
   const visibleTabs: readonly RibbonTab[] = hasSelection ? [...baseTabs, 'shape'] : baseTabs;
   const [active, setActive] = useState<RibbonTab>(hasSelection ? 'shape' : 'home');
+  const [selectionShown, setSelectionShown] = useState(hasSelection);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const previousSelection = useRef(hasSelection);
-  useEffect(() => {
-    const previous = previousSelection.current;
-    previousSelection.current = hasSelection;
-    if (hasSelection && !previous) setActive('shape');
-    else if (!hasSelection && previous) setActive((current) => (current === 'shape' ? 'home' : current));
-  }, [hasSelection]);
+  if (selectionShown !== hasSelection) {
+    setSelectionShown(hasSelection);
+    if (hasSelection) setActive('shape');
+    else if (active === 'shape') setActive('home');
+  }
   const select = (next: RibbonTab) => setActive(next);
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     let next = index;

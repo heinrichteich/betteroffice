@@ -119,6 +119,12 @@ interface LoweringContext {
   styleResolver: StyleResolver | null;
   theme: Theme | null;
   plans: StoryPlan[];
+  compatibilityMode: number;
+}
+
+function compatibilityModeFromDocument(document: Document): number {
+  const mode = document.package.settings?.compatibilityFlags?.compatibilityMode;
+  return typeof mode === 'number' && Number.isFinite(mode) ? Math.trunc(mode) : 12;
 }
 
 const BOOLEAN_MARKS = new Set([
@@ -403,6 +409,7 @@ function imagePayload(image: Image): Attrs {
     distRight: image.wrap.distR != null ? emuToPixels(image.wrap.distR) : null,
     position: image.position
       ? {
+          relativeHeight: image.position.relativeHeight,
           horizontal: image.position.horizontal
             ? {
                 relativeTo: image.position.horizontal.relativeTo,
@@ -428,6 +435,7 @@ function imagePayload(image: Image): Attrs {
     cropRight: image.crop?.right ?? null,
     cropBottom: image.crop?.bottom ?? null,
     cropLeft: image.crop?.left ?? null,
+    shapeType: image.shapeType ?? null,
     opacity: image.opacity ?? null,
     effectExtentTop: image.padding?.top ? emuToPixels(image.padding.top) : null,
     effectExtentBottom: image.padding?.bottom ? emuToPixels(image.padding.bottom) : null,
@@ -841,6 +849,9 @@ function paragraphAttrs(
     listMarkerHidden: paragraph.listRendering?.markerHidden || null,
     listMarkerFontFamily: paragraph.listRendering?.markerFontFamily || null,
     listMarkerFontSize: paragraph.listRendering?.markerFontSize || null,
+    listMarkerBold: paragraph.listRendering?.markerBold ?? null,
+    listMarkerItalic: paragraph.listRendering?.markerItalic ?? null,
+    listMarkerColor: paragraph.listRendering?.markerColor ?? null,
     listMarkerSuffix: paragraph.listRendering?.markerSuffix || null,
     listLevelNumFmts: paragraph.listRendering?.levelNumFmts || null,
     listAbstractNumId: paragraph.listRendering?.abstractNumId ?? null,
@@ -1362,7 +1373,8 @@ function projectRow(
 function projectTable(
   table: Table,
   styleResolver: StyleResolver | null,
-  theme: Theme | null
+  theme: Theme | null,
+  compatibilityMode: number
 ): ProjectedTable {
   const defaultStyle = styleResolver?.getDefaultTableStyle();
   const styleId = table.formatting?.styleId;
@@ -1412,6 +1424,9 @@ function projectTable(
     cellMargins: defaultMargins ?? null,
     look: table.formatting?.look ?? null,
     bidi: table.formatting?.bidi || null,
+    // Omit the default so pre-existing yrs snapshots (no field) keep matching;
+    // the bridge treats an absent mode as 12.
+    compatibilityMode: compatibilityMode === 12 ? null : compatibilityMode,
     _originalFormatting: originalFormatting,
   };
   if (table.propertyChanges?.length) attrs.tblPrChange = table.propertyChanges;
@@ -1498,7 +1513,12 @@ function visitStory(
     }
     if (block.type === 'table') {
       const currentTable = tableIndex++;
-      const table = projectTable(block, context.styleResolver, context.theme);
+      const table = projectTable(
+        block,
+        context.styleResolver,
+        context.theme,
+        context.compatibilityMode
+      );
       const rows = table.rows.map((row, rowIndex) => ({
         trPr: row.attrs,
         cells: row.cells.map((cell, cellIndex) => ({
@@ -1624,6 +1644,7 @@ export function documentToYrs(session: YrsSession, document: Document): void {
     styleResolver: document.package.styles ? createStyleResolver(document.package.styles) : null,
     theme: document.package.theme ?? null,
     plans: [],
+    compatibilityMode: compatibilityModeFromDocument(document),
   };
   visitStory(context, 'body', document.package.document.content, {
     includePageBreaks: true,

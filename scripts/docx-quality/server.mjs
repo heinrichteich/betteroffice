@@ -1,6 +1,7 @@
 import { createServer } from 'vite';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { qualityRendererPlugin } from '../office-quality/renderer.mjs';
 
 const packageRoot = process.env.QUALITY_PACKAGE_ROOT;
 const reactRoot = process.env.QUALITY_REACT_ROOT;
@@ -24,6 +25,7 @@ for (const [name, override] of [
 }
 const server = await createServer({
   configFile: false,
+  plugins: format === 'docx' ? [] : [qualityRendererPlugin(format)],
   cacheDir: resolve(
     `.source/docx-quality/vite-cache-${process.env.QUALITY_PORT ?? 4178}`
   ),

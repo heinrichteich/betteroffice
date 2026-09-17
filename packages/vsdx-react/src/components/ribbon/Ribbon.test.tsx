@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
+import { useLayoutEffect } from 'react';
 import type { DiagramHandle } from '@betteroffice/vsdx';
 import { createT, en } from '@betteroffice/vsdx-i18n';
 import { Ribbon } from './Ribbon';
@@ -75,6 +76,43 @@ test('shape tab appears on selection, activates itself, and disappears with the 
   expect(view.queryByRole('tab', { name: 'Shape' })).toBeNull();
   expect(view.queryByTestId('vsdx-ribbon-shape-panel')).toBeNull();
   expect(view.getByRole('tab', { name: 'Home' }).getAttribute('aria-selected')).toBe('true');
+  view.unmount();
+});
+
+test('no commit shows the shape panel without a selection or a tablist without a selected tab', () => {
+  const diagram = stubDiagram(['one']);
+  const commits: Array<{ shapePanel: boolean; selected: number }> = [];
+  function Probe() {
+    useLayoutEffect(() => {
+      commits.push({
+        shapePanel: document.querySelector('[data-testid="vsdx-ribbon-shape-panel"]') !== null,
+        selected: document.querySelectorAll('.vsdx-ribbon-flat [role="tab"][aria-selected="true"]').length,
+      });
+    });
+    return null;
+  }
+  const tree = (selection: ReturnType<typeof selectionFor> | null) => <RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selection} onMutation={() => {}} onError={() => {}} onDownload={() => {}}><Ribbon t={createT(en)} hasSelection={selection !== null} /><Probe /></RibbonCommandsProvider>;
+  cleanup();
+  const view = render(tree(null));
+  view.rerender(tree(selectionFor('one')));
+  expect(commits[commits.length - 1]).toEqual({ shapePanel: true, selected: 1 });
+  view.rerender(tree(null));
+  expect(commits.length).toBe(3);
+  for (const commit of commits) expect(commit.selected).toBe(1);
+  expect(commits[commits.length - 1]).toEqual({ shapePanel: false, selected: 1 });
+  view.unmount();
+});
+
+test('switching tabs mutates nothing', () => {
+  const calls = { reorder: [] as unknown[][], mutation: 0 };
+  const diagram = richDiagram([{ id: 'one' }, { id: 'two' }], calls);
+  const errors: unknown[] = [];
+  cleanup();
+  const view = render(<RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selectionFor('one')} onMutation={() => { calls.mutation += 1; }} onError={(error) => { errors.push(error); }} onDownload={() => {}}><Ribbon t={createT(en)} hasSelection={true} /></RibbonCommandsProvider>);
+  for (const name of ['File', 'Insert', 'Home', 'Shape', 'Home']) fireEvent.click(view.getByRole('tab', { name }));
+  expect(calls.mutation).toBe(0);
+  expect(calls.reorder).toEqual([]);
+  expect(errors).toEqual([]);
   view.unmount();
 });
 

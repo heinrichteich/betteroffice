@@ -182,6 +182,152 @@ fn trailing_spaces_can_overhang_without_wrapping_the_word() {
 }
 
 #[test]
+fn trailing_ideographic_spaces_overhang_like_ascii_spaces() {
+    const W_IDEO: f64 = 16.0;
+    let value = measure(json!([{ "kind": "text", "text": "00\u{3000}" }]), 2.0 * W0).unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 3)]);
+    approx(
+        value["lines"][0]["width"].as_f64().unwrap(),
+        2.0 * W0 + W_IDEO,
+        "retained ideographic advance",
+    );
+    let value = measure(
+        json!([{ "kind": "text", "text": "00\u{3000}\u{3000}\u{3000}" }]),
+        2.0 * W0,
+    )
+    .unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 5)]);
+    approx(
+        value["lines"][0]["width"].as_f64().unwrap(),
+        2.0 * W0 + 3.0 * W_IDEO,
+        "retained ideographic advances",
+    );
+}
+
+#[test]
+fn ideographic_space_breaks_words_keeping_full_advance() {
+    const W_IDEO: f64 = 16.0;
+    let value = measure(
+        json!([{ "kind": "text", "text": "00\u{3000}00" }]),
+        2.0 * W0 + 1.0,
+    )
+    .unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 3), (0, 3, 0, 5)]);
+    let lines = value["lines"].as_array().unwrap();
+    approx(
+        lines[0]["width"].as_f64().unwrap(),
+        2.0 * W0 + W_IDEO,
+        "first line keeps the trailing ideographic advance",
+    );
+    approx(
+        lines[1]["width"].as_f64().unwrap(),
+        2.0 * W0,
+        "second line width",
+    );
+}
+
+#[test]
+fn justified_text_does_not_compress_ideographic_spaces() {
+    const W_IDEO: f64 = 16.0;
+    let natural = 12.0 * W0 + 3.0 * W_IDEO;
+    let minimum = natural - 0.25 * 3.0 * W_IDEO;
+    for (alignment, width, expected_lines) in [
+        ("justify", natural, 1),
+        ("justify", minimum, 2),
+        ("left", minimum, 2),
+    ] {
+        let input = json!({
+            "block":{"kind":"paragraph","runs":[{"kind":"text","text":"000\u{3000}000\u{3000}000\u{3000}000"}],"attrs":{"alignment":alignment}},
+            "maxWidth":width,"fontChains":{"liberation sans|0|0":[0]},
+            "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+        });
+        let measured: Value =
+            serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(
+            measured["lines"].as_array().unwrap().len(),
+            expected_lines,
+            "{alignment} at {width}"
+        );
+    }
+    let input = json!({
+        "block":{"kind":"paragraph","runs":[{"kind":"text","text":"000\u{3000}000\u{3000}000\u{3000}000"}]},
+        "maxWidth":natural,"fontChains":{"liberation sans|0|0":[0]},
+        "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+    });
+    let measured: Value =
+        serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+            .unwrap();
+    approx(
+        measured["lines"][0]["clusterAdvances"][3]["advance"]
+            .as_f64()
+            .unwrap(),
+        W_IDEO,
+        "ideographic advance uncompressed",
+    );
+}
+
+#[test]
+fn justified_mixed_ascii_and_trailing_ideographic_keeps_spaces_uncompressed() {
+    const W_IDEO: f64 = 16.0;
+    let natural = 12.0 * W0 + 3.0 * SP;
+    for trailing in ["\u{3000}", "\u{3000}\u{3000}"] {
+        let count = trailing.chars().count() as f64;
+        let text = format!("000 000 000 000{trailing}");
+        let input = json!({
+            "block":{"kind":"paragraph","runs":[{"kind":"text","text":text}],"attrs":{"alignment":"justify"}},
+            "maxWidth":natural,"fontChains":{"liberation sans|0|0":[0]},
+            "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+        });
+        let measured: Value =
+            serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(
+            measured["lines"].as_array().unwrap().len(),
+            1,
+            "trailing {count}"
+        );
+        let line = &measured["lines"][0];
+        approx(
+            line["width"].as_f64().unwrap(),
+            natural + count * W_IDEO,
+            "full width retained",
+        );
+        for idx in [3, 7, 11] {
+            approx(
+                line["clusterAdvances"][idx]["advance"].as_f64().unwrap(),
+                SP,
+                "ascii space uncompressed",
+            );
+        }
+        approx(
+            line["clusterAdvances"][0]["advance"].as_f64().unwrap(),
+            W0,
+            "unchanged glyph advance",
+        );
+        let base = 15;
+        for offset in 0..count as usize {
+            approx(
+                line["clusterAdvances"][base + offset]["advance"]
+                    .as_f64()
+                    .unwrap(),
+                W_IDEO,
+                "trailing ideographic advance",
+            );
+        }
+    }
+}
+
+#[test]
+fn ideographic_space_only_run_measures_like_empty_paragraph() {
+    for text in ["\u{3000}", "\u{3000}\u{3000}"] {
+        let v = measure(json!([{ "kind": "text", "text": text }]), 200.0).unwrap();
+        assert_eq!(spans(&v), vec![(0, 0, 0, 0)]);
+        assert_eq!(v["lines"][0]["width"].as_f64().unwrap(), 0.0);
+    }
+}
+
+#[test]
 fn justified_text_compresses_spaces_before_wrapping() {
     let natural = 12.0 * W0 + 3.0 * SP;
     let minimum = natural - 0.25 * 3.0 * SP;
@@ -1139,6 +1285,68 @@ fn tab_in_hanging_indent_lands_on_the_body_edge() {
         24.0 + W0,
         "tab to indent stop",
     );
+}
+
+#[test]
+fn declared_tabs_before_the_indent_preserve_their_alignment() {
+    for (alignment, expected) in [
+        ("start", 40.0 + 2.0 * W0),
+        ("end", 40.0),
+        ("center", 40.0 + W0),
+    ] {
+        let v = measure_with(
+            json!({
+                "kind": "paragraph",
+                "runs": [{ "kind": "tab" }, { "kind": "text", "text": "00" }],
+                "attrs": {
+                    "indent": { "left": 64.0, "hanging": 64.0 },
+                    "tabs": [{ "val": alignment, "pos": 600.0 }]
+                }
+            }),
+            300.0,
+        )
+        .unwrap();
+        approx(
+            v["lines"][0]["width"].as_f64().unwrap(),
+            expected,
+            alignment,
+        );
+    }
+}
+
+#[test]
+fn hanging_indent_preserves_declared_tabs_before_the_body_edge() {
+    for label in ["", "(1)"] {
+        for explicit_body_stop in [false, true] {
+            let mut stops = vec![json!({ "val": "end", "pos": 595.0 })];
+            if explicit_body_stop {
+                stops.push(json!({ "val": "start", "pos": 879.0 }));
+            }
+            let v = measure_with(
+                json!({
+                    "kind": "paragraph",
+                    "runs": [
+                        { "kind": "tab" },
+                        { "kind": "text", "text": label },
+                        { "kind": "tab" },
+                        { "kind": "text", "text": "00000000" }
+                    ],
+                    "attrs": {
+                        "indent": { "left": 58.6, "hanging": 58.6 },
+                        "tabs": stops
+                    }
+                }),
+                139.0,
+            )
+            .unwrap();
+            assert_eq!(spans(&v), vec![(0, 0, 3, 8)]);
+            approx(
+                v["lines"][0]["width"].as_f64().unwrap(),
+                58.6 + 8.0 * W0,
+                "body text starts at the left indent after the label tab",
+            );
+        }
+    }
 }
 
 // 16. a tab's font contributes to line metrics

@@ -126,6 +126,11 @@ pub fn renderer_version() -> String {
     env!("CARGO_PKG_VERSION").to_owned()
 }
 
+#[wasm_bindgen(js_name = decodeTiffPng)]
+pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, JsValue> {
+    ooxml_drawingml::media::decode_tiff_png(data).map_err(js_error)
+}
+
 fn js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }
