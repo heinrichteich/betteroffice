@@ -15,7 +15,7 @@
 //! - Any `val` other than `clear`/`end`/`center`/`decimal`/`bar` behaves like
 //!   `start`.
 //! - A `clear` entry knocks out the grid line at that position as well as a
-//!   declared stop; stops left of the left indent are dropped; and a positive
+//!   declared stop; explicit stops within a hanging indent are retained; a positive
 //!   left indent gains an implicit stop at the indent itself, so a tab on a
 //!   hanging first line lands on the body text edge.
 //! - When the resolved span shrinks below a pixel — following content wider
@@ -67,14 +67,14 @@ fn same_stop_position(a: f32, b: f32) -> bool {
 
 /// The paragraph's effective stop list, in twips, sorted by position:
 /// declared stops overlaid on the implicit 720-twip grid, with `clear`
-/// entries knocked out and stops left of the indent dropped.
+/// entries knocked out.
 fn compute_tab_stops(declared: &[TabStopIn], left_indent_twips: f32) -> Vec<(f32, StopKind)> {
     let mut kept: Vec<(f32, StopKind)> = Vec::new();
     let mut cleared_at: Vec<f32> = Vec::new();
     for stop in declared {
         if stop.val == "clear" {
             cleared_at.push(stop.pos);
-        } else if stop.pos >= left_indent_twips {
+        } else {
             kept.push((stop.pos, stop_kind(&stop.val)));
         }
     }
@@ -84,7 +84,11 @@ fn compute_tab_stops(declared: &[TabStopIn], left_indent_twips: f32) -> Vec<(f32
 
     // hanging-indent paragraphs get an implicit stop at the indent itself so
     // a tab in the first line lands on the body text edge, matching Word
-    if left_indent_twips > 0.0 && !kept.iter().any(|s| s.0 <= left_indent_twips) {
+    if left_indent_twips > 0.0
+        && !kept
+            .iter()
+            .any(|s| same_stop_position(s.0, left_indent_twips))
+    {
         let indent_cleared = cleared_at
             .iter()
             .any(|&p| same_stop_position(p, left_indent_twips));
@@ -101,7 +105,8 @@ fn compute_tab_stops(declared: &[TabStopIn], left_indent_twips: f32) -> Vec<(f32
         left_indent_twips
     };
     let grid_ceiling = left_indent_twips + GRID_CEILING_SPAN_TWIPS;
-    let mut grid_pos = grid_seed + DEFAULT_TAB_INTERVAL_TWIPS;
+    let mut grid_pos =
+        ((grid_seed / DEFAULT_TAB_INTERVAL_TWIPS).floor() + 1.0) * DEFAULT_TAB_INTERVAL_TWIPS;
     while grid_pos - DEFAULT_TAB_INTERVAL_TWIPS < grid_ceiling {
         let shadowed = kept.iter().any(|s| same_stop_position(s.0, grid_pos));
         let knocked_out = cleared_at.iter().any(|&p| same_stop_position(p, grid_pos));
@@ -133,6 +138,7 @@ pub(super) fn calculate_tab_width(
     declared: &[TabStopIn],
     left_indent_twips: f32,
     following_width_px: f32,
+    available_width_px: f32,
 ) -> f32 {
     let current_x_twips = px_to_twips(current_x_px);
     let grid = compute_tab_stops(declared, left_indent_twips);
@@ -156,6 +162,12 @@ pub(super) fn calculate_tab_width(
     // default grid instead
     if width < 1.0 {
         return default_grid_advance(current_x_px);
+    }
+    if kind == StopKind::End && width > available_width_px + 1e-3 {
+        let clamped = available_width_px - following_width_px;
+        if clamped > 1.0 {
+            return clamped;
+        }
     }
     width
 }

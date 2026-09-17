@@ -94,6 +94,10 @@ enum WorkbookMode {
 struct PreservedSheetState {
     origins: Vec<Option<usize>>,
     shared_string_cells: Vec<xlsx_parse::SharedStringCells>,
+    /// Where each sheet's source rows and columns sit after the row and column
+    /// edits made since the package was read. `None` once an identity-less
+    /// replay replaced the model wholesale, which reserializes edited sheets.
+    axes: Vec<Option<xlsx_parse::SheetAxes>>,
 }
 
 impl PreservedSheetState {
@@ -102,6 +106,7 @@ impl PreservedSheetState {
         self.origins.resize(sheets, None);
         self.shared_string_cells
             .resize_with(sheets, Default::default);
+        self.axes.resize(sheets, None);
     }
 
     fn insert(&mut self, index: usize) {
@@ -109,12 +114,16 @@ impl PreservedSheetState {
         self.origins.insert(index, None);
         self.shared_string_cells
             .insert(index, xlsx_parse::SharedStringCells::new());
+        self.axes.insert(index, None);
     }
 
     fn remove(&mut self, index: usize) {
         if index < self.origins.len() {
             self.origins.remove(index);
             self.shared_string_cells.remove(index);
+        }
+        if index < self.axes.len() {
+            self.axes.remove(index);
         }
     }
 
@@ -131,6 +140,19 @@ impl PreservedSheetState {
                 Some(((moved.row, moved.col), index))
             })
             .collect();
+        if let Some(axes) = self
+            .axes
+            .get_mut(sheet.0 as usize)
+            .and_then(|axes| axes.as_mut())
+        {
+            match *op {
+                Op::InsertRows { at, count, .. } => axes.rows.insert(at, count),
+                Op::DeleteRows { at, count, .. } => axes.rows.delete(at, count),
+                Op::InsertCols { at, count, .. } => axes.cols.insert(at, count),
+                Op::DeleteCols { at, count, .. } => axes.cols.delete(at, count),
+                _ => {}
+            }
+        }
     }
 
     /// Drops shared-string provenance after identity-less replay.
@@ -138,6 +160,11 @@ impl PreservedSheetState {
         for cells in &mut self.shared_string_cells {
             cells.clear();
         }
+    }
+
+    /// Drops source-address tracking after identity-less replay.
+    fn forget_axes(&mut self) {
+        self.axes.fill(None);
     }
 }
 
@@ -302,10 +329,12 @@ impl Workbook {
                 shared_string_cells: (0..model.sheets.len())
                     .map(|index| package.source_shared_string_cells(index))
                     .collect(),
+                axes: vec![Some(xlsx_parse::SheetAxes::default()); model.sheets.len()],
             },
             None => PreservedSheetState {
                 origins: vec![None; model.sheets.len()],
                 shared_string_cells: vec![Default::default(); model.sheets.len()],
+                axes: vec![None; model.sheets.len()],
             },
         };
         Ok(Self {
@@ -443,6 +472,7 @@ impl Workbook {
         self.preserved_undo.clear();
         self.preserved_redo.clear();
         self.preserved.forget_shared_strings();
+        self.preserved.forget_axes();
         self.authority.clear_history();
         self.proposals.clear();
         self.edited_since_open = true;
@@ -572,7 +602,7 @@ impl Workbook {
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority
-            .apply_update_v1(&commit_update)
+            .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
         self.install_model(model)?;
         self.graph = Some(graph);
@@ -581,6 +611,7 @@ impl Workbook {
         self.preserved_undo.clear();
         self.preserved_redo.clear();
         self.preserved.forget_shared_strings();
+        self.preserved.forget_axes();
         self.authority.clear_history();
         self.edited_since_open = true;
         self.emit_update(UpdateEvent {
@@ -632,11 +663,12 @@ impl Workbook {
         validate_chart_source(&self.model, self.source_package.is_some())?;
         let parts = match &self.source_package {
             Some(package) => {
-                xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet(
+                xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
                     &self.model,
                     package,
                     &self.preserved.origins,
                     &self.preserved.shared_string_cells,
+                    &self.preserved.axes,
                     xlsx_parse::SaveEdits {
                         changed: self.edited_since_open,
                         moved_references: self.moved_references_since_open,
@@ -828,7 +860,7 @@ impl Workbook {
         let number_format = uniform(number_formats.iter().map(|(kind, _)| *kind));
         let number_format_pattern =
             uniform(number_formats.iter().map(|(_, pattern)| pattern.clone())).flatten();
-        let theme = &self.model.styles.theme;
+        let styles = &self.model.styles;
         Ok(SelectionFormatting {
             number_format,
             number_format_pattern,
@@ -850,14 +882,14 @@ impl Workbook {
                     .font
                     .color
                     .as_ref()
-                    .and_then(|color| color.resolve(theme))
+                    .and_then(|color| styles.resolve_color(color))
                     .unwrap_or_else(|| "#000000".into())
                     .to_ascii_lowercase()
             })),
             fill_color: uniform(formats.iter().map(|(_, format)| {
                 match &format.fill {
-                    Fill::Solid(color) => color
-                        .resolve(theme)
+                    Fill::Solid(color) => styles
+                        .resolve_color(color)
                         .unwrap_or_else(|| "#ffffff".into())
                         .to_ascii_lowercase(),
                     Fill::None => "#ffffff".into(),
@@ -868,7 +900,7 @@ impl Workbook {
             border_color: uniform_border_value(&formats, |edge| {
                 edge.color
                     .as_ref()
-                    .and_then(|color| color.resolve(theme))
+                    .and_then(|color| styles.resolve_color(color))
                     .unwrap_or_else(|| "#000000".into())
                     .to_ascii_lowercase()
             }),
@@ -1254,6 +1286,7 @@ impl Workbook {
         self.edited_since_open = true;
         self.restore_active_sheet(active_name.as_deref());
         self.preserved.forget_shared_strings();
+        self.preserved.forget_axes();
         self.proposals.clear();
         let result = self.rebuild_and_recalculate(options);
         let changed = changed_cells_between(&before, &self.model);

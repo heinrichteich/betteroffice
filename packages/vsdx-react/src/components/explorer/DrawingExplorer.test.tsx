@@ -224,8 +224,28 @@ test('bounds the depth of a hostile document', () => {
     />,
   );
   for (let level = 0; level < MAX_EXPLORER_DEPTH; level += 1) {
-    fireEvent.click(view.getByRole('button', { name: `Shape ${level} (Group)` }));
+    const node = view.container.querySelector(`[data-explorer-key="shape:page:1:deep-${level}"]`);
+    expect(node?.textContent).toBe(`Shape ${level} (Group)`);
+    fireEvent.click(node as HTMLButtonElement);
   }
   expect(view.getByText(t('explorer.depthLimit'))).toBeDefined();
-  expect(view.queryAllByRole('button', { name: /^Shape \d+ \(Group\)$/ })).toHaveLength(MAX_EXPLORER_DEPTH);
+  expect(view.container.querySelectorAll('[data-explorer-key^="shape:"]')).toHaveLength(MAX_EXPLORER_DEPTH);
+});
+
+test('keeps a collapsed branch collapsed when a new snapshot arrives for the same selection', () => {
+  const props = {
+    activePageIndex: 0,
+    selection: { pageId: 'page:1', shapeId: 'c1', hit: { kind: 'shape' as const, shapeId: 'c1' } },
+    onSelectPage: () => {},
+    onSelectShape: () => {},
+    collapsed: false,
+    onToggleCollapsed: () => {},
+    t,
+  };
+  const view = render(<DrawingExplorer {...props} snapshot={snapshot()} />);
+  const shapes = view.getByRole('button', { name: 'Shapes' });
+  fireEvent.click(shapes);
+  expect(shapes.getAttribute('aria-expanded')).toBe('false');
+  view.rerender(<DrawingExplorer {...props} snapshot={snapshot()} />);
+  expect(shapes.getAttribute('aria-expanded')).toBe('false');
 });

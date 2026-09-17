@@ -27,6 +27,7 @@ import type {
 export * from './inputPositionMap';
 export {
   ResidentEngineWorkerClient,
+  ResidentWorkerFailureError,
   canUseResidentEngineWorker,
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,
@@ -197,6 +198,9 @@ export interface YrsParagraphAttrs {
   listMarkerHidden?: boolean | null;
   listMarkerFontFamily?: string | null;
   listMarkerFontSize?: number | null;
+  listMarkerBold?: boolean | null;
+  listMarkerItalic?: boolean | null;
+  listMarkerColor?: import('../types/colors').ColorValue | null;
   listMarkerSuffix?: 'tab' | 'space' | 'nothing' | null;
   listLevelNumFmts?: readonly string[] | null;
   listAbstractNumId?: number | null;
@@ -347,6 +351,9 @@ export type YrsRawOp =
 
 /** Host context for {@link YrsSession.yrsBlocksForStory} (theme + list numbering). */
 export interface YrsRenderEnv {
+  tocStyleIds?: string[];
+  paragraphSpacingLinePx?: number;
+  defaultParagraphStyleId?: string;
   /** Theme color name → hex (`accent1` → `4472C4`), for theme-color resolution. */
   themeColors?: Record<string, string>;
   /** The document default tab stop in twips. */
@@ -355,6 +362,8 @@ export interface YrsRenderEnv {
   pageContentHeight?: number | null;
   /** yrs revision/paragraph id → dense numeric layout id (list markers, revisions). */
   numericIds?: Record<string, number>;
+  /** Include hidden text in visible layout without changing the document. */
+  showHiddenText?: boolean;
 }
 
 /** Receipt of {@link YrsSession.addComment}. */

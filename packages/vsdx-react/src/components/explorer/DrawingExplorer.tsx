@@ -116,6 +116,7 @@ function pageIdsKey(snapshot: DiagramSnapshot | null): string {
 export function DrawingExplorer({ snapshot, activePageIndex, selection, onSelectPage, onSelectShape, collapsed, onToggleCollapsed, t, className }: DrawingExplorerProps) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set(['document', 'pages']));
   const expandedPageRef = useRef<string | null>(null);
+  const revealedRef = useRef<string | null>(null);
   const documentKey = pageIdsKey(snapshot);
 
   useLayoutEffect(() => {
@@ -133,11 +134,14 @@ export function DrawingExplorer({ snapshot, activePageIndex, selection, onSelect
   }, [activePageIndex, documentKey, snapshot]);
 
   useEffect(() => {
-    if (!snapshot || !selection) return;
+    if (!snapshot || !selection) { revealedRef.current = null; return; }
+    const revealKey = `${selection.pageId} ${selection.shapeId}`;
+    if (revealedRef.current === revealKey) return;
     const page = snapshot.pages.find((entry) => entry.id === selection.pageId);
     if (!page) return;
     const path = findShapePath(page.shapes, selection.shapeId);
     if (!path) return;
+    revealedRef.current = revealKey;
     setExpanded((previous) => {
       const next = new Set(previous);
       next.add('document');
@@ -297,11 +301,13 @@ function ShapeNode({ page, pageIndex, shape, depth, level, expanded, selection, 
       </div>
     );
   }
-  const { shapeCells, sections } = groupShapeSections(shape);
-  const visibleSections: ExplorerSection[] = shapeCells.length > 0
-    ? [{ key: `${nodeKey}:shape`, name: t('explorer.shapeSection'), sectionIndex: null, cells: shapeCells }, ...sections]
-    : sections;
-  const expandable = shape.children.length > 0 || visibleSections.length > 0;
+  const expandable = shape.children.length > 0 || shape.cells.length > 0;
+  const visibleSections: ExplorerSection[] = [];
+  if (isOpen) {
+    const { shapeCells, sections } = groupShapeSections(shape);
+    if (shapeCells.length > 0) visibleSections.push({ key: `${nodeKey}:shape`, name: t('explorer.shapeSection'), sectionIndex: null, cells: shapeCells });
+    visibleSections.push(...sections);
+  }
   return (
     <TreeNode nodeKey={nodeKey} level={level} label={shapeLabel(shape, t)} selected={selected} expandable={expandable} expanded={isOpen} onToggle={() => onToggle(nodeKey)} onActivate={() => onSelectShape(pageIndex, page.id, shape.id)}>
       {isOpen && shape.children.map((child) => (

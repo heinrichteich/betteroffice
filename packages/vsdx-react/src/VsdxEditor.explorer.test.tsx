@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { initWasm } from '@betteroffice/vsdx';
+import { en } from '@betteroffice/vsdx-i18n';
 import type { DiagramHandle } from '@betteroffice/vsdx';
 import { VsdxEditor } from './VsdxEditor';
 
@@ -31,6 +32,26 @@ test('the explorer mirrors the engine snapshot and shares the canvas selection',
     expect(canvases[0].getAttribute('aria-label')).toContain('page:1:shape:1');
     expect(node.closest('[role="treeitem"]')?.getAttribute('aria-selected')).toBe('true');
     expect(view.getByRole('button', { name: 'Geometry' })).toBeDefined();
+    cleanup();
+  } finally {
+    canvasPrototype.getContext = getContext;
+  }
+});
+
+test('the explorer and the shape data panel stay side by side and share one selection', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  try {
+    const fixture = await readFile(resolve(root, 'crates/vsdx-parse/tests/fixtures/foundation.vsdx'));
+    let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+    const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
+    await waitFor(() => expect(ready).toBeDefined());
+    expect(view.getByText(en.shapeData.title)).toBeDefined();
+    expect(view.getByText(en.layersPanel.title)).toBeDefined();
+    expect(view.getByText(en.shapeData.noSelection)).toBeDefined();
+    await act(async () => { fireEvent.click(view.getByRole('button', { name: 'Shape 1' })); });
+    expect(view.queryByText(en.shapeData.noSelection)).toBeNull();
     cleanup();
   } finally {
     canvasPrototype.getContext = getContext;

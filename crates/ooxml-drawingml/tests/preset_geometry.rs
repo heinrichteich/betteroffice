@@ -54,6 +54,7 @@ const PRESETS: &[&str] = &[
     "upDownArrow",
     "chevron",
     "homePlate",
+    "plus",
     "flowChartProcess",
     "flowChartAlternateProcess",
     "flowChartPredefinedProcess",

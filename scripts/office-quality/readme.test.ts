@@ -36,6 +36,7 @@ test('generates every format and never reuses scores for a different release or 
   expect(section).toContain('| PPTX | [0.0.4]');
   expect(section).toContain('| XLSX | [0.1.0]');
   expect(section).toContain('| — |');
+  expect(section).toMatch(/\| DOCX .*\| — \| 0\/1 .*\| — \| 0\/1 \|$/m);
 });
 
 test('replaces and moves the generated block without touching other sections', () => {
@@ -74,6 +75,83 @@ test('keeps each format tied to its own published version and comparison', () =>
     });
   }
   const section = renderSection(input);
-  expect(section).toMatch(/\| PPTX .*\| 0\.9100 .*\| 0\.9100 \| 1 \/ 1 \|/);
-  expect(section).toMatch(/\| XLSX .*\| 0\.8700 .*\| 0\.8700 \| 1 \/ 1 \|/);
+  expect(section).toMatch(
+    /\| PPTX .*\| 0\.9100 \| 1\/1 .*\| 0\.9100 \| 1\/1 \|$/m
+  );
+  expect(section).toMatch(
+    /\| XLSX .*\| 0\.8700 \| 1\/1 .*\| 0\.8700 \| 1\/1 \|$/m
+  );
+});
+
+test('all failures show no score and cannot carry an invented zero', () => {
+  const input = report();
+  const failure = {
+    channel: 'published',
+    version: '0.1.0',
+    status: 'failed',
+    stage: 'capture',
+    error: 'Could not render',
+  };
+  const failedReport = {
+    ...input,
+    samples: [{ ...input.samples[0], comparisons: [failure] }],
+  };
+  const section = renderSection(failedReport);
+  expect(section).not.toContain('0.0000');
+  expect(section).toMatch(/\| DOCX .*\| — \| 0\/1 .*\| — \| 0\/1 \|$/m);
+  expect(section).not.toContain('Could not render');
+  expect(() =>
+    renderSection({
+      ...failedReport,
+      samples: [
+        { ...input.samples[0], comparisons: [{ ...failure, penalized_ssim: 0 }] },
+      ],
+    })
+  ).toThrow('Invalid failed comparison');
+});
+
+test('omits failure diagnostics from the README', () => {
+  const input = report();
+  const failedReport = {
+    ...input,
+    samples: [
+      {
+        ...input.samples[0],
+        comparisons: [
+          {
+            channel: 'published',
+            version: '0.1.0',
+            status: 'failed',
+            stage: 'capture',
+            error:
+              '<script>alert(1)</script>|[link](https://example.com/private)\nextra row',
+          },
+        ],
+      },
+    ],
+  };
+  const section = renderSection(failedReport);
+  expect(section).not.toContain('<script>');
+  expect(section).not.toContain('https://example.com');
+  expect(section).not.toContain('extra row');
+  expect(section).not.toContain('Failed or missing');
+  expect(section).not.toContain('| Sample | Channel | Stage | Error |');
+});
+
+test('duplicate and invalid successful comparisons cannot be published', () => {
+  const input = report();
+  input.samples[0].comparisons.push(input.samples[0].comparisons[0]);
+  expect(() => renderSection(input)).toThrow('Duplicate');
+  for (const changed of [
+    { source_verified: false },
+    { actual: { status: 'error', sha256: 'source' } },
+    { reference: { status: 'ok' }, actual: { status: 'ok' } },
+    { penalized_ssim: NaN },
+    { penalized_ssim: 2 },
+    { resized: true },
+  ]) {
+    const invalid = report();
+    Object.assign(invalid.samples[0].comparisons[0], changed);
+    expect(() => renderSection(invalid)).toThrow('mismatched');
+  }
 });

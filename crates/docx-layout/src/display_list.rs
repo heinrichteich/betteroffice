@@ -361,6 +361,8 @@ pub struct DocAttrs {
     pub image_flip_h: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "flipV")]
     pub image_flip_v: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "shapeType")]
+    pub image_shape_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_frame: Option<ContentFrame>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -392,6 +394,8 @@ pub struct DocAttrs {
     pub modern_effects: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table: Option<TableMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_shape_atom: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -1668,6 +1672,8 @@ struct ImageRunIn {
     #[serde(default)]
     alt: Option<String>,
     #[serde(default)]
+    shape_type: Option<String>,
+    #[serde(default)]
     transform: Option<String>,
     #[serde(default)]
     wrap_type: Option<String>,
@@ -1709,6 +1715,8 @@ struct ImageRunIn {
     #[serde(default)]
     hyperlink: Option<HyperlinkIn>,
     #[serde(default)]
+    inline_shape: Option<Value>,
+    #[serde(default)]
     is_insertion: Option<bool>,
     #[serde(default)]
     is_deletion: Option<bool>,
@@ -1748,6 +1756,8 @@ struct AnchorPosIn {
     horizontal: Option<AnchorAxisIn>,
     #[serde(default)]
     vertical: Option<AnchorAxisIn>,
+    #[serde(default)]
+    relative_height: Option<u64>,
 }
 
 /// one axis of an anchor: an OOXML `relativeFrom` band plus either an `align`
@@ -1798,6 +1808,8 @@ struct FieldRunIn {
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ParaAttrsIn {
+    #[serde(default)]
+    horizontal_rules: Vec<crate::types::HorizontalRule>,
     #[serde(default)]
     alignment: Option<String>,
     /// Resolved paragraph spacing.
@@ -1919,6 +1931,10 @@ pub(crate) struct TableBlockIn {
     #[serde(default)]
     indent: Option<f64>,
     #[serde(default)]
+    compatibility_mode: Option<u8>,
+    #[serde(default)]
+    cell_margin_left: Option<f64>,
+    #[serde(default)]
     caption: Option<String>,
     #[serde(default)]
     description: Option<String>,
@@ -1928,36 +1944,7 @@ pub(crate) struct TableBlockIn {
     pub(crate) floating: Option<FloatingTablePositionIn>,
 }
 
-#[derive(Deserialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct FloatingTablePositionIn {
-    #[serde(default)]
-    pub(crate) horz_anchor: Option<String>,
-    #[serde(default)]
-    pub(crate) tblp_x: Option<f64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) tblp_x_spec: Option<String>,
-    #[serde(default)]
-    pub(crate) vert_anchor: Option<String>,
-    #[serde(default)]
-    pub(crate) tblp_y: Option<f64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) tblp_y_spec: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) top_from_text: Option<f64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) right_from_text: Option<f64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) bottom_from_text: Option<f64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) left_from_text: Option<f64>,
-}
+pub(crate) type FloatingTablePositionIn = crate::types::FloatingTablePosition;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2044,6 +2031,8 @@ pub(crate) struct ImageBlockIn {
     /// Alternative text from `wp:docPr` `descr`.
     #[serde(default)]
     pub(crate) alt: Option<String>,
+    #[serde(default)]
+    pub(crate) shape_type: Option<String>,
     #[serde(default)]
     pub(crate) transform: Option<String>,
     #[serde(default)]
@@ -2732,6 +2721,8 @@ pub(crate) struct PageIn {
     section_page_number: Option<u64>,
     #[serde(default)]
     pub(crate) header_footer_refs: Option<PageHeaderFooterRefsIn>,
+    #[serde(default)]
+    pub(crate) parity_filler: Option<bool>,
     #[serde(default)]
     background: Option<String>,
     #[serde(default)]
@@ -3678,6 +3669,7 @@ fn stamp_image_run_attrs(attrs: &mut DocAttrs, run: &ImageRunIn, x: f64, y: f64)
         || transform_has_flip(run.transform.as_deref(), 'y'))
     .then_some(true);
     attrs.content_frame = content_frame(x, y, run.width, run.height, run.rotation_bounds.as_ref());
+    attrs.image_shape_type = run.shape_type.clone();
     attrs.effects = run.effects.clone();
     attrs.border = run.outline.clone();
     if run.is_insertion == Some(true) || run.is_deletion == Some(true) {
@@ -3714,6 +3706,7 @@ fn stamp_image_block_attrs(attrs: &mut DocAttrs, block: &ImageBlockIn, x: f64, y
         block.height,
         block.rotation_bounds.as_ref(),
     );
+    attrs.image_shape_type = block.shape_type.clone();
     attrs.effects = block.effects.clone();
     attrs.border = block.outline.clone();
 }
@@ -4060,8 +4053,10 @@ pub(crate) type FieldWidthMap = HashMap<i64, FieldWidthEntry>;
 /// to the header/footer variant being composed.
 pub(crate) struct RenderCtx<'a> {
     pub(crate) page_number: u64,
+    /// Formatted PAGE label; `None` falls back to `page_number`.
+    pub(crate) page_label: Option<String>,
     /// Zero-based key into per-page field-width arrays.
-    /// Distinct from `page_number`, which restarts per section.
+    /// Distinct from `page_label`, which restarts per section.
     pub(crate) page_index: usize,
     pub(crate) total_pages: u64,
     /// Shaping fonts for glyph-run emission.
@@ -4685,6 +4680,7 @@ fn recompose_hf_region(
         .collect();
     let ctx = RenderCtx {
         page_number: page.number.unwrap_or(page_index as u64 + 1),
+        page_label: page.page_label.clone(),
         page_index,
         total_pages,
         shape,
@@ -4913,6 +4909,7 @@ fn build_display_list_selected(
         }
         let ctx = RenderCtx {
             page_number: page.number.unwrap_or(page_index as u64 + 1),
+            page_label: page.page_label.clone(),
             page_index,
             total_pages,
             shape: shape_fonts.as_ref(),
@@ -4946,13 +4943,56 @@ fn build_display_list_selected(
             content_height: page.size.h - page.margins.top - page.margins.bottom,
         };
 
-        // Behind-document floating images paint before body content.
-        for frag in &page.fragments {
-            if let FragmentIn::Paragraph(pf) = frag
-                && let Some(mb) = by_id.get(&block_key(&pf.block_id))
-                && let BlockIn::Paragraph(block) = &mb.block
-            {
-                emit_paragraph_floating_images(&mut prims, block, pf.y, &float_geom, true);
+        let mut behind_objects = Vec::new();
+        for fragment in &page.fragments {
+            match fragment {
+                FragmentIn::Paragraph(fragment) => {
+                    let Some(measured) = by_id.get(&block_key(&fragment.block_id)) else {
+                        continue;
+                    };
+                    let BlockIn::Paragraph(block) = &measured.block else {
+                        continue;
+                    };
+                    for run in &block.runs {
+                        if let RunIn::Image(image) = run
+                            && image.wrap_type.as_deref() == Some("behind")
+                            && is_floating_image_run(image)
+                        {
+                            behind_objects.push(BehindObject::Image {
+                                block,
+                                image,
+                                fragment_y: fragment.y,
+                            });
+                        }
+                    }
+                }
+                FragmentIn::Shape(fragment) => {
+                    let Some(measured) = by_id.get(&block_key(&fragment.block_id)) else {
+                        continue;
+                    };
+                    if let BlockIn::Shape(block) = &measured.block
+                        && block.position.is_some()
+                        && block.behind_doc.unwrap_or(false)
+                    {
+                        behind_objects.push(BehindObject::Shape { fragment, block });
+                    }
+                }
+                _ => {}
+            }
+        }
+        behind_objects.sort_by_key(BehindObject::relative_height);
+        for object in behind_objects {
+            match object {
+                BehindObject::Image {
+                    block,
+                    image,
+                    fragment_y,
+                } => {
+                    emit_floating_image(&mut prims, block, image, fragment_y, &float_geom);
+                }
+                BehindObject::Shape { fragment, block } => {
+                    emit_shape_fragment(&mut prims, fragment, block, &ctx);
+                }
             }
         }
 
@@ -5065,7 +5105,9 @@ fn build_display_list_selected(
                     let BlockIn::Shape(block) = &mb.block else {
                         continue;
                     };
-                    emit_shape_fragment(&mut prims, sf, block, &ctx);
+                    if block.position.is_none() || !block.behind_doc.unwrap_or(false) {
+                        emit_shape_fragment(&mut prims, sf, block, &ctx);
+                    }
                 }
                 FragmentIn::Chart(cf) => {
                     prev_para_borders = None;
@@ -5849,7 +5891,20 @@ fn emit_line(
                     }
                 }
                 RunIn::Text(text) => {
-                    pool_estimate += fallback_text_width(&seg.text, &text.fmt, default_font_pt)
+                    if let Some(rule) = attrs.and_then(|attrs| {
+                        attrs
+                            .horizontal_rules
+                            .iter()
+                            .find(|rule| seg.pm_start == Some(rule.pm_start as i64))
+                    }) {
+                        if text.fmt.hidden != Some(true) {
+                            fixed_width += rule.advance_width(
+                                (geom.frag_width - geom.indent_left - geom.indent_right).max(0.0),
+                            );
+                        }
+                    } else {
+                        pool_estimate += fallback_text_width(&seg.text, &text.fmt, default_font_pt);
+                    }
                 }
                 RunIn::Field(f) => match ctx.field_width(seg.pm_start) {
                     Some((fallback, resolved)) => {
@@ -6020,10 +6075,29 @@ fn emit_line(
                 // editing view paints them dimmed rather than suppressing them, so
                 // the display list keeps their primitives for hit-testing too
                 RunIn::Text(t) => {
-                    let w = width_per_estimate
-                        * fallback_text_width(&seg.text, &t.fmt, default_font_pt)
-                        + word_space_extra
-                            * seg.text.chars().filter(|&ch| ch == ' ').count() as f64;
+                    let w = attrs
+                        .and_then(|attrs| {
+                            attrs
+                                .horizontal_rules
+                                .iter()
+                                .find(|rule| seg.pm_start == Some(rule.pm_start as i64))
+                        })
+                        .map(|rule| {
+                            if t.fmt.hidden == Some(true) {
+                                0.0
+                            } else {
+                                rule.advance_width(
+                                    (geom.frag_width - geom.indent_left - geom.indent_right)
+                                        .max(0.0),
+                                )
+                            }
+                        })
+                        .unwrap_or_else(|| {
+                            width_per_estimate
+                                * fallback_text_width(&seg.text, &t.fmt, default_font_pt)
+                                + word_space_extra
+                                    * seg.text.chars().filter(|&ch| ch == ' ').count() as f64
+                        });
                     push_bidi_text_items(
                         &mut logical_items,
                         &seg.text,
@@ -6111,19 +6185,50 @@ fn emit_line(
         };
         match item {
             LinePaintItem::Text(item) => {
-                let paint_width = item.width
-                    + if item.exact_advance && item.text == " " {
-                        word_space_extra
-                    } else {
-                        0.0
-                    };
+                let rule = attrs.and_then(|attrs| {
+                    attrs.horizontal_rules.iter().find(|rule| {
+                        item.pm_start == Some(rule.pm_start as i64)
+                            && item.pm_end == Some(rule.pm_end as i64)
+                    })
+                });
+                let mut text_x = pen_x;
+                if let Some(rule) = rule.filter(|_| item.fmt.hidden != Some(true)) {
+                    let standalone = segments.iter().all(|segment| {
+                        segment.pm_start == Some(rule.pm_start as i64)
+                            || matches!(segment.run, RunIn::Text(text) if text.fmt.hidden == Some(true)
+                                || segment.text.is_empty())
+                    });
+                    let available_width =
+                        (geom.frag_width - geom.indent_left - geom.indent_right).max(0.0);
+                    if standalone {
+                        let remaining = available_width - rule.rendered_width(available_width);
+                        text_x = geom.frag_x
+                            + geom.indent_left
+                            + match rule.alignment.as_str() {
+                                "left" => 0.0,
+                                "right" => remaining,
+                                _ => remaining / 2.0,
+                            };
+                    }
+                    emit_horizontal_rule(prims, rule, block_ref, text_x, baseline, available_width);
+                }
+                let paint_width = if rule.is_some() && item.fmt.hidden == Some(true) {
+                    0.0
+                } else {
+                    item.width
+                        + if item.exact_advance && item.text == " " {
+                            word_space_extra
+                        } else {
+                            0.0
+                        }
+                };
                 emit_text_segment(
                     prims,
                     &item.text,
                     item.fmt,
                     item.pm_start,
                     item.pm_end,
-                    pen_x,
+                    text_x,
                     baseline,
                     paint_width,
                     word_space_px.clone(),
@@ -6142,7 +6247,7 @@ fn emit_line(
                 if item.pm_start.is_some() {
                     emitted_positioned_text = true;
                 }
-                pen_x += paint_width;
+                pen_x = text_x + paint_width;
             }
             LinePaintItem::Tab {
                 run,
@@ -6222,6 +6327,60 @@ fn emit_line(
                 } else {
                     baseline - layout_height
                 };
+                if let Some(inline_value) = imr.inline_shape.as_ref()
+                    && let Ok(shape_block) =
+                        serde_json::from_value::<ShapeBlockIn>(inline_value.clone())
+                {
+                    let stamp_from = prims.len();
+                    let fragment = ShapeFragmentIn {
+                        block_id: shape_block.id.clone(),
+                        x: pen_x,
+                        y,
+                        width: layout_width,
+                        height: layout_height,
+                        doc_start: *pm_start,
+                        doc_end: *pm_end,
+                        pm_start: *pm_start,
+                        pm_end: *pm_end,
+                        is_anchored: None,
+                        z_index: None,
+                    };
+                    emit_shape_fragment(prims, &fragment, &shape_block, ctx);
+                    for primitive in &mut prims[stamp_from..] {
+                        if let Some(attrs) = doc_attrs_mut(primitive) {
+                            attrs.inline_shape_atom = Some(true);
+                            stamp_hyperlink_attrs(
+                                attrs,
+                                imr.hyperlink.as_ref(),
+                                imr.hlink_href.as_deref(),
+                            );
+                            attrs.logical_order = attrs.logical_order.or(*logical_order);
+                            attrs.bidi_level =
+                                attrs.bidi_level.or_else(|| logical_order.map(|_| *level));
+                            if imr.is_insertion == Some(true) || imr.is_deletion == Some(true) {
+                                attrs.revision = Some(Revision {
+                                    author: imr.change_author.clone().unwrap_or_default(),
+                                    date: imr.change_date.clone().unwrap_or_default(),
+                                    revision_id: imr
+                                        .change_revision_id
+                                        .map(|id| id.to_string())
+                                        .unwrap_or_default(),
+                                    kind: if imr.is_insertion == Some(true) {
+                                        RevisionKind::Ins
+                                    } else {
+                                        RevisionKind::Del
+                                    },
+                                });
+                            }
+                        }
+                    }
+                    if imr.display_mode.as_deref() != Some("block")
+                        && imr.wrap_type.as_deref() != Some("topAndBottom")
+                    {
+                        pen_x += layout_width;
+                    }
+                    continue;
+                }
                 let rot = imr
                     .rotation_deg
                     .unwrap_or_else(|| rotation_degrees(imr.transform.as_deref()));
@@ -6994,7 +7153,9 @@ fn try_emit_glyph_runs(
 /// DATE/TIME deliberately resolve to the stored fallback for determinism)
 fn field_text(f: &FieldRunIn, ctx: &RenderCtx<'_>) -> String {
     match f.field_type.as_deref() {
-        Some("PAGE") => ctx.page_number.to_string(),
+        Some("PAGE") => {
+            crate::regions::page_field_text(ctx.page_label.as_deref(), ctx.page_number).into_owned()
+        }
         Some("NUMPAGES") => ctx.total_pages.to_string(),
         _ => f.fallback.clone().unwrap_or_default(),
     }
@@ -7230,6 +7391,51 @@ fn page_border_primitive(
         bottom: page_border_side(pb.bottom.as_ref()),
         left: page_border_side(pb.left.as_ref()),
     })
+}
+
+fn emit_horizontal_rule(
+    prims: &mut Vec<Primitive>,
+    rule: &crate::types::HorizontalRule,
+    block_ref: &BlockRef,
+    x: f64,
+    baseline: f64,
+    available_width: f64,
+) {
+    let width = rule.rendered_width(available_width);
+    let height = (rule.height - 8.0 / 15.0).max(0.0);
+    let x = x + if rule.no_shade { 0.0 } else { 1.0 };
+    let y = baseline - if rule.no_shade { height } else { rule.height };
+    let mut attrs = block_ref.attrs();
+    attrs.doc_start = Some(rule.pm_start as i64);
+    attrs.doc_end = Some(rule.pm_end as i64);
+    if rule.no_shade {
+        prims.push(Primitive::Rect(RectPrimitive {
+            x: px(x),
+            y: px(y),
+            w: px(width),
+            h: px(height),
+            fill: rule.color.clone(),
+            attrs,
+        }));
+    } else {
+        for (x1, y1, x2, y2) in [
+            (x, y, x + width, y),
+            (x, y + height, x + width, y + height),
+            (x, y, x, y + height),
+            (x + width, y, x + width, y + height),
+        ] {
+            prims.push(Primitive::Line(LinePrimitive {
+                x1: px(x1),
+                y1: px(y1),
+                x2: px(x2),
+                y2: px(y2),
+                stroke_width: px(1.0),
+                color: "#000000".to_owned(),
+                attrs: attrs.clone(),
+                ..LinePrimitive::contract_defaults()
+            }));
+        }
+    }
 }
 
 /// paragraph borders as line primitives (role 'border'): top only when the
@@ -7474,6 +7680,28 @@ fn resolve_anchored_position(
     (x, y)
 }
 
+enum BehindObject<'a> {
+    Image {
+        block: &'a ParagraphBlockIn,
+        image: &'a ImageRunIn,
+        fragment_y: f64,
+    },
+    Shape {
+        fragment: &'a ShapeFragmentIn,
+        block: &'a ShapeBlockIn,
+    },
+}
+
+impl BehindObject<'_> {
+    fn relative_height(&self) -> u64 {
+        match self {
+            Self::Image { image, .. } => image.position.as_ref().and_then(|p| p.relative_height),
+            Self::Shape { block, .. } => block.relative_height,
+        }
+        .unwrap_or(0)
+    }
+}
+
 /// Emits a paragraph's floating image runs at their resolved page rectangles.
 /// `want_behind` selects the pass: behind-document floats paint before body
 /// content, the rest after.
@@ -7484,9 +7712,6 @@ fn emit_paragraph_floating_images(
     geom: &PageFloatGeom,
     want_behind: bool,
 ) {
-    let block_ref = BlockRef::of(&block.id);
-    // Float anchors resolve against the content area, not the page.
-    let fragment_content_y = frag_y - geom.margin_top;
     for run in &block.runs {
         let RunIn::Image(imr) = run else { continue };
         if !is_floating_image_run(imr) {
@@ -7496,36 +7721,46 @@ fn emit_paragraph_floating_images(
         if is_behind != want_behind {
             continue;
         }
-        let (x, y) = resolve_anchored_position(imr, fragment_content_y, geom);
-        // Content-relative back to page-local.
-        let page_x = geom.margin_left + x;
-        let page_y = geom.margin_top + y;
-        let rot = imr
-            .rotation_deg
-            .unwrap_or_else(|| rotation_degrees(imr.transform.as_deref()));
-        let layout_width = image_layout_width(imr);
-        let layout_height = image_layout_height(imr);
-        let mut attrs = block_ref.attrs();
-        attrs.doc_start = imr.pm_start;
-        attrs.doc_end = imr.pm_end;
-        stamp_image_run_attrs(&mut attrs, imr, page_x, page_y);
-        attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
-        attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
-        prims.push(Primitive::Image(ImagePrimitive {
-            rel_id: imr.src.clone(),
-            x: px(page_x),
-            y: px(page_y),
-            w: px(layout_width),
-            h: px(layout_height),
-            rotation_deg: if rot != 0.0 { Some(px(rot)) } else { None },
-            opacity: imr.opacity.map(px),
-            filter: None,
-            decorative: imr.decorative.unwrap_or(false),
-            crop: crop_of(imr),
-            alt_text: capped_alt_text(imr.alt.as_deref()),
-            attrs,
-        }));
+        emit_floating_image(prims, block, imr, frag_y, geom);
     }
+}
+
+fn emit_floating_image(
+    prims: &mut Vec<Primitive>,
+    block: &ParagraphBlockIn,
+    imr: &ImageRunIn,
+    frag_y: f64,
+    geom: &PageFloatGeom,
+) {
+    let block_ref = BlockRef::of(&block.id);
+    let (x, y) = resolve_anchored_position(imr, frag_y - geom.margin_top, geom);
+    let page_x = geom.margin_left + x;
+    let page_y = geom.margin_top + y;
+    let rot = imr
+        .rotation_deg
+        .unwrap_or_else(|| rotation_degrees(imr.transform.as_deref()));
+    let layout_width = image_layout_width(imr);
+    let layout_height = image_layout_height(imr);
+    let mut attrs = block_ref.attrs();
+    attrs.doc_start = imr.pm_start;
+    attrs.doc_end = imr.pm_end;
+    stamp_image_run_attrs(&mut attrs, imr, page_x, page_y);
+    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
+    attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
+    prims.push(Primitive::Image(ImagePrimitive {
+        rel_id: imr.src.clone(),
+        x: px(page_x),
+        y: px(page_y),
+        w: px(layout_width),
+        h: px(layout_height),
+        rotation_deg: if rot != 0.0 { Some(px(rot)) } else { None },
+        opacity: imr.opacity.map(px),
+        filter: None,
+        decorative: imr.decorative.unwrap_or(false),
+        crop: crop_of(imr),
+        alt_text: capped_alt_text(imr.alt.as_deref()),
+        attrs,
+    }));
 }
 
 /// paint one DrawingML shape fragment: a page-placed path primitive carrying
@@ -8419,12 +8654,15 @@ pub(crate) fn table_total_width(measure: &TableExtentIn) -> f64 {
 }
 
 fn nested_table_x_offset(block: &TableBlockIn, measure: &TableExtentIn, content_width: f64) -> f64 {
-    let table_width = table_total_width(measure);
-    match block.justification.as_deref() {
-        Some("center") => ((content_width - table_width) / 2.0).max(0.0),
-        Some("right") => (content_width - table_width).max(0.0),
-        _ => block.indent.unwrap_or(0.0).max(0.0),
-    }
+    crate::cell_layout::nested_table_horizontal_offset(
+        block.floating.as_ref(),
+        block.justification.as_deref(),
+        block.indent,
+        block.compatibility_mode,
+        block.cell_margin_left,
+        table_total_width(measure),
+        content_width,
+    )
 }
 
 fn clip_number(value: &Option<Number>) -> f64 {
@@ -8667,6 +8905,11 @@ pub(crate) fn emit_table_fragment(
         let cell = &block.rows[p.g.row_index].cells[p.g.cell_index];
         let cx = frag.x + p.g.x;
         let cy = frag.y + p.cell_y;
+        let clip_top_y = if p.g.row_index < header_row_count {
+            clip_top_y
+        } else {
+            clip_top_y + header_height
+        };
         // The outer left border insets cell content by its width.
         let is_first_col = if bidi {
             p.g.column_index + p.g.col_span >= col_count
@@ -9052,6 +9295,7 @@ fn emit_cell_content(
     let mut block_tops: Vec<f64> = Vec::with_capacity(cell.blocks.len());
     let mut stack_cursor = 0.0_f64;
     let mut prev_after = 0.0_f64;
+    let mut float_bottom = 0.0_f64;
     for (i, blk) in cell.blocks.iter().enumerate() {
         match (blk, cell_measure.blocks.get(i)) {
             (BlockIn::Paragraph(pb), Some(MeasureIn::Paragraph(pm))) => {
@@ -9067,10 +9311,17 @@ fn emit_cell_content(
                     .sum::<f64>();
                 prev_after = after;
             }
-            (BlockIn::Table(_), Some(MeasureIn::Table(tm))) => {
+            (BlockIn::Table(table), Some(MeasureIn::Table(tm))) => {
                 stack_cursor += prev_after;
-                block_tops.push(stack_cursor);
-                stack_cursor += tm.total_height;
+                if let Some(offset) =
+                    crate::cell_layout::nested_table_float_offset(table.floating.as_ref())
+                {
+                    block_tops.push(stack_cursor + offset);
+                    float_bottom = float_bottom.max(stack_cursor + offset + tm.total_height);
+                } else {
+                    block_tops.push(stack_cursor);
+                    stack_cursor += tm.total_height;
+                }
                 prev_after = 0.0;
             }
             (BlockIn::Image(_), Some(MeasureIn::Image(image))) => {
@@ -9096,7 +9347,7 @@ fn emit_cell_content(
         }
     }
     // a trailing spacing.after becomes the content box's padding-bottom
-    let content_height = stack_cursor + prev_after;
+    let content_height = (stack_cursor + prev_after).max(float_bottom);
 
     // Content that fills or overflows the cell remains top-aligned.
     let v_offset = crate::cell_layout::cell_vertical_offset(
@@ -10520,6 +10771,76 @@ mod tests {
     }
 
     #[test]
+    fn parity_filler_suppresses_header_footer_with_page_fields() {
+        let band = |id: &str, label: &str| {
+            json!({
+                "block": {"kind": "paragraph", "id": id, "runs": [
+                    {"kind": "text", "text": label},
+                    {"kind": "field", "fieldType": "PAGE", "fallback": "0"}
+                ]},
+                "measure": {"kind": "paragraph", "totalHeight": 16, "lines": [
+                    {"headRun": 0, "headChar": 0, "tailRun": 1, "tailChar": 1,
+                        "width": 60, "ascent": 11, "descent": 3, "lineHeight": 16}
+                ]}
+            })
+        };
+        let page = |number: u64, filler: bool| {
+            let mut page = json!({
+                "number": number,
+                "size": {"w": 300, "h": 500},
+                "margins": {"top": 80, "right": 20, "bottom": 80, "left": 20,
+                    "header": 40, "footer": 40},
+                "fragments": []
+            });
+            if filler {
+                page["parityFiller"] = json!(true);
+            }
+            page
+        };
+        let input = json!({
+            "measured": [], "options": {},
+            "headersFooters": {"variants": [
+                {"rId": "hdr", "kind": "header", "type": "default",
+                    "height": 32, "flowHeight": 32, "measured": [band("hf-hdr", "HDR ")]},
+                {"rId": "ftr", "kind": "footer", "type": "default",
+                    "height": 32, "flowHeight": 32, "measured": [band("hf-ftr", "FTR ")]}
+            ]},
+            "layout": {"pages": [page(1, false), page(2, true), page(3, false), page(4, false)]}
+        });
+        let output: Value =
+            serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap()).unwrap();
+        let pages = output["pages"].as_array().unwrap();
+        assert_eq!(pages.len(), 4);
+        for (index, expected) in [(0, "1"), (2, "3"), (3, "4")] {
+            let header = pages[index]["header"]["primitives"]
+                .as_array()
+                .unwrap_or_else(|| panic!("page {index} keeps its header"));
+            assert!(
+                header.iter().any(|p| p["text"] == "HDR "),
+                "page {index} header text"
+            );
+            let field = header
+                .iter()
+                .find(|p| p["text"] == expected)
+                .unwrap_or_else(|| panic!("page {index} header PAGE field"));
+            assert_eq!(field["field"]["category"], "PAGE");
+            let footer = pages[index]["footer"]["primitives"]
+                .as_array()
+                .unwrap_or_else(|| panic!("page {index} keeps its footer"));
+            assert!(
+                footer.iter().any(|p| p["text"] == "FTR "),
+                "page {index} footer text"
+            );
+            assert!(
+                footer.iter().any(|p| p["text"] == expected),
+                "page {index} footer PAGE"
+            );
+        }
+        assert!(pages[1]["header"].is_null(), "filler suppresses header");
+        assert!(pages[1]["footer"].is_null(), "filler suppresses footer");
+    }
+
+    #[test]
     fn page_regions_emit_columns_notes_and_hf_floating_content() {
         let paragraph = |id: &str, text: &str| {
             json!({
@@ -11098,5 +11419,119 @@ mod tests {
             ..Default::default()
         };
         assert!(plot_labels_from(None, Some(&series_only)).is_none());
+    }
+
+    #[test]
+    fn inline_shape_paints_native_geometry_children_and_paint() {
+        let inline_shape = json!({
+            "id": "shape:inline-test",
+            "shapeType": "rect",
+            "geometryPath": [
+                {"type": "move", "x": 0.1, "y": 0.2},
+                {"type": "line", "x": 0.9, "y": 0.8},
+                {"type": "close"}
+            ],
+            "fill": {"type": "solid", "color": "#112233"},
+            "stroke": {"color": "#445566", "width": 2.5, "dash": "dash"},
+            "transform": {"rotation": 12.0, "flipH": true},
+            "width": 60.0,
+            "height": 18.0,
+            "children": [{
+                "id": "shape:inline-test:child:0",
+                "shapeType": "ellipse",
+                "geometryPath": [
+                    {"type": "move", "x": 0.0, "y": 0.0},
+                    {"type": "line", "x": 1.0, "y": 1.0}
+                ],
+                "width": 10.0,
+                "height": 8.0,
+                "x": 5.0,
+                "y": 4.0
+            }],
+            "title": "Oval callout",
+            "pmStart": 2,
+            "pmEnd": 3
+        });
+        let input = json!({
+            "contractVersion": 1,
+            "measured": [{
+                "block": {
+                    "kind": "paragraph",
+                    "id": "inline-para",
+                    "runs": [
+                        {"kind": "text", "text": "A", "pmStart": 1, "pmEnd": 2},
+                        {
+                            "kind": "image",
+                            "src": "",
+                            "width": 60.0,
+                            "height": 18.0,
+                            "wrapType": "inline",
+                            "displayMode": "inline",
+                            "cssFloat": "none",
+                            "pmStart": 2,
+                            "pmEnd": 3,
+                            "inlineShape": inline_shape
+                        },
+                        {"kind": "text", "text": "B", "pmStart": 3, "pmEnd": 4}
+                    ],
+                    "pmStart": 0,
+                    "pmEnd": 5
+                },
+                "measure": {
+                    "kind": "paragraph",
+                    "totalHeight": 22,
+                    "lines": [{
+                        "headRun": 0, "headChar": 0, "tailRun": 2, "tailChar": 1,
+                        "width": 120, "ascent": 16, "descent": 6, "lineHeight": 22
+                    }]
+                }
+            }],
+            "options": {},
+            "layout": {"pages": [{"number": 1, "size": {"w": 400, "h": 400},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20},
+                "fragments": [{"kind": "paragraph", "blockId": "inline-para", "x": 20, "y": 20,
+                    "width": 360, "height": 22, "fromLine": 0, "toLine": 1,
+                    "pmStart": 0, "pmEnd": 5}]
+            }]}
+        });
+        let output: Value =
+            serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap()).unwrap();
+        let primitives = output["pages"][0]["primitives"].as_array().unwrap();
+        assert!(
+            !primitives
+                .iter()
+                .any(|primitive| primitive["kind"] == "image" && primitive["relId"] == ""),
+            "no empty placeholder image"
+        );
+        let shapes: Vec<_> = primitives
+            .iter()
+            .filter(|primitive| primitive["kind"] == "shape")
+            .collect();
+        assert_eq!(
+            shapes.len(),
+            2,
+            "parent plus one child, not first-child only"
+        );
+        let parent = shapes
+            .iter()
+            .find(|primitive| primitive["blockKey"] == "shape:inline-test")
+            .expect("parent shape with original id");
+        assert_eq!(parent["fill"], "#112233");
+        assert_eq!(parent["stroke"]["color"], "#445566");
+        assert_eq!(parent["ariaLabel"], "Oval callout");
+        assert_eq!(parent["docStart"], 2);
+        assert_eq!(parent["docEnd"], 3);
+        let path = parent["geometryPath"].as_array().unwrap();
+        assert_eq!(path.len(), 3, "custom path preserved, not preset rect");
+        assert_eq!(path[0]["type"], "move");
+        assert_eq!(path[1]["type"], "line");
+        assert_eq!(path[2]["type"], "close");
+        assert!(parent["transform"]["flipH"] == true);
+        let child = shapes
+            .iter()
+            .find(|primitive| primitive["blockKey"] == "shape:inline-test:child:0")
+            .expect("child shape with original id");
+        assert!(child.get("docStart").is_none());
+        assert!(child.get("docEnd").is_none());
     }
 }

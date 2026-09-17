@@ -17,6 +17,7 @@ import type {
   InlineSdt,
   MathEquation,
   Paragraph,
+  ParagraphFormatting,
   ParagraphContent,
   Run,
   RunContent,
@@ -34,6 +35,8 @@ import type {
 } from '../types/document';
 import { ensureHexPrefix, resolveColorToHex } from '../utils/colorResolver';
 import { mergeTextFormatting } from '../utils/textFormattingMerge';
+import { tableCellParagraphFormatting, tableColumnCount } from './tableParagraphFormatting';
+import type { Style } from '../types/styles';
 import type { YrsRawOp, YrsSession } from './index';
 import {
   blockSdtAttrsToPayload,
@@ -92,9 +95,11 @@ interface StoryOptions {
   appendBodyTail: boolean;
   seedComments: boolean;
   extraRunFormatting?: TextFormatting;
+  tableParagraphFormatting?: ParagraphFormatting;
 }
 
 interface ProjectedCell {
+  paragraphFormatting?: ParagraphFormatting;
   attrs: Attrs;
   content: BlockContent[];
   extraRunFormatting?: TextFormatting;
@@ -114,6 +119,12 @@ interface LoweringContext {
   styleResolver: StyleResolver | null;
   theme: Theme | null;
   plans: StoryPlan[];
+  compatibilityMode: number;
+}
+
+function compatibilityModeFromDocument(document: Document): number {
+  const mode = document.package.settings?.compatibilityFlags?.compatibilityMode;
+  return typeof mode === 'number' && Number.isFinite(mode) ? Math.trunc(mode) : 12;
 }
 
 const BOOLEAN_MARKS = new Set([
@@ -315,9 +326,20 @@ function runMarks(
   const runStyleFormatting = run.formatting?.styleId
     ? styleResolver?.getRunStyleOwnProperties(run.formatting.styleId)
     : undefined;
-  return formattingToMarks(
+  const marks = formattingToMarks(
     mergeTextFormatting(mergeTextFormatting(styleFormatting, runStyleFormatting), run.formatting)
   );
+  const styleId = run.formatting?.styleId;
+  const styleName = styleId ? styleResolver?.getStyle(styleId)?.name : undefined;
+  if ([styleId, styleName].some((name) => /^(?:Followed)?Hyperlink$/i.test(name ?? ''))) {
+    for (const [property, name] of [['color', 'textColor'], ['underline', 'underline']] as const) {
+      if (run.formatting?.[property] === undefined && runStyleFormatting?.[property] !== undefined) {
+        const mark = marks.find((mark) => mark.name === name);
+        if (mark) mark.attrs.inheritedHyperlink = true;
+      }
+    }
+  }
+  return marks;
 }
 
 function imagePayload(image: Image): Attrs {
@@ -387,6 +409,7 @@ function imagePayload(image: Image): Attrs {
     distRight: image.wrap.distR != null ? emuToPixels(image.wrap.distR) : null,
     position: image.position
       ? {
+          relativeHeight: image.position.relativeHeight,
           horizontal: image.position.horizontal
             ? {
                 relativeTo: image.position.horizontal.relativeTo,
@@ -412,6 +435,7 @@ function imagePayload(image: Image): Attrs {
     cropRight: image.crop?.right ?? null,
     cropBottom: image.crop?.bottom ?? null,
     cropLeft: image.crop?.left ?? null,
+    shapeType: image.shapeType ?? null,
     opacity: image.opacity ?? null,
     effectExtentTop: image.padding?.top ? emuToPixels(image.padding.top) : null,
     effectExtentBottom: image.padding?.bottom ? emuToPixels(image.padding.bottom) : null,
@@ -604,6 +628,8 @@ function runContentToUnits(
       ];
     case 'drawing':
       return [embedUnit('image', imagePayload(content.image))];
+    case 'horizontalRule':
+      return [embedUnit('horizontalRule', { rule: content.rule }, marks, commentId)];
     case 'shape':
       return [embedUnit('shape', shapePayload(content.shape))];
     case 'chart':
@@ -801,7 +827,8 @@ function paragraphAttrs(
   paragraph: Paragraph,
   styleResolver: StyleResolver | null,
   units: readonly InlineUnit[],
-  runBoundaries: Attrs[] | undefined
+  runBoundaries: Attrs[] | undefined,
+  tableParagraphFormatting?: ParagraphFormatting
 ): Attrs {
   const formatting = paragraph.formatting;
   const styleId = formatting?.styleId;
@@ -822,6 +849,9 @@ function paragraphAttrs(
     listMarkerHidden: paragraph.listRendering?.markerHidden || null,
     listMarkerFontFamily: paragraph.listRendering?.markerFontFamily || null,
     listMarkerFontSize: paragraph.listRendering?.markerFontSize || null,
+    listMarkerBold: paragraph.listRendering?.markerBold ?? null,
+    listMarkerItalic: paragraph.listRendering?.markerItalic ?? null,
+    listMarkerColor: paragraph.listRendering?.markerColor ?? null,
     listMarkerSuffix: paragraph.listRendering?.markerSuffix || null,
     listLevelNumFmts: paragraph.listRendering?.levelNumFmts || null,
     listAbstractNumId: paragraph.listRendering?.abstractNumId ?? null,
@@ -830,11 +860,15 @@ function paragraphAttrs(
   };
 
   if (styleResolver) {
-    const resolved = styleResolver.resolveParagraphStyle(styleId);
+    const resolved = styleResolver.resolveParagraphStyle(styleId, tableParagraphFormatting);
     const stylePpr = resolved.paragraphFormatting;
     attrs.alignment = formatting?.alignment ?? stylePpr?.alignment ?? null;
     attrs.spaceBefore = formatting?.spaceBefore ?? stylePpr?.spaceBefore ?? null;
     attrs.spaceAfter = formatting?.spaceAfter ?? stylePpr?.spaceAfter ?? null;
+    attrs.spaceBeforeLines = formatting?.spaceBeforeLines ?? stylePpr?.spaceBeforeLines ?? null;
+    attrs.spaceAfterLines = formatting?.spaceAfterLines ?? stylePpr?.spaceAfterLines ?? null;
+    attrs.beforeAutospacing = formatting?.beforeAutospacing ?? stylePpr?.beforeAutospacing ?? null;
+    attrs.afterAutospacing = formatting?.afterAutospacing ?? stylePpr?.afterAutospacing ?? null;
     attrs.lineSpacing = formatting?.lineSpacing ?? stylePpr?.lineSpacing ?? null;
     attrs.lineSpacingRule = formatting?.lineSpacingRule ?? stylePpr?.lineSpacingRule ?? null;
     attrs.spacingExplicit = formatting?.spacingExplicit || null;
@@ -883,6 +917,10 @@ function paragraphAttrs(
     attrs.alignment = formatting?.alignment ?? null;
     attrs.spaceBefore = formatting?.spaceBefore ?? null;
     attrs.spaceAfter = formatting?.spaceAfter ?? null;
+    attrs.spaceBeforeLines = formatting?.spaceBeforeLines ?? null;
+    attrs.spaceAfterLines = formatting?.spaceAfterLines ?? null;
+    attrs.beforeAutospacing = formatting?.beforeAutospacing ?? null;
+    attrs.afterAutospacing = formatting?.afterAutospacing ?? null;
     attrs.lineSpacing = formatting?.lineSpacing ?? null;
     attrs.lineSpacingRule = formatting?.lineSpacingRule ?? null;
     attrs.spacingExplicit = formatting?.spacingExplicit || null;
@@ -973,7 +1011,8 @@ function unitsForParagraphContent(content: ParagraphContent): number {
 function paragraphUnits(
   paragraph: Paragraph,
   styleResolver: StyleResolver | null,
-  extraRunFormatting?: TextFormatting
+  extraRunFormatting?: TextFormatting,
+  tableParagraphFormatting?: ParagraphFormatting
 ): { units: InlineUnit[]; ppr: Attrs } {
   const units: InlineUnit[] = [];
   const activeComments = new Set<number>();
@@ -1017,7 +1056,7 @@ function paragraphUnits(
     }
     paragraphContentUnitCounts.set(content as object, units.length - start);
   }
-  const attrs = paragraphAttrs(paragraph, styleResolver, units, boundaries);
+  const attrs = paragraphAttrs(paragraph, styleResolver, units, boundaries, tableParagraphFormatting);
   return { units, ppr: paraAttrsToPpr(attrs) };
 }
 
@@ -1223,7 +1262,9 @@ function projectRow(
   rowSpans: Map<string, RowSpanInfo>,
   tableBorders: TableBorders | undefined,
   defaultMargins: { top?: number; bottom?: number; left?: number; right?: number } | undefined,
-  theme: Theme | null
+  theme: Theme | null,
+  tableStyle: Style | undefined,
+  styleColumns: number
 ): ProjectedRow {
   const attrs: Attrs = {
     height: row.formatting?.height?.value ?? null,
@@ -1270,8 +1311,16 @@ function projectRow(
     }
     column += colspan;
     if (rowSpan?.skip) return;
-    cells.push(
-      projectCell(cell, {
+    cells.push({
+      paragraphFormatting: tableCellParagraphFormatting(
+        table,
+        tableStyle,
+        rowIndex,
+        startColumn,
+        column,
+        styleColumns
+      ),
+      ...projectCell(cell, {
         isHeader: rowIndex === 0 && !!table.formatting?.look?.firstRow,
         rowspan: rowSpan?.rowSpan ?? 1,
         gridWidth,
@@ -1283,12 +1332,20 @@ function projectRow(
         defaultMargins,
         theme,
         tableBidi: Boolean(table.formatting?.bidi),
-      })
-    );
+      }),
+    });
   });
   if (cells.length === 0) {
-    cells.push(
-      projectCell(
+    cells.push({
+      paragraphFormatting: tableCellParagraphFormatting(
+        table,
+        tableStyle,
+        rowIndex,
+        0,
+        totalColumns,
+        styleColumns
+      ),
+      ...projectCell(
         {
           type: 'tableCell',
           formatting: totalColumns > 1 ? { gridSpan: totalColumns } : undefined,
@@ -1307,8 +1364,8 @@ function projectRow(
           theme,
           tableBidi: Boolean(table.formatting?.bidi),
         }
-      )
-    );
+      ),
+    });
   }
   return { attrs: tableRowAttrsToTrPr(attrs), cells };
 }
@@ -1316,7 +1373,8 @@ function projectRow(
 function projectTable(
   table: Table,
   styleResolver: StyleResolver | null,
-  theme: Theme | null
+  theme: Theme | null,
+  compatibilityMode: number
 ): ProjectedTable {
   const defaultStyle = styleResolver?.getDefaultTableStyle();
   const styleId = table.formatting?.styleId;
@@ -1366,14 +1424,28 @@ function projectTable(
     cellMargins: defaultMargins ?? null,
     look: table.formatting?.look ?? null,
     bidi: table.formatting?.bidi || null,
+    // Omit the default so pre-existing yrs snapshots (no field) keep matching;
+    // the bridge treats an absent mode as 12.
+    compatibilityMode: compatibilityMode === 12 ? null : compatibilityMode,
     _originalFormatting: originalFormatting,
   };
   if (table.propertyChanges?.length) attrs.tblPrChange = table.propertyChanges;
   const rowSpans = calculateRowSpans(table);
+  const styleColumns = tableColumnCount(table);
   return {
     attrs,
     rows: table.rows.map((row, rowIndex) =>
-      projectRow(row, table, rowIndex, rowSpans, borders, defaultMargins, theme)
+      projectRow(
+        row,
+        table,
+        rowIndex,
+        rowSpans,
+        borders,
+        defaultMargins,
+        theme,
+        tableStyle ?? defaultStyle,
+        styleColumns
+      )
     ),
   };
 }
@@ -1419,7 +1491,12 @@ function visitStory(
   for (const block of blocks) {
     if (isRawXml(block)) continue;
     if (block.type === 'paragraph') {
-      const paragraph = paragraphUnits(block, context.styleResolver, options.extraRunFormatting);
+      const paragraph = paragraphUnits(
+        block,
+        context.styleResolver,
+        options.extraRunFormatting,
+        options.tableParagraphFormatting
+      );
       plan.units.push(...paragraph.units);
       plan.units.push(
         embedUnit('pilcrow', {
@@ -1436,7 +1513,12 @@ function visitStory(
     }
     if (block.type === 'table') {
       const currentTable = tableIndex++;
-      const table = projectTable(block, context.styleResolver, context.theme);
+      const table = projectTable(
+        block,
+        context.styleResolver,
+        context.theme,
+        context.compatibilityMode
+      );
       const rows = table.rows.map((row, rowIndex) => ({
         trPr: row.attrs,
         cells: row.cells.map((cell, cellIndex) => ({
@@ -1462,6 +1544,7 @@ function visitStory(
               appendBodyTail: false,
               seedComments: false,
               extraRunFormatting: cell.extraRunFormatting,
+              tableParagraphFormatting: cell.paragraphFormatting,
             }
           );
         });
@@ -1481,6 +1564,7 @@ function visitStory(
       includePageBreaks: options.includePageBreaks,
       appendBodyTail: false,
       seedComments: false,
+      tableParagraphFormatting: options.tableParagraphFormatting,
     });
     lastKind = 'blockSdt';
   }
@@ -1560,6 +1644,7 @@ export function documentToYrs(session: YrsSession, document: Document): void {
     styleResolver: document.package.styles ? createStyleResolver(document.package.styles) : null,
     theme: document.package.theme ?? null,
     plans: [],
+    compatibilityMode: compatibilityModeFromDocument(document),
   };
   visitStory(context, 'body', document.package.document.content, {
     includePageBreaks: true,
