@@ -272,6 +272,32 @@ test('the menu flips inside the viewport near an edge', () => {
   }
 });
 
+test('the menu re-clamps when the viewport shrinks while it is open', () => {
+  const originalRect = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+    if (this.getAttribute?.('role') === 'menu' && !this.hasAttribute('data-submenu')) return { x: 0, y: 0, width: 220, height: 340, top: 0, left: 0, right: 220, bottom: 340, toJSON: () => ({}) } as DOMRect;
+    return originalRect.call(this);
+  };
+  const originalWidth = window.innerWidth;
+  const originalHeight = window.innerHeight;
+  const { view } = renderMenu({ position: { top: 100, left: 100 } });
+  try {
+    const menu = parentMenu() as HTMLElement;
+    expect(menu.style.top).toBe('100px');
+    expect(menu.style.left).toBe('100px');
+    Object.defineProperty(window, 'innerWidth', { value: 300, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { value: 200, configurable: true });
+    fireEvent(window, new window.Event('resize'));
+    expect(menu.style.left).toBe('76px');
+    expect(menu.style.top).toBe('4px');
+  } finally {
+    Object.defineProperty(window, 'innerWidth', { value: originalWidth, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { value: originalHeight, configurable: true });
+    HTMLElement.prototype.getBoundingClientRect = originalRect;
+    view.unmount();
+  }
+});
+
 test('a locked shape disables its refused operation and focuses the first allowed entry', () => {
   const { view } = renderMenu({ cells: [cell('LockDelete', '1'), cell('Angle', 'GUARD(0)'), cell('FlipX', '0'), cell('FlipY', '0')] });
   try {
@@ -291,7 +317,7 @@ test('a click on a hover-opened submenu trigger keeps the submenu open', () => {
   try {
     const trigger = parentMenu().querySelector('[data-submenu-id="bringToFront"]') as HTMLElement;
     expect(trigger).not.toBeNull();
-    fireEvent.mouseOver(trigger);
+    fireEvent.mouseEnter(trigger);
     expect(document.querySelector('[data-submenu="bringToFront"]')).not.toBeNull();
     fireEvent.click(trigger);
     expect(document.querySelector('[data-submenu="bringToFront"]')).not.toBeNull();
@@ -333,6 +359,24 @@ test('a fully guarded rotate submenu stays closed to keyboard and pointer', () =
     expect(document.activeElement?.getAttribute('data-submenu-id')).toBe('sendToBack');
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' });
     expect(document.activeElement?.getAttribute('data-command-id')).toBe('delete');
+  } finally {
+    view.unmount();
+  }
+});
+
+test('a guarded Angle leaves the rotate submenu open with only the flips enabled', () => {
+  const { view, calls } = renderMenu({ cells: [cell('Angle', 'GUARD(0)'), cell('FlipX', '0'), cell('FlipY', '0')] });
+  try {
+    expect((parentMenu().querySelector('[data-submenu-id="rotateRight"]') as HTMLButtonElement).disabled).toBe(false);
+    const submenu = openSubmenu('rotateRight');
+    const disabled = (id: string) => (submenu.querySelector(`[data-command-id="${id}"]`) as HTMLButtonElement).disabled;
+    expect(disabled('rotateRight')).toBe(true);
+    expect(disabled('rotateLeft')).toBe(true);
+    expect(disabled('flipHorizontal')).toBe(false);
+    expect(disabled('flipVertical')).toBe(false);
+    expect(document.activeElement?.getAttribute('data-command-id')).toBe('flipHorizontal');
+    fireEvent.click(submenu.querySelector('[data-command-id="rotateRight"]') as HTMLElement);
+    expect(calls.formulas).toEqual([]);
   } finally {
     view.unmount();
   }

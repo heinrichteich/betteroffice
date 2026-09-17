@@ -5,6 +5,7 @@
  */
 
 import wasmInit, {
+  decodeTiffPng,
   initSync,
   parse_docx_s9,
   parse_relationships_xml,
@@ -56,4 +57,15 @@ export function serializeDocxS12Wire(requestJson: string): string {
 export function writeDocxS13Wire(requestJson: string, originalDocx: Uint8Array): Uint8Array {
   state.ensure();
   return write_docx_s13_wasm(requestJson, originalDocx);
+}
+
+export function decodeTiffImage(bytes: Uint8Array): Uint8Array {
+  state.ensure();
+  try {
+    return decodeTiffPng(bytes);
+  } catch (error) {
+    throw error instanceof Error
+      ? error
+      : new Error(typeof error === 'string' ? error : String(error));
+  }
 }

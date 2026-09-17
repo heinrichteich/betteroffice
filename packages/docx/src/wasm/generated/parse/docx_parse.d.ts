@@ -2,6 +2,11 @@
 /* eslint-disable */
 
 /**
+ * Decodes TIFF bytes to PNG bytes for browsers without a TIFF decoder.
+ */
+export function decodeTiffPng(data: Uint8Array): Uint8Array;
+
+/**
  * Wasm control-plane entry: safe ZIP -> bounded XML -> typed relationships.
  */
 export function parse_docx_relationships(data: Uint8Array): string;
@@ -75,6 +80,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s3: (a: number, b: number) => [number, number, number, number];

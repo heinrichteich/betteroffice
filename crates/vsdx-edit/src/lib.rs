@@ -29,6 +29,7 @@ pub(crate) const CONNECTS: &str = "vsdx:connects";
 pub(crate) const STORIES: &str = "vsdx:stories";
 pub(crate) const REMOTE_ORIGIN: &str = "vsdx:remote";
 pub(crate) const HYDRATE_ORIGIN: &str = "vsdx:hydrate";
+pub(crate) const MIGRATE_ORIGIN: &str = "vsdx:migrate";
 const BOOTSTRAP_CLIENT_ID: u64 = (1_u64 << 53) - 1;
 pub const MAX_SAFE_CLIENT_ID: u64 = BOOTSTRAP_CLIENT_ID - 1;
 pub const MAX_UPDATE_BYTES: usize = 64 * 1024 * 1024;
@@ -94,6 +95,7 @@ impl DiagramSession {
         }
         let doc = doc_with_client_id(client_id);
         hydrate_doc(&doc, update)?;
+        diagram::migrate_doc(&doc)?;
         diagram::validate_doc(&doc)?;
         let undo = DiagramUndoManager::new(&doc, client_id)?;
         Ok(Self {
@@ -624,6 +626,41 @@ mod tests {
     }
 
     #[test]
+    fn identical_formula_rewrites_skip_the_undo_stack() {
+        let session = session();
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "PinX",
+            None,
+            None,
+            Some("3"),
+            Some("3"),
+        );
+        let receipt = session
+            .set_cell_formula(
+                &EditCtx::local("test"),
+                "page:1",
+                "page:1:shape:1",
+                "PinX",
+                "3",
+            )
+            .unwrap();
+        assert_eq!(receipt.before.as_deref(), Some("3"));
+        assert!(!session.can_undo());
+        session
+            .set_cell_formula(
+                &EditCtx::local("test"),
+                "page:1",
+                "page:1:shape:1",
+                "PinX",
+                "4",
+            )
+            .unwrap();
+        assert!(session.can_undo());
+    }
+
+    #[test]
     fn drafts_fail_atomically_for_invalid_or_duplicate_locators() {
         let session = session();
         let cell = CellSnapshot {
@@ -865,6 +902,55 @@ mod tests {
     }
 
     #[test]
+    fn converging_redirects_refuse_the_batch_without_writing() {
+        for (source, target) in [("PinX", "Width"), ("Width", "Height")] {
+            let session = session();
+            for cell in ["PinX", "PinY", "Width", "Height"] {
+                add_cell(&session, cell, Some("1"), None);
+            }
+            add_cell(&session, source, Some(&format!("SETATREF({target})")), None);
+            let before = session.snapshot().unwrap();
+            let vector = session.encode_state_vector_v1();
+            assert_eq!(
+                session
+                    .set_shape_bounds(
+                        &EditCtx::local("a"),
+                        "page:1",
+                        "page:1:shape:1",
+                        ["2", "3", "4", "5"].map(str::to_owned)
+                    )
+                    .unwrap_err()
+                    .to_string(),
+                format!("invalid diagram state: redirects converge on {target} more than once")
+            );
+            assert_eq!(session.snapshot().unwrap(), before);
+            assert_eq!(session.encode_state_vector_v1(), vector);
+        }
+    }
+
+    #[test]
+    fn shape_bounds_stop_at_a_missing_cell_without_writing_the_others() {
+        let session = session();
+        for cell in ["PinX", "PinY", "Width"] {
+            add_cell(&session, cell, Some("1"), None);
+        }
+        let before = session.snapshot().unwrap();
+        let vector = session.encode_state_vector_v1();
+        assert!(
+            session
+                .set_shape_bounds(
+                    &EditCtx::local("a"),
+                    "page:1",
+                    "page:1:shape:1",
+                    ["2", "3", "4", "5"].map(str::to_owned)
+                )
+                .is_err()
+        );
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert_eq!(session.encode_state_vector_v1(), vector);
+    }
+
+    #[test]
     fn shape_bounds_undo_restores_all_four_cells() {
         let session = session();
         for cell in ["PinX", "PinY", "Width", "Height"] {
@@ -904,6 +990,25 @@ mod tests {
             [2.25, 0.75]
         );
         assert_eq!(session.snapshot().unwrap(), before);
+    }
+
+    #[test]
+    fn resize_loc_pin_refuses_formulas_outside_the_shape_sheet() {
+        for formula in ["ThePage!PageWidth*0.5", "User.Anchor"] {
+            let session = session();
+            for (name, value) in [("Width", "2"), ("Height", "3")] {
+                add_cell(&session, name, Some(value), None);
+            }
+            add_cell(&session, "LocPinX", Some(formula), Some("1"));
+            assert_eq!(
+                session
+                    .resize_loc_pin("page:1", "page:1:shape:1", 4.0, 6.0)
+                    .unwrap_err()
+                    .to_string(),
+                "invalid diagram state: cannot evaluate LocPinX for resize",
+                "{formula}"
+            );
+        }
     }
 
     #[test]
@@ -957,6 +1062,312 @@ mod tests {
                 .as_deref(),
             Some("1")
         );
+    }
+
+    fn container_pair() -> DiagramSession {
+        let session = session();
+        for (shape, pin_x, pin_y, width, height, loc_pin) in [
+            ("page:1:shape:1", "5", "4", "4", "4", "2"),
+            ("page:1:shape:2", "5", "4", "1", "1", "0.5"),
+        ] {
+            for (name, formula) in [
+                ("PinX", pin_x),
+                ("PinY", pin_y),
+                ("Width", width),
+                ("Height", height),
+                ("LocPinX", loc_pin),
+                ("LocPinY", loc_pin),
+            ] {
+                add_shape_cell(&session, shape, name, None, None, Some(formula), None);
+            }
+        }
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "Relationships",
+            None,
+            None,
+            Some("SUM(DEPENDSON(1,Sheet.2!SheetRef()))"),
+            None,
+        );
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "Value",
+            Some("User"),
+            Some(CellRow::Name("msvStructureType".into())),
+            None,
+            Some("Container"),
+        );
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "Value",
+            Some("User"),
+            Some(CellRow::Name("msvSDContainerMargin".into())),
+            None,
+            Some("0.25"),
+        );
+        add_shape_cell(
+            &session,
+            "page:1:shape:2",
+            "Relationships",
+            None,
+            None,
+            Some("SUM(DEPENDSON(4,Sheet.1!SheetRef()))"),
+            None,
+        );
+        session
+    }
+
+    fn shape_formula(session: &DiagramSession, shape: &str, name: &str) -> Option<String> {
+        session.snapshot().unwrap().pages[0]
+            .shapes
+            .iter()
+            .find(|candidate| candidate.id == shape)
+            .and_then(|shape| {
+                shape
+                    .cells
+                    .iter()
+                    .find(|cell| cell.name == name)
+                    .and_then(|cell| cell.formula.clone())
+            })
+    }
+
+    #[test]
+    fn container_move_shifts_members_in_one_undo() {
+        let session = container_pair();
+        let before = session.snapshot().unwrap();
+        let receipts = session
+            .move_container(&EditCtx::local("a"), "page:1", "page:1:shape:1", 1.0, 2.0)
+            .unwrap();
+        assert_eq!(receipts.len(), 4);
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "PinX").as_deref(),
+            Some("6")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "PinY").as_deref(),
+            Some("6")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:2", "PinX").as_deref(),
+            Some("6")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:2", "PinY").as_deref(),
+            Some("6")
+        );
+        assert!(session.undo());
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn container_move_refusal_moves_nothing() {
+        let session = container_pair();
+        add_shape_cell(
+            &session,
+            "page:1:shape:2",
+            "LockMoveX",
+            None,
+            None,
+            Some("1"),
+            None,
+        );
+        let before = session.snapshot().unwrap();
+        assert!(
+            session
+                .move_container(&EditCtx::local("a"), "page:1", "page:1:shape:1", 1.0, 2.0)
+                .is_err()
+        );
+        assert_eq!(session.snapshot().unwrap(), before);
+    }
+
+    #[test]
+    fn container_move_rejects_non_containers() {
+        let session = container_pair();
+        assert!(
+            session
+                .move_container(&EditCtx::local("a"), "page:1", "page:1:shape:2", 1.0, 2.0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn member_move_expands_container_with_margin() {
+        let session = container_pair();
+        let receipts = session
+            .move_container_member(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:2",
+                "8".to_owned(),
+                "4".to_owned(),
+            )
+            .unwrap();
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:2", "PinX").as_deref(),
+            Some("8")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Width").as_deref(),
+            Some("5.75")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "PinX").as_deref(),
+            Some("5")
+        );
+        assert!(receipts.len() >= 3);
+        assert!(session.undo());
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Width").as_deref(),
+            Some("4")
+        );
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn member_move_inside_leaves_container_bounds() {
+        let session = container_pair();
+        let receipts = session
+            .move_container_member(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:2",
+                "5.5".to_owned(),
+                "4".to_owned(),
+            )
+            .unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Width").as_deref(),
+            Some("4")
+        );
+    }
+
+    #[test]
+    fn locked_container_skips_autofit() {
+        let session = container_pair();
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "Value",
+            Some("User"),
+            Some(CellRow::Name("msvSDContainerLocked".into())),
+            None,
+            Some("1"),
+        );
+        let receipts = session
+            .move_container_member(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:2",
+                "8".to_owned(),
+                "4".to_owned(),
+            )
+            .unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Width").as_deref(),
+            Some("4")
+        );
+    }
+
+    #[test]
+    fn autofit_container_shrinks_to_member_extent_with_margin() {
+        let session = container_pair();
+        session
+            .autofit_container(&EditCtx::local("a"), "page:1", "page:1:shape:1")
+            .unwrap();
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Width").as_deref(),
+            Some("1.5")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Height").as_deref(),
+            Some("1.5")
+        );
+    }
+
+    #[test]
+    fn autofit_container_uses_formula_loc_pin_at_the_requested_size() {
+        let session = container_pair();
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "LocPinX",
+            None,
+            None,
+            Some("Width*0.5"),
+            None,
+        );
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "LocPinY",
+            None,
+            None,
+            Some("Height*0.5"),
+            None,
+        );
+        session
+            .autofit_container(&EditCtx::local("a"), "page:1", "page:1:shape:1")
+            .unwrap();
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "PinX").as_deref(),
+            Some("5")
+        );
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "PinY").as_deref(),
+            Some("4")
+        );
+    }
+
+    #[test]
+    fn rotated_members_are_enclosed_by_autofit_and_move() {
+        let session = container_pair();
+        add_shape_cell(
+            &session,
+            "page:1:shape:2",
+            "Angle",
+            None,
+            None,
+            Some("0.7853981633974483"),
+            None,
+        );
+        session
+            .autofit_container(&EditCtx::local("a"), "page:1", "page:1:shape:1")
+            .unwrap();
+        assert_eq!(
+            shape_formula(&session, "page:1:shape:1", "Width").as_deref(),
+            Some("1.9142135623730958"),
+        );
+
+        let session = container_pair();
+        add_shape_cell(
+            &session,
+            "page:1:shape:2",
+            "Angle",
+            None,
+            None,
+            Some("0.7853981633974483"),
+            None,
+        );
+        session
+            .move_container_member(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:2",
+                "8".to_owned(),
+                "4".to_owned(),
+            )
+            .unwrap();
+        let width = shape_formula(&session, "page:1:shape:1", "Width")
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        assert!(width > 5.9);
     }
 
     #[test]
@@ -2778,5 +3189,407 @@ mod tests {
             )
             .unwrap_err();
         assert!(refused.to_string().contains("GUARD"));
+    }
+
+    fn control_formula(session: &DiagramSession, shape_id: &str, cell: &str) -> Option<String> {
+        let snapshot = session.snapshot().unwrap();
+        let shape = snapshot.pages[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == shape_id)?;
+        shape
+            .cells
+            .iter()
+            .find(|entry| {
+                entry.locator.section.as_deref() == Some("Control")
+                    && entry.locator.row == Some(CellRow::Name("Row_1".to_owned()))
+                    && entry.name == cell
+            })?
+            .formula
+            .clone()
+    }
+
+    #[test]
+    fn a_control_handle_drag_writes_both_axes_as_one_undo_entry() {
+        let (session, page_id, shape_id) = control_session();
+        session.add_undo_barrier();
+        let receipts = session
+            .set_control_handle(
+                &EditCtx::local("test"),
+                &page_id,
+                &shape_id,
+                "Row_1",
+                Some("1.5".to_owned()),
+                Some("0.25".to_owned()),
+            )
+            .unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(
+            [
+                control_formula(&session, &shape_id, "X"),
+                control_formula(&session, &shape_id, "Y")
+            ],
+            [Some("1.5".to_owned()), Some("0.25".to_owned())]
+        );
+        assert!(session.undo());
+        assert_eq!(
+            [
+                control_formula(&session, &shape_id, "X"),
+                control_formula(&session, &shape_id, "Y")
+            ],
+            [Some("Width*0.25".to_owned()), Some("Height*0.5".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_guarded_axis_refuses_the_whole_control_handle_drag() {
+        let (session, page_id, shape_id) = control_session();
+        session
+            .set_cell_formula_at(
+                &EditCtx::local("test"),
+                &page_id,
+                &shape_id,
+                control_locator("X"),
+                "GUARD(Width*0.25)",
+            )
+            .unwrap();
+        let refused = session
+            .set_control_handle(
+                &EditCtx::local("test"),
+                &page_id,
+                &shape_id,
+                "Row_1",
+                Some("1.5".to_owned()),
+                Some("0.25".to_owned()),
+            )
+            .unwrap_err();
+        assert!(refused.to_string().contains("GUARD"));
+        assert_eq!(
+            control_formula(&session, &shape_id, "Y"),
+            Some("Height*0.5".to_owned())
+        );
+        let receipts = session
+            .set_control_handle(
+                &EditCtx::local("test"),
+                &page_id,
+                &shape_id,
+                "Row_1",
+                None,
+                Some("0.25".to_owned()),
+            )
+            .unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            [
+                control_formula(&session, &shape_id, "X"),
+                control_formula(&session, &shape_id, "Y")
+            ],
+            [
+                Some("GUARD(Width*0.25)".to_owned()),
+                Some("0.25".to_owned())
+            ]
+        );
+    }
+
+    fn route_fixture() -> DiagramSession {
+        DiagramSession::open(
+            include_bytes!("../../vsdx-parse/tests/fixtures/connector-route-style.vsdx"),
+            31,
+        )
+        .unwrap()
+    }
+
+    fn route_cells(session: &DiagramSession, shape: &str) -> Vec<(u32, String, Option<String>)> {
+        let mut cells = session.snapshot().unwrap().pages[0]
+            .shapes
+            .iter()
+            .find(|candidate| candidate.id == shape)
+            .unwrap()
+            .cells
+            .iter()
+            .filter(|cell| cell.locator.section.as_deref() == Some("Geometry"))
+            .map(|cell| {
+                let row = match cell.locator.row {
+                    Some(CellRow::Index(index)) => index,
+                    _ => u32::MAX,
+                };
+                (row, cell.locator.cell_name.clone(), cell.formula.clone())
+            })
+            .collect::<Vec<_>>();
+        cells.sort();
+        cells
+    }
+
+    #[test]
+    fn set_connector_route_rewrites_filed_geometry() {
+        let session = route_fixture();
+        let receipt = session
+            .set_connector_route(
+                &EditCtx::local("test"),
+                "page:1",
+                "page:1:shape:1",
+                &[(1.0, 1.0), (2.5, 1.0), (2.5, 3.0), (4.0, 3.0)],
+            )
+            .unwrap();
+        assert_eq!(receipt.points, 4);
+        assert_eq!(
+            route_cells(&session, "page:1:shape:1"),
+            vec![
+                (0, "X".to_owned(), Some("0".to_owned())),
+                (0, "Y".to_owned(), Some("0".to_owned())),
+                (1, "X".to_owned(), Some("1.5".to_owned())),
+                (1, "Y".to_owned(), Some("0".to_owned())),
+                (2, "X".to_owned(), Some("1.5".to_owned())),
+                (2, "Y".to_owned(), Some("2".to_owned())),
+                (3, "X".to_owned(), Some("3".to_owned())),
+                (3, "Y".to_owned(), Some("2".to_owned())),
+            ]
+        );
+        let saved = session.save().unwrap();
+        let reparsed = vsdx_parse::parse_vsdx(&saved).unwrap();
+        let shape = reparsed.page_contents["visio/pages/page1.xml"]
+            .shapes()
+            .next()
+            .unwrap();
+        let rows = shape
+            .sections()
+            .find(|section| section.name == "Geometry")
+            .unwrap()
+            .rows()
+            .map(|row| {
+                (
+                    row.row_type.clone(),
+                    row.cells()
+                        .map(|cell| (cell.name.clone(), cell.formula.clone()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].0.as_deref(), Some("MoveTo"));
+        assert!(
+            rows[1..]
+                .iter()
+                .all(|row| row.0.as_deref() == Some("LineTo"))
+        );
+    }
+
+    #[test]
+    fn set_connector_route_round_trips_through_peers() {
+        let left = route_fixture();
+        let right =
+            DiagramSession::open_from_update(&left.encode_state_as_update_v1(), 32).unwrap();
+        left.set_connector_route(
+            &EditCtx::local("left"),
+            "page:1",
+            "page:1:shape:1",
+            &[(1.0, 1.0), (4.0, 1.0), (4.0, 3.0)],
+        )
+        .unwrap();
+        let update = left
+            .encode_diff_v1(&right.encode_state_vector_v1())
+            .unwrap();
+        right.apply_update_v1(&update).unwrap();
+        assert_eq!(
+            route_cells(&left, "page:1:shape:1"),
+            route_cells(&right, "page:1:shape:1")
+        );
+    }
+
+    #[test]
+    fn set_connector_route_collapses_surplus_rows() {
+        let session = route_fixture();
+        let receipt = session
+            .set_connector_route(
+                &EditCtx::local("test"),
+                "page:1",
+                "page:1:shape:1",
+                &[(1.0, 1.0), (2.0, 2.0), (3.0, 2.0), (4.0, 3.0), (4.0, 3.0)],
+            )
+            .unwrap();
+        assert_eq!(receipt.points, 4);
+        session
+            .set_connector_route(
+                &EditCtx::local("test"),
+                "page:1",
+                "page:1:shape:1",
+                &[(1.0, 1.0), (4.0, 3.0)],
+            )
+            .unwrap();
+        let cells = route_cells(&session, "page:1:shape:1");
+        assert_eq!(cells.len(), 8);
+        for (_, _, formula) in cells.iter().skip(2) {
+            assert!(formula.as_deref() == Some("3") || formula.as_deref() == Some("2"));
+        }
+    }
+
+    /// The renderer appends the glued endpoint, so a re-fed route must not grow a row per drag.
+    #[test]
+    fn set_connector_route_drops_a_repeated_endpoint() {
+        let session = route_fixture();
+        session
+            .set_connector_route(
+                &EditCtx::local("test"),
+                "page:1",
+                "page:1:shape:1",
+                &[(1.0, 1.0), (2.5, 1.0), (4.0, 3.0), (4.0, 3.0)],
+            )
+            .unwrap();
+        assert_eq!(
+            route_cells(&session, "page:1:shape:1"),
+            vec![
+                (0, "X".to_owned(), Some("0".to_owned())),
+                (0, "Y".to_owned(), Some("0".to_owned())),
+                (1, "X".to_owned(), Some("1.5".to_owned())),
+                (1, "Y".to_owned(), Some("0".to_owned())),
+                (2, "X".to_owned(), Some("3".to_owned())),
+                (2, "Y".to_owned(), Some("2".to_owned())),
+            ]
+        );
+        assert_eq!(
+            session
+                .set_connector_route(
+                    &EditCtx::local("test"),
+                    "page:1",
+                    "page:1:shape:1",
+                    &[(2.0, 2.0), (2.0, 2.0)],
+                )
+                .unwrap_err()
+                .to_string(),
+            "invalid diagram state: connector route needs two distinct points"
+        );
+    }
+
+    /// Page 4 of the fixture files two subpaths; a hand route must refuse, not overwrite them.
+    #[test]
+    fn set_connector_route_refuses_a_multi_subpath_geometry() {
+        let session = route_fixture();
+        assert_eq!(
+            session
+                .set_connector_route(
+                    &EditCtx::local("test"),
+                    "page:4",
+                    "page:4:shape:1",
+                    &[(1.0, 1.0), (4.0, 3.0)],
+                )
+                .unwrap_err()
+                .to_string(),
+            "invalid diagram state: connector Geometry is not a single straight run"
+        );
+    }
+
+    /// A refusal in a later row must leave every earlier row untouched.
+    #[test]
+    fn set_connector_route_refuses_before_the_first_write() {
+        let guarded = session();
+        for name in ["OneD", "BeginX", "BeginY", "EndX", "EndY"] {
+            add_cell(&guarded, name, Some("1"), None);
+        }
+        for name in ["PinX", "PinY", "Width", "Height"] {
+            add_cell(&guarded, name, Some("1"), None);
+        }
+        for (row, name, formula) in [
+            (0, "X", "9"),
+            (0, "Y", "9"),
+            (1, "X", "GUARD(0)"),
+            (1, "Y", "9"),
+        ] {
+            add_cell_at(
+                &guarded,
+                name,
+                Some("Geometry"),
+                Some(CellRow::Index(row)),
+                Some(formula),
+                None,
+            );
+        }
+        assert_eq!(
+            guarded
+                .set_connector_route(
+                    &EditCtx::local("test"),
+                    "page:1",
+                    "page:1:shape:1",
+                    &[(0.0, 0.0), (1.0, 1.0)],
+                )
+                .unwrap_err()
+                .to_string(),
+            "invalid diagram state: GUARD protects the requested cell"
+        );
+        assert_eq!(
+            route_cells(&guarded, "page:1:shape:1")
+                .into_iter()
+                .map(|(_, _, formula)| formula)
+                .collect::<Vec<_>>(),
+            vec![
+                Some("9".to_owned()),
+                Some("9".to_owned()),
+                Some("GUARD(0)".to_owned()),
+                Some("9".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn set_connector_route_refuses_shapes_without_endpoints() {
+        let session = DiagramSession::open(
+            include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
+            33,
+        )
+        .unwrap();
+        assert_eq!(
+            session
+                .set_connector_route(
+                    &EditCtx::local("test"),
+                    "page:1",
+                    "page:1:shape:1",
+                    &[(0.0, 0.0), (1.0, 1.0)],
+                )
+                .unwrap_err()
+                .to_string(),
+            "invalid diagram state: shape is not a 1D connector"
+        );
+        assert_eq!(
+            session
+                .set_connector_route(
+                    &EditCtx::local("test"),
+                    "page:1",
+                    "page:1:shape:1",
+                    &[(0.0, 0.0)],
+                )
+                .unwrap_err()
+                .to_string(),
+            "invalid diagram state: connector route needs between 2 and 256 points"
+        );
+    }
+
+    #[test]
+    fn set_connector_route_honours_guarded_geometry() {
+        let guarded = session();
+        for name in ["OneD", "BeginX", "BeginY", "EndX", "EndY"] {
+            add_cell(&guarded, name, Some("1"), None);
+        }
+        for name in ["PinX", "PinY", "Width", "Height"] {
+            add_cell(&guarded, name, Some("1"), None);
+        }
+        add_cell_at(
+            &guarded,
+            "X",
+            Some("Geometry"),
+            Some(CellRow::Index(0)),
+            Some("GUARD(0)"),
+            None,
+        );
+        assert_eq!(
+            guarded
+                .set_connector_route(
+                    &EditCtx::local("test"),
+                    "page:1",
+                    "page:1:shape:1",
+                    &[(0.0, 0.0), (1.0, 1.0)],
+                )
+                .unwrap_err()
+                .to_string(),
+            "invalid diagram state: GUARD protects the requested cell"
+        );
     }
 }
