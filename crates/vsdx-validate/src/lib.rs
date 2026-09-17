@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
-use vsdx_parse::{Sheet, Shape, VsdxPackage};
+use vsdx_parse::{Shape, Sheet, VsdxPackage};
 use vsdx_resolve::{Lookup, PageConnectivity, ResolvedShape, Resolver, SceneAffine, shape_data};
 
 pub const RULE_DANGLING_CONNECTOR: &str = "dangling-connector";
@@ -11,6 +11,9 @@ pub const RULE_ISOLATED_SHAPE: &str = "isolated-shape";
 pub const RULE_OVERLAPPING_SHAPES: &str = "overlapping-shapes";
 pub const RULE_CONNECTOR_CROSSING: &str = "connector-crossing";
 pub const RULE_EMPTY_SHAPE_DATA: &str = "empty-shape-data";
+
+/// Pages with more shapes than this skip the two pairwise rules, which are quadratic.
+pub const MAX_PAIRWISE_SHAPES: usize = 2_000;
 
 /// Severity of a validation issue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -98,7 +101,8 @@ pub fn validate_package(package: &VsdxPackage) -> ValidationReport {
     ValidationReport { issues }
 }
 
-/// Validates one page part. Returns no issues when the page cannot resolve.
+/// Validates one page part. Returns no issues when the page cannot resolve, and
+/// skips the pairwise rules beyond `MAX_PAIRWISE_SHAPES`.
 pub fn validate_page(package: &VsdxPackage, page_part: &str) -> Vec<ValidationIssue> {
     let resolver = Resolver::new(package);
     let Ok(shapes) = resolver.resolve_page_shapes(page_part) else {
@@ -125,15 +129,19 @@ pub fn validate_page(package: &VsdxPackage, page_part: &str) -> Vec<ValidationIs
         &connectivity,
         &tree,
     ));
-    issues.extend(overlapping_shapes(page_part, page_id, &shapes, &bounds, &tree));
-    issues.extend(connector_crossings(
-        page_part,
-        page_id,
-        &shapes,
-        &connectivity,
-        &bounds,
-        &tree,
-    ));
+    if bounds.len() <= MAX_PAIRWISE_SHAPES {
+        issues.extend(overlapping_shapes(
+            page_part, page_id, &shapes, &bounds, &tree,
+        ));
+        issues.extend(connector_crossings(
+            page_part,
+            page_id,
+            &shapes,
+            &connectivity,
+            &bounds,
+            &tree,
+        ));
+    }
     issues.extend(empty_shape_data(page_part, page_id, &shapes));
     issues.sort();
     issues
@@ -198,15 +206,12 @@ fn index_tree(page: Option<&Sheet>) -> ShapeTree {
     let Some(page) = page else {
         return tree;
     };
-    let mut stack: Vec<(&Shape, Option<u32>)> =
-        page.shapes().map(|shape| (shape, None)).collect();
+    let mut stack: Vec<(&Shape, Option<u32>)> = page.shapes().map(|shape| (shape, None)).collect();
     while let Some((shape, parent)) = stack.pop() {
         let children: Vec<&Shape> = shape.shapes().collect();
         tree.nodes.insert(shape.id, ShapeNode { parent });
-        tree.children.insert(
-            shape.id,
-            children.iter().map(|child| child.id).collect(),
-        );
+        tree.children
+            .insert(shape.id, children.iter().map(|child| child.id).collect());
         for child in children {
             stack.push((child, Some(shape.id)));
         }
@@ -227,7 +232,9 @@ fn ancestors(tree: &ShapeTree, id: u32) -> HashSet<u32> {
 }
 
 fn is_group(tree: &ShapeTree, id: u32) -> bool {
-    tree.children.get(&id).is_some_and(|children| !children.is_empty())
+    tree.children
+        .get(&id)
+        .is_some_and(|children| !children.is_empty())
 }
 
 fn cell_number(shape: &ResolvedShape, name: &str) -> Option<f64> {
@@ -293,9 +300,8 @@ fn scene_bounds(
     let Some(page) = page else {
         return HashMap::new();
     };
-    let transforms = vsdx_resolve::scene_transforms(page, shapes, |_, shape, name| {
-        cell_number(shape, name)
-    });
+    let transforms =
+        vsdx_resolve::scene_transforms(page, shapes, |_, shape, name| cell_number(shape, name));
     let mut bounds = HashMap::new();
     for (id, shape) in shapes {
         if shape.deleted || is_1d(shape) || is_group(tree, *id) {
@@ -334,10 +340,26 @@ fn affine_bounds(transform: SceneAffine, width: f64, height: f64) -> Bounds {
         transform.apply_point(width, height),
     ];
     Bounds {
-        min_x: corners.iter().map(|point| point.x).reduce(f64::min).unwrap_or(0.0),
-        min_y: corners.iter().map(|point| point.y).reduce(f64::min).unwrap_or(0.0),
-        max_x: corners.iter().map(|point| point.x).reduce(f64::max).unwrap_or(0.0),
-        max_y: corners.iter().map(|point| point.y).reduce(f64::max).unwrap_or(0.0),
+        min_x: corners
+            .iter()
+            .map(|point| point.x)
+            .reduce(f64::min)
+            .unwrap_or(0.0),
+        min_y: corners
+            .iter()
+            .map(|point| point.y)
+            .reduce(f64::min)
+            .unwrap_or(0.0),
+        max_x: corners
+            .iter()
+            .map(|point| point.x)
+            .reduce(f64::max)
+            .unwrap_or(0.0),
+        max_y: corners
+            .iter()
+            .map(|point| point.y)
+            .reduce(f64::max)
+            .unwrap_or(0.0),
     }
 }
 
@@ -510,7 +532,11 @@ fn overlapping_shapes(
                 continue;
             }
             if overlap_area(left_bounds, right_bounds) > 1e-9 {
-                let (first, second) = if left < right { (left, right) } else { (right, left) };
+                let (first, second) = if left < right {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
                 issues.push(ValidationIssue {
                     id: format!("{RULE_OVERLAPPING_SHAPES}:{page_part}:{first}:{second}"),
                     rule: RULE_OVERLAPPING_SHAPES.to_owned(),
@@ -568,12 +594,13 @@ fn connector_crossings(
             .iter()
             .filter_map(|glue| glue.to.as_ref().map(|target| target.shape_id))
             .collect();
-        let kin: HashSet<u32> = ancestors(tree, connector.shape_id)
-            .into_iter()
-            .chain(tree.nodes.iter().filter_map(|(id, node)| {
-                (node.parent == Some(connector.shape_id)).then_some(*id)
-            }))
-            .collect();
+        let kin: HashSet<u32> =
+            ancestors(tree, connector.shape_id)
+                .into_iter()
+                .chain(tree.nodes.iter().filter_map(|(id, node)| {
+                    (node.parent == Some(connector.shape_id)).then_some(*id)
+                }))
+                .collect();
         for (id, candidate) in bounds {
             if *id == connector.shape_id || glued.contains(id) || kin.contains(id) {
                 continue;
@@ -746,9 +773,14 @@ mod tests {
                 .into_iter()
                 .map(|name| ShapeChild::Cell(cell(name, "1")))
                 .chain(
-                    [("PinX", pin_x), ("PinY", pin_y), ("LocPinX", 0.5), ("LocPinY", 0.5)]
-                        .into_iter()
-                        .map(|(name, value)| ShapeChild::Cell(cell(name, &value.to_string()))),
+                    [
+                        ("PinX", pin_x),
+                        ("PinY", pin_y),
+                        ("LocPinX", 0.5),
+                        ("LocPinY", 0.5),
+                    ]
+                    .into_iter()
+                    .map(|(name, value)| ShapeChild::Cell(cell(name, &value.to_string()))),
                 )
                 .collect(),
             del: false,
@@ -765,7 +797,9 @@ mod tests {
             ("EndX", end.0),
             ("EndY", end.1),
         ] {
-            shape.children.push(ShapeChild::Cell(cell(name, &value.to_string())));
+            shape
+                .children
+                .push(ShapeChild::Cell(cell(name, &value.to_string())));
         }
         shape
     }
@@ -799,9 +833,7 @@ mod tests {
             id: None,
             children: vec![
                 SheetChild::Shapes(shapes.into_iter().map(ShapesChild::Shape).collect()),
-                SheetChild::Connects(
-                    connects.into_iter().map(ConnectsChild::Connect).collect(),
-                ),
+                SheetChild::Connects(connects.into_iter().map(ConnectsChild::Connect).collect()),
             ],
             other_attrs: Vec::new(),
         };
@@ -886,7 +918,13 @@ mod tests {
             vec![glue(4, "BeginX", 1, "PinX"), glue(4, "EndX", 2, "PinX")],
         );
         let issues = rules_for(&package, RULE_ISOLATED_SHAPE);
-        assert_eq!(issues.iter().map(|issue| issue.shape_id).collect::<Vec<_>>(), [3]);
+        assert_eq!(
+            issues
+                .iter()
+                .map(|issue| issue.shape_id)
+                .collect::<Vec<_>>(),
+            [3]
+        );
     }
 
     #[test]
@@ -902,10 +940,7 @@ mod tests {
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].shape_id, 1);
         assert_eq!(issues[0].other_shape_id, Some(2));
-        assert_eq!(
-            issues[0].id,
-            format!("{RULE_OVERLAPPING_SHAPES}:page:1:2")
-        );
+        assert_eq!(issues[0].id, format!("{RULE_OVERLAPPING_SHAPES}:page:1:2"));
     }
 
     #[test]

@@ -119,7 +119,7 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
   let pages: number;
   if (format === 'pptx') {
     const { initWasm, openPresentation, paintSlide, sizeCanvasForSlide, presentationImageBlob } = await import(
-      '@betteroffice/pptx'
+      'virtual:office-quality-renderer'
     );
     await initWasm();
     const handle = openPresentation(bytes, { fonts });
@@ -151,7 +151,7 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
     };
   } else if (format === 'xlsx') {
     const { initWasm, openWorkbook, paintDisplayList } = await import(
-      '@betteroffice/xlsx'
+      'virtual:office-quality-renderer'
     );
     await initWasm();
     const handle = openWorkbook(bytes);
@@ -242,7 +242,7 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
     };
   } else if (format === 'vsdx') {
     const { initWasm, openDiagram, paintPage, sizeCanvasForPage } = await import(
-      '@betteroffice/vsdx'
+      'virtual:office-quality-renderer'
     );
     await initWasm();
     const handle = openDiagram(bytes, { fonts });
