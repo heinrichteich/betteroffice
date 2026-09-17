@@ -79,9 +79,25 @@ async function writeTestFixtures(): Promise<void> {
     'visio/masters/master1.xml': `<MasterContents ${ns}><Shapes><Shape ID='10' Type='Shape'><Text>master text</Text></Shape></Shapes></MasterContents>`,
   });
 
+  const connector = (styleCell: string, geometry = '') =>
+    `<Shape ID='1' Type='Shape'>${xform(3, 2, 2.5, 2, 1.5, 1, 0, 0, 0)}<Cell N='OneD' V='1'/><Cell N='BeginX' V='1'/><Cell N='BeginY' V='1'/><Cell N='EndX' V='4'/><Cell N='EndY' V='3'/>${styleCell}${geometry}</Shape>`;
+  const routePage = (styleCell: string) =>
+    `<PageContents ${ns}><Shapes>${connector(styleCell)}</Shapes></PageContents>`;
+  const routeSheet = (routeCell: string) =>
+    `<PageSheet><Cell N='PageWidth' V='8.5'/><Cell N='PageHeight' V='11'/>${routeCell}</PageSheet>`;
+  await writeZip(path.join(root, 'crates/vsdx-parse/tests/fixtures/connector-route-style.vsdx'), {
+    ...parts,
+    'visio/pages/pages.xml': `<Pages ${ns}><Page ID='1' NameU='ShapeOverridesPage' Name='ShapeOverridesPage' r:id='rId1' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${routeSheet("<Cell N='RouteStyle' V='2'/>")}</Page><Page ID='2' NameU='PageFallback' Name='PageFallback' r:id='rId2' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${routeSheet("<Cell N='RouteStyle' V='5'/>")}</Page><Page ID='3' NameU='StraightStyle' Name='StraightStyle' r:id='rId3' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${routeSheet("<Cell N='RouteStyle' V='1'/>")}</Page><Page ID='4' NameU='MultiSubpath' Name='MultiSubpath' r:id='rId4' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${routeSheet('')}</Page></Pages>`,
+    'visio/pages/_rels/pages.xml.rels': "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page1.xml'/><Relationship Id='rId2' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page2.xml'/><Relationship Id='rId3' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page3.xml'/><Relationship Id='rId4' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page4.xml'/></Relationships>",
+    'visio/pages/page1.xml': routePage("<Cell N='ShapeRouteStyle' V='1'/>"),
+    'visio/pages/page2.xml': routePage(''),
+    'visio/pages/page3.xml': routePage("<Cell N='ShapeRouteStyle' V='2'/>"),
+    'visio/pages/page4.xml': `<PageContents ${ns}><Shapes>${connector("<Cell N='ShapeRouteStyle' V='1'/>", "<Section N='Geometry'><Row IX='0' T='MoveTo'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row><Row IX='1' T='LineTo'><Cell N='X' V='0.25'/><Cell N='Y' V='0'/></Row><Row IX='2' T='MoveTo'><Cell N='X' V='0.75'/><Cell N='Y' V='1'/></Row><Row IX='3' T='LineTo'><Cell N='X' V='1'/><Cell N='Y' V='1'/></Row></Section>")}</Shapes></PageContents>`,
+  });
+
   await writeZip(path.join(root, 'crates/vsdx-parse/tests/fixtures/transform-sources.vsdx'), {
     ...parts,
-    'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Shape'>${xform(2, 1, 3, 4, 1, 0.5, 0.5235987755982988, 1, 0)}${rect}</Shape><Shape ID='2' Type='Shape' Master='1' MasterShape='10'>${rect}</Shape><Shape ID='3' Type='Group'>${xform(4, 4, 6, 6, 2, 2, 0.7853981633974483, 0, 1)}<Shapes><Shape ID='4' Type='Shape'>${xform(1, 1, 1, 1, 0.5, 0.5, 0, 0, 0)}${rect}</Shape><Shape ID='5' Type='Shape' Master='1' MasterShape='10'>${rect}</Shape></Shapes></Shape><Shape ID='6' Type='Shape'><Cell N='Width' F='1+1' V='2'/><Cell N='Height' F='Width/2' V='1'/><Cell N='PinX' F='2*4' V='8'/><Cell N='PinY' V='2'/><Cell N='LocPinX' F='Width*0.5' V='1'/><Cell N='LocPinY' F='Height*0.5' V='0.5'/><Cell N='Angle' V='0'/>${rect}</Shape></Shapes></PageContents>`,
+    'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Shape'>${xform(2, 1, 3, 4, 1, 0.5, 0.5235987755982988, 1, 0)}${rect}</Shape><Shape ID='2' Type='Shape' Master='1' MasterShape='10'>${rect}</Shape><Shape ID='3' Type='Group'>${xform(4, 4, 6, 6, 2, 2, 0.7853981633974483, 0, 1)}<Shapes><Shape ID='4' Type='Shape'>${xform(1, 1, 1, 1, 0.5, 0.5, 0, 0, 0)}${rect}</Shape><Shape ID='5' Type='Shape' Master='1' MasterShape='10'>${rect}</Shape></Shapes></Shape><Shape ID='6' Type='Shape'><Cell N='Width' F='1+1'/><Cell N='Height' F='Width/2'/><Cell N='PinX' F='2*4'/><Cell N='PinY' V='2'/><Cell N='LocPinX' F='Width*0.5'/><Cell N='LocPinY' F='Height*0.5'/><Cell N='Angle' V='0'/>${rect}</Shape></Shapes></PageContents>`,
     'visio/masters/master1.xml': `<MasterContents ${ns}><Shapes><Shape ID='10' Type='Shape'>${xform(1.5, 0.75, 2, 2, 0.75, 0.375, 0, 0, 0)}${rect}</Shape></Shapes></MasterContents>`,
   });
 }

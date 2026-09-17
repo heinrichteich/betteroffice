@@ -117,8 +117,9 @@ test('adds a rectangle carrying geometry rows instead of a bodiless shape', () =
   const diagram = handle(snapshot());
   const commands = createRibbonCommands(diagram, null, 'page', () => {}, () => {}, () => {});
   commands.addShape.run();
-  const draft = (diagram.addShape as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][1] as { cells: Array<{ locator: { section?: string } }> };
+  const draft = (diagram.addShape as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][1] as { cells: Array<{ locator: { section?: string }; name: string; formula: string }> };
   expect(draft.cells.some((cell) => cell.locator.section === 'Geometry')).toBe(true);
+  expect(Number(draft.cells.find((cell) => cell.name === 'Width')?.formula)).toBeCloseTo(4 / 3, 10);
 });
 
 test('refuses to add a shape onto a page that is no longer present', () => {
