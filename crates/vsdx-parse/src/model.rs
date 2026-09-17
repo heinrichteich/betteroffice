@@ -31,6 +31,8 @@ pub struct VsdxPackage {
     #[serde(default)]
     pub page_names: BTreeMap<u32, String>,
     pub master_part_ids: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub master_names: BTreeMap<u32, String>,
     pub page_contents: BTreeMap<String, Sheet>,
     pub master_contents: BTreeMap<String, Sheet>,
     #[serde(skip)]

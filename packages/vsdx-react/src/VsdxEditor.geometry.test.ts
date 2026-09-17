@@ -1,13 +1,16 @@
 import { expect, test } from 'bun:test';
-import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
+import type { DiagramSnapshot, PageDisplayList, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { canvasPointerPosition, inchFormula, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
+import { MAX_PAGE_BREAK_LINES, canvasPointerPosition, centreInsertPoint, clientPointToModel, connectorTargetForPoint, inchFormula, pageBreakLines, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
 import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
+import { modelToPage } from './connector';
 
 const frame: PageDisplayList = {
-  contractVersion: 6,
+  contractVersion: 7,
   width: 816,
   height: 1056,
+  printWidth: 816,
+  printHeight: 1056,
   paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 },
   primitives: [],
 };
@@ -33,6 +36,28 @@ test('maps a canvas pointer onto Y-up inches for the save projection', () => {
 test('keeps the pointer mapping stable while the canvas is zoomed', () => {
   const zoomed = canvasPointerPosition(pointerAt(384, 1728, 2), frame);
   expect(zoomed.model).toEqual({ x: 2, y: 2 });
+});
+
+test('lands a drop on the same inches at every zoom and canvas offset', () => {
+  const rectAt = (cssScale: number, left = 0, top = 0) => ({ left, top, width: frame.width * cssScale, height: frame.height * cssScale });
+  for (const cssScale of [0.5, 1, 2]) {
+    const drop = clientPointToModel(frame, rectAt(cssScale), 192 * cssScale, 864 * cssScale);
+    expect(drop.model.x).toBeCloseTo(2, 10);
+    expect(drop.model.y).toBeCloseTo(2, 10);
+    expect(drop.canvas.x).toBeCloseTo(192, 10);
+  }
+  const offset = clientPointToModel(frame, rectAt(2, 40, 24), 192 * 2 + 40, 864 * 2 + 24);
+  expect(offset.model.x).toBeCloseTo(2, 10);
+  expect(offset.model.y).toBeCloseTo(2, 10);
+});
+
+test('cascades repeated centre inserts a quarter inch down the page and wraps after eight', () => {
+  const centre = { x: 4.25, y: 5.5 };
+  expect(centreInsertPoint(centre, 0)).toEqual(centre);
+  expect(centreInsertPoint(centre, 1)).toEqual({ x: 4.5, y: 5.25 });
+  expect(centreInsertPoint(centre, 7)).toEqual({ x: 6, y: 3.75 });
+  expect(centreInsertPoint(centre, 8)).toEqual(centre);
+  expect(centreInsertPoint(centre, 9)).toEqual({ x: 4.5, y: 5.25 });
 });
 
 test('formats inch formulas without exponent noise or negative zero', () => {
@@ -185,4 +210,80 @@ test('a nudge inside a rotated and scaled group matches the equivalent drag', ()
   expect(nudged.x).toBeCloseTo(dragged.x, 10);
   expect(nudged.y).toBeCloseTo(dragged.y, 10);
   expect(nudged.x).not.toBeCloseTo(2 + dx, 6);
+});
+
+test('page breaks fall on printer-paper boundaries inside the page', () => {
+  const plan = { width: 45.27165 * 96, height: 39.33858 * 96, printWidth: 11.69291 * 96, printHeight: 8.26772 * 96 };
+  const lines = pageBreakLines(plan, 1);
+  expect(lines.vertical).toHaveLength(3);
+  expect(lines.horizontal).toHaveLength(4);
+  expect(lines.vertical[0]).toBeCloseTo(plan.printWidth, 8);
+  expect(lines.horizontal[0]).toBeCloseTo(plan.printHeight, 8);
+  for (let i = 1; i < lines.vertical.length; i += 1) expect(lines.vertical[i] - lines.vertical[i - 1]).toBeCloseTo(plan.printWidth, 8);
+  for (let i = 1; i < lines.horizontal.length; i += 1) expect(lines.horizontal[i] - lines.horizontal[i - 1]).toBeCloseTo(plan.printHeight, 8);
+  expect(lines.vertical.every((x) => x < plan.width)).toBe(true);
+  expect(lines.horizontal.every((y) => y < plan.height)).toBe(true);
+});
+
+test('page breaks scale with the zoom and vanish for a page that fits one sheet', () => {
+  const plan = { width: 45.27165 * 96, height: 39.33858 * 96, printWidth: 11.69291 * 96, printHeight: 8.26772 * 96 };
+  expect(pageBreakLines(plan, 1.5).vertical[0]).toBeCloseTo(plan.printWidth * 1.5, 8);
+  expect(pageBreakLines(frame, 1)).toEqual({ vertical: [], horizontal: [] });
+  expect(pageBreakLines({ width: frame.width, height: frame.height, printWidth: frame.width * 2, printHeight: frame.height * 2 }, 1)).toEqual({ vertical: [], horizontal: [] });
+});
+
+test('a degenerate print tile draws no page-break guides', () => {
+  const dense = { width: frame.width, height: frame.height, printWidth: 1e-4 * 96, printHeight: 1e-4 * 96 };
+  expect(pageBreakLines(dense, 1)).toEqual({ vertical: [], horizontal: [] });
+  const legible = { width: frame.width, height: frame.height, printWidth: frame.width / MAX_PAGE_BREAK_LINES, printHeight: frame.height / MAX_PAGE_BREAK_LINES };
+  expect(pageBreakLines(legible, 1).vertical).toHaveLength(MAX_PAGE_BREAK_LINES - 1);
+  expect(pageBreakLines({ width: frame.width, height: frame.height, printWidth: 0, printHeight: -1 }, 1)).toEqual({ vertical: [], horizontal: [] });
+});
+
+function cellShape(id: string, cells: Record<string, string>): ShapeSnapshot {
+  return {
+    id,
+    sourceId: id === 'a' ? 1 : 2,
+    name: null,
+    children: [],
+    cells: Object.entries(cells).map(([name, formula]) => ({
+      locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name },
+      name,
+      formula,
+      value: formula,
+    })),
+  };
+}
+
+function pointerForModel(model: { x: number; y: number }, zoom: number): PointerEvent<HTMLCanvasElement> {
+  const page = modelToPage(frame, model);
+  return pointerAt(page.x * zoom, page.y * zoom, zoom);
+}
+
+/** A centre-to-centre drag must resolve at 50%, 100% and 150% zoom. */
+test('resolves a connector drag at every review zoom', () => {
+  const shapes = [
+    cellShape('a', { PinX: '2', PinY: '2', Width: '1', Height: '1' }),
+    cellShape('b', { PinX: '5', PinY: '2', Width: '1', Height: '1' }),
+  ];
+  const silentHandle = { hitTest: () => null };
+  for (const zoom of [0.5, 1, 1.5]) {
+    const from = canvasPointerPosition(pointerForModel({ x: 2, y: 2 }, zoom), frame);
+    expect(from.model.x).toBeCloseTo(2, 8);
+    expect(from.model.y).toBeCloseTo(2, 8);
+    expect(connectorTargetForPoint(shapes, silentHandle as never, from.canvas, from.model)?.shapeId).toBe('a');
+    const to = canvasPointerPosition(pointerForModel({ x: 5, y: 2 }, zoom), frame);
+    expect(connectorTargetForPoint(shapes, silentHandle as never, to.canvas, to.model)?.shapeId).toBe('b');
+    const interior = canvasPointerPosition(pointerForModel({ x: 5.2, y: 2.1 }, zoom), frame);
+    expect(connectorTargetForPoint(shapes, silentHandle as never, interior.canvas, interior.model)?.shapeId).toBe('b');
+  }
+});
+
+/** A hit-tested shape still glues when the pointer misses every connection point. */
+test('falls back to the hit-tested shape for rotated frames', () => {
+  const shapes = [cellShape('a', { PinX: '2', PinY: '2', Width: '1', Height: '1' })];
+  const handle = { hitTest: () => ({ kind: 'shape', shapeId: 'a' }) };
+  const target = connectorTargetForPoint(shapes, handle as never, { x: 0, y: 0 }, { x: 2.1, y: 2.05 });
+  expect(target?.shapeId).toBe('a');
+  expect(target?.point.side).toBe('centre');
 });

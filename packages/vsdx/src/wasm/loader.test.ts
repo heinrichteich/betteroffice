@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { VsdxDocument, VsdxRenderer } from './generated/vsdx_wasm.js';
-import { initWasm, openDiagram } from '../index';
+import { initWasm, openDiagram, shapeDataRows, shapeDataValueFormula, visibleShapeDataRows } from '../index';
 import type { FormulaShapeDraft } from '../types';
 
 const root = resolve(import.meta.dir, '../../../..');
@@ -38,9 +38,9 @@ describe('VSDX wasm boundary', () => {
     expect(() => diagram.snapshot()).toThrow('diagram handle is disposed');
   });
 
-  test('accepts only v5 display lists', () => {
+  test('accepts only v7 display lists', () => {
     const diagram = openDiagram(foundation, { clientId: 9002 });
-    expect(diagram.layoutPage(0).contractVersion).toBe(6);
+    expect(diagram.layoutPage(0).contractVersion).toBe(7);
 
     const layoutPageJson = VsdxRenderer.prototype.layoutPageJson;
     VsdxRenderer.prototype.layoutPageJson = () => JSON.stringify({ contractVersion: 2 });
@@ -50,6 +50,15 @@ describe('VSDX wasm boundary', () => {
       VsdxRenderer.prototype.layoutPageJson = layoutPageJson;
       diagram.dispose();
     }
+  });
+
+  test('reports the printable paper tile for page breaks', () => {
+    const diagram = openDiagram(foundation, { clientId: 9054 });
+    try {
+      const frame = diagram.layoutPage(0);
+      expect(frame.printWidth).toBe(frame.width);
+      expect(frame.printHeight).toBe(frame.height);
+    } finally { diagram.dispose(); }
   });
 
   test('frees the document when applying the initial update fails', () => {
@@ -98,6 +107,21 @@ describe('VSDX wasm boundary', () => {
     const diagnostics = diagram.layoutPage(0).primitives.flatMap(primitive => primitive.kind === 'textBox' ? primitive.paragraphs.flatMap(paragraph => paragraph.runs.flatMap(run => run.diagnostics ?? [])) : []);
     expect(diagnostics).toContainEqual(expect.objectContaining({ category: 'fidelity', code: 'unregistered-font' }));
     diagram.dispose();
+  });
+
+  test('exports a vector PDF with one page per diagram page', () => {
+    const diagram = openDiagram(textAccounting, { clientId: 9012 });
+    try {
+      const pdf = diagram.exportPdf();
+      const text = new TextDecoder('latin1').decode(pdf);
+      expect(text.startsWith('%PDF-1.4')).toBe(true);
+      expect(text.endsWith('%%EOF')).toBe(true);
+      expect(text.match(/\/Type \/Page /g)?.length).toBe(diagram.snapshot().pages.length);
+      expect(text).toContain('BT');
+      expect(text).toContain('Tj');
+    } finally {
+      diagram.dispose();
+    }
   });
 
   test('omits diagnostics from runs laid out with a registered face', async () => {
@@ -296,6 +320,51 @@ describe('VSDX wasm boundary', () => {
     const archive = await JSZip.loadAsync(deleted);
     const pageXml = await archive.file(editedPart)!.async('text');
     expect(pageXml).not.toMatch(/FromSheet="4"|ToSheet="4"/);
+    await expectUntouchedParts(foundation, saved, editedPart);
+  });
+
+  test('inserts a connected shape with its connector as one undoable receipt', async () => {
+    const pageId = 'page:1';
+    const editedPart = 'visio/pages/page1.xml';
+    const diagram = openDiagram(foundation, { clientId: 9030 });
+    const connectionCells = (rowIndex: number): FormulaShapeDraft['cells'] => ([
+      { locator: { section: 'Connection', rowIndex, rowType: 'Connection', cellName: 'X' }, formula: 'Width*0.5' },
+      { locator: { section: 'Connection', rowIndex, rowType: 'Connection', cellName: 'Y' }, formula: 'Height*1' },
+    ]);
+    const rect = (pinX: string): FormulaShapeDraft => ({ name: 'Rect', cells: [
+      { locator: { cellName: 'Width' }, formula: '1' },
+      { locator: { cellName: 'Height' }, formula: '1' },
+      { locator: { cellName: 'PinX' }, formula: pinX },
+      { locator: { cellName: 'PinY' }, formula: '1' },
+      { locator: { cellName: 'LocPinX' }, formula: '0' },
+      { locator: { cellName: 'LocPinY' }, formula: '0' },
+      ...connectionCells(0),
+    ] });
+    const from = diagram.addShape(pageId, rect('1'));
+    const receipt = diagram.addConnectedShape(pageId, rect('5'), { name: 'Connector', cells: [
+      { locator: { cellName: 'OneD' }, formula: '1' },
+      { locator: { cellName: 'BeginX' }, formula: '1' },
+      { locator: { cellName: 'BeginY' }, formula: '1' },
+      { locator: { cellName: 'EndX' }, formula: '5' },
+      { locator: { cellName: 'EndY' }, formula: '1' },
+    ] }, { shapeId: from.shapeId, toCell: 'Connections.X1' }, 'Connections.X1');
+    const live = diagram.snapshot();
+    expect(live.pages[0].shapes.find(shape => shape.id === receipt.shape.shapeId)).toBeDefined();
+    const connector = live.pages[0].shapes.find(shape => shape.id === receipt.connector.shapeId)!;
+    expect(connector).toEqual(expect.objectContaining({ name: 'Connector' }));
+    const laid = diagram.layoutPage(0);
+    expect(laid.primitives.find(item => item.id === `${live.pages[0].sourcePartPath}:${connector.sourceId}`)).toEqual(expect.objectContaining({ kind: 'shape' }));
+    const beforeUndo = live.pages[0].shapes.length;
+    diagram.undo();
+    expect(diagram.snapshot().pages[0].shapes.length).toBe(beforeUndo - 2);
+    diagram.redo();
+    expect(diagram.snapshot().pages[0].shapes.length).toBe(beforeUndo);
+    const saved = diagram.save();
+    diagram.dispose();
+
+    const reopened = openDiagram(saved, { clientId: 9031 });
+    expect(reopened.layoutPage(0)).toEqual(laid);
+    reopened.dispose();
     await expectUntouchedParts(foundation, saved, editedPart);
   });
 
@@ -609,12 +678,16 @@ describe('VSDX wasm boundary', () => {
     diagram.dispose();
   });
 
-  test('keeps shape drafts formula-only at the type boundary', () => {
-    const draft: FormulaShapeDraft = { cells: [] };
-    expect(draft.cells).toEqual([]);
-    // @ts-expect-error Shape cells accept formulas, never cached values.
-    const invalid: FormulaShapeDraft = { cells: [{ locator: { cellName: 'Width' }, formula: '1', value: '1' }] };
-    expect(invalid).toBeDefined();
+  test('keeps plain shape drafts formula-only while paste carries cached values', () => {
+    const diagram = openDiagram(foundation, { clientId: 9011 });
+    try {
+      expect(() => diagram.addShape('page:1', { cells: [{ locator: { cellName: 'Width' }, value: '1' }] })).toThrow('must not contain value');
+      const receipt = diagram.addShapeWithText('page:1', { cells: [{ locator: { cellName: 'Width' }, value: '1' }] }, '');
+      const added = diagram.snapshot().pages[0].shapes.find(shape => shape.id === receipt.shapeId);
+      expect(added?.cells.find(cell => cell.name === 'Width')?.value).toBe('1');
+    } finally {
+      diagram.dispose();
+    }
   });
 
   test('adds a shape from the declared cell locator shape', () => {
@@ -633,6 +706,33 @@ describe('VSDX wasm boundary', () => {
     expect(x?.formula).toBe('2');
     expect(x?.locator).toEqual(expect.objectContaining({ section: 'Geometry', row: { index: 0 }, cellName: 'X' }));
     diagram.dispose();
+  });
+
+  test('commits a shape-data edit through the mutation policy', async () => {
+    const section = `<Section N='Property'>`
+      + `<Row N='Device'><Cell N='Label' V='Device name'/><Cell N='Type' V='0'/><Cell N='SortKey' V='B'/><Cell N='Value' V='Old' F='&quot;Old&quot;'/></Row>`
+      + `<Row N='Serial'><Cell N='Label' V='Serial'/><Cell N='Type' V='0'/><Cell N='SortKey' V='A'/><Cell N='Value' V='ABC' F='GUARD(&quot;ABC&quot;)'/></Row>`
+      + `<Row N='Hidden'><Cell N='Label' V='Hidden'/><Cell N='Invisible' V='1'/><Cell N='Value' V='H' F='&quot;H&quot;'/></Row>`
+      + `</Section>`;
+    const archive = await JSZip.loadAsync(foundation);
+    const contents = await archive.file('visio/pages/page1.xml')!.async('string');
+    archive.file('visio/pages/page1.xml', contents.replace(`NameU='Process'`, `NameU='Process'>${section}`));
+    const diagram = openDiagram(await archive.generateAsync({ type: 'uint8array' }), { clientId: 9054 });
+    try {
+      const page = diagram.snapshot().pages[0];
+      const shape = page.shapes[0];
+      expect(shapeDataRows(shape).map(row => row.rowName)).toEqual(['Hidden', 'Serial', 'Device']);
+      expect(visibleShapeDataRows(shape).map(row => row.rowName)).toEqual(['Serial', 'Device']);
+      const locate = (rowName: string) => ({ cellName: 'Value', section: 'Property', rowName });
+      const receipt = diagram.setCellFormula(page.id, shape.id, locate('Device'), shapeDataValueFormula('string', 'New'));
+      expect(receipt).toEqual({ pageId: page.id, shapeId: shape.id, cellName: 'Value', before: '"Old"', after: '"New"' });
+      expect(shapeDataRows(diagram.snapshot().pages[0].shapes[0]).find(row => row.rowName === 'Device')!.displayValue).toBe('New');
+      expect(() => diagram.setCellFormula(page.id, shape.id, locate('Serial'), '"XYZ"')).toThrow();
+      expect(shapeDataRows(diagram.snapshot().pages[0].shapes[0]).find(row => row.rowName === 'Serial')!.formula).toBe('GUARD("ABC")');
+      const saved = await JSZip.loadAsync(diagram.save()).then(zip => zip.file('visio/pages/page1.xml')!.async('string'));
+      expect(saved).toContain(`<Row N='Device'><Cell N='Label' V='Device name'/><Cell N='Type' V='0'/><Cell N='SortKey' V='B'/><Cell N='Value' F='&quot;New&quot;'/></Row>`);
+      expect(saved).toContain(`<Cell N='Value' V='ABC' F='GUARD(&quot;ABC&quot;)'/>`);
+    } finally { diagram.dispose(); }
   });
 
   test('lists page layers and hides shapes on invisible layers', async () => {
@@ -657,6 +757,27 @@ describe('VSDX wasm boundary', () => {
       expect(diagram.layoutPage(0).primitives.some(primitive => primitive.id === `${part}:1`)).toBe(false);
       diagram.clearLayerVisibility();
       expect(diagram.pageLayers(0)[1]).toEqual(expect.objectContaining({ index: 1, visible: false }));
+    } finally { diagram.dispose(); }
+  });
+
+  test('layer visibility stays out of the saved package', async () => {
+    const archive = await JSZip.loadAsync(foundation);
+    const pages = await archive.file('visio/pages/pages.xml')!.async('string');
+    archive.file('visio/pages/pages.xml', pages.replace('</PageSheet>',
+      `<Section N='Layer'><Row IX='0'><Cell N='Name' V='Trussing'/><Cell N='Visible' V='1'/></Row><Row IX='1'><Cell N='Name' V='Lighting'/><Cell N='Visible' V='0'/></Row></Section></PageSheet>`));
+    const contents = await archive.file('visio/pages/page1.xml')!.async('string');
+    archive.file('visio/pages/page1.xml', contents.replace(`NameU='Process'`, `NameU='Process'><Cell N='LayerMember' V='1'/>`));
+    const bytes = await archive.generateAsync({ type: 'uint8array' });
+    const diagram = openDiagram(bytes, { clientId: 9053 });
+    try {
+      const part = diagram.snapshot().pages[0].sourcePartPath;
+      const before = diagram.save();
+      diagram.setLayerVisible(part, 1, true);
+      diagram.layoutPage(0);
+      expect(diagram.save()).toEqual(before);
+      expect(diagram.canUndo()).toBe(false);
+      const saved = await JSZip.loadAsync(diagram.save());
+      expect(await saved.file('visio/pages/pages.xml')!.async('string')).toBe(await JSZip.loadAsync(bytes).then(zip => zip.file('visio/pages/pages.xml')!.async('string')));
     } finally { diagram.dispose(); }
   });
 
