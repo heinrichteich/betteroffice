@@ -122,6 +122,12 @@ impl VsdxRenderer {
         };
         serde_json::to_string(&result).map_err(js_error)
     }
+
+    #[wasm_bindgen(js_name = exportPdf)]
+    pub fn export_pdf(&self, document: &VsdxDocument) -> Result<Vec<u8>, JsValue> {
+        let package = document.session().package().map_err(js_error)?;
+        self.renderer.export_pdf(&package).map_err(js_error)
+    }
 }
 
 impl Default for VsdxRenderer {
@@ -365,6 +371,64 @@ mod tests {
     }
 
     #[test]
+    fn set_connector_route_json_reroutes_the_painted_path() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/connector-route-style.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        let mut renderer = VsdxRenderer::new();
+        let before: serde_json::Value =
+            serde_json::from_str(&renderer.layout_page_json(&document, 0).unwrap()).unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(
+            &document
+                .set_connector_route_json(
+                    &serde_json::json!({
+                        "pageId": "page:1",
+                        "shapeId": "page:1:shape:1",
+                        "points": [
+                            { "x": 1.0, "y": 1.0 },
+                            { "x": 1.0, "y": 3.0 },
+                            { "x": 4.0, "y": 3.0 },
+                        ],
+                    })
+                    .to_string(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["points"], 3);
+        let after: serde_json::Value =
+            serde_json::from_str(&renderer.layout_page_json(&document, 0).unwrap()).unwrap();
+        let path = after["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["id"] == "visio/pages/page1.xml:1")
+            .unwrap()["path"]
+            .clone();
+        assert_eq!(
+            path,
+            serde_json::json!([
+                { "type": "move", "x": 1.0, "y": 1.0 },
+                { "type": "line", "x": 1.0, "y": 3.0 },
+                { "type": "line", "x": 4.0, "y": 3.0 },
+                { "type": "line", "x": 4.0, "y": 3.0 },
+            ])
+        );
+        assert_ne!(before, after);
+        let reopened = VsdxDocument::open_collaborative(&document.save().unwrap(), 2.0).unwrap();
+        let mut reopened_renderer = VsdxRenderer::new();
+        assert_eq!(
+            after,
+            serde_json::from_str::<serde_json::Value>(
+                &reopened_renderer.layout_page_json(&reopened, 0).unwrap()
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
     fn layout_of_reordered_added_shapes_matches_the_saved_document() {
         let document = VsdxDocument::open_collaborative(
             include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
@@ -426,7 +490,7 @@ mod tests {
         assert_eq!(previews[0]["name"], serde_json::json!("Stencil-Rect"));
         assert_eq!(
             previews[0]["display"]["contractVersion"],
-            serde_json::json!(5)
+            serde_json::json!(vsdx_render::CONTRACT_VERSION)
         );
         assert_eq!(
             previews[0]["display"]["primitives"]

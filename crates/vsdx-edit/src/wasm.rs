@@ -7,7 +7,7 @@ use yrs::Subscription;
 
 use crate::{
     CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx, MAX_SAFE_CLIENT_ID, ShapeDraft,
-    UpdateEvent, UpdateOrigin,
+    ShapeTreeDraft, ShapeTreeGlue, UpdateEvent, UpdateOrigin,
 };
 use vsdx_parse::{CellLocator, CellRow, CellSheet};
 
@@ -76,6 +76,18 @@ struct SetCellFormulaArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SetControlHandleArgs {
+    page_id: String,
+    shape_id: String,
+    row: String,
+    #[serde(default)]
+    x_formula: Option<String>,
+    #[serde(default)]
+    y_formula: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MoveShapeArgs {
     page_id: String,
     shape_id: String,
@@ -127,6 +139,109 @@ struct AddShapeArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AddShapeWithTextArgs {
+    page_id: String,
+    draft: FormulaShapeDraft,
+    text: String,
+}
+
+/// A pasted group subtree; every node names its live copy source.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FormulaShapeTreeDraft {
+    name: Option<String>,
+    cells: Vec<serde_json::Value>,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    copy_source_id: Option<u32>,
+    #[serde(default)]
+    copy_source_page_id: Option<u32>,
+    #[serde(default)]
+    source_shape_id: Option<String>,
+    #[serde(default)]
+    source_id: Option<u32>,
+    #[serde(default)]
+    copy_refusal: Option<String>,
+    #[serde(default)]
+    glue: Vec<FormulaShapeTreeGlue>,
+    #[serde(default)]
+    children: Vec<FormulaShapeTreeDraft>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FormulaShapeTreeGlue {
+    connector_source: String,
+    endpoint: String,
+    target_source: String,
+    to_cell: String,
+}
+
+impl FormulaShapeTreeDraft {
+    /** Paste carries trusted cached values so formula-less cells survive; depth stays bounded. */
+    fn into_shape_tree_draft(self, depth: usize) -> Result<ShapeTreeDraft, &'static str> {
+        if depth > crate::diagram::MAX_SHAPE_NESTING {
+            return Err("shape nesting exceeds maximum depth");
+        }
+        let mut cells = Vec::with_capacity(self.cells.len());
+        for cell in self.cells {
+            let cell = serde_json::from_value::<FormulaShapeCell>(cell)
+                .map_err(|_| "invalid shape draft cell")?;
+            let row_type = cell.locator.row_type.clone();
+            let locator = CellLocator::try_from(cell.locator)?;
+            cells.push(CellSnapshot {
+                row_type,
+                name: locator.cell_name.clone(),
+                locator,
+                formula: cell.formula,
+                value: cell.value,
+            });
+        }
+        let mut children = Vec::with_capacity(self.children.len());
+        for child in self.children {
+            children.push(child.into_shape_tree_draft(depth + 1)?);
+        }
+        Ok(ShapeTreeDraft {
+            name: self.name,
+            cells,
+            text: self.text,
+            copy_source_id: self.copy_source_id,
+            copy_source_page_id: self.copy_source_page_id,
+            source_shape_id: self.source_shape_id,
+            source_id: self.source_id,
+            copy_refusal: self.copy_refusal,
+            glue: self
+                .glue
+                .into_iter()
+                .map(|glue| ShapeTreeGlue {
+                    connector_source: glue.connector_source,
+                    endpoint: glue.endpoint,
+                    target_source: glue.target_source,
+                    to_cell: glue.to_cell,
+                })
+                .collect(),
+            children,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddShapeTreeArgs {
+    page_id: String,
+    draft: FormulaShapeTreeDraft,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubtreeGlueArgs {
+    page_id: String,
+    shape_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DeleteShapeArgs {
     page_id: String,
     shape_id: String,
@@ -149,11 +264,44 @@ struct ShapeTextArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RoutePointArgs {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetConnectorRouteArgs {
+    page_id: String,
+    shape_id: String,
+    points: Vec<RoutePointArgs>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AddConnectorArgs {
     page_id: String,
     draft: FormulaShapeDraft,
     from: crate::ConnectorGlue,
     to: crate::ConnectorGlue,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddFreeConnectorArgs {
+    page_id: String,
+    draft: FormulaShapeDraft,
+    from: crate::ConnectorGlue,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddConnectedShapeArgs {
+    page_id: String,
+    shape_draft: FormulaShapeDraft,
+    connector_draft: FormulaShapeDraft,
+    from: crate::ConnectorGlue,
+    to_cell: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -171,15 +319,15 @@ struct FormulaShapeDraft {
 struct FormulaShapeCell {
     locator: CellLocatorArgs,
     formula: Option<String>,
+    value: Option<String>,
 }
 
-impl TryFrom<FormulaShapeDraft> for ShapeDraft {
-    type Error = &'static str;
-
-    fn try_from(value: FormulaShapeDraft) -> Result<Self, Self::Error> {
-        let mut cells = Vec::with_capacity(value.cells.len());
-        for cell in value.cells {
-            if cell.get("value").is_some() {
+impl FormulaShapeDraft {
+    /** Paste carries trusted cached values so formula-less cells survive; other drafts stay formula-only. */
+    fn into_shape_draft(self, allow_values: bool) -> Result<ShapeDraft, &'static str> {
+        let mut cells = Vec::with_capacity(self.cells.len());
+        for cell in self.cells {
+            if !allow_values && cell.get("value").is_some() {
                 return Err("shape draft cells must not contain value");
             }
             let cell = serde_json::from_value::<FormulaShapeCell>(cell)
@@ -191,14 +339,22 @@ impl TryFrom<FormulaShapeDraft> for ShapeDraft {
                 name: locator.cell_name.clone(),
                 locator,
                 formula: cell.formula,
-                value: None,
+                value: cell.value,
             });
         }
-        Ok(Self {
-            name: value.name,
-            master: value.master,
+        Ok(ShapeDraft {
+            name: self.name,
+            master: self.master,
             cells,
         })
+    }
+}
+
+impl TryFrom<FormulaShapeDraft> for ShapeDraft {
+    type Error = &'static str;
+
+    fn try_from(value: FormulaShapeDraft) -> Result<Self, Self::Error> {
+        value.into_shape_draft(false)
     }
 }
 
@@ -348,6 +504,11 @@ impl VsdxDocument {
         self.set_cell_formula_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = setControlHandleJson)]
+    pub fn set_control_handle_json(&self, args: &str) -> Result<String, JsValue> {
+        self.set_control_handle_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = moveShapeJson)]
     pub fn move_shape_json(&self, args: &str) -> Result<String, JsValue> {
         self.move_shape_json_inner(args).map_err(js_error)
@@ -392,6 +553,21 @@ impl VsdxDocument {
         self.add_shape_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = addShapeWithTextJson)]
+    pub fn add_shape_with_text_json(&self, args: &str) -> Result<String, JsValue> {
+        self.add_shape_with_text_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = addShapeTreeJson)]
+    pub fn add_shape_tree_json(&self, args: &str) -> Result<String, JsValue> {
+        self.add_shape_tree_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = subtreeGlueJson)]
+    pub fn subtree_glue_json(&self, args: &str) -> Result<String, JsValue> {
+        self.subtree_glue_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = deleteShapeJson)]
     pub fn delete_shape_json(&self, args: &str) -> Result<String, JsValue> {
         self.delete_shape_json_inner(args).map_err(js_error)
@@ -402,6 +578,16 @@ impl VsdxDocument {
         self.add_connector_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = addFreeConnectorJson)]
+    pub fn add_free_connector_json(&self, args: &str) -> Result<String, JsValue> {
+        self.add_free_connector_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = addConnectedShapeJson)]
+    pub fn add_connected_shape_json(&self, args: &str) -> Result<String, JsValue> {
+        self.add_connected_shape_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = setShapeTextJson)]
     pub fn set_shape_text_json(&self, args: &str) -> Result<String, JsValue> {
         self.set_shape_text_json_inner(args).map_err(js_error)
@@ -410,6 +596,11 @@ impl VsdxDocument {
     #[wasm_bindgen(js_name = shapeTextJson)]
     pub fn shape_text_json(&self, args: &str) -> Result<String, JsValue> {
         self.shape_text_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = setConnectorRouteJson)]
+    pub fn set_connector_route_json(&self, args: &str) -> Result<String, JsValue> {
+        self.set_connector_route_json_inner(args).map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = save)]
@@ -495,6 +686,21 @@ impl VsdxDocument {
             .and_then(json_inner)
     }
 
+    fn set_control_handle_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: SetControlHandleArgs = parse_args_inner(args)?;
+        self.session
+            .set_control_handle(
+                &local_context(),
+                &args.page_id,
+                &args.shape_id,
+                &args.row,
+                args.x_formula,
+                args.y_formula,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
     fn move_shape(&self, args: MoveShapeArgs) -> crate::EditResult<[crate::CellFormulaReceipt; 2]> {
         self.session.move_shape(
             &local_context(),
@@ -560,6 +766,32 @@ impl VsdxDocument {
             .and_then(json_inner)
     }
 
+    fn add_shape_with_text_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddShapeWithTextArgs = parse_args_inner(args)?;
+        let draft = args.draft.into_shape_draft(true).map_err(str::to_owned)?;
+        self.session
+            .add_shape_with_text(&local_context(), &args.page_id, &draft, args.text)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn add_shape_tree_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddShapeTreeArgs = parse_args_inner(args)?;
+        let draft = args.draft.into_shape_tree_draft(1).map_err(str::to_owned)?;
+        self.session
+            .add_shape_tree(&local_context(), &args.page_id, &draft)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn subtree_glue_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: SubtreeGlueArgs = parse_args_inner(args)?;
+        self.session
+            .subtree_glue(&args.page_id, &args.shape_id)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
     fn delete_shape_json_inner(&self, args: &str) -> Result<String, String> {
         let args: DeleteShapeArgs = parse_args_inner(args)?;
         self.session
@@ -583,10 +815,49 @@ impl VsdxDocument {
             .and_then(json_inner)
     }
 
+    fn add_free_connector_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddFreeConnectorArgs = parse_args_inner(args)?;
+        let draft = args.draft.try_into().map_err(str::to_owned)?;
+        self.session
+            .add_free_connector(&local_context(), &args.page_id, &draft, &args.from)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn add_connected_shape_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddConnectedShapeArgs = parse_args_inner(args)?;
+        let shape_draft = args.shape_draft.try_into().map_err(str::to_owned)?;
+        let connector_draft = args.connector_draft.try_into().map_err(str::to_owned)?;
+        self.session
+            .add_connected_shape(
+                &local_context(),
+                &args.page_id,
+                &shape_draft,
+                &connector_draft,
+                &args.from,
+                args.to_cell.as_deref(),
+            )
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
     fn shape_text_json_inner(&self, args: &str) -> Result<String, String> {
         let args: ShapeTextArgs = parse_args_inner(args)?;
         self.session
             .shape_text(&args.page_id, &args.shape_id)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn set_connector_route_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: SetConnectorRouteArgs = parse_args_inner(args)?;
+        let points = args
+            .points
+            .iter()
+            .map(|point| (point.x, point.y))
+            .collect::<Vec<_>>();
+        self.session
+            .set_connector_route(&local_context(), &args.page_id, &args.shape_id, &points)
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }
@@ -1268,6 +1539,37 @@ mod tests {
     }
 
     #[test]
+    fn add_shape_with_text_json_inner_keeps_cached_values() {
+        let document = document();
+        let receipt: serde_json::Value = serde_json::from_str(
+            &document
+                .add_shape_with_text_json(
+                    r#"{"pageId":"page:1","draft":{"cells":[{"locator":{"cellName":"Width"},"value":"3.5"},{"locator":{"cellName":"PinX"},"formula":"1"}]},"text":"hello"}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let shape_id = receipt["shapeId"].as_str().unwrap().to_owned();
+        let snapshot = document.session().snapshot().unwrap();
+        let shape = snapshot.pages[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == shape_id)
+            .unwrap();
+        let width = shape
+            .cells
+            .iter()
+            .find(|cell| cell.name == "Width")
+            .unwrap();
+        assert_eq!(width.formula, None);
+        assert_eq!(width.value.as_deref(), Some("3.5"));
+        assert_eq!(
+            document.session().shape_text("page:1", &shape_id).unwrap(),
+            "hello"
+        );
+    }
+
+    #[test]
     fn remote_cell_additions_must_be_formula_only() {
         let raw = document();
         assert_eq!(
@@ -1369,7 +1671,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             document.apply_update_json_inner(&update).unwrap_err(),
-            "invalid diagram state: added shapes cannot have a parent"
+            "invalid diagram state: added shapes cannot have an original parent"
         );
         assert_eq!(document.encode_state_as_update(), before);
     }

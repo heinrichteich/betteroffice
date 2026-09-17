@@ -4,9 +4,11 @@ import { documentMasterDraft, documentStencilEntries, masterPreviewPath } from '
 
 function displayList(path: GeometryPathCommand[]): PageDisplayList {
   return {
-    contractVersion: 5,
+    contractVersion: 6,
     width: 96,
     height: 96,
+    printWidth: 96,
+    printHeight: 96,
     paintTransform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
     primitives: [{ kind: 'shape', id: 'master:1', zOrder: 0, path }],
   };
@@ -75,6 +77,12 @@ describe('documentStencilEntries', () => {
     const [rect, broken] = documentStencilEntries(masters);
     expect(rect.preview).not.toBe('');
     expect(broken.preview).toBe('');
+  });
+
+  test('sizes the tile from the rendered master, in inches', () => {
+    const [rect, broken] = documentStencilEntries(masters);
+    expect(rect.defaultSize).toEqual({ width: 1, height: 1 });
+    expect(broken.defaultSize).toEqual({ width: 1, height: 1 });
   });
 
   test('drafts an instance of the master it came from', () => {

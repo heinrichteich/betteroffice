@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, KeyboardEvent, ReactElement } from 'react';
+import { useMemo, useRef, useState } from 'react';
+import type { CSSProperties, DragEvent, KeyboardEvent, ReactElement } from 'react';
 import type { TFunction } from '@betteroffice/vsdx-i18n';
 import type { ShapeStencil, StandardShape } from './shapeLibrary';
 import { shapeLabel } from './shapeLibrary';
+
+/** Native drag payload identifying a stencil entry. */
+export const STENCIL_DRAG_MIME = 'application/x-betteroffice-shape';
 
 export interface ShapesPanelProps {
   shapes?: readonly StandardShape[];
@@ -50,6 +53,7 @@ function nextFocusIndex(key: string, count: number, index: number): number {
 }
 
 function stencilIcon(id: string): ReactElement {
+  if (id === 'arrows') return <svg aria-hidden="true" width="18" height="18" viewBox="0 0 18 18"><path d="M 2 9 L 12 9" fill="none" stroke="currentColor" strokeWidth="1.5" /><path d="M 9 4.5 L 14 9 L 9 13.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>;
   if (id === 'document') return <svg aria-hidden="true" width="18" height="18" viewBox="0 0 18 18"><path d="M 4 2 L 11 2 L 14 5 L 14 16 L 4 16 Z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" /><path d="M 11 2 L 11 5 L 14 5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" /><rect x="6.5" y="7.5" width="5" height="4" fill="none" stroke="currentColor" strokeWidth="1.2" /></svg>;
   return <svg aria-hidden="true" width="18" height="18" viewBox="0 0 18 18"><rect x="3" y="3" width="5" height="5" fill="none" stroke="currentColor" /><circle cx="13" cy="5.5" r="2.5" fill="none" stroke="currentColor" /><path d="M 3 14 L 6 10 L 9 14 Z" fill="none" stroke="currentColor" /></svg>;
 }
@@ -65,12 +69,11 @@ export function ShapesPanel({ shapes, stencils, activeStencilId, onSelectStencil
   }, [stencils, shapes]);
   const activeStencil = resolvedStencils.find((stencil) => stencil.id === activeStencilId) ?? resolvedStencils[0];
   const previousStencilId = useRef(activeStencil.id);
-  useEffect(() => {
-    if (previousStencilId.current === activeStencil.id) return;
+  if (previousStencilId.current !== activeStencil.id) {
     previousStencilId.current = activeStencil.id;
     setQuery('');
     setFocusIndex(0);
-  }, [activeStencil.id]);
+  }
   const selectStencil = (id: string) => {
     if (id !== activeStencil.id) onSelectStencil?.(id);
     if (collapsed) onToggleCollapsed();
@@ -93,10 +96,10 @@ export function ShapesPanel({ shapes, stencils, activeStencilId, onSelectStencil
     <aside className={className} style={styles.root} aria-label={t('shapesPanel.title')}>
       <nav style={styles.rail} aria-label={t('shapesPanel.categoriesLabel')}>
         <ul style={{ display: 'contents', margin: 0, padding: 0, listStyle: 'none' }}>
-          {resolvedStencils.map((stencil, stencilIndex) => {
+          {resolvedStencils.map((stencil) => {
             const selected = stencil.id === activeStencil.id;
             return (
-              <li key={stencil.id} style={stencilIndex === 0 ? undefined : { marginTop: 4 }}>
+              <li key={stencil.id} style={stencil.id === resolvedStencils[0].id ? undefined : { marginTop: 4 }}>
                 <button type="button" aria-label={t(stencil.nameKey)} aria-current={selected} title={t(stencil.nameKey)} onClick={() => selectStencil(stencil.id)} style={selected ? styles.railButton : styles.railButtonInactive}>
                   {stencilIcon(stencil.id)}
                 </button>
@@ -133,6 +136,8 @@ export function ShapesPanel({ shapes, stencils, activeStencilId, onSelectStencil
                           type="button"
                           tabIndex={index === activeIndex ? 0 : -1}
                           aria-label={label}
+                          draggable
+                          onDragStart={(event: DragEvent<HTMLButtonElement>) => { event.dataTransfer.setData(STENCIL_DRAG_MIME, shape.id); event.dataTransfer.effectAllowed = 'copy'; }}
                           onFocus={() => setFocusIndex(index)}
                           onClick={() => onInsert(shape)}
                           onKeyDown={(event) => moveFocus(event, index)}

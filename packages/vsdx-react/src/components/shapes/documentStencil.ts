@@ -127,12 +127,20 @@ export function masterPreviewPath(list: PageDisplayList): string {
     .join(' ');
 }
 
+const PIXELS_PER_INCH = 96;
+
+function masterSize(display: PageDisplayList | null): { width: number; height: number } {
+  const inches = (value: number | undefined) => (Number.isFinite(value) && (value as number) > 0 ? (value as number) / PIXELS_PER_INCH : 1);
+  return { width: inches(display?.width), height: inches(display?.height) };
+}
+
 export function documentStencilEntries(masters: readonly DocumentMaster[]): StandardShape[] {
   return masters.map((master) => ({
     id: `document-master-${master.id}`,
     nameKey: 'shapesPanel.shape.documentShape',
     label: master.name ?? `#${master.id}`,
     preview: master.display ? masterPreviewPath(master.display) : '',
+    defaultSize: masterSize(master.display),
     draft: (x, y) => documentMasterDraft(master.id, x, y),
   } satisfies StandardShape));
 }

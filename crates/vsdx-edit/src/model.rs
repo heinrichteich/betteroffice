@@ -54,6 +54,12 @@ pub struct ShapeSnapshot {
     pub master: Option<u32>,
     pub cells: Vec<CellSnapshot>,
     pub children: Vec<ShapeSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_source_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_source_page_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_refusal: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -65,19 +71,10 @@ pub struct PageSnapshot {
     pub shapes: Vec<ShapeSnapshot>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PaletteEntry {
-    pub index: i64,
-    pub color: String,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagramSnapshot {
     pub pages: Vec<PageSnapshot>,
-    #[serde(default)]
-    pub palette: Vec<PaletteEntry>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -109,6 +106,23 @@ pub struct TextReceipt {
     pub after: String,
 }
 
+/// Paired receipts for a shape inserted with its connector in one transaction.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectedShapeReceipt {
+    pub shape: ShapeReceipt,
+    pub connector: ShapeReceipt,
+}
+
+/// A hand-routed connector path written in scene-space points.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorRouteReceipt {
+    pub page_id: String,
+    pub shape_id: String,
+    pub points: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeDraft {
@@ -116,6 +130,40 @@ pub struct ShapeDraft {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub master: Option<u32>,
     pub cells: Vec<CellSnapshot>,
+}
+
+/// A pasted group subtree; every node names its live copy source.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeTreeDraft {
+    pub name: Option<String>,
+    pub cells: Vec<CellSnapshot>,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub copy_source_id: Option<u32>,
+    #[serde(default)]
+    pub copy_source_page_id: Option<u32>,
+    #[serde(default)]
+    pub source_shape_id: Option<String>,
+    #[serde(default)]
+    pub source_id: Option<u32>,
+    #[serde(default)]
+    pub copy_refusal: Option<String>,
+    #[serde(default)]
+    pub glue: Vec<ShapeTreeGlue>,
+    #[serde(default)]
+    pub children: Vec<ShapeTreeDraft>,
+}
+
+/// One internal glue record of a copied subtree, addressed by copy sources.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeTreeGlue {
+    pub connector_source: String,
+    pub endpoint: String,
+    pub target_source: String,
+    pub to_cell: String,
 }
 
 /// One glued connector endpoint; `to_cell` defaults to `PinX` when absent.

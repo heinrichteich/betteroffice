@@ -364,6 +364,24 @@ test('a fully guarded rotate submenu stays closed to keyboard and pointer', () =
   }
 });
 
+test('a guarded Angle leaves the rotate submenu open with only the flips enabled', () => {
+  const { view, calls } = renderMenu({ cells: [cell('Angle', 'GUARD(0)'), cell('FlipX', '0'), cell('FlipY', '0')] });
+  try {
+    expect((parentMenu().querySelector('[data-submenu-id="rotateRight"]') as HTMLButtonElement).disabled).toBe(false);
+    const submenu = openSubmenu('rotateRight');
+    const disabled = (id: string) => (submenu.querySelector(`[data-command-id="${id}"]`) as HTMLButtonElement).disabled;
+    expect(disabled('rotateRight')).toBe(true);
+    expect(disabled('rotateLeft')).toBe(true);
+    expect(disabled('flipHorizontal')).toBe(false);
+    expect(disabled('flipVertical')).toBe(false);
+    expect(document.activeElement?.getAttribute('data-command-id')).toBe('flipHorizontal');
+    fireEvent.click(submenu.querySelector('[data-command-id="rotateRight"]') as HTMLElement);
+    expect(calls.formulas).toEqual([]);
+  } finally {
+    view.unmount();
+  }
+});
+
 for (const submenuId of ['bringToFront', 'rotateRight']) for (const nearRight of [false, true]) test(`${submenuId} submenu ${nearRight ? 'flips left' : 'opens right'} and stays above the viewport bottom`, () => {
   const originalRect = HTMLElement.prototype.getBoundingClientRect;
   const left = nearRight ? window.innerWidth - 224 : 20;
