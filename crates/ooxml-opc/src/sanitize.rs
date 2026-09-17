@@ -27,7 +27,7 @@ pub fn sanitize_package(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 pub fn sanitize_package_for_format(data: &[u8], expected_format: &str) -> Result<Vec<u8>, String> {
-    if !matches!(expected_format, "docx" | "xlsx" | "pptx" | "vsdx") {
+    if !matches!(expected_format, "docx" | "xlsx" | "pptx" | "vsdx" | "vstx") {
         return Err(format!("unsupported OOXML format: {expected_format}"));
     }
     sanitize_package_inner(data, Some(expected_format))
@@ -1363,6 +1363,29 @@ mod tests {
         let xml = String::from_utf8_lossy(&page.1);
         assert!(xml.contains("F='Width*0.5'"));
         assert!(xml.contains("<fld IX='0'/>"));
+    }
+
+    #[test]
+    fn accepts_vstx_without_accepting_macro_templates() {
+        for (content_type, accepted) in [
+            ("application/vnd.ms-visio.template.main+xml", true),
+            (
+                "application/vnd.ms-visio.template.macroEnabled.main+xml",
+                false,
+            ),
+            ("application/vnd.ms-visio.drawing.main+xml", false),
+        ] {
+            let package = rezip_parts(&package_parts(
+                "visio/document.xml",
+                content_type,
+                b"<VisioDocument/>",
+            ))
+            .unwrap();
+            assert_eq!(
+                sanitize_package_for_format(&package, "vstx").is_ok(),
+                accepted
+            );
+        }
     }
 
     #[test]

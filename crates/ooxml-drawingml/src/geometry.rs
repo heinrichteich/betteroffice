@@ -8,6 +8,7 @@ const ROUND_RECT_ADJUSTMENT: f64 = 0.166_67;
 pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, f64> {
     let values = match shape_type {
         "roundRect" => vec![("adj", ROUND_RECT_ADJUSTMENT)],
+        "plus" => vec![("adj", 0.25)],
         "triangle" | "isosTriangle" => vec![("adj", 0.5)],
         "parallelogram" => vec![("adj", 0.25)],
         "trapezoid" => vec![("adj", 0.2)],
@@ -106,6 +107,7 @@ pub fn preset_geometry_to_path(
             let i = clamp_fraction(adjustments.get("adj").copied(), 0.25);
             polygon(&[(i, 0.0), (1.0, 0.0), (1.0 - i, 1.0), (0.0, 1.0)])
         }
+        "plus" => plus(aspect_ratio, adjustments.get("adj").copied()),
         "trapezoid" => {
             let i = clamp_fraction(adjustments.get("adj").copied(), 0.2);
             polygon(&[(i, 0.0), (1.0 - i, 0.0), (1.0, 1.0), (0.0, 1.0)])
@@ -313,6 +315,26 @@ fn rounded_rect(aspect_ratio: f64, adjustment: f64) -> Vec<GeometryPathCommand> 
         },
         C::Close,
     ]
+}
+
+fn plus(aspect_ratio: f64, adjustment: Option<f64>) -> Vec<GeometryPathCommand> {
+    let arm = pin(adjustment, 0.25, 0.5);
+    let xn = arm / width_in_shortest_sides(aspect_ratio);
+    let yn = arm / height_in_shortest_sides(aspect_ratio);
+    polygon(&[
+        (0.0, yn),
+        (xn, yn),
+        (xn, 0.0),
+        (1.0 - xn, 0.0),
+        (1.0 - xn, yn),
+        (1.0, yn),
+        (1.0, 1.0 - yn),
+        (1.0 - xn, 1.0 - yn),
+        (1.0 - xn, 1.0),
+        (xn, 1.0),
+        (xn, 1.0 - yn),
+        (0.0, 1.0 - yn),
+    ])
 }
 
 fn polygon(points: &[(f64, f64)]) -> Vec<GeometryPathCommand> {
@@ -649,6 +671,7 @@ mod tests {
             "rightArrow",
             "star5",
             "bentConnector3",
+            "plus",
         ] {
             let path = |value| {
                 let adjustments = ["adj", "adj1", "adj2"]
@@ -774,5 +797,134 @@ mod tests {
         let (rx, ry) = corner_radii(&path);
         assert_close(rx * 400.0, 50.0);
         assert_close(ry * 100.0, 50.0);
+    }
+
+    fn plus_path(adj: Option<f64>, aspect: f64) -> Vec<GeometryPathCommand> {
+        let mut adjustments = HashMap::new();
+        if let Some(value) = adj {
+            adjustments.insert("adj".to_owned(), value);
+        }
+        preset_geometry_to_path("plus", &adjustments, aspect).unwrap()
+    }
+
+    fn plus_move(path: &[GeometryPathCommand]) -> (f64, f64) {
+        let GeometryPathCommand::Move { x, y } = path[0] else {
+            panic!("plus must open with a move");
+        };
+        (x, y)
+    }
+
+    #[test]
+    fn plus_defaults_to_a_quarter_arm() {
+        assert_eq!(
+            preset_geometry_default_adjustments("plus").get("adj"),
+            Some(&0.25)
+        );
+        let path = plus_path(None, 1.0);
+        assert_eq!(path.len(), 13);
+        assert_eq!(path[0], GeometryPathCommand::Move { x: 0.0, y: 0.25 });
+        assert_eq!(path[1], GeometryPathCommand::Line { x: 0.25, y: 0.25 });
+        assert_eq!(path[2], GeometryPathCommand::Line { x: 0.25, y: 0.0 });
+        assert_eq!(path[5], GeometryPathCommand::Line { x: 1.0, y: 0.25 });
+        assert_eq!(path[6], GeometryPathCommand::Line { x: 1.0, y: 0.75 });
+        assert_eq!(path[12], GeometryPathCommand::Close);
+    }
+
+    #[test]
+    fn plus_authored_adjust_matches_source_extent() {
+        let adj = 39_887.0 / 100_000.0;
+        let aspect = 557_530.0 / 538_480.0;
+        let path = plus_path(Some(adj), aspect);
+        let xn = adj / aspect;
+        assert_close(plus_move(&path).1, adj);
+        let GeometryPathCommand::Line { x, y } = path[1] else {
+            panic!("plus second vertex carries the arm");
+        };
+        assert_close(x, xn);
+        assert_close(y, adj);
+        let GeometryPathCommand::Line { x, y } = path[6] else {
+            panic!("plus right edge carries the arm");
+        };
+        assert_close(x, 1.0);
+        assert_close(y, 1.0 - adj);
+        let GeometryPathCommand::Line { x, y } = path[7] else {
+            panic!("plus inner corner mirrors the arm");
+        };
+        assert_close(x, 1.0 - xn);
+        assert_close(y, 1.0 - adj);
+    }
+
+    #[test]
+    fn plus_pins_zero_and_half() {
+        let (x, y) = plus_move(&plus_path(Some(0.0), 1.0));
+        assert_close(x, 0.0);
+        assert_close(y, 0.0);
+        for pinned in [0.5, 1.0, 2.0] {
+            let (x, y) = plus_move(&plus_path(Some(pinned), 1.0));
+            assert_close(x, 0.0);
+            assert_close(y, 0.5);
+        }
+        let (x, y) = plus_move(&plus_path(Some(-0.25), 1.0));
+        assert_close(x, 0.0);
+        assert_close(y, 0.0);
+        assert_eq!(plus_path(Some(2.0), 1.0), plus_path(Some(0.5), 1.0));
+        assert_eq!(plus_path(Some(-1.0), 1.0), plus_path(Some(0.0), 1.0));
+    }
+
+    #[test]
+    fn plus_scales_each_axis_off_the_shortest_side() {
+        let (_, y) = plus_move(&plus_path(None, 4.0));
+        assert_close(y, 0.25);
+        let GeometryPathCommand::Line { x, y } = plus_path(None, 4.0)[1] else {
+            panic!("plus second vertex carries both axes");
+        };
+        assert_close(x, 0.25 / 4.0);
+        assert_close(y, 0.25);
+        let GeometryPathCommand::Line { x, y } = plus_path(None, 0.25)[1] else {
+            panic!("tall plus mirrors the wide case");
+        };
+        assert_close(x, 0.25);
+        assert_close(y, 0.25 * 0.25);
+        let wide = plus_path(Some(0.4), 4.0);
+        let tall = plus_path(Some(0.4), 0.25);
+        let GeometryPathCommand::Line { x: wx, y: wy } = wide[1] else {
+            unreachable!();
+        };
+        let GeometryPathCommand::Line { x: tx, y: ty } = tall[1] else {
+            unreachable!();
+        };
+        assert_close(wx, 0.1);
+        assert_close(wy, 0.4);
+        assert_close(tx, 0.4);
+        assert_close(ty, 0.1);
+    }
+
+    #[test]
+    fn plus_stays_inside_a_closed_frame() {
+        for aspect in [0.25, 1.0, 4.0, 557_530.0 / 538_480.0] {
+            for adj in [
+                None,
+                Some(0.0),
+                Some(0.25),
+                Some(0.39887),
+                Some(0.5),
+                Some(2.0),
+            ] {
+                let path = plus_path(adj, aspect);
+                assert_eq!(path.len(), 13);
+                assert_eq!(path[12], GeometryPathCommand::Close);
+                for command in &path {
+                    match command {
+                        GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
+                            assert!((0.0..=1.0).contains(x), "{x} in {aspect} {adj:?}");
+                            assert!((0.0..=1.0).contains(y), "{y} in {aspect} {adj:?}");
+                        }
+                        GeometryPathCommand::Close => {}
+                        _ => panic!("plus uses straight edges only"),
+                    }
+                }
+                assert_ne!(path[1], GeometryPathCommand::Line { x: 1.0, y: 0.0 });
+            }
+        }
     }
 }

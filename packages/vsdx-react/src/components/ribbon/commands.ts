@@ -172,7 +172,7 @@ export function createRibbonCommands(
         if (!page) throw new Error(`vsdx page ${pageId ?? ''} is no longer part of the diagram`);
         const rectangle = standardShapeById('rectangle');
         if (!rectangle) throw new Error('vsdx standard rectangle shape is unavailable');
-        currentHandle.addShape(page.id, rectangle.draft(1, 1, 1, 1));
+        currentHandle.addShape(page.id, rectangle.draft(1, 1, rectangle.defaultSize.width, rectangle.defaultSize.height));
       }),
     },
     download: { id: 'download', enabled: Boolean(handle), run: () => { if (!handle) return; try { onDownload(handle.save()); } catch (error) { onError(error); } } },

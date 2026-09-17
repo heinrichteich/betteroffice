@@ -39,11 +39,11 @@ use std::sync::Arc;
 
 use docx_layout::types::{
     BlockId, BorderStyle, BoxEdges, CellBorderSpec, CellBorders, ChartBlock, ColumnBreakBlock,
-    ColumnLayout, FieldRun, FloatingTablePosition, HyperlinkInfo, ImageRun, ImageRunPosition,
-    LayoutBlock, LineBreakRun, ListNumPr, PageBreakBlock, PageMargins, ParagraphAttrs,
-    ParagraphBlock, ParagraphBorders, ParagraphIndent, ParagraphSpacing, Run, RunFontSlots,
-    RunFormatting, RunLanguageSlots, SdtGroup, SectionBreakBlock, SectionBreakType, ShapeBlock,
-    Size, SpacingExplicit, TabRun, TabStop, TableBlock, TableCell, TableRow, TextRun,
+    ColumnLayout, FieldRun, FloatingTablePosition, HorizontalRule, HyperlinkInfo, ImageRun,
+    ImageRunPosition, LayoutBlock, LineBreakRun, ListNumPr, PageBreakBlock, PageMargins,
+    ParagraphAttrs, ParagraphBlock, ParagraphBorders, ParagraphIndent, ParagraphSpacing, Run,
+    RunFontSlots, RunFormatting, RunLanguageSlots, SdtGroup, SectionBreakBlock, SectionBreakType,
+    ShapeBlock, Size, SpacingExplicit, TabRun, TabStop, TableBlock, TableCell, TableRow, TextRun,
     UnderlineSpec,
 };
 use serde_json::{Map as JsonMap, Value};
@@ -62,6 +62,8 @@ const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct RenderEnv {
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub toc_style_ids: BTreeSet<String>,
     /// Six-digit RGB values keyed by OOXML theme slot. A missing slot falls
     /// back to the default Office palette.
     pub theme_colors: BTreeMap<String, String>,
@@ -78,6 +80,10 @@ pub struct RenderEnv {
     pub numeric_ids: BTreeMap<String, f64>,
     /// Include hidden text in visible layout without changing the document.
     pub show_hidden_text: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paragraph_spacing_line_px: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_paragraph_style_id: Option<String>,
 }
 
 impl RenderEnv {
@@ -168,8 +174,22 @@ pub fn yrs_doc_to_layout_blocks(
     let txn = doc.yrs_doc().transact();
     let mut active_stories = BTreeSet::new();
     let mut list_state = ListState::default();
-    lower_story(&txn, story_id, env, 0, &mut active_stories, &mut list_state)
-        .map(|(blocks, _)| blocks)
+    lower_story(
+        &txn,
+        story_id,
+        env,
+        0,
+        &mut active_stories,
+        &mut list_state,
+        CellEdges::default(),
+    )
+    .map(|(blocks, _)| blocks)
+}
+
+#[derive(Clone, Copy, Default)]
+struct CellEdges {
+    before: bool,
+    after: bool,
 }
 
 fn lower_story<T: ReadTxn>(
@@ -179,6 +199,7 @@ fn lower_story<T: ReadTxn>(
     pm_base: u64,
     active_stories: &mut BTreeSet<String>,
     list_state: &mut ListState,
+    cell_edges: CellEdges,
 ) -> Result<(Vec<LayoutBlock>, u64), BridgeError> {
     if !active_stories.insert(story_id.to_owned()) {
         return Err(BridgeError::RecursiveStory(story_id.to_owned()));
@@ -221,7 +242,7 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = false;
                 }
                 Out::YMap(pilcrow) if is_pilcrow(&pilcrow, txn) => {
-                    let paragraph_blocks = flush_paragraph_parts(
+                    let mut paragraph_blocks = flush_paragraph_parts(
                         paragraph_runs,
                         paragraph_drawings,
                         &pilcrow,
@@ -233,6 +254,15 @@ fn lower_story<T: ReadTxn>(
                         paragraph_pm_units,
                         list_state,
                     );
+                    let values = pilcrow_values(&pilcrow, txn);
+                    suppress_cell_edge_spacing(
+                        &mut paragraph_blocks,
+                        &values,
+                        CellEdges {
+                            before: cell_edges.before && paragraph_start == 0,
+                            after: cell_edges.after && story_index + 1 == story.len(txn),
+                        },
+                    );
                     pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
                     if !shared_map_string(&pilcrow, txn, "paraId")
                         .is_some_and(|id| hidden_field_paragraphs.contains(&id))
@@ -241,7 +271,6 @@ fn lower_story<T: ReadTxn>(
                     }
                     // A pilcrow carrying section properties ENDS its section,
                     // so the break block follows its paragraph.
-                    let values = pilcrow_values(&pilcrow, txn);
                     if let Some(section_break) = section_break_block(&values, &mut section_margins)
                     {
                         blocks.push(LayoutBlock::SectionBreak(section_break));
@@ -361,6 +390,10 @@ fn lower_story<T: ReadTxn>(
                         pm_cursor + 1,
                         active_stories,
                         list_state,
+                        CellEdges {
+                            before: cell_edges.before && story_index == 0,
+                            after: cell_edges.after && story_index + 1 == story.len(txn),
+                        },
                     )?;
                     stamp_sdt_group(&mut child_blocks, group);
                     blocks.extend(child_blocks);
@@ -412,6 +445,7 @@ fn lower_story<T: ReadTxn>(
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
                         pm_end: paragraph_pm_units + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                     });
                     story_index += 1;
@@ -454,6 +488,7 @@ fn lower_story<T: ReadTxn>(
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
                         pm_end: paragraph_pm_units + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                     });
                     story_index += 1;
@@ -470,6 +505,7 @@ fn lower_story<T: ReadTxn>(
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
                         pm_end: paragraph_pm_units + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                     });
                     story_index += 1;
@@ -487,6 +523,52 @@ fn lower_story<T: ReadTxn>(
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
                         pm_end: paragraph_pm_units + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(attributes),
+                        inline_sdt_widget: None,
+                    });
+                    story_index += 1;
+                    paragraph_pm_units += 1;
+                    at_block_boundary = false;
+                }
+                Out::YMap(rule)
+                    if shared_map_string(&rule, txn, "_kind").as_deref()
+                        == Some("horizontalRule") =>
+                {
+                    let Some(rule) = shared_any(&rule, txn, "rule")
+                        .filter(|value| {
+                            any_map(value).is_some_and(|map| {
+                                ["width", "widthPercent", "height"].iter().all(|key| {
+                                    !matches!(map.get(*key), Some(Any::Number(value)) if !value.is_finite())
+                                })
+                            })
+                        })
+                        .and_then(|value| any_json(&value))
+                        .and_then(|value| {
+                            serde_json::from_value::<docx_parse::vml::HorizontalRule>(value).ok()
+                        })
+                    else {
+                        return Err(BridgeError::UnsupportedEmbed {
+                            story: story_id.to_owned(),
+                            index: story_index,
+                        });
+                    };
+                    paragraph_runs.push(RawRun {
+                        kind: RawRunKind::HorizontalRule(HorizontalRule {
+                            width: rule.width.map(|width| width / 9_525.0),
+                            width_percent: rule.width_percent,
+                            height: rule.height / 9_525.0,
+                            alignment: rule.alignment,
+                            no_shade: rule.no_shade,
+                            color: rule.color,
+                            pm_start: 0.0,
+                            pm_end: 0.0,
+                        }),
+                        formatting: lower_run_formatting(attributes, env),
+                        story_start: story_index,
+                        story_end: story_index + 1,
+                        pm_start: paragraph_pm_units,
+                        pm_end: paragraph_pm_units + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                     });
                     story_index += 1;
@@ -514,6 +596,7 @@ fn lower_story<T: ReadTxn>(
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
                         pm_end: paragraph_pm_units + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                     });
                     story_index += 1;
@@ -552,11 +635,67 @@ fn lower_story<T: ReadTxn>(
                             index: story_index,
                         });
                     };
-                    paragraph_drawings.push(DrawingMarker {
-                        pm_offset,
-                        block: LayoutBlock::Shape(block),
-                        hidden: mark_bool(attributes, "hidden") == Some(true),
-                    });
+                    let formatting = lower_run_formatting(attributes, env);
+                    if shapes::inline_native_shape(&block) {
+                        let image = ImageRun {
+                            src: String::new(),
+                            width: block.width,
+                            height: block.height,
+                            alt: block.description.clone().or_else(|| block.title.clone()),
+                            shape_type: Some(block.shape_type.clone()),
+                            transform: None,
+                            position: None,
+                            wrap_type: Some("inline".to_owned()),
+                            display_mode: Some("inline".to_owned()),
+                            css_float: Some("none".to_owned()),
+                            dist_top: None,
+                            dist_bottom: None,
+                            dist_left: None,
+                            dist_right: None,
+                            crop_top: None,
+                            crop_right: None,
+                            crop_bottom: None,
+                            crop_left: None,
+                            opacity: None,
+                            rotation_deg: None,
+                            flip_h: None,
+                            flip_v: None,
+                            rotation_bounds: None,
+                            wrap_text: None,
+                            wrap_polygon: None,
+                            allow_overlap: None,
+                            layout_in_cell: None,
+                            effect_extent: None,
+                            effects: None,
+                            outline: None,
+                            decorative: block.decorative,
+                            hyperlink: formatting.hyperlink.clone(),
+                            inline_shape: Some(Box::new(block)),
+                            is_insertion: formatting.is_insertion,
+                            is_deletion: formatting.is_deletion,
+                            change_author: formatting.change_author.clone(),
+                            change_date: formatting.change_date.clone(),
+                            change_revision_id: formatting.change_revision_id,
+                            pm_start: None,
+                            pm_end: None,
+                        };
+                        paragraph_runs.push(RawRun {
+                            kind: RawRunKind::Image(image),
+                            formatting,
+                            story_start: story_index,
+                            story_end: story_index + 1,
+                            pm_start: pm_offset,
+                            pm_end: pm_offset + 1,
+                            inherited_hyperlink: inherited_hyperlink_style(attributes),
+                            inline_sdt_widget: None,
+                        });
+                    } else {
+                        paragraph_drawings.push(DrawingMarker {
+                            pm_offset,
+                            block: LayoutBlock::Shape(block),
+                            hidden: mark_bool(attributes, "hidden") == Some(true),
+                        });
+                    }
                     story_index += 1;
                     paragraph_pm_units += 1;
                     at_block_boundary = false;
@@ -790,6 +929,10 @@ fn lower_table<T: ReadTxn>(
                 cell_pm_start + 1,
                 active_stories,
                 list_state,
+                CellEdges {
+                    before: true,
+                    after: true,
+                },
             )?;
 
             let width_value = map_number(tc_pr, "width");
@@ -885,6 +1028,13 @@ fn lower_table<T: ReadTxn>(
         .get("floating")
         .and_then(any_map)
         .map(lower_floating_table);
+    let compatibility_mode = map_number(tbl_pr, "compatibilityMode").and_then(|value| {
+        (value.is_finite() && (0.0..=255.0).contains(&value)).then_some(value as u8)
+    });
+    let cell_margin_left = table_margins
+        .and_then(|margins| map_number(margins, "left"))
+        .map(twips_to_pixels)
+        .filter(|value| value.is_finite() && *value > 0.0);
 
     Ok((
         TableBlock {
@@ -904,6 +1054,8 @@ fn lower_table<T: ReadTxn>(
             bidi: (map_bool(tbl_pr, "bidi") == Some(true)).then_some(true),
             indent,
             floating,
+            compatibility_mode,
+            cell_margin_left,
             pm_start: Some(pm_start as f64),
             pm_end: Some((pm_start + node_size) as f64),
         },
@@ -1013,7 +1165,23 @@ fn lower_image_values(
     let position = values
         .get("position")
         .and_then(any_json)
-        .and_then(|value| serde_json::from_value::<ImageRunPosition>(value).ok());
+        .and_then(|mut value| {
+            if let Some(position) = value.as_object_mut()
+                && let Some(height) = position.remove("relativeHeight")
+                && let Some(height) = height.as_f64().filter(|height| {
+                    height.is_finite()
+                        && *height >= 0.0
+                        && *height <= u32::MAX as f64
+                        && height.fract() == 0.0
+                })
+            {
+                position.insert(
+                    "relativeHeight".to_owned(),
+                    serde_json::json!(height as u64),
+                );
+            }
+            serde_json::from_value::<ImageRunPosition>(value).ok()
+        });
 
     ImageRun {
         src: map_string(values, "src").unwrap_or_default(),
@@ -1033,6 +1201,7 @@ fn lower_image_values(
         crop_right: map_number(values, "cropRight"),
         crop_bottom: map_number(values, "cropBottom"),
         crop_left: map_number(values, "cropLeft"),
+        shape_type: map_string(values, "shapeType"),
         opacity: map_number(values, "opacity"),
         rotation_deg,
         flip_h,
@@ -1047,6 +1216,7 @@ fn lower_image_values(
         outline: None,
         decorative: None,
         hyperlink: None,
+        inline_shape: None,
         is_insertion: formatting.is_insertion,
         is_deletion: formatting.is_deletion,
         change_author: formatting.change_author.clone(),
@@ -1438,6 +1608,7 @@ fn lower_inline_sdt_values(
                         story_end: story_index + 1,
                         pm_start: child_pm_start,
                         pm_end: child_pm_start + width,
+                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: widget.clone(),
                     });
                 }
@@ -1451,6 +1622,7 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                 });
                 1
@@ -1463,6 +1635,7 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                 });
                 1
@@ -1476,6 +1649,7 @@ fn lower_inline_sdt_values(
                         story_end: story_index + 1,
                         pm_start: child_pm_start,
                         pm_end: child_pm_start + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: None,
                     });
                 }
@@ -1507,6 +1681,7 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                 });
                 1
@@ -1528,6 +1703,7 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                 });
                 1
@@ -1554,6 +1730,7 @@ fn lower_inline_sdt_values(
                         story_end: story_index + 1,
                         pm_start: child_pm_start,
                         pm_end: child_pm_start + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: widget.clone(),
                     });
                 }
@@ -1702,6 +1879,7 @@ enum RawRunKind {
     Text(String),
     Tab,
     Image(ImageRun),
+    HorizontalRule(HorizontalRule),
     LineBreak,
     Field {
         field_type: String,
@@ -1716,6 +1894,7 @@ enum RawRunKind {
 struct RawRun {
     kind: RawRunKind,
     formatting: RunFormatting,
+    inherited_hyperlink: (bool, bool),
     /// Story-global UTF-16 bounds of the source content.
     story_start: u32,
     story_end: u32,
@@ -1852,6 +2031,7 @@ fn push_text_chunks(
             story_end: end,
             pm_start: chunk_pm_start + start - chunk_start,
             pm_end: chunk_pm_start + end - chunk_start,
+            inherited_hyperlink: inherited_hyperlink_style(attributes),
             inline_sdt_widget: None,
         });
     }
@@ -1977,14 +2157,26 @@ fn flush_paragraph<T: ReadTxn>(
         .is_some_and(|suffix| suffix.parse::<usize>().is_ok());
     let style_id = paragraph_style_id(&values);
     let defaults = paragraph_run_defaults(&values);
+    let semantic_toc = style_id
+        .as_ref()
+        .is_some_and(|id| env.toc_style_ids.contains(id));
 
     for run in &mut raw_runs {
         apply_run_defaults(&mut run.formatting, &defaults);
-        if style_id.as_deref().is_some_and(is_toc_style) {
-            strip_toc_hyperlink_style(&mut run.formatting);
+        if semantic_toc || style_id.as_deref().is_some_and(is_toc_style) {
+            strip_toc_hyperlink_style(&mut run.formatting, run.inherited_hyperlink);
         }
     }
     let raw_runs = coalesce_runs(raw_runs);
+    let mut attrs = lower_paragraph_attrs(&values, pilcrow_attributes, env, list_state);
+    for raw in &raw_runs {
+        if let RawRunKind::HorizontalRule(rule) = &raw.kind {
+            let mut rule = rule.clone();
+            rule.pm_start = (paragraph_pm_start + 1 + u64::from(raw.pm_start)) as f64;
+            rule.pm_end = (paragraph_pm_start + 1 + u64::from(raw.pm_end)) as f64;
+            attrs.horizontal_rules.push(rule);
+        }
+    }
     let mut runs: Vec<Run> = raw_runs
         .into_iter()
         .map(|raw| raw_run_to_layout(raw, paragraph_pm_start))
@@ -1996,12 +2188,7 @@ fn flush_paragraph<T: ReadTxn>(
         id: BlockId::Str(para_id.clone()),
         para_id: (!para_id.is_empty() && !para_id_is_generated).then_some(para_id),
         runs,
-        attrs: Some(lower_paragraph_attrs(
-            &values,
-            pilcrow_attributes,
-            env,
-            list_state,
-        )),
+        attrs: Some(attrs),
         pm_start: Some(paragraph_pm_start as f64),
         pm_end: Some((paragraph_pm_start + u64::from(paragraph_pm_units) + 2) as f64),
     }
@@ -2194,6 +2381,13 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
     let pm_start = Some((paragraph_pm_start + 1 + u64::from(raw.pm_start)) as f64);
     let pm_end = Some((paragraph_pm_start + 1 + u64::from(raw.pm_end)) as f64);
     match raw.kind {
+        RawRunKind::HorizontalRule(_) => Run::Text(TextRun {
+            fmt: raw.formatting,
+            text: "\u{200b}".to_owned(),
+            pm_start,
+            pm_end,
+            inline_sdt_widget: raw.inline_sdt_widget,
+        }),
         RawRunKind::Text(text) => Run::Text(TextRun {
             fmt: raw.formatting,
             text,
@@ -2727,7 +2921,17 @@ fn lower_paragraph_attrs(
         style_id: paragraph_style_id(values),
         ..ParagraphAttrs::default()
     };
-    lower_paragraph_spacing(values, &mut result);
+    let raw_missing = result
+        .style_id
+        .as_deref()
+        .is_none_or(|style| style.is_empty());
+    if raw_missing {
+        result.effective_style_id = env
+            .default_paragraph_style_id
+            .clone()
+            .filter(|style| !style.is_empty());
+    }
+    lower_paragraph_spacing(values, &mut result, env.paragraph_spacing_line_px);
     lower_paragraph_indent(values, &mut result);
     lower_paragraph_tabs(values, &mut result);
 
@@ -2753,14 +2957,25 @@ fn lower_paragraph_attrs(
     result.list_marker_hidden = true_property(values, "listMarkerHidden");
     result.list_marker_font_family = value_string(values.get("listMarkerFontFamily"));
     result.list_marker_font_size = value_number(values.get("listMarkerFontSize"));
-    if result.list_marker.is_some()
-        && let Some(Any::Map(formatting)) = values.get("defaultTextFormatting")
-    {
-        result.list_marker_bold = map_bool(formatting, "bold");
-        result.list_marker_italic = map_bool(formatting, "italic");
-        result.list_marker_color = formatting
-            .get("color")
+    if result.list_marker.is_some() {
+        let explicit_bold = values.get("listMarkerBold").and_then(any_bool);
+        let explicit_italic = values.get("listMarkerItalic").and_then(any_bool);
+        let explicit_color = values
+            .get("listMarkerColor")
             .and_then(|color| resolve_color(color, env));
+        if let Some(Any::Map(formatting)) = values.get("defaultTextFormatting") {
+            result.list_marker_bold = explicit_bold.or_else(|| map_bool(formatting, "bold"));
+            result.list_marker_italic = explicit_italic.or_else(|| map_bool(formatting, "italic"));
+            result.list_marker_color = explicit_color.or_else(|| {
+                formatting
+                    .get("color")
+                    .and_then(|color| resolve_color(color, env))
+            });
+        } else {
+            result.list_marker_bold = explicit_bold;
+            result.list_marker_italic = explicit_italic;
+            result.list_marker_color = explicit_color;
+        }
     }
     result.list_marker_suffix = value_string(values.get("listMarkerSuffix"));
     result.default_tab_stop_twips = env.default_tab_stop_twips;
@@ -2881,11 +3096,59 @@ fn lower_paragraph_border(
     })
 }
 
-fn lower_paragraph_spacing(values: &BTreeMap<String, Any>, result: &mut ParagraphAttrs) {
+fn paragraph_auto_spacing(values: &BTreeMap<String, Any>, key: &str) -> bool {
+    values.get(key).and_then(any_bool).or_else(|| {
+        values
+            .get("_originalFormatting")
+            .and_then(any_map)
+            .and_then(|map| map_bool(map, key))
+    }) == Some(true)
+}
+
+fn suppress_cell_edge_spacing(
+    blocks: &mut [LayoutBlock],
+    values: &BTreeMap<String, Any>,
+    edges: CellEdges,
+) {
+    if edges.before
+        && paragraph_auto_spacing(values, "beforeAutospacing")
+        && let Some(spacing) = blocks.iter_mut().find_map(|block| match block {
+            LayoutBlock::Paragraph(paragraph) => paragraph.attrs.as_mut()?.spacing.as_mut(),
+            _ => None,
+        })
+    {
+        spacing.before = Some(0.0);
+    }
+    if edges.after
+        && paragraph_auto_spacing(values, "afterAutospacing")
+        && let Some(spacing) = blocks.iter_mut().rev().find_map(|block| match block {
+            LayoutBlock::Paragraph(paragraph) => paragraph.attrs.as_mut()?.spacing.as_mut(),
+            _ => None,
+        })
+    {
+        spacing.after = Some(0.0);
+    }
+}
+
+fn lower_paragraph_spacing(
+    values: &BTreeMap<String, Any>,
+    result: &mut ParagraphAttrs,
+    line_px: Option<f64>,
+) {
+    let line_px = line_px
+        .filter(|line| line.is_finite() && *line > 0.0)
+        .unwrap_or(16.0);
     let spacing_map = values.get("spacing").and_then(any_map);
-    let original = values.get("_originalFormatting").and_then(any_map);
-    let auto_before = original.and_then(|map| map_bool(map, "beforeAutospacing")) == Some(true);
-    let auto_after = original.and_then(|map| map_bool(map, "afterAutospacing")) == Some(true);
+    let auto_before = paragraph_auto_spacing(values, "beforeAutospacing");
+    let auto_after = paragraph_auto_spacing(values, "afterAutospacing");
+    let before_lines = (!auto_before)
+        .then(|| value_number(values.get("spaceBeforeLines")))
+        .flatten()
+        .filter(|value| value.is_finite() && *value > 0.0);
+    let after_lines = (!auto_after)
+        .then(|| value_number(values.get("spaceAfterLines")))
+        .flatten()
+        .filter(|value| value.is_finite() && *value > 0.0);
     let before = value_number(values.get("spaceBefore"))
         .or_else(|| spacing_map.and_then(|map| map_number(map, "before")));
     let after = value_number(values.get("spaceAfter"))
@@ -2895,17 +3158,30 @@ fn lower_paragraph_spacing(values: &BTreeMap<String, Any>, result: &mut Paragrap
     let line_rule = value_string(values.get("lineSpacingRule"))
         .or_else(|| spacing_map.and_then(|map| map_string(map, "lineRule")));
 
-    if auto_before || auto_after || before.is_some() || after.is_some() || line.is_some() {
+    if auto_before
+        || auto_after
+        || before.is_some()
+        || after.is_some()
+        || line.is_some()
+        || before_lines.is_some()
+        || after_lines.is_some()
+    {
         let mut spacing = ParagraphSpacing {
+            before_lines,
+            after_lines,
             before: if auto_before {
                 Some(AUTO_PARAGRAPH_SPACING_PX)
             } else {
-                before.map(twips_to_pixels)
+                before_lines
+                    .map(|lines| lines * line_px / 100.0)
+                    .or_else(|| before.map(twips_to_pixels))
             },
             after: if auto_after {
                 Some(AUTO_PARAGRAPH_SPACING_PX)
             } else {
-                after.map(twips_to_pixels)
+                after_lines
+                    .map(|lines| lines * line_px / 100.0)
+                    .or_else(|| after.map(twips_to_pixels))
             },
             ..ParagraphSpacing::default()
         };
@@ -3095,11 +3371,23 @@ fn apply_run_defaults(target: &mut RunFormatting, defaults: &RunFormatting) {
     }
 }
 
-fn strip_toc_hyperlink_style(formatting: &mut RunFormatting) {
+fn inherited_hyperlink_style(attributes: Option<&Attrs>) -> (bool, bool) {
+    let inherited = |key| {
+        attribute_map(attributes, key).and_then(|map| map_bool(map, "inheritedHyperlink"))
+            == Some(true)
+    };
+    (inherited("textColor"), inherited("underline"))
+}
+
+fn strip_toc_hyperlink_style(formatting: &mut RunFormatting, inherited: (bool, bool)) {
     if let Some(hyperlink) = &mut formatting.hyperlink {
         hyperlink.no_default_style = Some(true);
-        formatting.color = None;
-        formatting.underline = None;
+        if inherited.0 {
+            formatting.color = None;
+        }
+        if inherited.1 {
+            formatting.underline = None;
+        }
     }
 }
 
@@ -3464,6 +3752,64 @@ mod tests {
     }
 
     #[test]
+    fn horizontal_rule_payloads_reject_invalid_values_and_recover_positions() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/horizontal_rule_payloads.json"
+        ))
+        .unwrap();
+        let valid = Any::from_json(&cases[0]["payload"]["rule"].to_string()).unwrap();
+        for case in cases {
+            let doc = EditingDoc::new(7);
+            doc.create_story("body", "AB", "Normal", "left").unwrap();
+            let payload = case["payload"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key.clone(), Any::from_json(&value.to_string()).unwrap()))
+                .collect();
+            doc.apply_raw_ops(
+                "body",
+                vec![RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "horizontalRule".to_owned(),
+                    payload,
+                    attrs: Attrs::new(),
+                }],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+            let lowered = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default());
+            if case["valid"] == true {
+                assert!(lowered.is_ok(), "{}: {lowered:?}", case["name"]);
+            } else {
+                assert!(
+                    matches!(lowered, Err(BridgeError::UnsupportedEmbed { story, index: 1 }) if story == "body"),
+                    "{}",
+                    case["name"]
+                );
+                doc.set_embed_attrs(
+                    &EditCtx::local("", DATE),
+                    Position::new("body", 1),
+                    vec![("rule".to_owned(), valid.clone())],
+                )
+                .unwrap();
+            }
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!()
+            };
+            let rules = &paragraph.attrs.as_ref().unwrap().horizontal_rules;
+            assert_eq!(rules.len(), 1);
+            assert_eq!((rules[0].pm_start, rules[0].pm_end), (2.0, 3.0));
+            let Run::Text(tail) = paragraph.runs.last().unwrap() else {
+                panic!()
+            };
+            assert_eq!(tail.text, "B");
+            assert_eq!((tail.pm_start, tail.pm_end), (Some(3.0), Some(4.0)));
+        }
+    }
+
+    #[test]
     fn paragraph_shading_distinguishes_automatic_background_from_text() {
         let env = RenderEnv::default();
         for (shading, expected) in [
@@ -3517,6 +3863,66 @@ mod tests {
         assert_eq!(attrs.list_marker_font_family.as_deref(), Some("Arial"));
         assert_eq!(attrs.list_marker_bold, Some(true));
         assert_eq!(attrs.list_marker_italic, Some(false));
+        assert_eq!(attrs.list_marker_color.as_deref(), Some("#FF0000"));
+    }
+
+    #[test]
+    fn list_marker_level_off_overrides_paragraph_on() {
+        let values = BTreeMap::from([
+            ("listMarker".to_owned(), Any::String("1.".into())),
+            ("listMarkerBold".to_owned(), Any::Bool(false)),
+            ("listMarkerItalic".to_owned(), Any::Bool(false)),
+            (
+                "listMarkerColor".to_owned(),
+                any_map([("rgb", Any::String("000000".into()))]),
+            ),
+            (
+                "defaultTextFormatting".to_owned(),
+                any_map([
+                    ("bold", Any::Bool(true)),
+                    ("italic", Any::Bool(true)),
+                    ("color", any_map([("rgb", Any::String("FF0000".into()))])),
+                ]),
+            ),
+        ]);
+        let attrs = lower_paragraph_attrs(
+            &values,
+            None,
+            &RenderEnv::default(),
+            &mut ListState::default(),
+        );
+        assert_eq!(attrs.list_marker_bold, Some(false));
+        assert_eq!(attrs.list_marker_italic, Some(false));
+        assert_eq!(attrs.list_marker_color.as_deref(), Some("#000000"));
+    }
+
+    #[test]
+    fn list_marker_level_on_overrides_body_off() {
+        let values = BTreeMap::from([
+            ("listMarker".to_owned(), Any::String("1.".into())),
+            ("listMarkerBold".to_owned(), Any::Bool(true)),
+            ("listMarkerItalic".to_owned(), Any::Bool(true)),
+            (
+                "listMarkerColor".to_owned(),
+                any_map([("rgb", Any::String("FF0000".into()))]),
+            ),
+            (
+                "defaultTextFormatting".to_owned(),
+                any_map([
+                    ("bold", Any::Bool(false)),
+                    ("italic", Any::Bool(false)),
+                    ("color", any_map([("rgb", Any::String("000000".into()))])),
+                ]),
+            ),
+        ]);
+        let attrs = lower_paragraph_attrs(
+            &values,
+            None,
+            &RenderEnv::default(),
+            &mut ListState::default(),
+        );
+        assert_eq!(attrs.list_marker_bold, Some(true));
+        assert_eq!(attrs.list_marker_italic, Some(true));
         assert_eq!(attrs.list_marker_color.as_deref(), Some("#FF0000"));
     }
 
@@ -3973,6 +4379,207 @@ mod tests {
     }
 
     #[test]
+    fn inline_textless_shape_stays_one_paragraph_with_native_payload() {
+        let doc = EditingDoc::new(60);
+        doc.create_story("body", "AB", "Normal", "left").unwrap();
+        let shape = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "geometryPath": [
+                {"type": "move", "x": 0.1, "y": 0.2},
+                {"type": "line", "x": 0.9, "y": 0.8},
+                {"type": "close"}
+            ],
+            "fill": {"type": "solid", "color": {"rgb": "112233"}},
+            "outline": {"color": {"rgb": "445566"}, "width": 19050},
+            "transform": {"rotation": 12, "flipH": true},
+            "children": [
+                {"shapeType": "ellipse", "size": {"width": 91440, "height": 91440}}
+            ]
+        });
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 1,
+                kind: "shape".to_owned(),
+                payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                attrs: Attrs::new(),
+            }],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+        let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        assert_eq!(blocks.len(), 1);
+        let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+            panic!("expected single paragraph");
+        };
+        assert_eq!(paragraph.runs.len(), 3);
+        let Run::Text(before) = &paragraph.runs[0] else {
+            panic!("expected leading text");
+        };
+        assert_eq!(before.text, "A");
+        let Run::Image(image) = &paragraph.runs[1] else {
+            panic!("expected inline shape image");
+        };
+        assert_eq!(image.wrap_type.as_deref(), Some("inline"));
+        assert_eq!(image.display_mode.as_deref(), Some("inline"));
+        let inline = image.inline_shape.as_ref().expect("native payload");
+        assert_eq!(inline.geometry_path.len(), 3);
+        assert_eq!(inline.geometry_path[0]["x"], 0.1);
+        assert_eq!(inline.fill.as_ref().unwrap()["color"], "#112233");
+        assert_eq!(inline.stroke.as_ref().unwrap()["color"], "#445566");
+        assert_eq!(inline.transform.as_ref().unwrap()["flipH"], true);
+        assert_eq!(inline.children.len(), 1);
+        assert_eq!((image.width, image.height), (96.0, 48.0));
+        assert_eq!((image.pm_start, image.pm_end), (Some(2.0), Some(3.0)));
+        let Run::Text(after) = &paragraph.runs[2] else {
+            panic!("expected trailing text");
+        };
+        assert_eq!(after.text, "B");
+        assert_eq!((after.pm_start, after.pm_end), (Some(3.0), Some(4.0)));
+    }
+
+    #[test]
+    fn anchored_and_text_shapes_split_paragraph() {
+        for (name, shape) in [
+            (
+                "anchored",
+                json!({
+                    "shapeType": "rect",
+                    "size": {"width": 914400, "height": 457200},
+                    "position": {
+                        "horizontal": {"relativeTo": "column", "posOffset": 0},
+                        "vertical": {"relativeTo": "paragraph", "posOffset": 0}
+                    },
+                    "wrap": {"type": "square"}
+                }),
+            ),
+            (
+                "text",
+                json!({
+                    "shapeType": "rect",
+                    "size": {"width": 914400, "height": 457200},
+                    "textBody": {"content": [{
+                        "paraId": "p1",
+                        "content": [{
+                            "type": "run",
+                            "content": [{"type": "text", "text": "hi"}]
+                        }]
+                    }]}
+                }),
+            ),
+        ] {
+            let doc = EditingDoc::new(61);
+            doc.create_story("body", "AB", "Normal", "left").unwrap();
+            doc.apply_raw_ops(
+                "body",
+                vec![RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "shape".to_owned(),
+                    payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                    attrs: Attrs::new(),
+                }],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            assert_eq!(blocks.len(), 3, "{name}");
+            assert!(matches!(blocks[0], LayoutBlock::Paragraph(_)));
+            assert!(matches!(blocks[1], LayoutBlock::Shape(_)));
+            assert!(matches!(blocks[2], LayoutBlock::Paragraph(_)));
+        }
+    }
+
+    #[test]
+    fn inline_shape_preserves_pm_revision_and_hidden() {
+        let shape = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200}
+        });
+        let doc = EditingDoc::new(62);
+        doc.create_story("body", "AB", "Normal", "left").unwrap();
+        let mut revision_attrs = Attrs::new();
+        revision_attrs.insert(
+            Arc::from("ins"),
+            any_map([
+                ("id", Any::Number(7.0)),
+                ("author", Any::from("Ada")),
+                ("date", Any::from(DATE)),
+            ]),
+        );
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 1,
+                kind: "shape".to_owned(),
+                payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                attrs: revision_attrs,
+            }],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+        let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        assert_eq!(blocks.len(), 1);
+        let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+            panic!();
+        };
+        let Run::Image(image) = &paragraph.runs[1] else {
+            panic!();
+        };
+        assert_eq!(image.is_insertion, Some(true));
+        assert_eq!(image.change_author.as_deref(), Some("Ada"));
+        assert!(image.inline_shape.is_some());
+        let hidden_doc = EditingDoc::new(63);
+        hidden_doc
+            .create_story("body", "AB", "Normal", "left")
+            .unwrap();
+        let mut hidden_attrs = Attrs::new();
+        hidden_attrs.insert(Arc::from("hidden"), Any::Bool(true));
+        hidden_doc
+            .apply_raw_ops(
+                "body",
+                vec![RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "shape".to_owned(),
+                    payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                    attrs: hidden_attrs,
+                }],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+        let blocks = yrs_doc_to_layout_blocks(&hidden_doc, "body", &RenderEnv::default()).unwrap();
+        let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+            panic!();
+        };
+        assert!(
+            !paragraph
+                .runs
+                .iter()
+                .any(|run| matches!(run, Run::Image(_))),
+            "hidden inline shape filtered"
+        );
+        let shown = yrs_doc_to_layout_blocks(
+            &hidden_doc,
+            "body",
+            &RenderEnv {
+                show_hidden_text: true,
+                ..RenderEnv::default()
+            },
+        )
+        .unwrap();
+        let LayoutBlock::Paragraph(paragraph) = &shown[0] else {
+            panic!();
+        };
+        assert!(
+            paragraph
+                .runs
+                .iter()
+                .any(|run| matches!(run, Run::Image(_))),
+            "show_hidden_text keeps inline shape"
+        );
+    }
+
+    #[test]
     fn native_shape_embed_lowers_raw_document_payload() {
         let doc = EditingDoc::new(44);
         doc.create_story("body", "", "Normal", "left").unwrap();
@@ -4372,6 +4979,7 @@ mod tests {
                     },
                     {
                         "kind": "text", "text": "link", "italic": true, "fontSize": 10.0,
+                        "color": "#0563C1", "underline": { "style": "single", "color": "#00FF00" },
                         "hyperlink": {
                             "href": "https://example.test", "tooltip": "Example",
                             "noDefaultStyle": true

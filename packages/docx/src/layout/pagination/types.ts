@@ -277,6 +277,7 @@ export type ImageRun = {
   width: number;
   height: number;
   alt?: string;
+  shapeType?: string;
   /** CSS transform string (rotation, flip) */
   transform?: string;
   /** Position for floating/anchored images */
@@ -337,6 +338,8 @@ export type ImageRun = {
   changeRevisionId?: number;
   pmStart?: number;
   pmEnd?: number;
+  /** Native inline DrawingML payload; present only for textless inline shapes. */
+  inlineShape?: unknown;
 };
 
 /** Run for an explicit w:br — ends the line, not the paragraph. */
@@ -376,6 +379,8 @@ export type Run = TextRun | TabRun | ImageRun | LineBreakRun | FieldRun;
 
 /** Paragraph spacing (w:spacing): above/below plus the w:lineRule line rule. */
 export type ParagraphSpacing = {
+  beforeLines?: number;
+  afterLines?: number;
   before?: number;
   after?: number;
   line?: number;
@@ -452,6 +457,7 @@ export type ParagraphAttrs = {
   widowControl?: boolean;
   pageBreakBefore?: boolean;
   styleId?: string;
+  effectiveStyleId?: string;
   contextualSpacing?: boolean;
   /** Right-to-left paragraph direction */
   bidi?: boolean;
@@ -675,6 +681,7 @@ export type ImageBlock = {
   width: number;
   height: number;
   alt?: string;
+  shapeType?: string;
   /** CSS transform string (rotation, flip) */
   transform?: string;
   opacity?: number;
@@ -1481,6 +1488,8 @@ export type Page = {
   noteAreas?: NoteAreaContract[];
   /** Column layout for this page (if multi-column). */
   columns?: ColumnLayout;
+  /** Automatic parity filler: suppress header/footer, keep physical page. */
+  parityFiller?: boolean;
 };
 
 /**

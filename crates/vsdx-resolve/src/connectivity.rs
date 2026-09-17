@@ -74,18 +74,12 @@ pub struct SceneTransform {
     pub scene: SceneAffine,
 }
 
-pub fn bounds_affine(
-    bounds: ShapeBounds,
-    child_extent: Option<(f64, f64, f64, f64)>,
-) -> SceneAffine {
-    let (origin_x, origin_y, scale_x, scale_y) = child_extent
-        .map(|(x, y, width, height)| (x, y, bounds.width / width, bounds.height / height))
-        .unwrap_or((0.0, 0.0, 1.0, 1.0));
+/// Maps a sheet's local space into its parent: local (0,0) is the shape box corner and
+/// LocPin lands on Pin. A group's children share this space, so no extent scaling applies.
+pub fn bounds_affine(bounds: ShapeBounds) -> SceneAffine {
     let (sin, cos) = bounds.angle.sin_cos();
-    let flip_x = if bounds.flip_x { -1.0 } else { 1.0 };
-    let flip_y = if bounds.flip_y { -1.0 } else { 1.0 };
-    let sx = scale_x * flip_x;
-    let sy = scale_y * flip_y;
+    let sx = if bounds.flip_x { -1.0 } else { 1.0 };
+    let sy = if bounds.flip_y { -1.0 } else { 1.0 };
     let pin_x = bounds.x + bounds.loc_pin_x;
     let pin_y = bounds.y + bounds.loc_pin_y;
     SceneAffine {
@@ -93,11 +87,8 @@ pub fn bounds_affine(
         b: sin * sx,
         c: -sin * sy,
         d: cos * sy,
-        e: pin_x - cos * (sx * origin_x + flip_x * bounds.loc_pin_x)
-            + sin * (sy * origin_y + flip_y * bounds.loc_pin_y),
-        f: pin_y
-            - sin * (sx * origin_x + flip_x * bounds.loc_pin_x)
-            - cos * (sy * origin_y + flip_y * bounds.loc_pin_y),
+        e: pin_x - cos * sx * bounds.loc_pin_x + sin * sy * bounds.loc_pin_y,
+        f: pin_y - sin * sx * bounds.loc_pin_x - cos * sy * bounds.loc_pin_y,
     }
 }
 
@@ -439,24 +430,6 @@ pub fn scene_transforms(
     transforms
 }
 
-pub fn scene_transforms_without_flips(
-    page: &vsdx_parse::Sheet,
-    shapes: &BTreeMap<u32, ResolvedShape>,
-    value: impl Fn(u32, &ResolvedShape, &str) -> Option<f64> + Copy,
-) -> BTreeMap<u32, SceneTransform> {
-    let mut transforms = BTreeMap::new();
-    for shape in page.shapes() {
-        add_scene_transforms_without_flips(
-            shape,
-            SceneAffine::identity(),
-            shapes,
-            value,
-            &mut transforms,
-        );
-    }
-    transforms
-}
-
 fn add_scene_transforms(
     shape: &Shape,
     parent: SceneAffine,
@@ -470,65 +443,12 @@ fn add_scene_transforms(
     let Some(bounds) = shape_bounds(shape.id, resolved, value) else {
         return;
     };
-    let children = shape.shapes().collect::<Vec<_>>();
-    let extent = child_extent(&children, shapes, value);
-    let local = bounds_affine(bounds, extent);
+    let local = bounds_affine(bounds);
     let scene = parent.compose(local);
     transforms.insert(shape.id, SceneTransform { local, scene });
-    for child in children {
+    for child in shape.shapes() {
         add_scene_transforms(child, scene, shapes, value, transforms);
     }
-}
-
-fn add_scene_transforms_without_flips(
-    shape: &Shape,
-    parent: SceneAffine,
-    shapes: &BTreeMap<u32, ResolvedShape>,
-    value: impl Fn(u32, &ResolvedShape, &str) -> Option<f64> + Copy,
-    transforms: &mut BTreeMap<u32, SceneTransform>,
-) {
-    let Some(resolved) = shapes.get(&shape.id) else {
-        return;
-    };
-    let Some(bounds) = shape_bounds_without_flips(shape.id, resolved, value) else {
-        return;
-    };
-    let children = shape.shapes().collect::<Vec<_>>();
-    let extent = child_extent(&children, shapes, value);
-    let local = bounds_affine(bounds, extent);
-    let scene = parent.compose(local);
-    transforms.insert(shape.id, SceneTransform { local, scene });
-    for child in children {
-        add_scene_transforms_without_flips(child, scene, shapes, value, transforms);
-    }
-}
-
-fn child_extent(
-    children: &[&Shape],
-    shapes: &BTreeMap<u32, ResolvedShape>,
-    value: impl Fn(u32, &ResolvedShape, &str) -> Option<f64> + Copy,
-) -> Option<(f64, f64, f64, f64)> {
-    let bounds = children
-        .iter()
-        .filter_map(|source| {
-            shapes
-                .get(&source.id)
-                .and_then(|shape| shape_bounds(source.id, shape, value))
-        })
-        .collect::<Vec<_>>();
-    let min_x = bounds.iter().map(|bounds| bounds.x).reduce(f64::min)?;
-    let min_y = bounds.iter().map(|bounds| bounds.y).reduce(f64::min)?;
-    let max_x = bounds
-        .iter()
-        .map(|bounds| bounds.x + bounds.width)
-        .reduce(f64::max)?;
-    let max_y = bounds
-        .iter()
-        .map(|bounds| bounds.y + bounds.height)
-        .reduce(f64::max)?;
-    let width = max_x - min_x;
-    let height = max_y - min_y;
-    (width > 0.0 && height > 0.0).then_some((min_x, min_y, width, height))
 }
 
 fn shape_bounds(
@@ -550,28 +470,6 @@ fn shape_bounds(
         angle: value(id, shape, "Angle").unwrap_or(0.0),
         flip_x: value(id, shape, "FlipX").unwrap_or(0.0) != 0.0,
         flip_y: value(id, shape, "FlipY").unwrap_or(0.0) != 0.0,
-    })
-}
-
-fn shape_bounds_without_flips(
-    id: u32,
-    shape: &ResolvedShape,
-    value: impl Fn(u32, &ResolvedShape, &str) -> Option<f64>,
-) -> Option<ShapeBounds> {
-    let width = value(id, shape, "Width")?;
-    let height = value(id, shape, "Height")?;
-    let loc_pin_x = value(id, shape, "LocPinX").unwrap_or(width / 2.0);
-    let loc_pin_y = value(id, shape, "LocPinY").unwrap_or(height / 2.0);
-    Some(ShapeBounds {
-        x: value(id, shape, "PinX")? - loc_pin_x,
-        y: value(id, shape, "PinY")? - loc_pin_y,
-        width,
-        height,
-        loc_pin_x,
-        loc_pin_y,
-        angle: value(id, shape, "Angle").unwrap_or(0.0),
-        flip_x: false,
-        flip_y: false,
     })
 }
 
