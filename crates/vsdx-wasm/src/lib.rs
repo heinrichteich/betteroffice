@@ -62,6 +62,31 @@ impl VsdxRenderer {
         Ok(json)
     }
 
+    #[wasm_bindgen(js_name = pageLayersJson)]
+    pub fn page_layers_json(
+        &self,
+        document: &VsdxDocument,
+        page_index: u32,
+    ) -> Result<String, JsValue> {
+        let package = document.session().package().map_err(js_error)?;
+        let page_part = package
+            .page_part_paths
+            .get(page_index as usize)
+            .ok_or_else(|| JsValue::from_str("page index is outside the document"))?;
+        let layers = self.renderer.effective_page_layers(&package, page_part);
+        serde_json::to_string(&layers).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = setLayerVisible)]
+    pub fn set_layer_visible(&mut self, page_part: &str, index: u32, visible: bool) {
+        self.renderer.set_layer_override(page_part, index, visible);
+    }
+
+    #[wasm_bindgen(js_name = clearLayerVisibility)]
+    pub fn clear_layer_visibility(&mut self) {
+        self.renderer.clear_layer_overrides();
+    }
+
     #[wasm_bindgen(js_name = hitTestJson)]
     pub fn hit_test_json(&self, x: f32, y: f32) -> Result<String, JsValue> {
         let result = self
@@ -78,6 +103,12 @@ impl VsdxRenderer {
             None => serde_json::Value::Null,
         };
         serde_json::to_string(&result).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = exportPdf)]
+    pub fn export_pdf(&self, document: &VsdxDocument) -> Result<Vec<u8>, JsValue> {
+        let package = document.session().package().map_err(js_error)?;
+        self.renderer.export_pdf(&package).map_err(js_error)
     }
 }
 
@@ -220,6 +251,107 @@ mod tests {
     }
 
     #[test]
+    fn add_connector_json_glues_two_shapes_and_survives_save() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        let rect = |pin_x: &str| {
+            serde_json::json!({
+                "pageId": "page:1",
+                "draft": {
+                    "name": "Rect",
+                    "cells": [
+                        { "locator": { "cellName": "Width" }, "formula": "1" },
+                        { "locator": { "cellName": "Height" }, "formula": "1" },
+                        { "locator": { "cellName": "PinX" }, "formula": pin_x },
+                        { "locator": { "cellName": "PinY" }, "formula": "1" },
+                        { "locator": { "cellName": "LocPinX" }, "formula": "0" },
+                        { "locator": { "cellName": "LocPinY" }, "formula": "0" },
+                    ],
+                }
+            })
+            .to_string()
+        };
+        let from: serde_json::Value =
+            serde_json::from_str(&document.add_shape_json(&rect("1")).unwrap()).unwrap();
+        let to: serde_json::Value =
+            serde_json::from_str(&document.add_shape_json(&rect("5")).unwrap()).unwrap();
+        let connector = serde_json::json!({
+            "pageId": "page:1",
+            "draft": {
+                "name": "Connector",
+                "cells": [
+                    { "locator": { "cellName": "OneD" }, "formula": "1" },
+                    { "locator": { "cellName": "BeginX" }, "formula": "1" },
+                    { "locator": { "cellName": "BeginY" }, "formula": "2" },
+                    { "locator": { "cellName": "EndX" }, "formula": "4" },
+                    { "locator": { "cellName": "EndY" }, "formula": "2" },
+                ],
+            },
+            "from": { "shapeId": from["shapeId"] },
+            "to": { "shapeId": to["shapeId"], "toCell": "PinX" },
+        })
+        .to_string();
+        let receipt: serde_json::Value =
+            serde_json::from_str(&document.add_connector_json(&connector).unwrap()).unwrap();
+        assert!(receipt["shapeId"].as_str().unwrap().contains(":added:"));
+        let mut renderer = VsdxRenderer::new();
+        let live = renderer.layout_page_json(&document, 0).unwrap();
+        let display: serde_json::Value = serde_json::from_str(&live).unwrap();
+        let connector = display["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["id"] == "visio/pages/page1.xml:4")
+            .unwrap();
+        assert_eq!(
+            connector["path"],
+            serde_json::json!([
+                { "type": "move", "x": 1.0, "y": 1.0 },
+                { "type": "line", "x": 5.0, "y": 1.0 },
+            ])
+        );
+        let saved = document.save().unwrap();
+        let reparsed = vsdx_parse::parse_vsdx(&saved).unwrap();
+        let part = reparsed.page_part_paths[0].clone();
+        let from_cells = reparsed.page_contents[&part]
+            .connects()
+            .filter_map(|connect| connect.from_cell.clone())
+            .collect::<Vec<_>>();
+        assert!(from_cells.iter().any(|cell| cell == "BeginX"));
+        assert!(from_cells.iter().any(|cell| cell == "EndX"));
+        let reopened = VsdxDocument::open_collaborative(&saved, 2.0).unwrap();
+        let mut reopened_renderer = VsdxRenderer::new();
+        assert_eq!(
+            live,
+            reopened_renderer.layout_page_json(&reopened, 0).unwrap()
+        );
+        assert!(
+            document
+                .session()
+                .add_connector(
+                    &vsdx_edit::EditCtx::local("test"),
+                    "page:1",
+                    &vsdx_edit::ShapeDraft {
+                        name: None,
+                        cells: Vec::new(),
+                    },
+                    &vsdx_edit::ConnectorGlue {
+                        shape_id: from["shapeId"].as_str().unwrap().to_owned(),
+                        to_cell: None,
+                    },
+                    &vsdx_edit::ConnectorGlue {
+                        shape_id: to["shapeId"].as_str().unwrap().to_owned(),
+                        to_cell: None,
+                    },
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
     fn layout_of_reordered_added_shapes_matches_the_saved_document() {
         let document = VsdxDocument::open_collaborative(
             include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
@@ -247,5 +379,21 @@ mod tests {
             live,
             reopened_renderer.layout_page_json(&reopened, 0).unwrap()
         );
+    }
+
+    #[test]
+    fn page_layers_json_lists_effective_visibility() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        let mut renderer = VsdxRenderer::new();
+        let layers: serde_json::Value =
+            serde_json::from_str(&renderer.page_layers_json(&document, 0).unwrap()).unwrap();
+        assert_eq!(layers, serde_json::Value::Array(Vec::new()));
+        renderer.set_layer_visible("visio/pages/page1.xml", 0, false);
+        renderer.layout_page_json(&document, 0).unwrap();
+        renderer.clear_layer_visibility();
     }
 }

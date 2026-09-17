@@ -1,7 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 import type { DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
-import { createRibbonCommands, findShapePlacement, isFormulaDerived, isHandleResizeBlocked, locPinAxisFractional, locPinAxisUnmanaged, locPinSizeDriven, numericCellValue } from './commands';
-import { resolveDragGeometry } from '../../interactions';
+import { LINE_PATTERN_VALUES, createRibbonCommands, findShapePlacement, frameSwatch, isFormulaChange, numericCellValue, parseLinePatternInput, parseLineWeightInput } from './commands';
 
 function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
   return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ['one', 'two', 'three'].map((id) => ({ id, sourceId: 1, name: id, children: [], cells: Object.entries(cells).map(([name, value]) => ({ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: value, value })) })) }] };
@@ -56,6 +55,25 @@ test('locks and guards disable the operations the mutation policy would refuse',
   expect(commands.flipVertical.enabled).toBe(true);
   expect(commands.bringForward.enabled).toBe(true);
   expect(commands.sendBackward.enabled).toBe(true);
+});
+
+test('a GUARD on a colour cell disables its picker instead of refusing on pick', () => {
+  const state = snapshot({ FillForegnd: 'GUARD(RGB(255,0,0))', LineColor: 'RGB(0,0,255)' });
+  const diagram = handle(state);
+  const commands = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {});
+  expect(commands.fillColor.enabled).toBe(false);
+  expect(commands.lineColor.enabled).toBe(true);
+});
+
+test('a GUARD substring inside a reference name disables nothing', () => {
+  const state = snapshot({ LockDelete: 'User.GuardDelete', Angle: 'User.GuardAngle', FlipX: 'User.GuardFlip', FlipY: 'User.GuardFlip' });
+  const diagram = handle(state);
+  const commands = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {});
+  expect(commands.delete.enabled).toBe(true);
+  expect(commands.rotateLeft.enabled).toBe(true);
+  expect(commands.rotateRight.enabled).toBe(true);
+  expect(commands.flipHorizontal.enabled).toBe(true);
+  expect(commands.flipVertical.enabled).toBe(true);
 });
 
 test('does not reorder forward past the topmost shape', () => {
@@ -118,8 +136,9 @@ test('adds a rectangle carrying geometry rows instead of a bodiless shape', () =
   const diagram = handle(snapshot());
   const commands = createRibbonCommands(diagram, null, 'page', () => {}, () => {}, () => {});
   commands.addShape.run();
-  const draft = (diagram.addShape as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][1] as { cells: Array<{ locator: { section?: string } }> };
+  const draft = (diagram.addShape as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][1] as { cells: Array<{ locator: { section?: string }; name: string; formula: string }> };
   expect(draft.cells.some((cell) => cell.locator.section === 'Geometry')).toBe(true);
+  expect(Number(draft.cells.find((cell) => cell.name === 'Width')?.formula)).toBeCloseTo(4 / 3, 10);
 });
 
 test('refuses to add a shape onto a page that is no longer present', () => {
@@ -144,81 +163,61 @@ test('does not mistake a prefix of an unresolved formula for a numeric angle', (
   expect(errors[0]).toEqual(new Error('Shape cell Angle has no resolved numeric value.'));
 });
 
-test('distinguishes formula-derived LocPin cells from fixed literals', () => {
-  expect(isFormulaDerived(null)).toBe(false);
-  expect(isFormulaDerived(undefined)).toBe(false);
-  expect(isFormulaDerived('')).toBe(false);
-  expect(isFormulaDerived('1')).toBe(false);
-  expect(isFormulaDerived(' 0.5 ')).toBe(false);
-  expect(isFormulaDerived('GUARD(0.5)')).toBe(false);
-  expect(isFormulaDerived('Width*0.5')).toBe(true);
-  expect(isFormulaDerived('Height*0.5')).toBe(true);
-  expect(isFormulaDerived('GUARD(Width*0.5)')).toBe(true);
-  const shape = { id: 's', sourceId: 1, name: null, children: [], cells: cellsOf({ LocPinX: { formula: 'Width*0.5', value: '1' }, LocPinY: { formula: '0.5', value: '0.5' } }) };
-  expect(locPinSizeDriven(shape as never)).toEqual({ x: true, y: false });
-  const literal = { ...shape, cells: cellsOf({ LocPinX: { formula: '1', value: '1' }, LocPinY: { formula: '0.5', value: '0.5' } }) };
-  expect(locPinSizeDriven(literal as never)).toEqual({ x: false, y: false });
-  expect(locPinSizeDriven(null)).toEqual({ x: false, y: false });
+test('rejects non-positive and non-numeric line weights', () => {
+  expect(parseLineWeightInput('-5')).toBeNull();
+  expect(parseLineWeightInput('0')).toBeNull();
+  expect(parseLineWeightInput('abc')).toBeNull();
+  expect(parseLineWeightInput('')).toBeNull();
+  expect(parseLineWeightInput('1e999')).toBeNull();
+  expect(parseLineWeightInput('+5')).toBeNull();
+  expect(parseLineWeightInput('0.018')).toBe('0.018');
+  expect(parseLineWeightInput('0.01 in')).toBe('0.01 in');
+  expect(parseLineWeightInput('12pt')).toBe('12 pt');
 });
 
-test('a non-proportional LocPin formula blocks handle resize instead of skewing the pin', () => {
-  for (const formula of ['Width-1', 'Width*0.5+1', 'User.Foo', 'Height*0.5', 'MIN(Width*0.5,1)']) {
-    const shape = snapshot({ LocPinX: formula }).pages[0].shapes[1];
-    expect(locPinAxisFractional(shape, 'LocPinX')).toBe(false);
-    expect(locPinAxisUnmanaged(shape, 'LocPinX')).toBe(true);
-    expect(locPinSizeDriven(shape as never).x).toBe(false);
-    expect(isHandleResizeBlocked(shape)).toBe(true);
-  }
-  for (const formula of ['Height-1', 'Height*0.5+1', 'Width*0.5']) {
-    const shape = snapshot({ LocPinY: formula }).pages[0].shapes[1];
-    expect(locPinAxisFractional(shape, 'LocPinY')).toBe(false);
-    expect(locPinAxisUnmanaged(shape, 'LocPinY')).toBe(true);
-    expect(locPinSizeDriven(shape as never).y).toBe(false);
-    expect(isHandleResizeBlocked(shape)).toBe(true);
-  }
-  for (const formula of ['Width*0.5', '=0.5*Width', 'Width / 2', '=WIDTH*0.25']) {
-    const shape = snapshot({ LocPinX: formula }).pages[0].shapes[1];
-    expect(locPinAxisFractional(shape, 'LocPinX')).toBe(true);
-    expect(locPinAxisUnmanaged(shape, 'LocPinX')).toBe(false);
-    expect(locPinSizeDriven(shape as never).x).toBe(true);
-    expect(isHandleResizeBlocked(shape)).toBe(false);
-  }
-  const heightScaled = snapshot({ LocPinY: 'Height*0.5' }).pages[0].shapes[1];
-  expect(locPinAxisFractional(heightScaled, 'LocPinY')).toBe(true);
-  expect(locPinSizeDriven(heightScaled as never).y).toBe(true);
-  expect(isHandleResizeBlocked(heightScaled)).toBe(false);
+test('bounds line patterns to the documented 0..23 range', () => {
+  expect(LINE_PATTERN_VALUES).toHaveLength(24);
+  expect(parseLinePatternInput('999')).toBeNull();
+  expect(parseLinePatternInput('abc')).toBeNull();
+  expect(parseLinePatternInput('-1')).toBeNull();
+  expect(parseLinePatternInput('4')).toBe('4');
+  expect(parseLinePatternInput('0')).toBe('0');
+  expect(parseLinePatternInput('23')).toBe('23');
 });
 
-test('a parenthesized proportional LocPin formula still allows handle resize', () => {
-  for (const formula of ['Width*(0.5)', '(Width*0.5)', '(0.5*Width)', '((Width*0.5))']) {
-    const shape = snapshot({ LocPinX: formula }).pages[0].shapes[1];
-    expect(locPinAxisFractional(shape, 'LocPinX')).toBe(true);
-    expect(locPinAxisUnmanaged(shape, 'LocPinX')).toBe(false);
-    expect(isHandleResizeBlocked(shape)).toBe(false);
-  }
-  for (const formula of ['Height*(0.5)', '(Height*0.5)']) {
-    const shape = snapshot({ LocPinY: formula }).pages[0].shapes[1];
-    expect(locPinAxisFractional(shape, 'LocPinY')).toBe(true);
-    expect(locPinAxisUnmanaged(shape, 'LocPinY')).toBe(false);
-    expect(isHandleResizeBlocked(shape)).toBe(false);
-  }
+test('invalid or unchanged ribbon values never reach the undo stack', () => {
+  const state = snapshot({ LineWeight: '0.01', LinePattern: '1' });
+  const diagram = handle(state);
+  const commands = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {});
+  commands.lineWeight.run('-5');
+  commands.lineWeight.run('abc');
+  commands.lineWeight.run('0.01');
+  commands.linePattern.run('999');
+  commands.linePattern.run('abc');
+  commands.linePattern.run('1');
+  expect(diagram.setCellFormula).not.toHaveBeenCalled();
+  commands.lineWeight.run('0.05');
+  commands.linePattern.run('4');
+  expect(diagram.setCellFormula).toHaveBeenCalledTimes(2);
+  expect(isFormulaChange('0.01', '0.01', parseLineWeightInput)).toBe(false);
+  expect(isFormulaChange('0.01 in', '0.01in', parseLineWeightInput)).toBe(false);
 });
 
-test('a guarded proportional LocPin allows handle resize and holds the anchored edge', () => {
-  const proportional = snapshot({ LocPinX: 'GUARD(Width*0.5)' }).pages[0].shapes[1];
-  expect(locPinAxisFractional(proportional, 'LocPinX')).toBe(true);
-  expect(locPinAxisUnmanaged(proportional, 'LocPinX')).toBe(false);
-  expect(locPinSizeDriven(proportional as never).x).toBe(true);
-  expect(isHandleResizeBlocked(proportional)).toBe(false);
-  const flags = locPinSizeDriven(proportional as never);
-  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, locPinFormula: flags, size: { width: 2, height: 1 } };
-  const grown = resolveDragGeometry(start, { x: 1, y: 0 });
-  expect(grown.width).toBeCloseTo(3, 10);
-  expect(grown.x - 0.5 * grown.width).toBeCloseTo(4, 10);
-  const guarded = snapshot({ LocPinX: 'GUARD(Width-1)' }).pages[0].shapes[1];
-  expect(locPinAxisFractional(guarded, 'LocPinX')).toBe(false);
-  expect(locPinAxisUnmanaged(guarded, 'LocPinX')).toBe(true);
-  expect(isHandleResizeBlocked(guarded)).toBe(true);
+test('prefers rendered display-list colours over unresolved palette indexes', () => {
+  const frame = {
+    contractVersion: 4, width: 8, height: 8,
+    paintTransform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+    primitives: [{ kind: 'shape', id: 'page:2', zOrder: 0, path: [], fill: { kind: 'solid', color: '#0000FF' }, stroke: { color: '#00FF00', width: 1 } }],
+  } as unknown as Parameters<typeof frameSwatch>[0];
+  const state = snapshot({ FillForegnd: '5', LineColor: '7' });
+  state.pages[0].shapes[1].sourceId = 2;
+  state.pages[0].sourcePartPath = 'page';
+  const diagram = handle(state);
+  const commands = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {}, frame);
+  expect(commands.fillColor.value).toBe('#0000FF');
+  expect(commands.lineColor.value).toBe('#00FF00');
+  const withoutFrame = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {});
+  expect(withoutFrame.fillColor.value).toBe('#000000');
 });
 
 test('uses a shape root cell without confusing a same-named User cell', () => {

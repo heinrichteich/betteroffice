@@ -1,24 +1,24 @@
 import { expect, test } from 'bun:test';
 import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { MAX_PAGE_BREAK_LINES, anchoredZoomScroll, canvasPointerPosition, centredPageScroll, inchFormula, pageBreakLines, resolveDragGeometry, selectionCorners, stillSelectable, surfaceDpr, surfaceSize, viewportCentreKey, zoomForWheelDelta } from './VsdxEditor';
+import { MAX_PAGE_BREAK_LINES, canvasPointerPosition, centreInsertPoint, clientPointToModel, inchFormula, pageBreakLines, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
 import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
 
 const frame: PageDisplayList = {
-  contractVersion: 5,
+  contractVersion: 6,
   width: 816,
   height: 1056,
-  printWidth: 480,
-  printHeight: 360,
+  printWidth: 816,
+  printHeight: 1056,
   paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 },
   primitives: [],
 };
 
-function pointerAt(clientX: number, clientY: number, zoom = 1, pad = 0): PointerEvent<HTMLCanvasElement> {
+function pointerAt(clientX: number, clientY: number, cssScale = 1): PointerEvent<HTMLCanvasElement> {
   return {
     clientX,
     clientY,
-    currentTarget: { getBoundingClientRect: () => ({ left: 0, top: 0, width: frame.width * zoom + pad * 2, height: frame.height * zoom + pad * 2 }) },
+    currentTarget: { getBoundingClientRect: () => ({ left: 0, top: 0, width: frame.width * cssScale, height: frame.height * cssScale }) },
   } as unknown as PointerEvent<HTMLCanvasElement>;
 }
 
@@ -33,21 +33,30 @@ test('maps a canvas pointer onto Y-up inches for the save projection', () => {
 });
 
 test('keeps the pointer mapping stable while the canvas is zoomed', () => {
-  const zoomed = canvasPointerPosition(pointerAt(384, 1728, 2), frame, 2);
+  const zoomed = canvasPointerPosition(pointerAt(384, 1728, 2), frame);
   expect(zoomed.model).toEqual({ x: 2, y: 2 });
 });
 
-test('measures the surface pad from the canvas element so the page origin sits inside the drawable surface', () => {
-  const pad = 2000;
-  const pageOrigin = canvasPointerPosition(pointerAt(pad, pad, 1, pad), frame, 1);
-  expect(pageOrigin.canvas).toEqual({ x: 0, y: 0 });
-  const outside = canvasPointerPosition(pointerAt(pad - 192, pad - 192, 1, pad), frame, 1);
-  expect(outside.canvas).toEqual({ x: -192, y: -192 });
-  expect(outside.model.x).toBeCloseTo(-2, 8);
-  const zoomedOutside = canvasPointerPosition(pointerAt(pad - 96, pad - 96, 0.5, pad), frame, 0.5);
-  expect(zoomedOutside.canvas).toEqual({ x: -192, y: -192 });
-  const explicit = canvasPointerPosition(pointerAt(pad, pad, 1, pad), frame, 1, pad);
-  expect(explicit.canvas).toEqual({ x: 0, y: 0 });
+test('lands a drop on the same inches at every zoom and canvas offset', () => {
+  const rectAt = (cssScale: number, left = 0, top = 0) => ({ left, top, width: frame.width * cssScale, height: frame.height * cssScale });
+  for (const cssScale of [0.5, 1, 2]) {
+    const drop = clientPointToModel(frame, rectAt(cssScale), 192 * cssScale, 864 * cssScale);
+    expect(drop.model.x).toBeCloseTo(2, 10);
+    expect(drop.model.y).toBeCloseTo(2, 10);
+    expect(drop.canvas.x).toBeCloseTo(192, 10);
+  }
+  const offset = clientPointToModel(frame, rectAt(2, 40, 24), 192 * 2 + 40, 864 * 2 + 24);
+  expect(offset.model.x).toBeCloseTo(2, 10);
+  expect(offset.model.y).toBeCloseTo(2, 10);
+});
+
+test('cascades repeated centre inserts a quarter inch down the page and wraps after eight', () => {
+  const centre = { x: 4.25, y: 5.5 };
+  expect(centreInsertPoint(centre, 0)).toEqual(centre);
+  expect(centreInsertPoint(centre, 1)).toEqual({ x: 4.5, y: 5.25 });
+  expect(centreInsertPoint(centre, 7)).toEqual({ x: 6, y: 3.75 });
+  expect(centreInsertPoint(centre, 8)).toEqual(centre);
+  expect(centreInsertPoint(centre, 9)).toEqual({ x: 4.5, y: 5.25 });
 });
 
 test('formats inch formulas without exponent noise or negative zero', () => {
@@ -202,119 +211,30 @@ test('a nudge inside a rotated and scaled group matches the equivalent drag', ()
   expect(nudged.x).not.toBeCloseTo(2 + dx, 6);
 });
 
-test('the scrollable surface pads the page extent at every zoom', () => {
-  for (const zoom of [0.5, 1, 1.5]) {
-    const surface = surfaceSize(frame.width, frame.height, zoom, 2000);
-    expect(surface.width).toBeCloseTo(frame.width * zoom + 4000, 8);
-    expect(surface.height).toBeCloseTo(frame.height * zoom + 4000, 8);
-    expect(surface.width).toBeGreaterThan(frame.width * zoom);
-    expect(surface.height).toBeGreaterThan(frame.height * zoom);
-  }
+test('page breaks fall on printer-paper boundaries inside the page', () => {
+  const plan = { width: 45.27165 * 96, height: 39.33858 * 96, printWidth: 11.69291 * 96, printHeight: 8.26772 * 96 };
+  const lines = pageBreakLines(plan, 1);
+  expect(lines.vertical).toHaveLength(3);
+  expect(lines.horizontal).toHaveLength(4);
+  expect(lines.vertical[0]).toBeCloseTo(plan.printWidth, 8);
+  expect(lines.horizontal[0]).toBeCloseTo(plan.printHeight, 8);
+  for (let i = 1; i < lines.vertical.length; i += 1) expect(lines.vertical[i] - lines.vertical[i - 1]).toBeCloseTo(plan.printWidth, 8);
+  for (let i = 1; i < lines.horizontal.length; i += 1) expect(lines.horizontal[i] - lines.horizontal[i - 1]).toBeCloseTo(plan.printHeight, 8);
+  expect(lines.vertical.every((x) => x < plan.width)).toBe(true);
+  expect(lines.horizontal.every((y) => y < plan.height)).toBe(true);
 });
 
-test('a pointer-anchored zoom keeps the canvas point under the cursor', () => {
-  for (const [oldZoom, newZoom] of [[1, 1.5], [1.5, 1], [1, 0.5], [0.5, 1]] as const) {
-    const cssX = 192 * oldZoom;
-    const cssY = 192 * oldZoom;
-    const target = anchoredZoomScroll(2000, 2000, cssX, cssY, oldZoom, newZoom);
-    expect((cssX / oldZoom) * newZoom - (target.left - 2000)).toBeCloseTo(cssX, 8);
-    expect((cssY / oldZoom) * newZoom - (target.top - 2000)).toBeCloseTo(cssY, 8);
-  }
+test('page breaks scale with the zoom and vanish for a page that fits one sheet', () => {
+  const plan = { width: 45.27165 * 96, height: 39.33858 * 96, printWidth: 11.69291 * 96, printHeight: 8.26772 * 96 };
+  expect(pageBreakLines(plan, 1.5).vertical[0]).toBeCloseTo(plan.printWidth * 1.5, 8);
+  expect(pageBreakLines(frame, 1)).toEqual({ vertical: [], horizontal: [] });
+  expect(pageBreakLines({ width: frame.width, height: frame.height, printWidth: frame.width * 2, printHeight: frame.height * 2 }, 1)).toEqual({ vertical: [], horizontal: [] });
 });
 
-test('a pointer-anchored zoom on the surface keeps the page point under the cursor', () => {
-  const pad = 2000;
-  for (const [oldZoom, newZoom] of [[1, 1.5], [1.5, 1], [1, 0.5], [0.5, 1]] as const) {
-    const cssX = pad + 192 * oldZoom;
-    const cssY = pad + 192 * oldZoom;
-    const target = anchoredZoomScroll(2000, 2000, cssX, cssY, oldZoom, newZoom, pad);
-    expect(((cssX - pad) / oldZoom) * newZoom + pad - (target.left - 2000)).toBeCloseTo(cssX, 8);
-    expect(((cssY - pad) / oldZoom) * newZoom + pad - (target.top - 2000)).toBeCloseTo(cssY, 8);
-  }
-});
-
-test('page breaks tile the surface in printer-paper cells from the page origin', () => {
-  const pad = 2000;
-  const zoom = 1;
-  const surface = surfaceSize(frame.width, frame.height, zoom, pad);
-  const lines = pageBreakLines(frame.width, frame.height, zoom, pad, surface.width, surface.height, frame.printWidth, frame.printHeight);
-  expect(lines.vertical).toContain(pad);
-  expect(lines.horizontal).toContain(pad);
-  expect(lines.vertical).toContain(pad + frame.printWidth);
-  expect(lines.horizontal).toContain(pad + frame.printHeight);
-  for (let i = 1; i < lines.vertical.length; i += 1) expect(lines.vertical[i] - lines.vertical[i - 1]).toBeCloseTo(frame.printWidth, 8);
-  for (let i = 1; i < lines.horizontal.length; i += 1) expect(lines.horizontal[i] - lines.horizontal[i - 1]).toBeCloseTo(frame.printHeight, 8);
-  expect(lines.vertical[0]).toBeLessThan(pad);
-  expect(lines.vertical[lines.vertical.length - 1]).toBeGreaterThan(pad);
-  expect(lines.horizontal[0]).toBeLessThan(pad);
-  expect(lines.horizontal[lines.horizontal.length - 1]).toBeGreaterThan(pad);
-  const zoomed = pageBreakLines(frame.width, frame.height, 1.5, pad, surface.width, surface.height, frame.printWidth, frame.printHeight);
-  expect(zoomed.vertical).toContain(pad);
-  expect(zoomed.horizontal).toContain(pad);
-});
-
-test('a degenerate print tile does not flood the surface with grid lines', () => {
-  const pad = 2000;
-  const surface = surfaceSize(frame.width, frame.height, 1, pad);
-  const lines = pageBreakLines(frame.width, frame.height, 1, pad, surface.width, surface.height, 1, 1);
-  expect(lines.vertical.length).toBeLessThanOrEqual(MAX_PAGE_BREAK_LINES);
-  expect(lines.horizontal.length).toBeLessThanOrEqual(MAX_PAGE_BREAK_LINES);
-  expect(lines.vertical.length + lines.horizontal.length).toBe(0);
-});
-
-test('page breaks fall back to the page extent without a print tile', () => {
-  const pad = 2000;
-  const surface = surfaceSize(frame.width, frame.height, 1, pad);
-  const lines = pageBreakLines(frame.width, frame.height, 1, pad, surface.width, surface.height);
-  expect(lines.vertical).toContain(pad + frame.width);
-  expect(lines.horizontal).toContain(pad + frame.height);
-});
-
-test('a large plan spans four by five landscape A4 sheets', () => {
-  const pad = 2000;
-  const zoom = 1;
-  const frameWidth = 45.27165 * 96;
-  const frameHeight = 39.33858 * 96;
-  const tileWidth = 11.69291 * 96;
-  const tileHeight = 8.26772 * 96;
-  const surface = surfaceSize(frameWidth, frameHeight, zoom, pad);
-  const lines = pageBreakLines(frameWidth, frameHeight, zoom, pad, surface.width, surface.height, tileWidth, tileHeight);
-  const interiorVertical = lines.vertical.filter((x) => x > pad + 1e-6 && x < pad + frameWidth - 1e-6);
-  const interiorHorizontal = lines.horizontal.filter((y) => y > pad + 1e-6 && y < pad + frameHeight - 1e-6);
-  expect(interiorVertical).toHaveLength(3);
-  expect(interiorHorizontal).toHaveLength(4);
-});
-
-test('the surface DPR clamps large backing stores instead of exceeding browser limits', () => {
-  expect(surfaceDpr(frame, 1, 1)).toBe(1);
-  const clamped = surfaceDpr(frame, 1, 2);
-  expect(clamped).toBeLessThan(2);
-  expect(clamped).toBeGreaterThanOrEqual(1 / 4);
-  const surface = surfaceSize(frame.width, frame.height, 1);
-  expect(surface.width * clamped).toBeLessThanOrEqual(8192 + 1);
-  expect(surface.height * clamped).toBeLessThanOrEqual(8192 + 1);
-  expect(surface.width * surface.height * clamped * clamped).toBeLessThanOrEqual(33554432 + 1);
-});
-
-test('ctrl+wheel steps the zoom multiplicatively in both directions', () => {
-  const zoomedIn = zoomForWheelDelta(1, -100);
-  const zoomedOut = zoomForWheelDelta(1, 100);
-  expect(zoomedIn).toBeGreaterThan(1);
-  expect(zoomedOut).toBeLessThan(1);
-  expect(zoomForWheelDelta(1, 0)).toBeCloseTo(1, 10);
-});
-
-test('fit centres the page extent inside the workspace', () => {
-  const centred = centredPageScroll(frame.width, frame.height, 1, 1200, 800, 2000);
-  expect(centred.left).toBeCloseTo(2000 + 816 / 2 - 600, 8);
-  expect(centred.top).toBeCloseTo(2000 + 1056 / 2 - 400, 8);
-});
-
-test('the viewport centre key is stable across refreshes and changes with the page', () => {
-  const snapshot = { pages: [{ id: 'page:1' }, { id: 'page:2' }] } as unknown as DiagramSnapshot;
-  expect(viewportCentreKey(snapshot, 0)).toBe('page:1');
-  expect(viewportCentreKey(snapshot, 0)).toBe(viewportCentreKey(snapshot, 0));
-  expect(viewportCentreKey(snapshot, 1)).toBe('page:2');
-  expect(viewportCentreKey(snapshot, 1)).not.toBe(viewportCentreKey(snapshot, 0));
-  expect(viewportCentreKey(null, 0)).toBe('index:0');
+test('a degenerate print tile draws no page-break guides', () => {
+  const dense = { width: frame.width, height: frame.height, printWidth: 1e-4 * 96, printHeight: 1e-4 * 96 };
+  expect(pageBreakLines(dense, 1)).toEqual({ vertical: [], horizontal: [] });
+  const legible = { width: frame.width, height: frame.height, printWidth: frame.width / MAX_PAGE_BREAK_LINES, printHeight: frame.height / MAX_PAGE_BREAK_LINES };
+  expect(pageBreakLines(legible, 1).vertical).toHaveLength(MAX_PAGE_BREAK_LINES - 1);
+  expect(pageBreakLines({ width: frame.width, height: frame.height, printWidth: 0, printHeight: -1 }, 1)).toEqual({ vertical: [], horizontal: [] });
 });

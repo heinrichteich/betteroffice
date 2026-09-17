@@ -8,6 +8,7 @@ const ROUND_RECT_ADJUSTMENT: f64 = 0.166_67;
 pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, f64> {
     let values = match shape_type {
         "roundRect" => vec![("adj", ROUND_RECT_ADJUSTMENT)],
+        "plus" => vec![("adj", 0.25)],
         "triangle" | "isosTriangle" => vec![("adj", 0.5)],
         "parallelogram" => vec![("adj", 0.25)],
         "trapezoid" => vec![("adj", 0.2)],
@@ -17,17 +18,9 @@ pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, 
             vec![("adj1", 0.5), ("adj2", 0.5)]
         }
         "chevron" | "homePlate" => vec![("adj", 0.5)],
-        value
-            if value
-                .strip_prefix("star")
-                .and_then(|points| points.parse::<usize>().ok())
-                .is_some_and(|points| {
-                    matches!(points, 4 | 5 | 6 | 7 | 8 | 10 | 12 | 16 | 24 | 32)
-                }) =>
-        {
-            vec![("adj", 0.45)]
-        }
-        _ => Vec::new(),
+        _ => star_preset(shape_type)
+            .map(|star| vec![("adj", star.adjustment)])
+            .unwrap_or_default(),
     };
     values
         .into_iter()
@@ -106,6 +99,7 @@ pub fn preset_geometry_to_path(
             let i = clamp_fraction(adjustments.get("adj").copied(), 0.25);
             polygon(&[(i, 0.0), (1.0, 0.0), (1.0 - i, 1.0), (0.0, 1.0)])
         }
+        "plus" => plus(aspect_ratio, adjustments.get("adj").copied()),
         "trapezoid" => {
             let i = clamp_fraction(adjustments.get("adj").copied(), 0.2);
             polygon(&[(i, 0.0), (1.0 - i, 0.0), (1.0, 1.0), (0.0, 1.0)])
@@ -139,11 +133,7 @@ pub fn preset_geometry_to_path(
         "decagon" => regular_polygon(10),
         "dodecagon" => regular_polygon(12),
         value if value.starts_with("star") => {
-            let points = value[4..].parse::<usize>().ok()?;
-            if !matches!(points, 4 | 5 | 6 | 7 | 8 | 10 | 12 | 16 | 24 | 32) {
-                return None;
-            }
-            star(points, adjustments.get("adj").copied())
+            star(star_preset(value)?, adjustments.get("adj").copied())
         }
         "bentConnector2" => bent_connector(2, adjustments.get("adj1").copied()),
         "bentConnector3" => bent_connector(3, adjustments.get("adj1").copied()),
@@ -315,6 +305,26 @@ fn rounded_rect(aspect_ratio: f64, adjustment: f64) -> Vec<GeometryPathCommand> 
     ]
 }
 
+fn plus(aspect_ratio: f64, adjustment: Option<f64>) -> Vec<GeometryPathCommand> {
+    let arm = pin(adjustment, 0.25, 0.5);
+    let xn = arm / width_in_shortest_sides(aspect_ratio);
+    let yn = arm / height_in_shortest_sides(aspect_ratio);
+    polygon(&[
+        (0.0, yn),
+        (xn, yn),
+        (xn, 0.0),
+        (1.0 - xn, 0.0),
+        (1.0 - xn, yn),
+        (1.0, yn),
+        (1.0, 1.0 - yn),
+        (1.0 - xn, 1.0 - yn),
+        (1.0 - xn, 1.0),
+        (xn, 1.0),
+        (xn, 1.0 - yn),
+        (0.0, 1.0 - yn),
+    ])
+}
+
 fn polygon(points: &[(f64, f64)]) -> Vec<GeometryPathCommand> {
     let mut commands = points
         .iter()
@@ -345,15 +355,44 @@ fn regular_polygon(sides: usize) -> Vec<GeometryPathCommand> {
     )
 }
 
-fn star(points: usize, adjustment: Option<f64>) -> Vec<GeometryPathCommand> {
-    let inner_radius = clamp_fraction(adjustment, 0.45) * 0.5;
+/// A `starN` preset's point count, default `adj`, and `hf`/`vf` radius factors.
+#[derive(Clone, Copy)]
+struct StarPreset {
+    points: usize,
+    adjustment: f64,
+    hf: f64,
+    vf: f64,
+}
+
+fn star_preset(shape_type: &str) -> Option<StarPreset> {
+    let points = shape_type.strip_prefix("star")?.parse::<usize>().ok()?;
+    let (adjustment, hf, vf) = match points {
+        4 => (0.125, 1.0, 1.0),
+        5 => (0.190_98, 1.051_46, 1.105_57),
+        6 => (0.288_68, 1.154_7, 1.0),
+        7 => (0.346_01, 1.025_72, 1.052_1),
+        10 => (0.425_33, 1.051_46, 1.0),
+        8 | 12 | 16 | 24 | 32 => (0.375, 1.0, 1.0),
+        _ => return None,
+    };
+    Some(StarPreset {
+        points,
+        adjustment,
+        hf,
+        vf,
+    })
+}
+
+fn star(preset: StarPreset, adjustment: Option<f64>) -> Vec<GeometryPathCommand> {
+    let (rx, ry) = (0.5 * preset.hf, 0.5 * preset.vf);
+    let inner = pin(adjustment, preset.adjustment, 0.5) * 2.0;
     polygon(
-        &(0..points * 2)
+        &(0..preset.points * 2)
             .map(|i| {
-                let a =
-                    -std::f64::consts::PI / 2.0 + i as f64 * std::f64::consts::PI / points as f64;
-                let r = if i % 2 == 0 { 0.5 } else { inner_radius };
-                (0.5 + a.cos() * r, 0.5 + a.sin() * r)
+                let a = -std::f64::consts::PI / 2.0
+                    + i as f64 * std::f64::consts::PI / preset.points as f64;
+                let scale = if i % 2 == 0 { 1.0 } else { inner };
+                (0.5 + a.cos() * rx * scale, ry + a.sin() * ry * scale)
             })
             .collect::<Vec<_>>(),
     )
@@ -649,6 +688,7 @@ mod tests {
             "rightArrow",
             "star5",
             "bentConnector3",
+            "plus",
         ] {
             let path = |value| {
                 let adjustments = ["adj", "adj1", "adj2"]
@@ -658,6 +698,94 @@ mod tests {
             };
             assert_eq!(path(2.0), path(1.0), "{shape}");
         }
+    }
+
+    const STARS: [&str; 10] = [
+        "star4", "star5", "star6", "star7", "star8", "star10", "star12", "star16", "star24",
+        "star32",
+    ];
+
+    fn star_vertices(shape: &str, adjust: Option<f64>) -> Vec<(f64, f64)> {
+        let adjustments = adjust
+            .map(|value| HashMap::from([("adj".to_owned(), value)]))
+            .unwrap_or_default();
+        preset_geometry_to_path(shape, &adjustments, 1.0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|command| match command {
+                GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
+                    Some((x, y))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn cross(origin: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+        (a.0 - origin.0) * (b.1 - origin.1) - (a.1 - origin.1) * (b.0 - origin.0)
+    }
+
+    #[test]
+    fn five_point_star_at_its_default_is_a_regular_pentagram() {
+        for adjust in [None, Some(0.190_98)] {
+            let v = star_vertices("star5", adjust);
+            assert!(cross(v[0], v[4], v[1]).abs() < 1e-5, "{adjust:?}");
+            assert!(cross(v[0], v[4], v[3]).abs() < 1e-5, "{adjust:?}");
+        }
+    }
+
+    #[test]
+    fn star_inner_radius_is_twice_adj_times_the_outer() {
+        let v = star_vertices("star8", Some(0.25));
+        let radius = |(x, y): (f64, f64)| (x - 0.5).hypot(y - 0.5);
+        assert_close(radius(v[0]), 0.5);
+        assert_close(radius(v[1]), 0.25);
+    }
+
+    #[test]
+    fn star_adjustment_pins_between_zero_and_half() {
+        assert_eq!(
+            star_vertices("star5", Some(0.8)),
+            star_vertices("star5", Some(0.5))
+        );
+        let v = star_vertices("star8", Some(0.5));
+        assert_close((v[1].0 - 0.5).hypot(v[1].1 - 0.5), 0.5);
+        let v = star_vertices("star8", Some(-0.1));
+        assert_close(v[1].0, 0.5);
+        assert_close(v[1].1, 0.5);
+    }
+
+    #[test]
+    fn stars_fill_their_frame() {
+        for shape in STARS {
+            let v = star_vertices(shape, None);
+            let min_x = v.iter().map(|p| p.0).fold(f64::MAX, f64::min);
+            let max_x = v.iter().map(|p| p.0).fold(f64::MIN, f64::max);
+            let min_y = v.iter().map(|p| p.1).fold(f64::MAX, f64::min);
+            let max_y = v.iter().map(|p| p.1).fold(f64::MIN, f64::max);
+            for (actual, expected) in [(min_x, 0.0), (max_x, 1.0), (min_y, 0.0), (max_y, 1.0)] {
+                assert!((actual - expected).abs() < 1e-4, "{shape}: {actual}");
+            }
+        }
+    }
+
+    #[test]
+    fn stars_default_to_their_own_adjustment() {
+        for (shape, expected) in [("star4", 0.125), ("star5", 0.190_98), ("star12", 0.375)] {
+            assert_eq!(
+                preset_geometry_default_adjustments(shape).get("adj"),
+                Some(&expected)
+            );
+        }
+        for shape in STARS {
+            let default = preset_geometry_default_adjustments(shape)["adj"];
+            assert_eq!(
+                star_vertices(shape, None),
+                star_vertices(shape, Some(default)),
+                "{shape}"
+            );
+        }
+        assert!(preset_geometry_to_path("star9", &HashMap::new(), 1.0).is_none());
     }
 
     fn assert_close(actual: f64, expected: f64) {
@@ -774,5 +902,134 @@ mod tests {
         let (rx, ry) = corner_radii(&path);
         assert_close(rx * 400.0, 50.0);
         assert_close(ry * 100.0, 50.0);
+    }
+
+    fn plus_path(adj: Option<f64>, aspect: f64) -> Vec<GeometryPathCommand> {
+        let mut adjustments = HashMap::new();
+        if let Some(value) = adj {
+            adjustments.insert("adj".to_owned(), value);
+        }
+        preset_geometry_to_path("plus", &adjustments, aspect).unwrap()
+    }
+
+    fn plus_move(path: &[GeometryPathCommand]) -> (f64, f64) {
+        let GeometryPathCommand::Move { x, y } = path[0] else {
+            panic!("plus must open with a move");
+        };
+        (x, y)
+    }
+
+    #[test]
+    fn plus_defaults_to_a_quarter_arm() {
+        assert_eq!(
+            preset_geometry_default_adjustments("plus").get("adj"),
+            Some(&0.25)
+        );
+        let path = plus_path(None, 1.0);
+        assert_eq!(path.len(), 13);
+        assert_eq!(path[0], GeometryPathCommand::Move { x: 0.0, y: 0.25 });
+        assert_eq!(path[1], GeometryPathCommand::Line { x: 0.25, y: 0.25 });
+        assert_eq!(path[2], GeometryPathCommand::Line { x: 0.25, y: 0.0 });
+        assert_eq!(path[5], GeometryPathCommand::Line { x: 1.0, y: 0.25 });
+        assert_eq!(path[6], GeometryPathCommand::Line { x: 1.0, y: 0.75 });
+        assert_eq!(path[12], GeometryPathCommand::Close);
+    }
+
+    #[test]
+    fn plus_authored_adjust_matches_source_extent() {
+        let adj = 39_887.0 / 100_000.0;
+        let aspect = 557_530.0 / 538_480.0;
+        let path = plus_path(Some(adj), aspect);
+        let xn = adj / aspect;
+        assert_close(plus_move(&path).1, adj);
+        let GeometryPathCommand::Line { x, y } = path[1] else {
+            panic!("plus second vertex carries the arm");
+        };
+        assert_close(x, xn);
+        assert_close(y, adj);
+        let GeometryPathCommand::Line { x, y } = path[6] else {
+            panic!("plus right edge carries the arm");
+        };
+        assert_close(x, 1.0);
+        assert_close(y, 1.0 - adj);
+        let GeometryPathCommand::Line { x, y } = path[7] else {
+            panic!("plus inner corner mirrors the arm");
+        };
+        assert_close(x, 1.0 - xn);
+        assert_close(y, 1.0 - adj);
+    }
+
+    #[test]
+    fn plus_pins_zero_and_half() {
+        let (x, y) = plus_move(&plus_path(Some(0.0), 1.0));
+        assert_close(x, 0.0);
+        assert_close(y, 0.0);
+        for pinned in [0.5, 1.0, 2.0] {
+            let (x, y) = plus_move(&plus_path(Some(pinned), 1.0));
+            assert_close(x, 0.0);
+            assert_close(y, 0.5);
+        }
+        let (x, y) = plus_move(&plus_path(Some(-0.25), 1.0));
+        assert_close(x, 0.0);
+        assert_close(y, 0.0);
+        assert_eq!(plus_path(Some(2.0), 1.0), plus_path(Some(0.5), 1.0));
+        assert_eq!(plus_path(Some(-1.0), 1.0), plus_path(Some(0.0), 1.0));
+    }
+
+    #[test]
+    fn plus_scales_each_axis_off_the_shortest_side() {
+        let (_, y) = plus_move(&plus_path(None, 4.0));
+        assert_close(y, 0.25);
+        let GeometryPathCommand::Line { x, y } = plus_path(None, 4.0)[1] else {
+            panic!("plus second vertex carries both axes");
+        };
+        assert_close(x, 0.25 / 4.0);
+        assert_close(y, 0.25);
+        let GeometryPathCommand::Line { x, y } = plus_path(None, 0.25)[1] else {
+            panic!("tall plus mirrors the wide case");
+        };
+        assert_close(x, 0.25);
+        assert_close(y, 0.25 * 0.25);
+        let wide = plus_path(Some(0.4), 4.0);
+        let tall = plus_path(Some(0.4), 0.25);
+        let GeometryPathCommand::Line { x: wx, y: wy } = wide[1] else {
+            unreachable!();
+        };
+        let GeometryPathCommand::Line { x: tx, y: ty } = tall[1] else {
+            unreachable!();
+        };
+        assert_close(wx, 0.1);
+        assert_close(wy, 0.4);
+        assert_close(tx, 0.4);
+        assert_close(ty, 0.1);
+    }
+
+    #[test]
+    fn plus_stays_inside_a_closed_frame() {
+        for aspect in [0.25, 1.0, 4.0, 557_530.0 / 538_480.0] {
+            for adj in [
+                None,
+                Some(0.0),
+                Some(0.25),
+                Some(0.39887),
+                Some(0.5),
+                Some(2.0),
+            ] {
+                let path = plus_path(adj, aspect);
+                assert_eq!(path.len(), 13);
+                assert_eq!(path[12], GeometryPathCommand::Close);
+                for command in &path {
+                    match command {
+                        GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
+                            assert!((0.0..=1.0).contains(x), "{x} in {aspect} {adj:?}");
+                            assert!((0.0..=1.0).contains(y), "{y} in {aspect} {adj:?}");
+                        }
+                        GeometryPathCommand::Close => {}
+                        _ => panic!("plus uses straight edges only"),
+                    }
+                }
+                assert_ne!(path[1], GeometryPathCommand::Line { x: 1.0, y: 0.0 });
+            }
+        }
     }
 }
