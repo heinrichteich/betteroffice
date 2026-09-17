@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { ShapeSnapshot } from '@betteroffice/vsdx';
-import { DUPLICATE_OFFSET, PASTE_OFFSET, buildClipboardEntry, canCopyShape, draftForPaste, draftTreeForPaste, resolvedNumeric, toFormula } from './clipboard';
+import { DUPLICATE_OFFSET, PASTE_OFFSET, ancestorPinOffset, buildClipboardEntry, canCopyShape, draftForPaste, draftTreeForPaste, resolvedNumeric, toFormula } from './clipboard';
 
 function shape(cells: Array<{ name: string; formula?: string | null; value?: string | null; section?: string | null; row?: { index: number } | { name: string } | null }>): ShapeSnapshot {
   return {
@@ -110,4 +110,34 @@ test('refuses only unportable content with its reason', () => {
   const blocked: ShapeSnapshot = { id: 'group:1', sourceId: 1, name: 'Group', copyRefusal: 'embedded media', children: [child], cells: [] };
   expect(canCopyShape(blocked)).toBe(false);
   expect(() => buildClipboardEntry('page:1', blocked, '')).toThrow('embedded media');
+});
+
+function group(id: string, cells: Array<{ name: string; value: string }>, children: ShapeSnapshot[]): ShapeSnapshot {
+  return {
+    id,
+    sourceId: 10,
+    name: 'Group',
+    children,
+    cells: cells.map((cell) => ({ locator: { sheet: { page: 1 }, shapeId: 10, section: null, sectionIndex: null, row: null, cellName: cell.name }, name: cell.name, formula: cell.value, value: cell.value })),
+  };
+}
+
+test('a nested shape copies at the page position it is drawn at', () => {
+  const child = { ...shape([{ name: 'PinX', formula: '1', value: '1' }, { name: 'PinY', formula: '2', value: '2' }]), id: 'child:1' };
+  const parent = group('group:1', [{ name: 'PinX', value: '10' }, { name: 'PinY', value: '4' }, { name: 'LocPinX', value: '0.5' }, { name: 'LocPinY', value: '0.5' }], [child]);
+  const offset = ancestorPinOffset([parent], 'child:1');
+  expect(offset).toEqual({ dx: 9.5, dy: 3.5 });
+  const entry = buildClipboardEntry('page:1', child, '', { pinOffset: offset ?? undefined });
+  expect(entry.pinX).toBe(10.5);
+  expect(entry.pinY).toBe(5.5);
+  expect(ancestorPinOffset([parent], 'group:1')).toEqual({ dx: 0, dy: 0 });
+});
+
+test('a rotated or flipped ancestor refuses the copy instead of misplacing it', () => {
+  const child = { ...shape([{ name: 'PinX', formula: '1', value: '1' }]), id: 'child:1' };
+  const rotated = group('group:1', [{ name: 'PinX', value: '10' }, { name: 'PinY', value: '10' }, { name: 'Angle', value: String(Math.PI / 2) }], [child]);
+  expect(ancestorPinOffset([rotated], 'child:1')).toBeNull();
+  const flipped = group('group:1', [{ name: 'PinX', value: '10' }, { name: 'FlipX', value: '1' }], [child]);
+  expect(ancestorPinOffset([flipped], 'child:1')).toBeNull();
+  expect(ancestorPinOffset([rotated], 'absent')).toBeNull();
 });

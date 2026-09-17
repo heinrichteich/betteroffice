@@ -1,10 +1,13 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use vsdx_eval::{MutationContext, MutationOutcome, decide_mutation, evaluate};
+use vsdx_eval::{
+    Evaluation, Expr, MutationContext, MutationOutcome, References, Value, decide_mutation,
+    evaluate,
+};
 use vsdx_parse::{
-    Cell, CellLocator, CellRow, CellSheet, Connect, ConnectsChild, MutationGesture, ParseLimits,
-    RowChild, SectionChild, Shape, ShapeChild, ShapesChild, SheetChild, StructuralEdit, TextToken,
+    Cell, CellLocator, CellRow, CellSheet, MutationGesture, ParseLimits, RowChild, SectionChild,
+    Shape, ShapeChild, ShapesChild, SheetChild, StructuralEdit, TextToken,
 };
 use vsdx_resolve::{Lookup, Resolver};
 use yrs::{
@@ -13,13 +16,20 @@ use yrs::{
 };
 
 use crate::{
-    CONNECTS, CellFormulaReceipt, CellSnapshot, ConnectorGlue, DiagramSession, DiagramSnapshot,
-    EditCtx, EditError, EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES,
-    ShapeDraft, ShapeReceipt, ShapeSnapshot, ShapeTreeDraft, ShapeTreeGlue, TextReceipt,
+    CONNECTS, CellFormulaReceipt, CellSnapshot, ConnectorRouteReceipt, DiagramSession,
+    DiagramSnapshot, EditCtx, EditError, EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS,
+    STORIES, ShapeDraft, ShapeReceipt, ShapeSnapshot, ShapeTreeDraft, ShapeTreeGlue, TextReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 1.0;
+mod connect;
+mod containers;
+
+const SCHEMA_VERSION: f64 = 2.0;
+/// Stories held resolved text tokens as JSON before this version.
+const TOKEN_STORY_SCHEMA_VERSION: f64 = 1.0;
 pub(crate) const MAX_SHAPE_NESTING: usize = 256;
+const MAX_CONNECTOR_ROUTE_POINTS: usize = 256;
+const ROUTE_POINT_EPSILON: f64 = 1e-9;
 type SectionRows<'a> = Vec<(
     (String, Option<u32>),
     Vec<(Option<CellRow>, Vec<&'a CellSnapshot>)>,
@@ -57,7 +67,7 @@ pub(crate) fn seed_doc(
     let order = txn.get_or_insert_array(PAGE_ORDER);
     let pages = txn.get_or_insert_map(PAGES);
     let sheets = txn.get_or_insert_map(SHEETS);
-    let connects = txn.get_or_insert_map(CONNECTS);
+    txn.get_or_insert_map(CONNECTS);
     let stories = txn.get_or_insert_map(STORIES);
     for path in &package.page_part_paths {
         let Some(page_id) = package.page_part_ids.get(path) else {
@@ -83,7 +93,6 @@ pub(crate) fn seed_doc(
         let shape_order = page.insert(&mut txn, "shapes", ArrayPrelim::default());
         if let Some(sheet) = package.page_contents.get(path) {
             let resolver = Resolver::new(package);
-            let mut sources = std::collections::HashMap::new();
             for shape in sheet.shapes() {
                 let shape_id = format!("{id}:shape:{}", shape.id);
                 shape_order.push_back(&mut txn, shape_id.as_str());
@@ -91,22 +100,10 @@ pub(crate) fn seed_doc(
                     .resolve_shape(path, shape.id)
                     .map_err(|error| EditError::InvalidState(error.to_string()))?;
                 seed_shape(
-                    &sheets,
-                    &stories,
-                    &mut txn,
-                    &shape_id,
-                    &id,
-                    None,
-                    path,
-                    sheet,
-                    shape,
-                    &resolver,
-                    &resolved,
-                    1,
-                    &mut sources,
+                    &sheets, &stories, &mut txn, &shape_id, &id, None, path, sheet, shape,
+                    &resolver, &resolved, 1,
                 )?;
             }
-            seed_page_glue(&connects, &mut txn, &id, sheet, &sources);
         }
     }
     Ok(())
@@ -115,7 +112,7 @@ pub(crate) fn seed_doc(
 pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage> {
     let mut package = original_package_from_doc(doc)?;
     let snapshot = snapshot_doc(doc)?;
-    let glue = glue_records(&doc.transact())?;
+    let glue = connect::glue_records(&doc.transact())?;
     let (texts, verbatim) = edited_story_texts(doc, &snapshot, &package)?;
     materialize_snapshot(
         doc,
@@ -169,7 +166,7 @@ fn materialize_snapshot(
     package: &mut vsdx_parse::VsdxPackage,
     snapshot: &DiagramSnapshot,
     original_shape_ids: &HashSet<String>,
-    glue: &[GlueRecord],
+    glue: &[connect::GlueRecord],
     texts: &std::collections::BTreeMap<String, String>,
     verbatim: &std::collections::BTreeMap<String, Vec<TextToken>>,
 ) -> EditResult<()> {
@@ -191,7 +188,7 @@ fn materialize_snapshot(
             .copied()
             .collect();
         vsdx_parse::remove_connects_referencing_shapes(sheet, &deleted);
-        materialize_page_glue(sheet, page, glue, original_shape_ids)?;
+        connect::materialize_page_glue(sheet, page, glue);
     }
     Ok(())
 }
@@ -239,13 +236,11 @@ fn materialize_page_text(
             target
                 .children
                 .retain(|child| !matches!(child, ShapeChild::Text(_)));
-            if !text.is_empty() {
-                target
-                    .children
-                    .push(ShapeChild::Text(vec![vsdx_parse::TextToken::Literal(
-                        text.clone(),
-                    )]));
-            }
+            let tokens = match text.is_empty() {
+                true => Vec::new(),
+                false => vec![vsdx_parse::TextToken::Literal(text.clone())],
+            };
+            target.children.push(ShapeChild::Text(tokens));
         }
         pending.extend(shape.children.iter());
     }
@@ -380,246 +375,7 @@ fn verbatim_source_text(
     let tokens = resolver
         .resolve_text_in_context(original, page_sheet, &resolved)
         .ok()?;
-    (plain_text(&tokens, &resolved) == story).then(|| local.to_vec())
-}
-
-struct GlueRecord {
-    id: String,
-    page_id: String,
-    connector_id: String,
-    endpoint: GlueEndpoint,
-    target_id: String,
-    to_cell: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum GlueEndpoint {
-    Begin,
-    End,
-}
-
-impl GlueEndpoint {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Begin => "begin",
-            Self::End => "end",
-        }
-    }
-    fn endpoint_cell(self) -> &'static str {
-        match self {
-            Self::Begin => "BeginX",
-            Self::End => "EndX",
-        }
-    }
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "begin" => Some(Self::Begin),
-            "end" => Some(Self::End),
-            _ => None,
-        }
-    }
-}
-
-fn glue_key(connector_id: &str, endpoint: GlueEndpoint) -> String {
-    format!("{connector_id}:{}", endpoint.name())
-}
-
-fn normalized_glue_target(cell: Option<&str>) -> Option<String> {
-    match cell {
-        None => Some("PinX".to_owned()),
-        Some(value) if valid_glue_target(value) => Some(value.to_owned()),
-        _ => None,
-    }
-}
-
-fn valid_glue_target(cell: &str) -> bool {
-    if matches!(cell, "PinX" | "PinY") {
-        return true;
-    }
-    cell.strip_prefix("Connections.X")
-        .and_then(|ordinal| ordinal.parse::<u32>().ok())
-        .is_some_and(|ordinal| ordinal >= 1)
-}
-
-fn glue_text_valid(value: &str) -> bool {
-    let limits = ParseLimits::default();
-    value.len() <= limits.max_attribute_bytes
-        && !value.is_empty()
-        && value
-            .chars()
-            .all(|c| matches!(c, '\t' | '\r' | '\n' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'))
-}
-
-/// Session glue for package connects the subtree copy path can carry.
-fn seed_page_glue(
-    connects: &MapRef,
-    txn: &mut TransactionMut<'_>,
-    page_id: &str,
-    sheet: &vsdx_parse::Sheet,
-    sources: &std::collections::HashMap<u32, String>,
-) {
-    let mut seen = HashSet::new();
-    for connect in sheet.connects() {
-        let endpoint = match connect.from_cell.as_deref() {
-            Some("BeginX") => GlueEndpoint::Begin,
-            Some("EndX") => GlueEndpoint::End,
-            _ => continue,
-        };
-        let Some(to_cell) = normalized_glue_target(connect.to_cell.as_deref()) else {
-            continue;
-        };
-        let (Some(connector), Some(target)) = (
-            sources.get(&connect.from_sheet),
-            sources.get(&connect.to_sheet),
-        ) else {
-            continue;
-        };
-        if !seen.insert((connector.clone(), endpoint)) {
-            continue;
-        }
-        let key = glue_key(connector, endpoint);
-        let entry = connects.insert(txn, key.as_str(), MapPrelim::default());
-        entry.insert(txn, "id", key.as_str());
-        entry.insert(txn, "pageId", page_id);
-        entry.insert(txn, "connectorId", connector.as_str());
-        entry.insert(txn, "endpoint", endpoint.name());
-        entry.insert(txn, "targetId", target.as_str());
-        entry.insert(txn, "toCell", to_cell.as_str());
-    }
-}
-
-fn draft_is_one_d(draft: &ShapeDraft) -> bool {
-    let mut endpoints = HashSet::new();
-    for cell in &draft.cells {
-        if cell.locator.section.is_some() {
-            continue;
-        }
-        match cell.name.as_str() {
-            "OneD" => {
-                let formula = cell.formula.as_deref().unwrap_or_default();
-                let truthy = formula
-                    .trim_start_matches('=')
-                    .trim()
-                    .parse::<f64>()
-                    .map(|value| value != 0.0)
-                    .unwrap_or(true);
-                if truthy {
-                    return true;
-                }
-            }
-            "BeginX" | "BeginY" | "EndX" | "EndY" => {
-                endpoints.insert(cell.name.as_str());
-            }
-            _ => {}
-        }
-    }
-    ["BeginX", "BeginY", "EndX", "EndY"]
-        .into_iter()
-        .all(|name| endpoints.contains(name))
-}
-
-fn glue_records<T: ReadTxn>(txn: &T) -> EditResult<Vec<GlueRecord>> {
-    let Some(connects) = txn.get_map(CONNECTS) else {
-        return Ok(Vec::new());
-    };
-    let mut records = Vec::with_capacity(connects.len(txn) as usize);
-    for (key, value) in connects.iter(txn) {
-        let Out::YMap(entry) = value else {
-            return Err(EditError::InvalidState(
-                "connector glue is not a map".to_owned(),
-            ));
-        };
-        let endpoint = map_string(&entry, txn, "endpoint")
-            .as_deref()
-            .and_then(GlueEndpoint::parse)
-            .ok_or_else(|| EditError::InvalidState("connector glue has no endpoint".to_owned()))?;
-        let to_cell = map_string(&entry, txn, "toCell")
-            .filter(|cell| valid_glue_target(cell))
-            .ok_or_else(|| {
-                EditError::InvalidState("connector glue has no target cell".to_owned())
-            })?;
-        records.push(GlueRecord {
-            id: map_string(&entry, txn, "id")
-                .filter(|id| id == key)
-                .ok_or_else(|| {
-                    EditError::InvalidState("connector glue ID does not match map key".to_owned())
-                })?,
-            page_id: map_string(&entry, txn, "pageId").ok_or_else(|| {
-                EditError::InvalidState("connector glue is missing its page".to_owned())
-            })?,
-            connector_id: map_string(&entry, txn, "connectorId").ok_or_else(|| {
-                EditError::InvalidState("connector glue is missing its connector".to_owned())
-            })?,
-            endpoint,
-            target_id: map_string(&entry, txn, "targetId").ok_or_else(|| {
-                EditError::InvalidState("connector glue is missing its target".to_owned())
-            })?,
-            to_cell,
-        });
-    }
-    records.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(records)
-}
-
-fn snapshot_shape_sources(page: &PageSnapshot) -> std::collections::BTreeMap<&str, u32> {
-    let mut sources = std::collections::BTreeMap::new();
-    let mut pending = page.shapes.iter().collect::<Vec<_>>();
-    while let Some(shape) = pending.pop() {
-        sources.insert(shape.id.as_str(), shape.source_id);
-        pending.extend(shape.children.iter());
-    }
-    sources
-}
-
-fn materialize_page_glue(
-    sheet: &mut vsdx_parse::Sheet,
-    page: &PageSnapshot,
-    glue: &[GlueRecord],
-    originals: &HashSet<String>,
-) -> EditResult<()> {
-    let sources = snapshot_shape_sources(page);
-    let mut pending = Vec::new();
-    for record in glue.iter().filter(|record| record.page_id == page.id) {
-        if originals.contains(record.connector_id.as_str())
-            && originals.contains(record.target_id.as_str())
-        {
-            continue;
-        }
-        let (Some(connector), Some(target)) = (
-            sources.get(record.connector_id.as_str()),
-            sources.get(record.target_id.as_str()),
-        ) else {
-            return Err(EditError::InvalidState(
-                "connector glue references a missing shape".to_owned(),
-            ));
-        };
-        pending.push(Connect {
-            from_sheet: *connector,
-            from_cell: Some(record.endpoint.endpoint_cell().to_owned()),
-            from_part: None,
-            to_sheet: *target,
-            to_cell: Some(record.to_cell.clone()),
-            to_part: None,
-            other_attrs: Vec::new(),
-        });
-    }
-    if pending.is_empty() {
-        return Ok(());
-    }
-    match sheet.children.iter_mut().find_map(|child| match child {
-        SheetChild::Connects(connects) => Some(connects),
-        _ => None,
-    }) {
-        Some(connects) => {
-            connects.extend(pending.into_iter().map(ConnectsChild::Connect));
-        }
-        None => {
-            sheet.children.push(SheetChild::Connects(
-                pending.into_iter().map(ConnectsChild::Connect).collect(),
-            ));
-        }
-    }
-    Ok(())
+    (plain_text(&tokens) == story).then(|| local.to_vec())
 }
 
 fn sheet_shape_ids(sheet: &vsdx_parse::Sheet) -> HashSet<u32> {
@@ -886,19 +642,17 @@ fn seed_shape(
     page_id: &str,
     parent_id: Option<&str>,
     page_path: &str,
-    page: &vsdx_parse::Sheet,
+    lookup: &vsdx_parse::Sheet,
     shape: &vsdx_parse::Shape,
     resolver: &Resolver<'_>,
     resolved: &vsdx_resolve::ResolvedShape,
     depth: usize,
-    sources: &mut std::collections::HashMap<u32, String>,
 ) -> EditResult<()> {
     if depth > MAX_SHAPE_NESTING {
         return Err(EditError::InvalidState(
             "shape nesting exceeds maximum depth".to_owned(),
         ));
     }
-    sources.insert(shape.id, id.to_owned());
     let map = sheets.insert(txn, id, MapPrelim::default());
     map.insert(txn, "id", id);
     map.insert(txn, "pageId", page_id);
@@ -968,9 +722,9 @@ fn seed_shape(
         }
     }
     let text = resolver
-        .resolve_text(shape, page)
+        .resolve_text_in_context(shape, lookup, resolved)
         .map_err(|error| EditError::InvalidState(error.to_string()))?;
-    stories.insert(txn, id, plain_text(&text, resolved));
+    stories.insert(txn, id, plain_text(&text));
     for child in shape.shapes() {
         let child_id = format!("{id}:shape:{}", child.id);
         child_order.push_back(txn, child_id.as_str());
@@ -985,12 +739,11 @@ fn seed_shape(
             page_id,
             Some(id),
             page_path,
-            page,
+            lookup,
             child,
             resolver,
             &child_resolved,
             depth + 1,
-            sources,
         )?;
     }
     Ok(())
@@ -1026,10 +779,7 @@ fn copy_refusal_reason(shape: &vsdx_parse::Shape) -> Option<&'static str> {
 }
 
 /// Plain text behind resolved `Text` markers; paragraph and tab runs become controls.
-fn plain_text(
-    tokens: &[vsdx_resolve::ResolvedTextToken],
-    resolved: &vsdx_resolve::ResolvedShape,
-) -> String {
+fn plain_text(tokens: &[vsdx_resolve::ResolvedTextToken]) -> String {
     let mut output = String::new();
     for token in tokens {
         match token {
@@ -1041,15 +791,13 @@ fn plain_text(
                 }
             }
             vsdx_resolve::ResolvedTextToken::Tab { .. } => output.push('\t'),
-            vsdx_resolve::ResolvedTextToken::Field { index, properties } => {
+            vsdx_resolve::ResolvedTextToken::Field { properties, .. } => {
                 let value = properties.get("Value").and_then(|lookup| match lookup {
                     Lookup::Found(cell) => cell.cell.value.clone(),
                     Lookup::Deleted | Lookup::Absent => None,
                 });
                 if let Some(value) = value {
                     output.push_str(&value);
-                } else {
-                    let _ = (index, resolved);
                 }
             }
         }
@@ -1093,6 +841,180 @@ fn seed_cell(
     }
     if let Some(value) = value {
         cell.insert(txn, "value", value);
+    }
+}
+
+/// Seeds a hand-routed Geometry cell with no baseline or cached value.
+fn seed_route_cell(
+    cells: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    locator: &CellLocator,
+    formula: &str,
+    row_type: &str,
+) {
+    let key = locator_key(locator);
+    let cell = cells.insert(txn, key.as_str(), MapPrelim::default());
+    cell.insert(txn, "name", locator.cell_name.as_str());
+    if let Some(section) = &locator.section {
+        cell.insert(txn, "section", section.as_str());
+    }
+    if let Some(CellRow::Index(index)) = &locator.row {
+        cell.insert(txn, "rowIndex", *index as f64);
+    }
+    cell.insert(txn, "rowType", row_type);
+    cell.insert(txn, "formula", formula);
+}
+
+struct GeometryRow {
+    row_type: Option<String>,
+    has_x: bool,
+    has_y: bool,
+}
+
+impl GeometryRow {
+    fn has(&self, name: &str) -> bool {
+        match name {
+            "X" => self.has_x,
+            _ => self.has_y,
+        }
+    }
+}
+
+/// Reuses the filed row indices in order, then appends past the highest one.
+fn route_row_index(filed: &[u32], slot: usize) -> u32 {
+    match filed.get(slot) {
+        Some(index) => *index,
+        None => filed.last().map_or(slot as u32, |last| {
+            last.saturating_add((slot - filed.len() + 1) as u32)
+        }),
+    }
+}
+
+fn allow_route_cell(
+    context: &CrdtMutationContext,
+    locator: CellLocator,
+    formula: &str,
+) -> EditResult<()> {
+    match decide_mutation(
+        context,
+        locator.clone(),
+        MutationGesture::CellEdit,
+        formula.to_owned(),
+        &ParseLimits::default(),
+    ) {
+        MutationOutcome::Allowed { target, .. } if target == locator => Ok(()),
+        MutationOutcome::Allowed { .. } => Err(EditError::InvalidState(
+            "connector route edit bypasses formula redirect".to_owned(),
+        )),
+        MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+            Err(EditError::InvalidState(reason))
+        }
+    }
+}
+
+/// A 1D shape resolves the way the glue resolver decides it: explicit OneD wins,
+/// otherwise all four endpoint cells must resolve.
+fn connector_route_shape(shape: &vsdx_resolve::ResolvedShape) -> bool {
+    match route_shape_number(shape, "OneD") {
+        Some(value) => value != 0.0,
+        None => ["BeginX", "BeginY", "EndX", "EndY"]
+            .into_iter()
+            .all(|name| route_shape_number(shape, name).is_some()),
+    }
+}
+
+fn route_shape_number(shape: &vsdx_resolve::ResolvedShape, name: &str) -> Option<f64> {
+    let Lookup::Found(cell) = shape.cell(name)? else {
+        return None;
+    };
+    route_cell_number(Some(&cell.cell), shape)
+}
+
+fn route_cell_number(cell: Option<&Cell>, shape: &vsdx_resolve::ResolvedShape) -> Option<f64> {
+    let cell = cell?;
+    if let Some(formula) = cell.formula.as_deref()
+        && let vsdx_eval::Evaluation::Evaluated(result) = evaluate(
+            formula.trim_start_matches('='),
+            shape,
+            &ParseLimits::default(),
+        )
+        && let vsdx_eval::Value::Number(number) = result.value
+        && number.number.is_finite()
+    {
+        return Some(number.number);
+    }
+    cell.value
+        .as_deref()?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
+struct RouteFrame {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64,
+}
+
+impl RouteFrame {
+    fn unproject(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let determinant = self.a * self.d - self.b * self.c;
+        if !determinant.is_finite() || determinant.abs() < 1e-12 {
+            return None;
+        }
+        let x = x - self.e;
+        let y = y - self.f;
+        let local = (
+            (self.d * x - self.c * y) / determinant,
+            (self.a * y - self.b * x) / determinant,
+        );
+        (local.0.is_finite() && local.1.is_finite()).then_some(local)
+    }
+}
+
+/// The connector's local frame, mirroring the resolver's unparented bounds affine.
+fn connector_route_frame(shape: &vsdx_resolve::ResolvedShape) -> Option<RouteFrame> {
+    let pin_x = route_shape_number(shape, "PinX")?;
+    let pin_y = route_shape_number(shape, "PinY")?;
+    let width = route_shape_number(shape, "Width")?;
+    let height = route_shape_number(shape, "Height")?;
+    if ![pin_x, pin_y, width, height]
+        .into_iter()
+        .all(|value| (value as f32).is_finite())
+        || width == 0.0
+        || height == 0.0
+    {
+        return None;
+    }
+    let loc_pin_x = route_shape_number(shape, "LocPinX").unwrap_or(width / 2.0);
+    let loc_pin_y = route_shape_number(shape, "LocPinY").unwrap_or(height / 2.0);
+    let angle = route_shape_number(shape, "Angle").unwrap_or(0.0);
+    let flip_x = route_shape_number(shape, "FlipX").is_some_and(|value| value != 0.0);
+    let flip_y = route_shape_number(shape, "FlipY").is_some_and(|value| value != 0.0);
+    let (sin, cos) = angle.sin_cos();
+    let (flip_x, flip_y) = (
+        if flip_x { -1.0 } else { 1.0 },
+        if flip_y { -1.0 } else { 1.0 },
+    );
+    Some(RouteFrame {
+        a: cos * flip_x,
+        b: sin * flip_x,
+        c: -sin * flip_y,
+        d: cos * flip_y,
+        e: pin_x - cos * (flip_x * loc_pin_x) + sin * (flip_y * loc_pin_y),
+        f: pin_y - sin * (flip_x * loc_pin_x) - cos * (flip_y * loc_pin_y),
+    })
+}
+
+fn decimal(value: f64) -> String {
+    if value == 0.0 {
+        "0".to_owned()
+    } else {
+        value.to_string()
     }
 }
 
@@ -1158,6 +1080,15 @@ impl DiagramSession {
         };
         let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
         let before = map_string(&cell, &txn, "formula");
+        if before.as_deref() == Some(formula.as_str()) {
+            return Ok(CellFormulaReceipt {
+                page_id: page_id.to_owned(),
+                shape_id: shape_id.to_owned(),
+                cell_name: target.cell_name,
+                before,
+                after: formula,
+            });
+        }
         cell.insert(&mut txn, "formula", formula.as_str());
         Ok(CellFormulaReceipt {
             page_id: page_id.to_owned(),
@@ -1166,6 +1097,78 @@ impl DiagramSession {
             before,
             after: formula,
         })
+    }
+
+    /// Writes a `Control` row's `X` and `Y` in one transaction, so a handle drag is one undo entry.
+    pub fn set_control_handle(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        row: &str,
+        x_formula: Option<String>,
+        y_formula: Option<String>,
+    ) -> EditResult<Vec<CellFormulaReceipt>> {
+        let requested = [("X", x_formula), ("Y", y_formula)]
+            .into_iter()
+            .filter_map(|(name, formula)| formula.map(|formula| (name, formula)))
+            .collect::<Vec<_>>();
+        if requested.is_empty() {
+            return Err(EditError::InvalidState(
+                "control handle edit writes no axis".to_owned(),
+            ));
+        }
+        let mut txn = self.transact_for(context);
+        let context_for_policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
+        let mut targets = Vec::with_capacity(requested.len());
+        for (name, formula) in requested {
+            let locator = CellLocator {
+                sheet: CellSheet::Page(0),
+                shape_id: None,
+                section: Some("Control".to_owned()),
+                section_index: None,
+                row: Some(CellRow::Name(row.to_owned())),
+                cell_name: name.to_owned(),
+            };
+            match decide_mutation(
+                &context_for_policy,
+                context_for_policy.locator(locator),
+                MutationGesture::CellEdit,
+                formula.clone(),
+                &ParseLimits::default(),
+            ) {
+                MutationOutcome::Allowed { target, .. } => targets.push((target, formula)),
+                MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                    return Err(EditError::InvalidState(reason));
+                }
+            }
+        }
+        for (index, (target, _)) in targets.iter().enumerate() {
+            if targets[..index].iter().any(|(seen, _)| seen == target) {
+                return Err(EditError::InvalidState(format!(
+                    "redirects converge on {} more than once",
+                    target.cell_name
+                )));
+            }
+        }
+        let mut prepared = Vec::with_capacity(targets.len());
+        for (target, formula) in targets {
+            let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
+            prepared.push((target, formula, cell));
+        }
+        let mut receipts = Vec::with_capacity(prepared.len());
+        for (target, formula, cell) in prepared {
+            let before = map_string(&cell, &txn, "formula");
+            cell.insert(&mut txn, "formula", formula.as_str());
+            receipts.push(CellFormulaReceipt {
+                page_id: page_id.to_owned(),
+                shape_id: shape_id.to_owned(),
+                cell_name: target.cell_name,
+                before,
+                after: formula,
+            });
+        }
+        Ok(receipts)
     }
 
     pub fn shape_text(&self, page_id: &str, shape_id: &str) -> EditResult<String> {
@@ -1234,12 +1237,14 @@ impl DiagramSession {
         x_formula: impl Into<String>,
         y_formula: impl Into<String>,
     ) -> EditResult<[CellFormulaReceipt; 2]> {
-        self.set_cell_formula_pair(
+        self.set_cell_formulas(
             context,
             page_id,
             shape_id,
-            ("PinX", x_formula.into(), MutationGesture::MoveX),
-            ("PinY", y_formula.into(), MutationGesture::MoveY),
+            [
+                ("PinX", x_formula.into(), MutationGesture::MoveX),
+                ("PinY", y_formula.into(), MutationGesture::MoveY),
+            ],
         )
     }
 
@@ -1251,17 +1256,87 @@ impl DiagramSession {
         width_formula: impl Into<String>,
         height_formula: impl Into<String>,
     ) -> EditResult<[CellFormulaReceipt; 2]> {
-        self.set_cell_formula_pair(
+        self.set_cell_formulas(
             context,
             page_id,
             shape_id,
-            ("Width", width_formula.into(), MutationGesture::ResizeWidth),
-            (
-                "Height",
-                height_formula.into(),
-                MutationGesture::ResizeHeight,
-            ),
+            [
+                ("Width", width_formula.into(), MutationGesture::ResizeWidth),
+                (
+                    "Height",
+                    height_formula.into(),
+                    MutationGesture::ResizeHeight,
+                ),
+            ],
         )
+    }
+
+    pub fn set_shape_bounds(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        formulas: [String; 4],
+    ) -> EditResult<[CellFormulaReceipt; 4]> {
+        let [x, y, width, height] = formulas;
+        self.set_cell_formulas(
+            context,
+            page_id,
+            shape_id,
+            [
+                ("PinX", x, MutationGesture::MoveX),
+                ("PinY", y, MutationGesture::MoveY),
+                ("Width", width, MutationGesture::ResizeWidth),
+                ("Height", height, MutationGesture::ResizeHeight),
+            ],
+        )
+    }
+
+    pub fn resize_loc_pin(
+        &self,
+        page_id: &str,
+        shape_id: &str,
+        width: f64,
+        height: f64,
+    ) -> EditResult<[f64; 2]> {
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return Err(EditError::InvalidState(
+                "invalid resize dimensions".to_owned(),
+            ));
+        }
+        let txn = self.doc.transact();
+        let mut references = CrdtMutationContext::new(&txn, page_id, shape_id)?.references;
+        for (name, value) in [("Width", width), ("Height", height)] {
+            references.cells.insert(
+                name.to_owned(),
+                Lookup::Found(vsdx_resolve::ResolvedCell {
+                    cell: Cell {
+                        name: name.to_owned(),
+                        formula: Some(value.to_string()),
+                        value: None,
+                        unit: None,
+                        del: false,
+                        other_attrs: Vec::new(),
+                    },
+                    provenance: vsdx_resolve::Provenance::Local,
+                }),
+            );
+        }
+        let loc_pin = |name: &str, fallback: f64| -> EditResult<f64> {
+            if !references.cells.contains_key(name) {
+                return Ok(fallback);
+            }
+            evaluate_cached_formula(name, &references)
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    EditError::InvalidState(format!("cannot evaluate {name} for resize"))
+                })
+        };
+        Ok([
+            loc_pin("LocPinX", width / 2.0)?,
+            loc_pin("LocPinY", height / 2.0)?,
+        ])
     }
 
     pub fn reorder_shape(
@@ -1290,58 +1365,160 @@ impl DiagramSession {
     ) -> EditResult<ShapeReceipt> {
         validate_shape_draft(draft, false)?;
         let mut txn = self.transact_for(context);
-        let pages = txn
-            .get_map(PAGES)
-            .ok_or_else(|| EditError::InvalidState("missing pages map".to_owned()))?;
-        let page = map_ref(&pages, &txn, page_id)?;
-        let order = map_array(&page, &txn, "shapes")?;
-        let index = order.len(&txn);
+        insert_shape(&mut txn, self.client_id, page_id, draft)
+    }
+
+    /// Rewrites a 1D connector's filed route from scene-space points in one transaction.
+    pub fn set_connector_route(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        points: &[(f64, f64)],
+    ) -> EditResult<ConnectorRouteReceipt> {
+        if points.len() < 2 || points.len() > MAX_CONNECTOR_ROUTE_POINTS {
+            return Err(EditError::InvalidState(
+                "connector route needs between 2 and 256 points".to_owned(),
+            ));
+        }
+        if points.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
+            return Err(EditError::InvalidState(
+                "connector route points must be finite".to_owned(),
+            ));
+        }
+        let mut txn = self.transact_for(context);
+        let context_for_policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
         let sheets = txn
             .get_map(SHEETS)
             .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
-        let id_prefix = format!("{page_id}:shape:added:{}:", self.client_id);
-        if sheets.len(&txn) as usize >= ParseLimits::default().max_shapes {
+        let shape = map_ref(&sheets, &txn, shape_id)?;
+        if map_string(&shape, &txn, "parentId").is_some() {
             return Err(EditError::InvalidState(
-                "shape count exceeds maximum".to_owned(),
+                "nested connector routes are not hand-routable".to_owned(),
             ));
         }
-        let source_bound = map_u32(&page, &txn, "maxSourceId")?
-            .ok_or_else(|| EditError::InvalidState("missing page source ID bound".to_owned()))?;
-        let allocated = materialized_source_ids(&sheets, &txn, &order, source_bound)?;
-        let largest = allocated.values().copied().max().unwrap_or(source_bound);
-        largest.checked_add(1).ok_or_else(|| {
-            EditError::InvalidState("cannot allocate a materialized source ID".to_owned())
+        let page_number = page_id
+            .trim_start_matches("page:")
+            .parse()
+            .unwrap_or_default();
+        let source_id = map_number(&shape, &txn, "sourceId").unwrap_or_default() as u32;
+        let cells = map_map(&shape, &txn, "cells")?;
+        let references = local_references(&cells, &txn)?;
+        if !connector_route_shape(&references) {
+            return Err(EditError::InvalidState(
+                "shape is not a 1D connector".to_owned(),
+            ));
+        }
+        let frame = connector_route_frame(&references).ok_or_else(|| {
+            EditError::InvalidState("connector frame cells do not resolve".to_owned())
         })?;
-        let sequence = txn.state_vector().get(&yrs::ClientID::new(self.client_id));
-        let id = format!("{id_prefix}{sequence}");
-        let shape = sheets.insert(&mut txn, id.as_str(), MapPrelim::default());
-        shape.insert(&mut txn, "id", id.as_str());
-        shape.insert(&mut txn, "pageId", page_id);
-        shape.insert(&mut txn, "sourceId", 0.0);
-        shape.insert(&mut txn, "origin", "added");
-        if let Some(name) = &draft.name {
-            shape.insert(&mut txn, "name", name.as_str());
+        let mut local = points
+            .iter()
+            .map(|point| frame.unproject(point.0, point.1))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                EditError::InvalidState("connector frame is not invertible".to_owned())
+            })?;
+        local.dedup_by(|right, left| {
+            (right.0 - left.0).abs() < ROUTE_POINT_EPSILON
+                && (right.1 - left.1).abs() < ROUTE_POINT_EPSILON
+        });
+        if local.len() < 2 {
+            return Err(EditError::InvalidState(
+                "connector route needs two distinct points".to_owned(),
+            ));
         }
-        let cells = shape.insert(&mut txn, "cells", MapPrelim::default());
-        shape.insert(&mut txn, "shapes", ArrayPrelim::default());
-        for cell in &draft.cells {
-            seed_cell(
-                &cells,
-                &mut txn,
-                &cell.locator,
-                cell.formula.as_deref(),
-                cell.value.as_deref(),
-                cell.row_type.as_deref(),
-            );
+        let mut rows = std::collections::BTreeMap::new();
+        for value in cells.iter(&txn).filter_map(|(_, value)| match value {
+            Out::YMap(cell) => Some(cell),
+            _ => None,
+        }) {
+            let locator = cell_locator(&value, &txn, 0, 0)?;
+            if locator.section.as_deref() != Some("Geometry") {
+                continue;
+            }
+            if locator.section_index.is_some() {
+                return Err(EditError::InvalidState(
+                    "indexed connector Geometry sections are not hand-routable".to_owned(),
+                ));
+            }
+            let Some(CellRow::Index(index)) = locator.row else {
+                continue;
+            };
+            let entry = rows.entry(index).or_insert(GeometryRow {
+                row_type: map_string(&value, &txn, "rowType"),
+                has_x: false,
+                has_y: false,
+            });
+            match locator.cell_name.as_str() {
+                "X" => entry.has_x = true,
+                "Y" => entry.has_y = true,
+                _ => {}
+            }
         }
-        order.push_back(&mut txn, id.as_str());
-        txn.get_or_insert_map(STORIES)
-            .insert(&mut txn, id.as_str(), "");
-        Ok(ShapeReceipt {
+        let filed = rows.keys().copied().collect::<Vec<_>>();
+        let last = *local.last().expect("route has at least two points");
+        let mut planned = Vec::new();
+        for (slot, point) in local
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(
+                last,
+                filed.len().saturating_sub(local.len()),
+            ))
+            .enumerate()
+        {
+            let index = route_row_index(&filed, slot);
+            let expected = if slot == 0 { "MoveTo" } else { "LineTo" };
+            let filed_type = rows.get(&index).and_then(|row| row.row_type.clone());
+            if filed_type
+                .as_deref()
+                .is_some_and(|actual| actual != expected)
+            {
+                return Err(EditError::InvalidState(
+                    "connector Geometry is not a single straight run".to_owned(),
+                ));
+            }
+            let row_type = filed_type.unwrap_or_else(|| expected.to_owned());
+            for (name, value) in [("X", point.0), ("Y", point.1)] {
+                if slot >= local.len() && !rows.get(&index).is_some_and(|row| row.has(name)) {
+                    continue;
+                }
+                let locator = CellLocator {
+                    sheet: CellSheet::Page(page_number),
+                    shape_id: Some(source_id),
+                    section: Some("Geometry".into()),
+                    section_index: None,
+                    row: Some(CellRow::Index(index)),
+                    cell_name: name.into(),
+                };
+                let formula = decimal(value);
+                allow_route_cell(&context_for_policy, locator.clone(), &formula)?;
+                planned.push((locator, formula, row_type.clone()));
+            }
+        }
+        let prepared = planned
+            .iter()
+            .map(|(locator, formula, row_type)| {
+                match cell_map(&mut txn, page_id, shape_id, locator) {
+                    Ok(cell) => Ok((Some(cell), locator, formula, row_type)),
+                    Err(EditError::CellNotFound(_)) => Ok((None, locator, formula, row_type)),
+                    Err(error) => Err(error),
+                }
+            })
+            .collect::<EditResult<Vec<_>>>()?;
+        for (cell, locator, formula, row_type) in prepared {
+            match cell {
+                Some(cell) => {
+                    cell.insert(&mut txn, "formula", formula.as_str());
+                }
+                None => seed_route_cell(&cells, &mut txn, locator, formula, row_type),
+            }
+        }
+        Ok(ConnectorRouteReceipt {
             page_id: page_id.to_owned(),
-            shape_id: id,
-            from_index: None,
-            to_index: Some(index),
+            shape_id: shape_id.to_owned(),
+            points: local.len() as u32,
         })
     }
 
@@ -1356,166 +1533,10 @@ impl DiagramSession {
         validate_shape_draft(draft, true)?;
         validate_story_text(&text)?;
         let mut txn = self.transact_for(context);
-        let pages = txn
-            .get_map(PAGES)
-            .ok_or_else(|| EditError::InvalidState("missing pages map".to_owned()))?;
-        let page = map_ref(&pages, &txn, page_id)?;
-        let order = map_array(&page, &txn, "shapes")?;
-        let index = order.len(&txn);
-        let sheets = txn
-            .get_map(SHEETS)
-            .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
-        let id_prefix = format!("{page_id}:shape:added:{}:", self.client_id);
-        if sheets.len(&txn) as usize >= ParseLimits::default().max_shapes {
-            return Err(EditError::InvalidState(
-                "shape count exceeds maximum".to_owned(),
-            ));
-        }
-        let source_bound = map_u32(&page, &txn, "maxSourceId")?
-            .ok_or_else(|| EditError::InvalidState("missing page source ID bound".to_owned()))?;
-        let allocated = materialized_source_ids(&sheets, &txn, &order, source_bound)?;
-        let largest = allocated.values().copied().max().unwrap_or(source_bound);
-        largest.checked_add(1).ok_or_else(|| {
-            EditError::InvalidState("cannot allocate a materialized source ID".to_owned())
-        })?;
-        let sequence = txn.state_vector().get(&yrs::ClientID::new(self.client_id));
-        let id = format!("{id_prefix}{sequence}");
-        let shape = sheets.insert(&mut txn, id.as_str(), MapPrelim::default());
-        shape.insert(&mut txn, "id", id.as_str());
-        shape.insert(&mut txn, "pageId", page_id);
-        shape.insert(&mut txn, "sourceId", 0.0);
-        shape.insert(&mut txn, "origin", "added");
-        if let Some(name) = &draft.name {
-            shape.insert(&mut txn, "name", name.as_str());
-        }
-        let cells = shape.insert(&mut txn, "cells", MapPrelim::default());
-        shape.insert(&mut txn, "shapes", ArrayPrelim::default());
-        for cell in &draft.cells {
-            seed_cell(
-                &cells,
-                &mut txn,
-                &cell.locator,
-                cell.formula.as_deref(),
-                cell.value.as_deref(),
-                cell.row_type.as_deref(),
-            );
-        }
-        order.push_back(&mut txn, id.as_str());
+        let receipt = insert_shape(&mut txn, self.client_id, page_id, draft)?;
         txn.get_or_insert_map(STORIES)
-            .insert(&mut txn, id.as_str(), text.as_str());
-        Ok(ShapeReceipt {
-            page_id: page_id.to_owned(),
-            shape_id: id,
-            from_index: None,
-            to_index: Some(index),
-        })
-    }
-
-    /// Adds a 1D connector shape glued at both ends in one atomic transaction.
-    pub fn add_connector(
-        &self,
-        context: &EditCtx,
-        page_id: &str,
-        draft: &ShapeDraft,
-        from: &ConnectorGlue,
-        to: &ConnectorGlue,
-    ) -> EditResult<ShapeReceipt> {
-        validate_shape_draft(draft, false)?;
-        if !draft_is_one_d(draft) {
-            return Err(EditError::InvalidState(
-                "connector draft must describe a 1D shape".to_owned(),
-            ));
-        }
-        let from_cell = normalized_glue_target(from.to_cell.as_deref()).ok_or_else(|| {
-            EditError::InvalidState("connector glue needs a valid target cell".to_owned())
-        })?;
-        let to_cell = normalized_glue_target(to.to_cell.as_deref()).ok_or_else(|| {
-            EditError::InvalidState("connector glue needs a valid target cell".to_owned())
-        })?;
-        for cell in [&from_cell, &to_cell] {
-            if !glue_text_valid(cell) {
-                return Err(EditError::InvalidState(
-                    "connector glue contains invalid XML attribute text".to_owned(),
-                ));
-            }
-        }
-        let mut txn = self.transact_for(context);
-        let pages = txn
-            .get_map(PAGES)
-            .ok_or_else(|| EditError::InvalidState("missing pages map".to_owned()))?;
-        let page = map_ref(&pages, &txn, page_id)?;
-        let order = map_array(&page, &txn, "shapes")?;
-        let index = order.len(&txn);
-        let sheets = txn
-            .get_map(SHEETS)
-            .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
-        for target in [&from.shape_id, &to.shape_id] {
-            let shape = match sheets.get(&txn, target.as_str()) {
-                Some(Out::YMap(shape)) => shape,
-                _ => return Err(EditError::ShapeNotFound(target.clone())),
-            };
-            if map_string(&shape, &txn, "pageId").as_deref() != Some(page_id) {
-                return Err(EditError::ShapeNotFound(target.clone()));
-            }
-        }
-        let id_prefix = format!("{page_id}:shape:added:{}:", self.client_id);
-        if sheets.len(&txn) as usize >= ParseLimits::default().max_shapes {
-            return Err(EditError::InvalidState(
-                "shape count exceeds maximum".to_owned(),
-            ));
-        }
-        let source_bound = map_u32(&page, &txn, "maxSourceId")?
-            .ok_or_else(|| EditError::InvalidState("missing page source ID bound".to_owned()))?;
-        let allocated = materialized_source_ids(&sheets, &txn, &order, source_bound)?;
-        let largest = allocated.values().copied().max().unwrap_or(source_bound);
-        largest.checked_add(1).ok_or_else(|| {
-            EditError::InvalidState("cannot allocate a materialized source ID".to_owned())
-        })?;
-        let sequence = txn.state_vector().get(&yrs::ClientID::new(self.client_id));
-        let id = format!("{id_prefix}{sequence}");
-        let shape = sheets.insert(&mut txn, id.as_str(), MapPrelim::default());
-        shape.insert(&mut txn, "id", id.as_str());
-        shape.insert(&mut txn, "pageId", page_id);
-        shape.insert(&mut txn, "sourceId", 0.0);
-        shape.insert(&mut txn, "origin", "added");
-        if let Some(name) = &draft.name {
-            shape.insert(&mut txn, "name", name.as_str());
-        }
-        let cells = shape.insert(&mut txn, "cells", MapPrelim::default());
-        shape.insert(&mut txn, "shapes", ArrayPrelim::default());
-        for cell in &draft.cells {
-            seed_cell(
-                &cells,
-                &mut txn,
-                &cell.locator,
-                cell.formula.as_deref(),
-                cell.value.as_deref(),
-                cell.row_type.as_deref(),
-            );
-        }
-        order.push_back(&mut txn, id.as_str());
-        txn.get_or_insert_map(STORIES)
-            .insert(&mut txn, id.as_str(), "");
-        let connects = txn.get_or_insert_map(CONNECTS);
-        for (endpoint, target, cell) in [
-            (GlueEndpoint::Begin, &from.shape_id, from_cell),
-            (GlueEndpoint::End, &to.shape_id, to_cell),
-        ] {
-            let key = glue_key(&id, endpoint);
-            let entry = connects.insert(&mut txn, key.as_str(), MapPrelim::default());
-            entry.insert(&mut txn, "id", key.as_str());
-            entry.insert(&mut txn, "pageId", page_id);
-            entry.insert(&mut txn, "connectorId", id.as_str());
-            entry.insert(&mut txn, "endpoint", endpoint.name());
-            entry.insert(&mut txn, "targetId", target.as_str());
-            entry.insert(&mut txn, "toCell", cell.as_str());
-        }
-        Ok(ShapeReceipt {
-            page_id: page_id.to_owned(),
-            shape_id: id,
-            from_index: None,
-            to_index: Some(index),
-        })
+            .insert(&mut txn, receipt.shape_id.as_str(), text.as_str());
+        Ok(receipt)
     }
 
     /// Internal glue of the subtree rooted at a shape, addressed by copy sources.
@@ -1530,6 +1551,7 @@ impl DiagramSession {
             return Err(EditError::ShapeNotFound(shape_id.to_owned()));
         }
         let mut members = HashSet::new();
+        let mut originals = std::collections::BTreeMap::new();
         let mut pending = vec![(shape_id.to_owned(), 1)];
         while let Some((id, depth)) = pending.pop() {
             if depth > MAX_SHAPE_NESTING {
@@ -1541,6 +1563,11 @@ impl DiagramSession {
                 continue;
             }
             let node = map_ref(&sheets, &txn, &id)?;
+            if shape_origin(&node, &txn)? == ShapeOrigin::Original
+                && let Some(source_id) = map_number(&node, &txn, "sourceId")
+            {
+                originals.insert(source_id as u32, id.clone());
+            }
             if let Some(Out::YArray(children)) = node.get(&txn, "shapes") {
                 for index in 0..children.len(&txn) {
                     let child = array_string(&children, &txn, index).ok_or_else(|| {
@@ -1550,20 +1577,16 @@ impl DiagramSession {
                 }
             }
         }
-        Ok(glue_records(&txn)?
-            .into_iter()
-            .filter(|record| {
-                record.page_id == page_id
-                    && members.contains(record.connector_id.as_str())
-                    && members.contains(record.target_id.as_str())
-            })
-            .map(|record| ShapeTreeGlue {
-                connector_source: record.connector_id,
-                endpoint: record.endpoint.name().to_owned(),
-                target_source: record.target_id,
-                to_cell: record.to_cell,
-            })
-            .collect())
+        let part = map_string(&map_ref(&pages, &txn, page_id)?, &txn, "sourcePartPath");
+        let package = match originals.is_empty() {
+            true => None,
+            false => Some(original_package_from_doc(&self.doc)?),
+        };
+        let sheet = package
+            .as_ref()
+            .zip(part.as_ref())
+            .and_then(|(package, part)| package.page_contents.get(part));
+        connect::subtree_glue(&txn, page_id, &members, sheet, &originals)
     }
 
     /// Pastes a copied group subtree with fresh identities in one transaction.
@@ -1587,8 +1610,6 @@ impl DiagramSession {
             .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
         let mut source_page_id: Option<String> = None;
         let mut source_page_numeric: Option<u32> = None;
-        let mut found = 0;
-        let mut missing: Option<String> = None;
         for node in &nodes {
             let source_id = node
                 .draft
@@ -1597,7 +1618,6 @@ impl DiagramSession {
                 .ok_or_else(|| EditError::InvalidState("missing copy source".to_owned()))?;
             match sheets.get(&txn, source_id.as_str()) {
                 Some(Out::YMap(source)) => {
-                    found += 1;
                     if let Some(reason) = map_string(&source, &txn, "copyRefusal") {
                         return Err(EditError::InvalidState(format!(
                             "cannot copy shape {source_id} with {reason}"
@@ -1636,16 +1656,10 @@ impl DiagramSession {
                             "cannot copy shape {source_id} with {reason}"
                         )));
                     }
-                    missing.get_or_insert_with(|| source_id.clone());
                 }
             }
         }
-        if found > 0 && found != nodes.len() {
-            return Err(EditError::ShapeNotFound(
-                missing.unwrap_or_else(|| "copy source".to_owned()),
-            ));
-        }
-        if found == 0 {
+        if source_page_numeric.is_none() {
             source_page_numeric = draft_source_page(&nodes)?;
         }
         if let Some(numeric) = source_page_numeric {
@@ -1673,6 +1687,21 @@ impl DiagramSession {
             .zip(&eager)
             .filter_map(|(key, eager)| key.map(|key| (key, *eager)))
             .collect::<std::collections::BTreeMap<_, _>>();
+        if source_page_numeric != Some(session_page_number(page_id)?)
+            && nodes.iter().any(|node| {
+                node.draft.cells.iter().any(|cell| {
+                    cell.formula.as_deref().is_some_and(|formula| {
+                        sheet_ref_spans(formula)
+                            .iter()
+                            .any(|span| !remap.contains_key(&span.2))
+                    })
+                })
+            })
+        {
+            return Err(EditError::InvalidState(
+                "paste references a shape outside the copy on another page".to_owned(),
+            ));
+        }
         let sequence = txn.state_vector().get(&yrs::ClientID::new(self.client_id));
         let prefix = format!("{page_id}:shape:added:{}:{sequence}:", self.client_id);
         let fresh = (0..nodes.len())
@@ -1692,10 +1721,13 @@ impl DiagramSession {
         let mut seen_endpoints = HashSet::new();
         let mut carried = Vec::new();
         for glue in &draft.glue {
-            let endpoint = GlueEndpoint::parse(glue.endpoint.as_str()).ok_or_else(|| {
-                EditError::InvalidState("connector glue has no endpoint".to_owned())
-            })?;
-            if !valid_glue_target(&glue.to_cell) || !glue_text_valid(&glue.to_cell) {
+            let endpoint =
+                connect::GlueEndpoint::parse(glue.endpoint.as_str()).ok_or_else(|| {
+                    EditError::InvalidState("connector glue has no endpoint".to_owned())
+                })?;
+            if !connect::valid_glue_target(&glue.to_cell)
+                || !connect::glue_text_valid(&glue.to_cell)
+            {
                 return Err(EditError::InvalidState(
                     "connector glue has an invalid target cell".to_owned(),
                 ));
@@ -1764,7 +1796,7 @@ impl DiagramSession {
         }
         let connects = txn.get_or_insert_map(CONNECTS);
         for (endpoint, connector, target, cell) in carried {
-            let key = glue_key(connector, endpoint);
+            let key = connect::glue_key(connector, endpoint);
             let entry = connects.insert(&mut txn, key.as_str(), MapPrelim::default());
             entry.insert(&mut txn, "id", key.as_str());
             entry.insert(&mut txn, "pageId", page_id);
@@ -1843,27 +1875,6 @@ impl DiagramSession {
                 stories.remove(&mut txn, id.as_str());
             }
         }
-        if let Some(connects) = txn.get_map(CONNECTS) {
-            let gone = removed.iter().map(String::as_str).collect::<HashSet<_>>();
-            let mut doomed = Vec::new();
-            for (key, value) in connects.iter(&txn) {
-                let Out::YMap(entry) = value else {
-                    continue;
-                };
-                let touches = map_string(&entry, &txn, "connectorId")
-                    .as_deref()
-                    .is_some_and(|id| gone.contains(id))
-                    || map_string(&entry, &txn, "targetId")
-                        .as_deref()
-                        .is_some_and(|id| gone.contains(id));
-                if touches {
-                    doomed.push(key.to_owned());
-                }
-            }
-            for key in doomed {
-                connects.remove(&mut txn, key.as_str());
-            }
-        }
         Ok(ShapeReceipt {
             page_id: page_id.to_owned(),
             shape_id: shape_id.to_owned(),
@@ -1872,14 +1883,13 @@ impl DiagramSession {
         })
     }
 
-    fn set_cell_formula_pair(
+    fn set_cell_formulas<const N: usize>(
         &self,
         context: &EditCtx,
         page_id: &str,
         shape_id: &str,
-        first: (&str, String, MutationGesture),
-        second: (&str, String, MutationGesture),
-    ) -> EditResult<[CellFormulaReceipt; 2]> {
+        cells: [(&str, String, MutationGesture); N],
+    ) -> EditResult<[CellFormulaReceipt; N]> {
         let mut txn = self.transact_for(context);
         let context_for_policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
         let decide =
@@ -1902,31 +1912,103 @@ impl DiagramSession {
                     Err(EditError::InvalidState(reason))
                 }
             };
-        let (first_target, first_formula) = decide(first)?;
-        let (second_target, second_formula) = decide(second)?;
-        let first_cell = cell_map(&mut txn, page_id, shape_id, &first_target)?;
-        let second_cell = cell_map(&mut txn, page_id, shape_id, &second_target)?;
-        let first_before = map_string(&first_cell, &txn, "formula");
-        let second_before = map_string(&second_cell, &txn, "formula");
-        first_cell.insert(&mut txn, "formula", first_formula.as_str());
-        second_cell.insert(&mut txn, "formula", second_formula.as_str());
-        Ok([
+        let targets = cells
+            .into_iter()
+            .map(decide)
+            .collect::<EditResult<Vec<_>>>()?;
+        for (index, (target, _)) in targets.iter().enumerate() {
+            if targets[..index].iter().any(|(seen, _)| seen == target) {
+                return Err(EditError::InvalidState(format!(
+                    "redirects converge on {} more than once",
+                    target.cell_name
+                )));
+            }
+        }
+        let prepared = targets
+            .into_iter()
+            .map(|(target, formula)| {
+                let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
+                Ok((target, formula, cell))
+            })
+            .collect::<EditResult<Vec<_>>>()?;
+        Ok(std::array::from_fn(|index| {
+            let (target, formula, cell) = &prepared[index];
+            let before = map_string(cell, &txn, "formula");
+            cell.insert(&mut txn, "formula", formula.as_str());
             CellFormulaReceipt {
                 page_id: page_id.to_owned(),
                 shape_id: shape_id.to_owned(),
-                cell_name: first_target.cell_name,
-                before: first_before,
-                after: first_formula,
-            },
-            CellFormulaReceipt {
-                page_id: page_id.to_owned(),
-                shape_id: shape_id.to_owned(),
-                cell_name: second_target.cell_name,
-                before: second_before,
-                after: second_formula,
-            },
-        ])
+                cell_name: target.cell_name.clone(),
+                before,
+                after: formula.clone(),
+            }
+        }))
     }
+}
+
+fn insert_shape(
+    txn: &mut TransactionMut<'_>,
+    client_id: u64,
+    page_id: &str,
+    draft: &ShapeDraft,
+) -> EditResult<ShapeReceipt> {
+    let pages = txn
+        .get_map(PAGES)
+        .ok_or_else(|| EditError::InvalidState("missing pages map".to_owned()))?;
+    let page = map_ref(&pages, txn, page_id)?;
+    let order = map_array(&page, txn, "shapes")?;
+    let index = order.len(txn);
+    let sheets = txn
+        .get_map(SHEETS)
+        .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
+    let id_prefix = format!("{page_id}:shape:added:{}:", client_id);
+    if sheets.len(txn) as usize >= ParseLimits::default().max_shapes {
+        return Err(EditError::InvalidState(
+            "shape count exceeds maximum".to_owned(),
+        ));
+    }
+    let source_bound = map_u32(&page, txn, "maxSourceId")?
+        .ok_or_else(|| EditError::InvalidState("missing page source ID bound".to_owned()))?;
+    let allocated = materialized_source_ids(&sheets, txn, &order, source_bound)?;
+    let largest = allocated.values().copied().max().unwrap_or(source_bound);
+    largest.checked_add(1).ok_or_else(|| {
+        EditError::InvalidState("cannot allocate a materialized source ID".to_owned())
+    })?;
+    let mut sequence = txn.state_vector().get(&yrs::ClientID::new(client_id));
+    let id = loop {
+        let candidate = format!("{id_prefix}{sequence}");
+        if sheets.get(&*txn, candidate.as_str()).is_none() {
+            break candidate;
+        }
+        sequence += 1;
+    };
+    let shape = sheets.insert(txn, id.as_str(), MapPrelim::default());
+    shape.insert(txn, "id", id.as_str());
+    shape.insert(txn, "pageId", page_id);
+    shape.insert(txn, "sourceId", 0.0);
+    shape.insert(txn, "origin", "added");
+    if let Some(name) = &draft.name {
+        shape.insert(txn, "name", name.as_str());
+    }
+    let cells = shape.insert(txn, "cells", MapPrelim::default());
+    shape.insert(txn, "shapes", ArrayPrelim::default());
+    for cell in &draft.cells {
+        seed_cell(
+            &cells,
+            txn,
+            &cell.locator,
+            cell.formula.as_deref(),
+            cell.value.as_deref(),
+            cell.row_type.as_deref(),
+        );
+    }
+    order.push_back(txn, id.as_str());
+    Ok(ShapeReceipt {
+        page_id: page_id.to_owned(),
+        shape_id: id,
+        from_index: None,
+        to_index: Some(index),
+    })
 }
 
 /** Paste reuses trusted cached values for formula-less cells; other drafts stay formula-only. */
@@ -2017,6 +2099,36 @@ fn validate_draft_cells(
 pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
     validate_schema(doc)?;
     serializable_doc(doc)
+}
+
+/// Carries a stored document forward; an unknown version is left for [`validate_schema`].
+pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
+    let rewrites = {
+        let txn = doc.transact();
+        let meta = required_map(&txn, META)?;
+        if map_number(&meta, &txn, "schemaVersion") != Some(TOKEN_STORY_SCHEMA_VERSION) {
+            return Ok(());
+        }
+        let stories = required_map(&txn, STORIES)?;
+        stories
+            .iter(&txn)
+            .filter_map(|(key, value)| {
+                let Out::Any(Any::String(value)) = value else {
+                    return None;
+                };
+                serde_json::from_str::<Vec<vsdx_resolve::ResolvedTextToken>>(&value)
+                    .ok()
+                    .map(|tokens| (key.to_owned(), plain_text(&tokens)))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut txn = doc.transact_mut_with(crate::MIGRATE_ORIGIN);
+    let stories = required_map(&txn, STORIES)?;
+    for (key, text) in &rewrites {
+        stories.insert(&mut txn, key.as_str(), text.as_str());
+    }
+    required_map(&txn, META)?.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+    Ok(())
 }
 
 struct FlatTreeNode<'a> {
@@ -2307,7 +2419,7 @@ fn validate_schema(doc: &Doc) -> EditResult<()> {
             "shape is not reachable from a page shape order".to_owned(),
         ));
     }
-    validate_glue_records(&txn)?;
+    connect::glue_records(&txn)?;
     validate_story_records(&txn)?;
     Ok(())
 }
@@ -2326,73 +2438,6 @@ fn validate_story_records<T: ReadTxn>(txn: &T) -> EditResult<()> {
         if sheets.get(txn, key).is_none() {
             return Err(EditError::InvalidState(
                 "shape text references a missing shape".to_owned(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_glue_records<T: ReadTxn>(txn: &T) -> EditResult<()> {
-    let Some(connects) = txn.get_map(CONNECTS) else {
-        return Ok(());
-    };
-    let pages = required_map(txn, PAGES)?;
-    let sheets = required_map(txn, SHEETS)?;
-    let mut endpoints = HashSet::new();
-    for (key, value) in connects.iter(txn) {
-        let Out::YMap(entry) = value else {
-            return Err(EditError::InvalidState(
-                "connector glue is not a map".to_owned(),
-            ));
-        };
-        if map_string(&entry, txn, "id").as_deref() != Some(key) {
-            return Err(EditError::InvalidState(
-                "connector glue ID does not match map key".to_owned(),
-            ));
-        }
-        let page_id = map_string(&entry, txn, "pageId").ok_or_else(|| {
-            EditError::InvalidState("connector glue is missing its page".to_owned())
-        })?;
-        map_ref(&pages, txn, &page_id).map_err(|_| {
-            EditError::InvalidState("connector glue references a missing page".to_owned())
-        })?;
-        let endpoint = map_string(&entry, txn, "endpoint")
-            .as_deref()
-            .and_then(GlueEndpoint::parse)
-            .ok_or_else(|| EditError::InvalidState("connector glue has no endpoint".to_owned()))?;
-        let to_cell = map_string(&entry, txn, "toCell").ok_or_else(|| {
-            EditError::InvalidState("connector glue has no target cell".to_owned())
-        })?;
-        if !valid_glue_target(&to_cell) || !glue_text_valid(&to_cell) {
-            return Err(EditError::InvalidState(
-                "connector glue has an invalid target cell".to_owned(),
-            ));
-        }
-        for field in ["connectorId", "targetId"] {
-            let target = map_string(&entry, txn, field).ok_or_else(|| {
-                EditError::InvalidState(format!("connector glue is missing {field}"))
-            })?;
-            let shape = match sheets.get(txn, target.as_str()) {
-                Some(Out::YMap(shape)) => shape,
-                _ => {
-                    return Err(EditError::InvalidState(
-                        "connector glue references a missing shape".to_owned(),
-                    ));
-                }
-            };
-            if map_string(&shape, txn, "pageId").as_deref() != Some(page_id.as_str()) {
-                return Err(EditError::InvalidState(
-                    "connector glue crosses pages".to_owned(),
-                ));
-            }
-        }
-        let pair = (
-            map_string(&entry, txn, "connectorId").unwrap_or_default(),
-            endpoint,
-        );
-        if !endpoints.insert(pair) {
-            return Err(EditError::InvalidState(
-                "connector glue duplicates an endpoint".to_owned(),
             ));
         }
     }
@@ -2524,75 +2569,7 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
         }
     }
     validate_new_cells(before, staged, &before_identities)?;
-    validate_remote_glue(before, staged, &after_identities, &removed_shapes)?;
-    Ok(())
-}
-
-type GlueIdentity = (String, String, String, String, String);
-
-fn glue_identities(doc: &Doc) -> EditResult<std::collections::BTreeMap<String, GlueIdentity>> {
-    let txn = doc.transact();
-    let Some(connects) = txn.get_map(CONNECTS) else {
-        return Ok(std::collections::BTreeMap::new());
-    };
-    let mut identities = std::collections::BTreeMap::new();
-    for (key, value) in connects.iter(&txn) {
-        let Out::YMap(entry) = value else {
-            continue;
-        };
-        identities.insert(
-            key.to_owned(),
-            (
-                map_string(&entry, &txn, "pageId").unwrap_or_default(),
-                map_string(&entry, &txn, "connectorId").unwrap_or_default(),
-                map_string(&entry, &txn, "endpoint").unwrap_or_default(),
-                map_string(&entry, &txn, "targetId").unwrap_or_default(),
-                map_string(&entry, &txn, "toCell").unwrap_or_default(),
-            ),
-        );
-    }
-    Ok(identities)
-}
-
-fn validate_remote_glue(
-    before: &Doc,
-    staged: &Doc,
-    after_identities: &std::collections::BTreeMap<String, ShapeIdentity>,
-    removed_shapes: &std::collections::BTreeSet<String>,
-) -> EditResult<()> {
-    let before_glue = glue_identities(before)?;
-    let after_glue = glue_identities(staged)?;
-    for (key, identity) in &before_glue {
-        match after_glue.get(key) {
-            Some(after) if after == identity => {}
-            Some(_) => {
-                return Err(EditError::InvalidState(format!(
-                    "remote update changes connector glue {key}"
-                )));
-            }
-            None => {
-                let (_, connector, _, target, _) = identity;
-                if !removed_shapes.contains(connector) && !removed_shapes.contains(target) {
-                    return Err(EditError::InvalidState(format!(
-                        "remote update removes connector glue {key} while its shapes survive"
-                    )));
-                }
-            }
-        }
-    }
-    for (key, (_, connector, _, _, _)) in after_glue
-        .iter()
-        .filter(|(key, _)| !before_glue.contains_key(*key))
-    {
-        let origin = after_identities
-            .get(connector)
-            .and_then(|identity| identity.2.as_deref());
-        if origin != Some("added") {
-            return Err(EditError::InvalidState(format!(
-                "remote update adds connector glue {key} without a session connector"
-            )));
-        }
-    }
+    connect::validate_remote_glue(before, staged)?;
     Ok(())
 }
 
@@ -2944,33 +2921,13 @@ fn validate_remote_text(before: &Doc, staged: &Doc) -> EditResult<()> {
     let before_txn = before.transact();
     let staged_txn = staged.transact();
     let before_sheets = required_map(&before_txn, SHEETS)?;
-    let staged_sheets = required_map(&staged_txn, SHEETS)?;
-    for (shape_id, staged_shape) in staged_sheets.iter(&staged_txn) {
-        let Out::YMap(staged_shape) = staged_shape else {
-            continue;
-        };
-        let Some(Out::YMap(before_shape)) = before_sheets.get(&before_txn, shape_id) else {
-            if let Some(text) = match staged_txn
-                .get_map(STORIES)
-                .as_ref()
-                .and_then(|stories| stories.get(&staged_txn, shape_id))
-            {
-                Some(Out::Any(Any::String(text))) => Some(text.to_string()),
-                Some(_) => {
-                    return Err(EditError::InvalidState(
-                        "shape text is not a string".to_owned(),
-                    ));
-                }
-                None => None,
-            } {
-                validate_story_text(&text)?;
-            }
-            let _ = staged_shape;
-            continue;
-        };
-        let before_text = story_text(&before_txn, shape_id);
+    for (shape_id, _) in required_map(&staged_txn, SHEETS)?.iter(&staged_txn) {
         let after_text = story_text(&staged_txn, shape_id);
-        if before_text == after_text {
+        let Some(Out::YMap(before_shape)) = before_sheets.get(&before_txn, shape_id) else {
+            validate_story_text(&after_text)?;
+            continue;
+        };
+        if story_text(&before_txn, shape_id) == after_text {
             continue;
         }
         validate_story_text(&after_text)?;
@@ -3431,6 +3388,173 @@ fn evaluate_cached_formula(
     }
 }
 
+pub(crate) fn loc_pin_at_size<T: ReadTxn>(
+    txn: &T,
+    shape_id: &str,
+    width: f64,
+    height: f64,
+) -> EditResult<(f64, f64)> {
+    let sheets = required_map(txn, SHEETS)?;
+    let shape = map_ref(&sheets, txn, shape_id)?;
+    let cells = map_map(&shape, txn, "cells")?;
+    let base = local_references(&cells, txn)?;
+    let overrides = SizeOverrideRefs {
+        base: &base,
+        width: width.to_string(),
+        height: height.to_string(),
+    };
+    Ok((
+        loc_pin_component(&base, &overrides, "LocPinX", width),
+        loc_pin_component(&base, &overrides, "LocPinY", height),
+    ))
+}
+
+struct SizeOverrideRefs<'a> {
+    base: &'a vsdx_resolve::ResolvedShape,
+    width: String,
+    height: String,
+}
+
+impl References for SizeOverrideRefs<'_> {
+    fn formula(&self, name: &str) -> Option<&str> {
+        if is_size_cell(name) {
+            None
+        } else {
+            self.base.formula(name)
+        }
+    }
+
+    fn value(&self, name: &str) -> Option<(&str, Option<&str>)> {
+        self.size_value(name).or_else(|| self.base.value(name))
+    }
+
+    fn formula_in(&self, sheet: Option<u32>, name: &str) -> Option<&str> {
+        if sheet.is_none() && is_size_cell(name) {
+            None
+        } else {
+            self.base.formula_in(sheet, name)
+        }
+    }
+
+    fn value_in(&self, sheet: Option<u32>, name: &str) -> Option<(&str, Option<&str>)> {
+        if sheet.is_none() {
+            self.size_value(name)
+                .or_else(|| self.base.value_in(sheet, name))
+        } else {
+            self.base.value_in(sheet, name)
+        }
+    }
+
+    fn formula_in_scoped(
+        &self,
+        sheet: Option<u32>,
+        scope: Option<&str>,
+        name: &str,
+    ) -> Option<&str> {
+        if sheet.is_none() && scope.is_none() && is_size_cell(name) {
+            None
+        } else {
+            self.base.formula_in_scoped(sheet, scope, name)
+        }
+    }
+
+    fn value_in_scoped(
+        &self,
+        sheet: Option<u32>,
+        scope: Option<&str>,
+        name: &str,
+    ) -> Option<(&str, Option<&str>)> {
+        if sheet.is_none() && scope.is_none() {
+            self.size_value(name)
+                .or_else(|| self.base.value_in_scoped(sheet, scope, name))
+        } else {
+            self.base.value_in_scoped(sheet, scope, name)
+        }
+    }
+
+    fn reference_key(&self, sheet: Option<u32>, name: &str) -> String {
+        self.base.reference_key(sheet, name)
+    }
+}
+
+impl SizeOverrideRefs<'_> {
+    fn size_value(&self, name: &str) -> Option<(&str, Option<&str>)> {
+        if name.eq_ignore_ascii_case("Width") {
+            Some((&self.width, None))
+        } else if name.eq_ignore_ascii_case("Height") {
+            Some((&self.height, None))
+        } else {
+            None
+        }
+    }
+}
+
+fn is_size_cell(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Width") || name.eq_ignore_ascii_case("Height")
+}
+
+fn numeric_reference(references: &impl References, name: &str) -> Option<f64> {
+    let formula = references.formula(name)?;
+    match evaluate(
+        formula.trim_start_matches('='),
+        references,
+        &ParseLimits::default(),
+    ) {
+        Evaluation::Evaluated(result) => match result.value {
+            Value::Number(number) => Some(number.number),
+            Value::Color(_) => None,
+        },
+        _ => None,
+    }
+}
+
+fn references_pin(expression: &Expr) -> bool {
+    match expression {
+        Expr::Reference(name) => {
+            !name.contains('!') && {
+                let cell = name.rsplit('.').next().unwrap_or(name);
+                cell.eq_ignore_ascii_case("PinX") || cell.eq_ignore_ascii_case("PinY")
+            }
+        }
+        Expr::Unary(inner) => references_pin(inner),
+        Expr::Binary(left, _, right) => references_pin(left) || references_pin(right),
+        Expr::Call(_, arguments) => arguments.iter().any(references_pin),
+        Expr::Number(_, _) | Expr::String(_) => false,
+    }
+}
+
+fn loc_pin_component(
+    base: &vsdx_resolve::ResolvedShape,
+    overrides: &SizeOverrideRefs<'_>,
+    name: &str,
+    proposed_size: f64,
+) -> f64 {
+    let current = numeric_reference(base, name)
+        .or_else(|| {
+            base.value(name)
+                .and_then(|(value, _)| value.parse::<f64>().ok())
+        })
+        .unwrap_or(proposed_size / 2.0);
+    let Some(formula) = base.formula(name) else {
+        return current;
+    };
+    let trimmed = formula.trim_start_matches('=').trim();
+    if trimmed.is_empty() {
+        return current;
+    }
+    match vsdx_eval::parse(trimmed, &ParseLimits::default()) {
+        Ok(expression) if references_pin(&expression) => current,
+        Ok(_) => match evaluate(trimmed, overrides, &ParseLimits::default()) {
+            Evaluation::Evaluated(result) => match result.value {
+                Value::Number(number) => number.number,
+                Value::Color(_) => current,
+            },
+            _ => current,
+        },
+        Err(_) => current,
+    }
+}
+
 fn materialized_source_ids<T: ReadTxn>(
     sheets: &MapRef,
     txn: &T,
@@ -3506,6 +3630,7 @@ fn semantic_cell_edits(doc: &Doc) -> EditResult<Vec<vsdx_parse::SemanticCellEdit
                         gesture: gesture_for_cell(&locator.cell_name),
                         formula: Some(formula),
                         value,
+                        row_type: map_string(&cell, &txn, "rowType"),
                     });
                 }
             }
@@ -3568,18 +3693,13 @@ fn semantic_text_edits_in(
         let Some(original) = find_shape_in(contents, source_id) else {
             continue;
         };
-        let page_sheet = package
-            .page_part_ids
-            .get(&path)
-            .and_then(|id| package.page_sheets.get(id))
-            .unwrap_or(contents);
         let resolved = resolver
             .resolve_shape(&path, source_id)
             .map_err(|error| EditError::InvalidState(error.to_string()))?;
         let tokens = resolver
-            .resolve_text_in_context(original, page_sheet, &resolved)
+            .resolve_text_in_context(original, contents, &resolved)
             .map_err(|error| EditError::InvalidState(error.to_string()))?;
-        if plain_text(&tokens, &resolved) == current {
+        if plain_text(&tokens) == current {
             continue;
         }
         edits.push(vsdx_parse::SemanticTextEdit {
@@ -3623,15 +3743,13 @@ fn serialize_doc(doc: &Doc) -> EditResult<Vec<u8>> {
         vsdx_parse::save_semantic_cell_edits(&package, &cell_edits)
             .map_err(|error| EditError::Parse(error.to_string()))?
     } else {
-        vsdx_parse::save_structural_edits(&package, &structural)
+        let restructured = vsdx_parse::save_structural_edits(&package, &structural)
+            .map_err(|error| EditError::Parse(error.to_string()))?;
+        let staged = vsdx_parse::parse_vsdx(&restructured)
+            .map_err(|error| EditError::Parse(error.to_string()))?;
+        vsdx_parse::save_semantic_cell_edits(&staged, &cell_edits)
             .map_err(|error| EditError::Parse(error.to_string()))?
     };
-    if !structural.is_empty() || !text_edits.is_empty() {
-        let staged =
-            vsdx_parse::parse_vsdx(&bytes).map_err(|error| EditError::Parse(error.to_string()))?;
-        bytes = vsdx_parse::save_semantic_cell_edits(&staged, &cell_edits)
-            .map_err(|error| EditError::Parse(error.to_string()))?;
-    }
     if !text_edits.is_empty() {
         let staged =
             vsdx_parse::parse_vsdx(&bytes).map_err(|error| EditError::Parse(error.to_string()))?;
@@ -3663,7 +3781,7 @@ fn structural_edits(
     let txn = doc.transact();
     let pages = required_map(&txn, PAGES)?;
     let sheets = required_map(&txn, SHEETS)?;
-    let glue = glue_records(&txn)?;
+    let glue = connect::glue_records(&txn)?;
     let mut edits = Vec::new();
     let desired_page_ids =
         page_part_paths_for_snapshot(package, snapshot)?
@@ -3809,29 +3927,13 @@ fn structural_edits(
                 .collect::<Vec<_>>();
             structural_container_edits(*page_id, original_order, &desired, &added, &mut edits)?;
         }
-        let sources = desired
-            .iter()
-            .map(|shape| (shape.id.as_str(), shape.source_id))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        for record in glue.iter().filter(|record| record.page_id == page.id) {
-            let original = |id: &str| by_id.get(id).is_some_and(|entry| entry.is_original);
-            if original(record.connector_id.as_str()) && original(record.target_id.as_str()) {
-                continue;
-            }
-            let (Some(connector), Some(target)) = (
-                sources.get(record.connector_id.as_str()),
-                sources.get(record.target_id.as_str()),
-            ) else {
-                return Err(EditError::InvalidState(
-                    "connector glue references a missing shape".to_owned(),
-                ));
-            };
+        for pending in connect::page_glue(page, &glue) {
             edits.push(StructuralEdit::AddConnect {
                 page_id: *page_id,
-                from_sheet: *connector,
-                from_cell: record.endpoint.endpoint_cell().to_owned(),
-                to_sheet: *target,
-                to_cell: record.to_cell.clone(),
+                from_sheet: pending.from_sheet,
+                from_cell: pending.from_cell.to_owned(),
+                to_sheet: pending.to_sheet,
+                to_cell: pending.to_cell,
             });
         }
     }
@@ -4167,14 +4269,7 @@ fn shape_xml(
         output.push_str("</Text>");
     } else if let Some(text) = texts.get(shape.id.as_str()).filter(|text| !text.is_empty()) {
         output.push_str("<Text>");
-        for character in text.chars() {
-            match character {
-                '&' => output.push_str("&amp;"),
-                '<' => output.push_str("&lt;"),
-                '>' => output.push_str("&gt;"),
-                _ => output.push(character),
-            }
-        }
+        xml_escape(&mut output, text);
         output.push_str("</Text>");
     }
     if !shape.children.is_empty() {
@@ -4614,4 +4709,268 @@ fn array_string<T: ReadTxn>(array: &ArrayRef, txn: &T, index: u32) -> Option<Str
         Out::Any(Any::String(value)) => Some(value.to_string()),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::EditCtx;
+
+    const GROUP_MASTER_TEXT: &[u8] =
+        include_bytes!("../../vsdx-parse/tests/fixtures/group-master-text.vsdx");
+    const SUB_SHAPE: &str = "page:1:shape:1:shape:2";
+    const MASTER_PART: &str = "visio/masters/master7.xml";
+    const PAGE_PART: &str = "visio/pages/page1.xml";
+
+    fn part(bytes: &[u8], path: &str) -> Vec<u8> {
+        vsdx_parse::parse_vsdx(bytes)
+            .unwrap()
+            .part_bytes(path)
+            .unwrap()
+            .to_vec()
+    }
+
+    fn story_values(doc: &Doc) -> std::collections::BTreeMap<String, String> {
+        let txn = doc.transact();
+        txn.get_map(STORIES)
+            .unwrap()
+            .iter(&txn)
+            .map(|(id, value)| {
+                let Out::Any(Any::String(text)) = value else {
+                    panic!("story {id} is not a string");
+                };
+                (id.to_owned(), text.to_string())
+            })
+            .collect()
+    }
+
+    fn stamp_token_stories(
+        session: &DiagramSession,
+        stories: &std::collections::BTreeMap<String, String>,
+    ) {
+        let mut txn = session.doc.transact_mut_with(crate::HYDRATE_ORIGIN);
+        let map = txn.get_or_insert_map(STORIES);
+        for (id, text) in stories {
+            let tokens = if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![vsdx_resolve::ResolvedTextToken::Literal(text.clone())]
+            };
+            let json = serde_json::to_string(&tokens).unwrap();
+            map.insert(&mut txn, id.as_str(), json.as_str());
+        }
+        txn.get_or_insert_map(META)
+            .insert(&mut txn, "schemaVersion", TOKEN_STORY_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_token_stories_migrate_to_plain_text_on_open() {
+        let session = DiagramSession::open(GROUP_MASTER_TEXT, 3).unwrap();
+        let expected = story_values(&session.doc);
+        assert!(expected.values().any(|text| text == "group label"));
+        assert!(expected.values().any(String::is_empty));
+        stamp_token_stories(&session, &expected);
+        assert!(
+            story_values(&session.doc)
+                .values()
+                .all(|text| text.starts_with('['))
+        );
+
+        let reopened =
+            DiagramSession::open_from_update(&session.encode_state_as_update_v1(), 4).unwrap();
+        assert_eq!(story_values(&reopened.doc), expected);
+        assert_eq!(
+            reopened.shape_text("page:1", SUB_SHAPE).unwrap(),
+            "group label"
+        );
+        let txn = reopened.doc.transact();
+        assert_eq!(
+            map_number(&required_map(&txn, META).unwrap(), &txn, "schemaVersion"),
+            Some(SCHEMA_VERSION)
+        );
+        drop(txn);
+        assert!(semantic_text_edits(&reopened.doc).unwrap().is_empty());
+        assert!(!reopened.can_undo());
+        assert_eq!(
+            reopened.save().unwrap(),
+            vsdx_parse::write_vsdx(&vsdx_parse::parse_vsdx(GROUP_MASTER_TEXT).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn remote_update_cannot_downgrade_the_schema_version() {
+        let live = DiagramSession::open(GROUP_MASTER_TEXT, 5).unwrap();
+        let peer = DiagramSession::open(GROUP_MASTER_TEXT, 6).unwrap();
+        let expected = story_values(&live.doc);
+        stamp_token_stories(&peer, &expected);
+
+        let error = live
+            .apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap_err();
+        assert!(
+            matches!(&error, EditError::InvalidState(reason) if reason.contains("schema version")),
+            "unexpected error {error:?}"
+        );
+        assert_eq!(story_values(&live.doc), expected);
+    }
+
+    #[test]
+    fn group_sub_shape_text_inherits_through_its_enclosing_master() {
+        let session = DiagramSession::open(GROUP_MASTER_TEXT, 3).unwrap();
+        assert_eq!(
+            session.shape_text("page:1", SUB_SHAPE).unwrap(),
+            "group label"
+        );
+        assert!(semantic_text_edits(&session.doc).unwrap().is_empty());
+        assert_eq!(
+            session.save().unwrap(),
+            vsdx_parse::write_vsdx(&vsdx_parse::parse_vsdx(GROUP_MASTER_TEXT).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn unedited_shapes_keep_their_original_text_markers() {
+        let source = include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx");
+        let session = DiagramSession::open(source, 3).unwrap();
+        session
+            .set_shape_text(&EditCtx::local("t"), "page:1", "page:1:shape:1", "edited")
+            .unwrap();
+        let package = session.package().unwrap();
+        let sheet = &package.page_contents["visio/pages/page1.xml"];
+        let text = |id: u32| {
+            sheet
+                .shapes()
+                .find(|shape| shape.id == id)
+                .unwrap()
+                .text()
+                .map(<[_]>::to_vec)
+        };
+        assert_eq!(
+            text(1),
+            Some(vec![vsdx_parse::TextToken::Literal("edited".to_owned())])
+        );
+        assert_eq!(text(2), Some(vec![vsdx_parse::TextToken::Field(0)]));
+        assert_eq!(
+            text(3),
+            Some(vec![
+                vsdx_parse::TextToken::CharacterRun(0),
+                vsdx_parse::TextToken::Literal("style text".to_owned()),
+            ])
+        );
+        assert_eq!(text(4), None);
+    }
+
+    #[test]
+    fn text_given_to_an_added_shape_survives_saving() {
+        let source = include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx");
+        let session = DiagramSession::open(source, 3).unwrap();
+        let context = EditCtx::local("t");
+        let draft = ShapeDraft {
+            name: None,
+            cells: ["Width", "Height", "PinX", "PinY"]
+                .into_iter()
+                .map(|name| CellSnapshot {
+                    row_type: None,
+                    locator: CellLocator {
+                        sheet: CellSheet::Page(1),
+                        shape_id: None,
+                        section: None,
+                        section_index: None,
+                        row: None,
+                        cell_name: name.to_owned(),
+                    },
+                    name: name.to_owned(),
+                    formula: Some("1".to_owned()),
+                    value: None,
+                })
+                .collect(),
+        };
+        let receipt = session.add_shape(&context, "page:1", &draft).unwrap();
+        session
+            .set_shape_text(&context, "page:1", &receipt.shape_id, "added & <new>")
+            .unwrap();
+        let reopened = DiagramSession::open(&session.save().unwrap(), 4).unwrap();
+        let added = reopened.snapshot().unwrap().pages[0]
+            .shapes
+            .last()
+            .unwrap()
+            .id
+            .clone();
+        assert_eq!(
+            reopened.shape_text("page:1", &added).unwrap(),
+            "added & <new>"
+        );
+    }
+
+    #[test]
+    fn text_edits_are_undoable() {
+        let source = include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx");
+        let session = DiagramSession::open(source, 3).unwrap();
+        let before = session.shape_text("page:1", "page:1:shape:3").unwrap();
+        session
+            .set_shape_text(&EditCtx::local("t"), "page:1", "page:1:shape:3", "edited")
+            .unwrap();
+        session.add_undo_barrier();
+        assert!(session.undo());
+        assert_eq!(
+            session.shape_text("page:1", "page:1:shape:3").unwrap(),
+            before
+        );
+        assert!(session.redo());
+        assert_eq!(
+            session.shape_text("page:1", "page:1:shape:3").unwrap(),
+            "edited"
+        );
+    }
+
+    #[test]
+    fn clearing_inherited_text_shadows_the_master_after_reopening() {
+        let session = DiagramSession::open(GROUP_MASTER_TEXT, 3).unwrap();
+        session
+            .set_shape_text(&EditCtx::local("t"), "page:1", SUB_SHAPE, "")
+            .unwrap();
+        let saved = session.save().unwrap();
+        assert_eq!(
+            DiagramSession::open(&saved, 4)
+                .unwrap()
+                .shape_text("page:1", SUB_SHAPE)
+                .unwrap(),
+            ""
+        );
+        let package = session.package().unwrap();
+        let projected = package.page_contents["visio/pages/page1.xml"]
+            .shapes()
+            .flat_map(vsdx_parse::Shape::shapes)
+            .find(|shape| shape.id == 2)
+            .unwrap()
+            .text()
+            .map(<[_]>::to_vec);
+        assert_eq!(projected, Some(Vec::new()));
+    }
+
+    #[test]
+    fn editing_an_inherited_sub_shape_rewrites_only_its_own_text() {
+        let session = DiagramSession::open(GROUP_MASTER_TEXT, 3).unwrap();
+        session
+            .set_shape_text(&EditCtx::local("t"), "page:1", SUB_SHAPE, "renamed")
+            .unwrap();
+        let saved = session.save().unwrap();
+        assert_eq!(
+            DiagramSession::open(&saved, 4)
+                .unwrap()
+                .shape_text("page:1", SUB_SHAPE)
+                .unwrap(),
+            "renamed"
+        );
+        assert_eq!(
+            part(&saved, MASTER_PART),
+            part(GROUP_MASTER_TEXT, MASTER_PART)
+        );
+        let page = String::from_utf8(part(&saved, PAGE_PART)).unwrap();
+        assert!(page.contains("<Text>renamed</Text>"), "{page}");
+        assert_eq!(
+            page.replace("<Text>renamed</Text>", ""),
+            String::from_utf8(part(GROUP_MASTER_TEXT, PAGE_PART)).unwrap()
+        );
+    }
 }

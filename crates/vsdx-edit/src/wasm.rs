@@ -76,6 +76,18 @@ struct SetCellFormulaArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SetControlHandleArgs {
+    page_id: String,
+    shape_id: String,
+    row: String,
+    #[serde(default)]
+    x_formula: Option<String>,
+    #[serde(default)]
+    y_formula: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MoveShapeArgs {
     page_id: String,
     shape_id: String,
@@ -88,6 +100,17 @@ struct MoveShapeArgs {
 struct ResizeShapeArgs {
     page_id: String,
     shape_id: String,
+    width_formula: String,
+    height_formula: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetShapeBoundsArgs {
+    page_id: String,
+    shape_id: String,
+    x_formula: String,
+    y_formula: String,
     width_formula: String,
     height_formula: String,
 }
@@ -241,9 +264,17 @@ struct ShapeTextArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ConnectorGlueArgs {
+struct RoutePointArgs {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetConnectorRouteArgs {
+    page_id: String,
     shape_id: String,
-    to_cell: Option<String>,
+    points: Vec<RoutePointArgs>,
 }
 
 #[derive(Deserialize)]
@@ -251,8 +282,26 @@ struct ConnectorGlueArgs {
 struct AddConnectorArgs {
     page_id: String,
     draft: FormulaShapeDraft,
-    from: ConnectorGlueArgs,
-    to: ConnectorGlueArgs,
+    from: crate::ConnectorGlue,
+    to: crate::ConnectorGlue,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddFreeConnectorArgs {
+    page_id: String,
+    draft: FormulaShapeDraft,
+    from: crate::ConnectorGlue,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddConnectedShapeArgs {
+    page_id: String,
+    shape_draft: FormulaShapeDraft,
+    connector_draft: FormulaShapeDraft,
+    from: crate::ConnectorGlue,
+    to_cell: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -452,6 +501,11 @@ impl VsdxDocument {
         self.set_cell_formula_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = setControlHandleJson)]
+    pub fn set_control_handle_json(&self, args: &str) -> Result<String, JsValue> {
+        self.set_control_handle_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = moveShapeJson)]
     pub fn move_shape_json(&self, args: &str) -> Result<String, JsValue> {
         self.move_shape_json_inner(args).map_err(js_error)
@@ -460,6 +514,25 @@ impl VsdxDocument {
     #[wasm_bindgen(js_name = resizeShapeJson)]
     pub fn resize_shape_json(&self, args: &str) -> Result<String, JsValue> {
         self.resize_shape_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = setShapeBoundsJson)]
+    pub fn set_shape_bounds_json(&self, args: &str) -> Result<String, JsValue> {
+        self.set_shape_bounds_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = resizeLocPin)]
+    pub fn resize_loc_pin(
+        &self,
+        page_id: &str,
+        shape_id: &str,
+        width: f64,
+        height: f64,
+    ) -> Result<Vec<f64>, JsValue> {
+        self.session
+            .resize_loc_pin(page_id, shape_id, width, height)
+            .map(Vec::from)
+            .map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = reorderShapeJson)]
@@ -502,6 +575,16 @@ impl VsdxDocument {
         self.add_connector_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = addFreeConnectorJson)]
+    pub fn add_free_connector_json(&self, args: &str) -> Result<String, JsValue> {
+        self.add_free_connector_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = addConnectedShapeJson)]
+    pub fn add_connected_shape_json(&self, args: &str) -> Result<String, JsValue> {
+        self.add_connected_shape_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = setShapeTextJson)]
     pub fn set_shape_text_json(&self, args: &str) -> Result<String, JsValue> {
         self.set_shape_text_json_inner(args).map_err(js_error)
@@ -510,6 +593,11 @@ impl VsdxDocument {
     #[wasm_bindgen(js_name = shapeTextJson)]
     pub fn shape_text_json(&self, args: &str) -> Result<String, JsValue> {
         self.shape_text_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = setConnectorRouteJson)]
+    pub fn set_connector_route_json(&self, args: &str) -> Result<String, JsValue> {
+        self.set_connector_route_json_inner(args).map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = save)]
@@ -595,6 +683,21 @@ impl VsdxDocument {
             .and_then(json_inner)
     }
 
+    fn set_control_handle_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: SetControlHandleArgs = parse_args_inner(args)?;
+        self.session
+            .set_control_handle(
+                &local_context(),
+                &args.page_id,
+                &args.shape_id,
+                &args.row,
+                args.x_formula,
+                args.y_formula,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
     fn move_shape(&self, args: MoveShapeArgs) -> crate::EditResult<[crate::CellFormulaReceipt; 2]> {
         self.session.move_shape(
             &local_context(),
@@ -608,6 +711,24 @@ impl VsdxDocument {
     fn move_shape_json_inner(&self, args: &str) -> Result<String, String> {
         let args = parse_args_inner(args)?;
         self.move_shape(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn set_shape_bounds_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: SetShapeBoundsArgs = parse_args_inner(args)?;
+        self.session
+            .set_shape_bounds(
+                &local_context(),
+                &args.page_id,
+                &args.shape_id,
+                [
+                    args.x_formula,
+                    args.y_formula,
+                    args.width_formula,
+                    args.height_formula,
+                ],
+            )
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }
@@ -684,14 +805,34 @@ impl VsdxDocument {
                 &local_context(),
                 &args.page_id,
                 &draft,
-                &crate::ConnectorGlue {
-                    shape_id: args.from.shape_id,
-                    to_cell: args.from.to_cell,
-                },
-                &crate::ConnectorGlue {
-                    shape_id: args.to.shape_id,
-                    to_cell: args.to.to_cell,
-                },
+                &args.from,
+                &args.to,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn add_free_connector_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddFreeConnectorArgs = parse_args_inner(args)?;
+        let draft = args.draft.try_into().map_err(str::to_owned)?;
+        self.session
+            .add_free_connector(&local_context(), &args.page_id, &draft, &args.from)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn add_connected_shape_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddConnectedShapeArgs = parse_args_inner(args)?;
+        let shape_draft = args.shape_draft.try_into().map_err(str::to_owned)?;
+        let connector_draft = args.connector_draft.try_into().map_err(str::to_owned)?;
+        self.session
+            .add_connected_shape(
+                &local_context(),
+                &args.page_id,
+                &shape_draft,
+                &connector_draft,
+                &args.from,
+                args.to_cell.as_deref(),
             )
             .map_err(|error| error.to_string())
             .and_then(json_inner)
@@ -701,6 +842,19 @@ impl VsdxDocument {
         let args: ShapeTextArgs = parse_args_inner(args)?;
         self.session
             .shape_text(&args.page_id, &args.shape_id)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn set_connector_route_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: SetConnectorRouteArgs = parse_args_inner(args)?;
+        let points = args
+            .points
+            .iter()
+            .map(|point| (point.x, point.y))
+            .collect::<Vec<_>>();
+        self.session
+            .set_connector_route(&local_context(), &args.page_id, &args.shape_id, &points)
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }
@@ -944,6 +1098,34 @@ mod tests {
         let snapshot = document.snapshot_json().unwrap();
         assert!(snapshot.contains(r#""name":"Width","formula":"SETATREF(Target)""#));
         assert!(snapshot.contains(r#""name":"Target","formula":"2""#));
+    }
+
+    #[test]
+    fn wasm_shape_bounds_json_is_atomic() {
+        let document = document();
+        for name in ["PinX", "PinY", "Width", "Height"] {
+            add_cell(&document, name, name, "1");
+        }
+        let args = r#"{"pageId":"page:1","shapeId":"page:1:shape:1","xFormula":"2","yFormula":"3","widthFormula":"4","heightFormula":"5"}"#;
+        let receipts: serde_json::Value =
+            serde_json::from_str(&document.set_shape_bounds_json(args).unwrap()).unwrap();
+        assert_eq!(
+            receipts
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|receipt| receipt["after"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["2", "3", "4", "5"]
+        );
+        add_cell(&document, "LockMoveY", "LockMoveY", "1");
+        let before = document.snapshot_json().unwrap();
+        assert!(
+            document
+                .set_shape_bounds_json_inner(&args.replace("\"4\"", "\"8\""))
+                .is_err()
+        );
+        assert_eq!(document.snapshot_json().unwrap(), before);
     }
 
     #[test]
@@ -1758,7 +1940,7 @@ mod tests {
             shape.text(),
             Some([vsdx_parse::TextToken::Literal("Hello\nNew line".to_owned())].as_slice())
         );
-        assert!(!receipt.before.is_empty());
+        assert_eq!(receipt.before, " AB\n\t C ");
     }
 
     #[test]
@@ -1783,12 +1965,13 @@ mod tests {
 
     #[test]
     fn set_shape_text_json_rejects_forbidden_characters() {
-        assert!(
+        assert_eq!(
             document()
                 .set_shape_text_json_inner(
-                    "{\"pageId\":\"page:1\",\"shapeId\":\"page:1:shape:1\",\"text\":\"bad\0\"}"
+                    r#"{"pageId":"page:1","shapeId":"page:1:shape:1","text":"bad\u0000"}"#
                 )
-                .is_err()
+                .unwrap_err(),
+            "invalid diagram state: shape text contains a character forbidden by XML 1.0"
         );
     }
 

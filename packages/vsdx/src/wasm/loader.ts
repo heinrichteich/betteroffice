@@ -1,6 +1,6 @@
 import initWasmModule, { VsdxDocument, VsdxRenderer, rendererVersion } from './generated/vsdx_wasm.js';
 import type { InitInput } from './generated/vsdx_wasm.js';
-import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectorGlue, DiagramSnapshot, FormulaShapeDraft, FormulaShapeTreeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, ShapeTreeGlue, TextReceipt, VsdxFontFace } from '../types';
+import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectedShapeReceipt, ConnectorGlue, ConnectorRoutePoint, ConnectorRouteReceipt, DiagramSnapshot, FormulaShapeDraft, FormulaShapeTreeDraft, HistoryResult, HitTestResult, PageDisplayList, PageLayer, ShapeReceipt, ShapeTreeGlue, TextReceipt, VsdxFontFace } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; initialUpdate?: Uint8Array; }
@@ -10,10 +10,17 @@ export interface DiagramHandle {
   snapshot(): DiagramSnapshot;
   registerFont(face: VsdxFontFace): number;
   layoutPage(pageIndex: number): PageDisplayList;
+  exportPdf(): Uint8Array;
+  pageLayers(pageIndex: number): PageLayer[];
+  setLayerVisible(pagePartPath: string, layerIndex: number, visible: boolean): void;
+  clearLayerVisibility(): void;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(assetId: string): Uint8Array;
   setCellFormula(pageId: string, shapeId: string, locator: CellLocator, formula: string): CellFormulaReceipt;
+  setControlHandle(pageId: string, shapeId: string, row: string, xFormula: string | null, yFormula: string | null): CellFormulaReceipt[];
   moveShape(pageId: string, shapeId: string, xFormula: string, yFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
+  setShapeBounds(pageId: string, shapeId: string, xFormula: string, yFormula: string, widthFormula: string, heightFormula: string): [CellFormulaReceipt, CellFormulaReceipt, CellFormulaReceipt, CellFormulaReceipt];
+  resizeLocPin(pageId: string, shapeId: string, width: number, height: number): { x: number; y: number };
   resizeShape(pageId: string, shapeId: string, widthFormula: string, heightFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
   reorderShape(pageId: string, shapeId: string, toIndex: number): ShapeReceipt;
   reorderPage(pageId: string, toIndex: number): ShapeReceipt;
@@ -22,6 +29,9 @@ export interface DiagramHandle {
   addShapeTree(pageId: string, draft: FormulaShapeTreeDraft): ShapeReceipt;
   subtreeGlue(pageId: string, shapeId: string): ShapeTreeGlue[];
   addConnector(pageId: string, draft: FormulaShapeDraft, from: ConnectorGlue, to: ConnectorGlue): ShapeReceipt;
+  addFreeConnector(pageId: string, draft: FormulaShapeDraft, from: ConnectorGlue): ShapeReceipt;
+  addConnectedShape(pageId: string, shapeDraft: FormulaShapeDraft, connectorDraft: FormulaShapeDraft, from: ConnectorGlue, toCell?: string): ConnectedShapeReceipt;
+  setConnectorRoute(pageId: string, shapeId: string, points: ConnectorRoutePoint[]): ConnectorRouteReceipt;
   deleteShape(pageId: string, shapeId: string): ShapeReceipt;
   shapeText(pageId: string, shapeId: string): string;
   setShapeText(pageId: string, shapeId: string, text: string): TextReceipt;
@@ -113,30 +123,40 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
   return {
     clientId: doc.clientId, snapshot: () => json(() => doc.snapshotJson()),
     registerFont: face => wasm(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes)),
+    pageLayers: pageIndex => json(() => renderer.pageLayersJson(doc, pageIndex)),
+    setLayerVisible: (pagePartPath, layerIndex, visible) => wasm(() => renderer.setLayerVisible(pagePartPath, layerIndex, visible)),
+    clearLayerVisibility: () => wasm(() => renderer.clearLayerVisibility()),
     layoutPage: pageIndex => {
       hitIds.clear();
       const list = json<PageDisplayList>(() => renderer.layoutPageJson(doc, pageIndex));
-      if (list.contractVersion !== 4) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
+      if (list.contractVersion !== 6) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
       const page = json<DiagramSnapshot>(() => doc.snapshotJson()).pages[pageIndex];
       const shapes = [...page.shapes];
       while (shapes.length) { const shape = shapes.pop()!; hitIds.set(`${page.sourcePartPath}:${shape.sourceId}`, shape.id); shapes.push(...shape.children); }
       return list;
     },
+    exportPdf: () => wasm(() => renderer.exportPdf(doc).slice()),
     hitTest: (x, y) => {
       const hit = json<HitTestResult | null>(() => renderer.hitTestJson(x, y));
       const shapeId = hit && hitIds.get(hit.shapeId);
       return hit && shapeId ? { ...hit, shapeId } : null;
     }, mediaBytes: assetId => wasm(() => doc.mediaBytes(assetId).slice()),
     setCellFormula: (pageId, shapeId, locator, formula) => json(() => doc.setCellFormulaJson(JSON.stringify({ pageId, shapeId, locator, formula })), true),
+    setControlHandle: (pageId, shapeId, row, xFormula, yFormula) => json(() => doc.setControlHandleJson(JSON.stringify({ pageId, shapeId, row, xFormula, yFormula })), true),
     moveShape: (pageId, shapeId, xFormula, yFormula) => json(() => doc.moveShapeJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula })), true),
+    setShapeBounds: (pageId, shapeId, xFormula, yFormula, widthFormula, heightFormula) => json(() => doc.setShapeBoundsJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula, widthFormula, heightFormula })), true),
+    resizeLocPin: (pageId, shapeId, width, height) => { const [x, y] = wasm(() => doc.resizeLocPin(pageId, shapeId, width, height)); return { x, y }; },
     resizeShape: (pageId, shapeId, widthFormula, heightFormula) => json(() => doc.resizeShapeJson(JSON.stringify({ pageId, shapeId, widthFormula, heightFormula })), true),
     reorderShape: (pageId, shapeId, toIndex) => json(() => doc.reorderShapeJson(JSON.stringify({ pageId, shapeId, toIndex })), true),
     reorderPage: (pageId, toIndex) => json(() => doc.reorderPageJson(JSON.stringify({ pageId, toIndex })), true),
     addShape: (pageId, draft) => json(() => doc.addShapeJson(JSON.stringify({ pageId, draft })), true),
     addShapeWithText: (pageId, draft, text) => json(() => doc.addShapeWithTextJson(JSON.stringify({ pageId, draft, text })), true),
-    addShapeTree: (pageId, draft) => json(() => (doc as unknown as { addShapeTreeJson: (args: string) => string }).addShapeTreeJson(JSON.stringify({ pageId, draft })), true),
-    subtreeGlue: (pageId, shapeId) => json(() => (doc as unknown as { subtreeGlueJson: (args: string) => string }).subtreeGlueJson(JSON.stringify({ pageId, shapeId }))),
+    addShapeTree: (pageId, draft) => json(() => doc.addShapeTreeJson(JSON.stringify({ pageId, draft })), true),
+    subtreeGlue: (pageId, shapeId) => json(() => doc.subtreeGlueJson(JSON.stringify({ pageId, shapeId }))),
     addConnector: (pageId, draft, from, to) => json(() => doc.addConnectorJson(JSON.stringify({ pageId, draft, from, to })), true),
+    addFreeConnector: (pageId, draft, from) => json(() => doc.addFreeConnectorJson(JSON.stringify({ pageId, draft, from })), true),
+    addConnectedShape: (pageId, shapeDraft, connectorDraft, from, toCell) => json(() => doc.addConnectedShapeJson(JSON.stringify({ pageId, shapeDraft, connectorDraft, from, toCell })), true),
+    setConnectorRoute: (pageId, shapeId, points) => json(() => doc.setConnectorRouteJson(JSON.stringify({ pageId, shapeId, points })), true),
     deleteShape: (pageId, shapeId) => json(() => doc.deleteShapeJson(JSON.stringify({ pageId, shapeId })), true),
     shapeText: (pageId, shapeId) => json(() => doc.shapeTextJson(JSON.stringify({ pageId, shapeId }))),
     setShapeText: (pageId, shapeId, text) => json(() => doc.setShapeTextJson(JSON.stringify({ pageId, shapeId, text })), true),

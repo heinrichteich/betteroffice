@@ -1,18 +1,17 @@
 use crate::{GeometryIssue, Lookup, RealizedGeometry, ResolvedSection};
 use ooxml_drawingml::GeometryPathCommand;
 
-/// Realizes a Geometry section in the shape's local drawing units. `Rel*` coordinates
-/// are fractions of `width` and `height`, giving absolute points in local space.
+/// Realizes local geometry, scaling relative coordinates by width and height.
 pub fn realize_geometry(section: &ResolvedSection, width: f64, height: f64) -> RealizedGeometry {
-    let mut out = RealizedGeometry::default();
-    if !section.unsupported_controls.is_empty() {
-        out.issues.extend(
-            section
-                .unsupported_controls
-                .iter()
-                .cloned()
-                .map(GeometryIssue::UnsupportedSectionControl),
-        );
+    let mut out = RealizedGeometry {
+        controls: section.controls,
+        ..Default::default()
+    };
+    for control in &section.unsupported_controls {
+        out.issues
+            .push(GeometryIssue::UnsupportedSectionControl(control.clone()));
+    }
+    if out.controls.no_show && out.issues.is_empty() {
         return out;
     }
     let mut current = (0.0, 0.0);
@@ -65,6 +64,10 @@ pub fn realize_geometry(section: &ResolvedSection, width: f64, height: f64) -> R
             }
             (values.len() == names.len()).then_some(values)
         };
+        if ty == "Close" {
+            push_checked(&mut out, GeometryPathCommand::Close, ty);
+            continue;
+        }
         let xy = match (value("X"), value("Y")) {
             (Some(x), Some(y)) => (x, y),
             _ => {
@@ -109,6 +112,99 @@ pub fn realize_geometry(section: &ResolvedSection, width: f64, height: f64) -> R
                 if push_checked(
                     &mut out,
                     GeometryPathCommand::Line { x: end.0, y: end.1 },
+                    ty,
+                ) {
+                    current = end;
+                }
+            }
+            "CubBezTo" => {
+                let Some(values) = required(&["A", "B", "C", "D"]) else {
+                    continue;
+                };
+                if push_checked(
+                    &mut out,
+                    GeometryPathCommand::Cubic {
+                        cp1x: values[0],
+                        cp1y: values[1],
+                        cp2x: values[2],
+                        cp2y: values[3],
+                        x: xy.0,
+                        y: xy.1,
+                    },
+                    ty,
+                ) {
+                    current = xy;
+                }
+            }
+            "RelCubBezTo" => {
+                let Some(values) = required(&["A", "B", "C", "D"]) else {
+                    continue;
+                };
+                let Some(end) = relative_point(&mut out, xy, (width, height), ty) else {
+                    continue;
+                };
+                let Some(first) =
+                    relative_point(&mut out, (values[0], values[1]), (width, height), ty)
+                else {
+                    continue;
+                };
+                let Some(second) =
+                    relative_point(&mut out, (values[2], values[3]), (width, height), ty)
+                else {
+                    continue;
+                };
+                if push_checked(
+                    &mut out,
+                    GeometryPathCommand::Cubic {
+                        cp1x: first.0,
+                        cp1y: first.1,
+                        cp2x: second.0,
+                        cp2y: second.1,
+                        x: end.0,
+                        y: end.1,
+                    },
+                    ty,
+                ) {
+                    current = end;
+                }
+            }
+            "QuadBezTo" => {
+                let Some(values) = required(&["A", "B"]) else {
+                    continue;
+                };
+                if push_checked(
+                    &mut out,
+                    GeometryPathCommand::Quad {
+                        cpx: values[0],
+                        cpy: values[1],
+                        x: xy.0,
+                        y: xy.1,
+                    },
+                    ty,
+                ) {
+                    current = xy;
+                }
+            }
+            "RelQuadBezTo" => {
+                let Some(values) = required(&["A", "B"]) else {
+                    continue;
+                };
+                let Some(end) = relative_point(&mut out, xy, (width, height), ty) else {
+                    continue;
+                };
+                let Some(control) =
+                    relative_point(&mut out, (values[0], values[1]), (width, height), ty)
+                else {
+                    continue;
+                };
+                if push_checked(
+                    &mut out,
+                    GeometryPathCommand::Quad {
+                        cpx: control.0,
+                        cpy: control.1,
+                        x: end.0,
+                        y: end.1,
+                    },
                     ty,
                 ) {
                     current = end;
@@ -224,6 +320,24 @@ pub fn realize_geometry(section: &ResolvedSection, width: f64, height: f64) -> R
                     )
                 }) {
                     current = xy;
+                }
+            }
+            "RelEllipticalArcTo" => {
+                let Some(values) = required(&["A", "B", "C", "D"]) else {
+                    continue;
+                };
+                let Some(end) = relative_point(&mut out, xy, (width, height), ty) else {
+                    continue;
+                };
+                let Some(through) =
+                    relative_point(&mut out, (values[0], values[1]), (width, height), ty)
+                else {
+                    continue;
+                };
+                if emit_row(&mut out, |out| {
+                    cubic_elliptical_arc(out, current, end, through, values[2], values[3], ty)
+                }) {
+                    current = end;
                 }
             }
             "Ellipse" => {
@@ -728,19 +842,40 @@ fn cubic_arc_segment(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn geometry_realizes_two_digit_rows_in_numeric_order() {
-        let keyed = |key: &str, ty: &str, cells: Vec<Cell>| {
-            (
-                key.to_owned(),
-                ResolvedRow {
-                    key: key.into(),
-                    ..resolved_row(ty, cells)
-                },
-            )
-        };
+    fn close_row_closes_the_path_and_reports_no_issue() {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                keyed("IX:1", "MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                keyed("IX:2", "LineTo", vec![cell("X", "1"), cell("Y", "0")]),
+                keyed("IX:3", "LineTo", vec![cell("X", "1"), cell("Y", "1")]),
+                keyed("IX:4", "Close", vec![cell("NoShow", "0")]),
+            ]),
+        };
+        let realized = realize_geometry(&section, 1.0, 1.0);
+        assert_eq!(
+            realized.commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                GeometryPathCommand::Close,
+            ]
+        );
+        assert!(realized.issues.is_empty());
+    }
+
+    #[test]
+    fn geometry_realizes_two_digit_rows_in_numeric_order() {
+        let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -774,6 +909,15 @@ mod tests {
             other_attrs: vec![],
         }
     }
+    fn keyed(key: &str, ty: &str, cells: Vec<Cell>) -> (String, ResolvedRow) {
+        (
+            key.to_owned(),
+            ResolvedRow {
+                key: key.into(),
+                ..resolved_row(ty, cells)
+            },
+        )
+    }
     fn resolved_row(ty: &str, cells: Vec<Cell>) -> ResolvedRow {
         ResolvedRow {
             key: "IX:0".into(),
@@ -799,6 +943,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -834,6 +979,7 @@ mod tests {
             let section = ResolvedSection {
                 index: None,
                 unsupported_controls: Vec::new(),
+                controls: crate::GeometrySectionControls::default(),
                 name: "Geometry".into(),
                 deleted: false,
                 row_order: vec![],
@@ -860,6 +1006,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -893,6 +1040,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -933,6 +1081,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -968,6 +1117,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1006,6 +1156,7 @@ mod tests {
             let section = ResolvedSection {
                 index: None,
                 unsupported_controls: Vec::new(),
+                controls: crate::GeometrySectionControls::default(),
                 name: "Geometry".into(),
                 deleted: false,
                 row_order: vec![],
@@ -1075,6 +1226,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1131,6 +1283,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1158,6 +1311,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1192,6 +1346,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1222,6 +1377,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1252,6 +1408,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1301,6 +1458,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1334,6 +1492,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1373,6 +1532,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1411,6 +1571,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1459,6 +1620,7 @@ mod tests {
             let section = ResolvedSection {
                 index: None,
                 unsupported_controls: Vec::new(),
+                controls: crate::GeometrySectionControls::default(),
                 name: "Geometry".into(),
                 deleted: false,
                 row_order: vec![],
@@ -1484,6 +1646,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1508,6 +1671,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1574,6 +1738,7 @@ mod tests {
             let section = ResolvedSection {
                 index: None,
                 unsupported_controls: Vec::new(),
+                controls: crate::GeometrySectionControls::default(),
                 name: "Geometry".into(),
                 deleted: false,
                 row_order: vec![],
@@ -1590,6 +1755,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1616,6 +1782,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1648,6 +1815,7 @@ mod tests {
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1719,19 +1887,124 @@ mod tests {
     }
 
     #[test]
-    fn geometry_realizes_two_digit_rows_in_numeric_order_without_row_order() {
-        let keyed = |key: &str, ty: &str, cells: Vec<Cell>| {
-            (
-                key.to_owned(),
-                ResolvedRow {
-                    key: key.into(),
-                    ..resolved_row(ty, cells)
-                },
-            )
+    fn geometry_section_controls_select_paint_without_issues() {
+        use crate::GeometrySectionControls;
+        let rows = || {
+            BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row("LineTo", vec![cell("X", "1"), cell("Y", "0")]),
+                ),
+            ])
         };
+        fn controlled(no_fill: bool, no_line: bool, no_show: bool) -> GeometrySectionControls {
+            GeometrySectionControls {
+                no_fill,
+                no_line,
+                no_show,
+            }
+        }
+        for (controls, no_fill, no_line, no_show) in [
+            (controlled(true, false, false), true, false, false),
+            (controlled(false, true, false), false, true, false),
+            (controlled(true, true, false), true, true, false),
+        ] {
+            let section = ResolvedSection {
+                index: None,
+                unsupported_controls: Vec::new(),
+                controls,
+                name: "Geometry".into(),
+                deleted: false,
+                row_order: vec![],
+                rows: rows(),
+            };
+            let geometry = realize_geometry(&section, 1.0, 1.0);
+            assert_eq!(geometry.controls.no_fill, no_fill);
+            assert_eq!(geometry.controls.no_line, no_line);
+            assert_eq!(geometry.controls.no_show, no_show);
+            assert!(geometry.issues.is_empty());
+            assert_eq!(geometry.commands.len(), 2);
+        }
         let section = ResolvedSection {
             index: None,
             unsupported_controls: Vec::new(),
+            controls: controlled(false, false, true),
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: rows(),
+        };
+        let geometry = realize_geometry(&section, 1.0, 1.0);
+        assert!(geometry.controls.no_show);
+        assert!(geometry.issues.is_empty());
+        assert!(geometry.commands.is_empty());
+    }
+
+    #[test]
+    fn geometry_unevaluable_control_draws_and_reports_uncertainty() {
+        let section = ResolvedSection {
+            index: None,
+            unsupported_controls: vec!["NoFill".into()],
+            controls: crate::GeometrySectionControls::default(),
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row("LineTo", vec![cell("X", "1"), cell("Y", "0")]),
+                ),
+            ]),
+        };
+        let geometry = realize_geometry(&section, 1.0, 1.0);
+        assert!(!geometry.controls.no_fill);
+        assert_eq!(geometry.commands.len(), 2);
+        assert_eq!(
+            geometry.issues,
+            vec![GeometryIssue::UnsupportedSectionControl("NoFill".into())]
+        );
+    }
+
+    #[test]
+    fn geometry_section_unknown_controls_stay_unsupported() {
+        let section = ResolvedSection {
+            index: None,
+            unsupported_controls: vec!["NoSuchControl".into()],
+            controls: crate::GeometrySectionControls::default(),
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([(
+                "IX:0".into(),
+                resolved_row("MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+            )]),
+        };
+        let geometry = realize_geometry(&section, 1.0, 1.0);
+        assert!(!geometry.controls.no_fill);
+        assert!(!geometry.controls.no_line);
+        assert!(!geometry.controls.no_show);
+        assert_eq!(
+            geometry.issues,
+            vec![GeometryIssue::UnsupportedSectionControl(
+                "NoSuchControl".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn geometry_realizes_two_digit_rows_in_numeric_order_without_row_order() {
+        let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1748,6 +2021,265 @@ mod tests {
                 GeometryPathCommand::Line { x: 1.0, y: 0.0 },
                 GeometryPathCommand::Line { x: 0.0, y: 1.0 },
             ]
+        );
+    }
+
+    fn single_row_geometry(
+        ty: &str,
+        cells: Vec<Cell>,
+        width: f64,
+        height: f64,
+    ) -> RealizedGeometry {
+        let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([("IX:0".into(), resolved_row(ty, cells))]),
+        };
+        realize_geometry(&section, width, height)
+    }
+
+    fn cubic_cells(endpoint: (&str, &str), first: (&str, &str), second: (&str, &str)) -> Vec<Cell> {
+        vec![
+            cell("X", endpoint.0),
+            cell("Y", endpoint.1),
+            cell("A", first.0),
+            cell("B", first.1),
+            cell("C", second.0),
+            cell("D", second.1),
+        ]
+    }
+
+    #[test]
+    fn cub_bez_to_emits_a_cubic_command() {
+        let geometry = single_row_geometry(
+            "CubBezTo",
+            cubic_cells(("3", "4"), ("1", "2"), ("5", "6")),
+            9.0,
+            7.0,
+        );
+        assert_eq!(
+            geometry.commands,
+            vec![GeometryPathCommand::Cubic {
+                cp1x: 1.0,
+                cp1y: 2.0,
+                cp2x: 5.0,
+                cp2y: 6.0,
+                x: 3.0,
+                y: 4.0,
+            }]
+        );
+        assert!(geometry.issues.is_empty());
+    }
+
+    #[test]
+    fn rel_cub_bez_to_matches_absolute_at_unit_size_and_scales_by_bounds() {
+        let relative = cubic_cells(("0.5", "0.5"), ("0.25", "0.75"), ("1", "0"));
+        let absolute = cubic_cells(("0.5", "0.5"), ("0.25", "0.75"), ("1", "0"));
+        assert_eq!(
+            single_row_geometry("RelCubBezTo", relative.clone(), 1.0, 1.0).commands,
+            single_row_geometry("CubBezTo", absolute, 1.0, 1.0).commands,
+        );
+        let geometry = single_row_geometry("RelCubBezTo", relative, 4.0, 2.0);
+        assert_eq!(
+            geometry.commands,
+            vec![GeometryPathCommand::Cubic {
+                cp1x: 1.0,
+                cp1y: 1.5,
+                cp2x: 4.0,
+                cp2y: 0.0,
+                x: 2.0,
+                y: 1.0,
+            }]
+        );
+        assert!(geometry.issues.is_empty());
+    }
+
+    #[test]
+    fn quad_bez_to_emits_a_quad_command() {
+        let geometry = single_row_geometry(
+            "QuadBezTo",
+            vec![
+                cell("X", "3"),
+                cell("Y", "4"),
+                cell("A", "1"),
+                cell("B", "2"),
+            ],
+            9.0,
+            7.0,
+        );
+        assert_eq!(
+            geometry.commands,
+            vec![GeometryPathCommand::Quad {
+                cpx: 1.0,
+                cpy: 2.0,
+                x: 3.0,
+                y: 4.0,
+            }]
+        );
+        assert!(geometry.issues.is_empty());
+    }
+
+    #[test]
+    fn rel_quad_bez_to_matches_absolute_at_unit_size_and_scales_by_bounds() {
+        let cells = vec![
+            cell("X", "0.5"),
+            cell("Y", "0.5"),
+            cell("A", "0.25"),
+            cell("B", "1"),
+        ];
+        assert_eq!(
+            single_row_geometry("RelQuadBezTo", cells.clone(), 1.0, 1.0).commands,
+            single_row_geometry(
+                "QuadBezTo",
+                vec![
+                    cell("X", "0.5"),
+                    cell("Y", "0.5"),
+                    cell("A", "0.25"),
+                    cell("B", "1"),
+                ],
+                1.0,
+                1.0,
+            )
+            .commands,
+        );
+        let geometry = single_row_geometry("RelQuadBezTo", cells, 4.0, 2.0);
+        assert_eq!(
+            geometry.commands,
+            vec![GeometryPathCommand::Quad {
+                cpx: 1.0,
+                cpy: 2.0,
+                x: 2.0,
+                y: 1.0,
+            }]
+        );
+        assert!(geometry.issues.is_empty());
+    }
+
+    fn elliptical_arc_section(
+        ty: &str,
+        endpoint: (&str, &str),
+        through: (&str, &str),
+        angle: &str,
+        ratio: &str,
+    ) -> ResolvedSection {
+        ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
+            controls: crate::GeometrySectionControls::default(),
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row(
+                        ty,
+                        vec![
+                            cell("X", endpoint.0),
+                            cell("Y", endpoint.1),
+                            cell("A", through.0),
+                            cell("B", through.1),
+                            cell("C", angle),
+                            cell("D", ratio),
+                        ],
+                    ),
+                ),
+            ]),
+        }
+    }
+
+    #[test]
+    fn rel_elliptical_arc_to_keeps_angle_and_aspect_absolute() {
+        let relative =
+            elliptical_arc_section("RelEllipticalArcTo", ("1", "0.5"), ("0.5", "1"), "0.5", "2");
+        let scaled_positions =
+            elliptical_arc_section("EllipticalArcTo", ("4", "1"), ("2", "2"), "0.5", "2");
+        let scaled_angle =
+            elliptical_arc_section("EllipticalArcTo", ("4", "1"), ("2", "2"), "2", "2");
+        let relative = realize_geometry(&relative, 4.0, 2.0);
+        let scaled_positions = realize_geometry(&scaled_positions, 4.0, 2.0);
+        let scaled_angle = realize_geometry(&scaled_angle, 4.0, 2.0);
+        assert!(!relative.commands.is_empty());
+        assert_eq!(relative.commands, scaled_positions.commands);
+        assert!(relative.issues.is_empty());
+        assert_ne!(relative.commands, scaled_angle.commands);
+    }
+
+    #[test]
+    fn bezier_and_relative_arc_rows_report_missing_cells() {
+        for (ty, cells, missing) in [
+            (
+                "CubBezTo",
+                vec![
+                    cell("X", "1"),
+                    cell("Y", "2"),
+                    cell("B", "1"),
+                    cell("C", "1"),
+                    cell("D", "1"),
+                ],
+                "A",
+            ),
+            (
+                "RelCubBezTo",
+                vec![
+                    cell("X", "1"),
+                    cell("Y", "1"),
+                    cell("A", "1"),
+                    cell("B", "1"),
+                    cell("C", "1"),
+                ],
+                "D",
+            ),
+            (
+                "QuadBezTo",
+                vec![cell("X", "1"), cell("Y", "2"), cell("B", "1")],
+                "A",
+            ),
+            (
+                "RelQuadBezTo",
+                vec![cell("X", "1"), cell("Y", "1"), cell("A", "1")],
+                "B",
+            ),
+            (
+                "RelEllipticalArcTo",
+                vec![
+                    cell("X", "1"),
+                    cell("Y", "1"),
+                    cell("A", "1"),
+                    cell("B", "1"),
+                    cell("D", "1"),
+                ],
+                "C",
+            ),
+        ] {
+            let geometry = single_row_geometry(ty, cells, 4.0, 2.0);
+            assert!(geometry.commands.is_empty(), "{ty}");
+            assert_eq!(
+                geometry.issues,
+                vec![GeometryIssue::MissingCell {
+                    row_type: ty.into(),
+                    cell: missing.into(),
+                }],
+                "{ty}"
+            );
+        }
+    }
+
+    #[test]
+    fn nurbs_to_remains_unsupported() {
+        let geometry = single_row_geometry("NURBSTo", vec![], 1.0, 1.0);
+        assert!(geometry.commands.is_empty());
+        assert_eq!(
+            geometry.issues,
+            vec![GeometryIssue::UnsupportedRowType("NURBSTo".into())]
         );
     }
 }

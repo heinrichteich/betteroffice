@@ -41,6 +41,7 @@ fn indexed_geometry_sections_resolve_and_edit_independently() {
             gesture: MutationGesture::CellEdit,
             formula: Some("7".into()),
             value: None,
+            row_type: None,
         }])
         .unwrap();
     assert_geometry(&saved, "1", "7");

@@ -62,6 +62,31 @@ impl VsdxRenderer {
         Ok(json)
     }
 
+    #[wasm_bindgen(js_name = pageLayersJson)]
+    pub fn page_layers_json(
+        &self,
+        document: &VsdxDocument,
+        page_index: u32,
+    ) -> Result<String, JsValue> {
+        let package = document.session().package().map_err(js_error)?;
+        let page_part = package
+            .page_part_paths
+            .get(page_index as usize)
+            .ok_or_else(|| JsValue::from_str("page index is outside the document"))?;
+        let layers = self.renderer.effective_page_layers(&package, page_part);
+        serde_json::to_string(&layers).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = setLayerVisible)]
+    pub fn set_layer_visible(&mut self, page_part: &str, index: u32, visible: bool) {
+        self.renderer.set_layer_override(page_part, index, visible);
+    }
+
+    #[wasm_bindgen(js_name = clearLayerVisibility)]
+    pub fn clear_layer_visibility(&mut self) {
+        self.renderer.clear_layer_overrides();
+    }
+
     #[wasm_bindgen(js_name = hitTestJson)]
     pub fn hit_test_json(&self, x: f32, y: f32) -> Result<String, JsValue> {
         let result = self
@@ -78,6 +103,12 @@ impl VsdxRenderer {
             None => serde_json::Value::Null,
         };
         serde_json::to_string(&result).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = exportPdf)]
+    pub fn export_pdf(&self, document: &VsdxDocument) -> Result<Vec<u8>, JsValue> {
+        let package = document.session().package().map_err(js_error)?;
+        self.renderer.export_pdf(&package).map_err(js_error)
     }
 }
 
@@ -268,7 +299,20 @@ mod tests {
         assert!(receipt["shapeId"].as_str().unwrap().contains(":added:"));
         let mut renderer = VsdxRenderer::new();
         let live = renderer.layout_page_json(&document, 0).unwrap();
-        assert!(live.contains(r#""x":1.0,"y":1.0"#));
+        let display: serde_json::Value = serde_json::from_str(&live).unwrap();
+        let connector = display["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["id"] == "visio/pages/page1.xml:4")
+            .unwrap();
+        assert_eq!(
+            connector["path"],
+            serde_json::json!([
+                { "type": "move", "x": 1.0, "y": 1.0 },
+                { "type": "line", "x": 5.0, "y": 1.0 },
+            ])
+        );
         let saved = document.save().unwrap();
         let reparsed = vsdx_parse::parse_vsdx(&saved).unwrap();
         let part = reparsed.page_part_paths[0].clone();
@@ -308,6 +352,64 @@ mod tests {
     }
 
     #[test]
+    fn set_connector_route_json_reroutes_the_painted_path() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/connector-route-style.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        let mut renderer = VsdxRenderer::new();
+        let before: serde_json::Value =
+            serde_json::from_str(&renderer.layout_page_json(&document, 0).unwrap()).unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(
+            &document
+                .set_connector_route_json(
+                    &serde_json::json!({
+                        "pageId": "page:1",
+                        "shapeId": "page:1:shape:1",
+                        "points": [
+                            { "x": 1.0, "y": 1.0 },
+                            { "x": 1.0, "y": 3.0 },
+                            { "x": 4.0, "y": 3.0 },
+                        ],
+                    })
+                    .to_string(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["points"], 3);
+        let after: serde_json::Value =
+            serde_json::from_str(&renderer.layout_page_json(&document, 0).unwrap()).unwrap();
+        let path = after["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["id"] == "visio/pages/page1.xml:1")
+            .unwrap()["path"]
+            .clone();
+        assert_eq!(
+            path,
+            serde_json::json!([
+                { "type": "move", "x": 1.0, "y": 1.0 },
+                { "type": "line", "x": 1.0, "y": 3.0 },
+                { "type": "line", "x": 4.0, "y": 3.0 },
+                { "type": "line", "x": 4.0, "y": 3.0 },
+            ])
+        );
+        assert_ne!(before, after);
+        let reopened = VsdxDocument::open_collaborative(&document.save().unwrap(), 2.0).unwrap();
+        let mut reopened_renderer = VsdxRenderer::new();
+        assert_eq!(
+            after,
+            serde_json::from_str::<serde_json::Value>(
+                &reopened_renderer.layout_page_json(&reopened, 0).unwrap()
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
     fn layout_of_reordered_added_shapes_matches_the_saved_document() {
         let document = VsdxDocument::open_collaborative(
             include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
@@ -335,5 +437,21 @@ mod tests {
             live,
             reopened_renderer.layout_page_json(&reopened, 0).unwrap()
         );
+    }
+
+    #[test]
+    fn page_layers_json_lists_effective_visibility() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        let mut renderer = VsdxRenderer::new();
+        let layers: serde_json::Value =
+            serde_json::from_str(&renderer.page_layers_json(&document, 0).unwrap()).unwrap();
+        assert_eq!(layers, serde_json::Value::Array(Vec::new()));
+        renderer.set_layer_visible("visio/pages/page1.xml", 0, false);
+        renderer.layout_page_json(&document, 0).unwrap();
+        renderer.clear_layer_visibility();
     }
 }

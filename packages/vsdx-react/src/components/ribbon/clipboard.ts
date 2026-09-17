@@ -23,13 +23,44 @@ export function copyRefusalReason(shape: ShapeSnapshot): string | null {
   return null;
 }
 
+/** Chain of groups above a shape, innermost last, or null when the shape is not there. */
+function ancestorChain(shapes: readonly ShapeSnapshot[], shapeId: string, depth = 0): ShapeSnapshot[] | null {
+  if (depth >= 256) return null;
+  for (const shape of shapes) {
+    if (shape.id === shapeId) return [];
+    const nested = ancestorChain(shape.children, shapeId, depth + 1);
+    if (nested) return [shape, ...nested];
+  }
+  return null;
+}
+
+/** Page-space offset of a shape's group-local pins; null when an ancestor rotates or flips. */
+export function ancestorPinOffset(shapes: readonly ShapeSnapshot[], shapeId: string): { dx: number; dy: number } | null {
+  const chain = ancestorChain(shapes, shapeId);
+  if (!chain) return null;
+  let dx = 0;
+  let dy = 0;
+  for (const ancestor of chain) {
+    const turned = ['Angle', 'FlipX', 'FlipY'].some((cell) => Math.abs(resolvedNumeric(ancestor, cell) ?? 0) > 1e-9);
+    if (turned) return null;
+    dx += (resolvedNumeric(ancestor, 'PinX') ?? 0) - (resolvedNumeric(ancestor, 'LocPinX') ?? 0);
+    dy += (resolvedNumeric(ancestor, 'PinY') ?? 0) - (resolvedNumeric(ancestor, 'LocPinY') ?? 0);
+  }
+  return { dx, dy };
+}
+
 /** Snapshot a shape into an in-app clipboard entry, preserving every cell formula. */
-export function buildClipboardEntry(pageId: string, shape: ShapeSnapshot, text: string, options?: { textFor?: (shape: ShapeSnapshot) => string; glue?: VsdxClipboardGlue[] }): VsdxClipboardEntry {
+export function buildClipboardEntry(pageId: string, shape: ShapeSnapshot, text: string, options?: { textFor?: (shape: ShapeSnapshot) => string; glue?: VsdxClipboardGlue[]; pinOffset?: { dx: number; dy: number } }): VsdxClipboardEntry {
   const reason = copyRefusalReason(shape);
   if (reason != null) throw new Error(`vsdx copy is not supported for shape ${shape.id} with ${reason}`);
   const textFor = options?.textFor ?? (() => '');
   const node = buildNode(shape, text, textFor);
-  return { pageId, name: node.name, cells: node.cells, text: node.text, pinX: resolvedNumeric(shape, 'PinX'), pinY: resolvedNumeric(shape, 'PinY'), pasteCount: 0, sourceShapeId: shape.id, sourceId: shape.sourceId, ...(shape.copySourceId != null ? { copySourceId: shape.copySourceId } : {}), ...(shape.copySourcePageId != null ? { copySourcePageId: shape.copySourcePageId } : {}), ...(shape.copyRefusal != null ? { copyRefusal: shape.copyRefusal } : {}), children: node.children, glue: options?.glue ?? [] };
+  const offset = options?.pinOffset ?? { dx: 0, dy: 0 };
+  const pin = (name: 'PinX' | 'PinY', delta: number) => {
+    const own = resolvedNumeric(shape, name);
+    return own == null ? null : own + delta;
+  };
+  return { pageId, name: node.name, cells: node.cells, text: node.text, pinX: pin('PinX', offset.dx), pinY: pin('PinY', offset.dy), pasteCount: 0, sourceShapeId: shape.id, sourceId: shape.sourceId, ...(shape.copySourceId != null ? { copySourceId: shape.copySourceId } : {}), ...(shape.copySourcePageId != null ? { copySourcePageId: shape.copySourcePageId } : {}), ...(shape.copyRefusal != null ? { copyRefusal: shape.copyRefusal } : {}), children: node.children, glue: options?.glue ?? [] };
 }
 
 function buildNode(shape: ShapeSnapshot, text: string, textFor: (shape: ShapeSnapshot) => string): { name?: string; cells: ClipboardCell[]; text: string; children: VsdxClipboardEntry[] } {
