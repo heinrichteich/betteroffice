@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { canvasPointerPosition, inchFormula, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
+import { canvasPointerPosition, centreInsertPoint, clientPointToModel, inchFormula, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
 import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
 
 const frame: PageDisplayList = {
@@ -33,6 +33,28 @@ test('maps a canvas pointer onto Y-up inches for the save projection', () => {
 test('keeps the pointer mapping stable while the canvas is zoomed', () => {
   const zoomed = canvasPointerPosition(pointerAt(384, 1728, 2), frame);
   expect(zoomed.model).toEqual({ x: 2, y: 2 });
+});
+
+test('lands a drop on the same inches at every zoom and canvas offset', () => {
+  const rectAt = (cssScale: number, left = 0, top = 0) => ({ left, top, width: frame.width * cssScale, height: frame.height * cssScale });
+  for (const cssScale of [0.5, 1, 2]) {
+    const drop = clientPointToModel(frame, rectAt(cssScale), 192 * cssScale, 864 * cssScale);
+    expect(drop.model.x).toBeCloseTo(2, 10);
+    expect(drop.model.y).toBeCloseTo(2, 10);
+    expect(drop.canvas.x).toBeCloseTo(192, 10);
+  }
+  const offset = clientPointToModel(frame, rectAt(2, 40, 24), 192 * 2 + 40, 864 * 2 + 24);
+  expect(offset.model.x).toBeCloseTo(2, 10);
+  expect(offset.model.y).toBeCloseTo(2, 10);
+});
+
+test('cascades repeated centre inserts a quarter inch down the page and wraps after eight', () => {
+  const centre = { x: 4.25, y: 5.5 };
+  expect(centreInsertPoint(centre, 0)).toEqual(centre);
+  expect(centreInsertPoint(centre, 1)).toEqual({ x: 4.5, y: 5.25 });
+  expect(centreInsertPoint(centre, 7)).toEqual({ x: 6, y: 3.75 });
+  expect(centreInsertPoint(centre, 8)).toEqual(centre);
+  expect(centreInsertPoint(centre, 9)).toEqual({ x: 4.5, y: 5.25 });
 });
 
 test('formats inch formulas without exponent noise or negative zero', () => {

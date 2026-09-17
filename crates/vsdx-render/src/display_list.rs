@@ -308,6 +308,7 @@ impl DiagnosticCategory {
             | "unresolvable-character-case"
             | "unresolvable-fill-colour"
             | "unresolvable-fill-gradient"
+            | "lossy-fill-gradient"
             | "unresolvable-stroke-colour"
             | "unresolvable-stroke-width" => Self::Fidelity,
             _ => Self::Integrity,

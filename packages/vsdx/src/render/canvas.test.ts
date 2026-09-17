@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { canvasPointToModel, modelPointToCanvas, paintPage } from './canvas';
-import type { PageDisplayList } from '../types';
+import type { PageDisplayList, ShapePrimitive } from '../types';
 
 function context(log: string[]): CanvasRenderingContext2D {
   return new Proxy({
@@ -56,6 +56,7 @@ test('replays positioned text runs at their line caret positions', async () => {
   expect(log).toContain('scale:1,-1');
   expect(log).toContain('textBaseline=top');
   expect(log.filter(entry => entry.startsWith('fillText:'))).toEqual(['fillText:left,30,20', 'fillText:right,60,45']);
+  expect(log.some(entry => entry.startsWith('clip'))).toBe(false);
 });
 
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 768 };
@@ -170,10 +171,14 @@ test('paints a linear gradient across the shape box along its angle', async () =
   };
   await paintPage(ctx, list);
   expect(gradients).toHaveLength(1);
-  const radius = Math.hypot(2, 1) / 2;
-  expect(gradients[0].args).toEqual([1 - radius, 0.5, 1 + radius, 0.5]);
+  expect(gradients[0].args).toEqual([0, 0.5, 2, 0.5]);
   expect(gradients[0].stops).toEqual([[0, '#ff0000'], [1, '#0000ff']]);
   expect(fillStyle).toBe(painted[0]);
+
+  gradients.length = 0;
+  const upright: PageDisplayList = { ...list, primitives: [{ ...(list.primitives[0] as ShapePrimitive), fill: { kind: 'gradient', angleDeg: 90, stops: [{ position: 0, color: '#ff0000' }, { position: 1, color: '#0000ff' }] } }] };
+  await paintPage(ctx, upright);
+  for (const [index, expected] of [1, 0, 1, 1].entries()) expect(gradients[0].args[index]).toBeCloseTo(expected, 10);
 });
 
 test('a degenerate gradient box falls back to its first stop', async () => {

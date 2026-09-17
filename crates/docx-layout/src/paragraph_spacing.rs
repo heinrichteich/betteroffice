@@ -1,6 +1,6 @@
 //! Paragraph spacing resolution.
 
-use crate::types::{LayoutBlock, ParagraphBlock, Run, ShapeBlock};
+use crate::types::{LayoutBlock, MeasuredBlock, ParagraphBlock, Run, ShapeBlock};
 
 /// Resolve paragraph line units against the section pitch.
 pub fn resolve_line_unit_spacing(block: &mut LayoutBlock, line_px: f64) {
@@ -58,7 +58,7 @@ fn resolve_paragraph_line_spacing(paragraph: &mut ParagraphBlock, line_px: f64) 
     }
 }
 
-fn is_empty_paragraph(block: &ParagraphBlock) -> bool {
+pub(crate) fn is_empty_paragraph(block: &ParagraphBlock) -> bool {
     if block.runs.is_empty() {
         return true;
     }
@@ -93,20 +93,180 @@ pub fn get_spacing_before(block: &ParagraphBlock) -> f64 {
 
 /// Returns effective trailing spacing.
 pub fn get_spacing_after(block: &ParagraphBlock) -> f64 {
-    let value = block
+    block
         .attrs
         .as_ref()
         .and_then(|a| a.spacing.as_ref())
         .and_then(|s| s.after)
-        .unwrap_or(0.0);
-    let explicit = block
-        .attrs
-        .as_ref()
-        .and_then(|a| a.spacing_explicit.as_ref())
-        .and_then(|e| e.after)
-        .unwrap_or(false);
-    if is_empty_paragraph(block) && !explicit {
-        return 0.0;
+        .unwrap_or(0.0)
+}
+
+fn effective_style_id(block: &ParagraphBlock) -> &str {
+    let attrs = block.attrs.as_ref();
+    attrs
+        .and_then(|attrs| {
+            attrs
+                .effective_style_id
+                .as_deref()
+                .filter(|style| !style.is_empty())
+        })
+        .or_else(|| {
+            attrs.and_then(|attrs| attrs.style_id.as_deref().filter(|style| !style.is_empty()))
+        })
+        .unwrap_or("")
+}
+
+pub(crate) fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutBlock) {
+    let LayoutBlock::Paragraph(c) = curr else {
+        return;
+    };
+    let next_is_table = matches!(next, LayoutBlock::Table(_));
+    let n = match next {
+        LayoutBlock::Paragraph(paragraph) => paragraph,
+        LayoutBlock::Table(table) if table.floating.is_none() && is_empty_paragraph(c) => {
+            let Some(LayoutBlock::Paragraph(paragraph)) = table
+                .rows
+                .first_mut()
+                .and_then(|row| row.cells.first_mut())
+                .and_then(|cell| cell.blocks.first_mut())
+            else {
+                return;
+            };
+            paragraph
+        }
+        _ => return,
+    };
+    let same_style = effective_style_id(c) == effective_style_id(n);
+    if !same_style {
+        return;
     }
-    value
+    if let Some(ca) = &mut c.attrs
+        && ca.contextual_spacing.unwrap_or(false)
+        && let Some(spacing) = &mut ca.spacing
+    {
+        spacing.after = Some(0.0);
+    }
+    if !next_is_table
+        && let Some(na) = &mut n.attrs
+        && na.contextual_spacing.unwrap_or(false)
+        && let Some(spacing) = &mut na.spacing
+    {
+        spacing.before = Some(0.0);
+    }
+}
+
+pub(crate) fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
+    for i in 0..blocks.len().saturating_sub(1) {
+        let (head, tail) = blocks.split_at_mut(i + 1);
+        contextual_spacing_pair(&mut head[i], &mut tail[0]);
+    }
+    for block in blocks.iter_mut() {
+        if let LayoutBlock::Table(table) = block {
+            for row in &mut table.rows {
+                for cell in &mut row.cells {
+                    apply_contextual_spacing_blocks(&mut cell.blocks);
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) {
+    for i in 0..measured.len().saturating_sub(1) {
+        let (head, tail) = measured.split_at_mut(i + 1);
+        contextual_spacing_pair(&mut head[i].block, &mut tail[0].block);
+    }
+    for mb in measured.iter_mut() {
+        if let LayoutBlock::Table(table) = &mut mb.block {
+            for row in &mut table.rows {
+                for cell in &mut row.cells {
+                    apply_contextual_spacing_blocks(&mut cell.blocks);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{BlockId, ParagraphAttrs, ParagraphBlock, ParagraphSpacing};
+
+    fn paragraph(style_id: Option<&str>, effective_style_id: Option<&str>) -> LayoutBlock {
+        LayoutBlock::Paragraph(ParagraphBlock {
+            sdt_groups: None,
+            id: BlockId::Str("p".to_owned()),
+            para_id: None,
+            runs: Vec::new(),
+            attrs: Some(ParagraphAttrs {
+                style_id: style_id.map(str::to_owned),
+                effective_style_id: effective_style_id.map(str::to_owned),
+                contextual_spacing: Some(true),
+                spacing: Some(ParagraphSpacing {
+                    before: Some(8.0),
+                    after: Some(8.0),
+                    ..ParagraphSpacing::default()
+                }),
+                ..ParagraphAttrs::default()
+            }),
+            pm_start: None,
+            pm_end: None,
+        })
+    }
+
+    fn after(block: &LayoutBlock) -> f64 {
+        match block {
+            LayoutBlock::Paragraph(paragraph) => paragraph
+                .attrs
+                .as_ref()
+                .and_then(|attrs| attrs.spacing.as_ref())
+                .and_then(|spacing| spacing.after)
+                .unwrap_or(-1.0),
+            _ => -1.0,
+        }
+    }
+
+    #[test]
+    fn effective_default_matches_explicit_both_orders() {
+        for (first, second) in [
+            (
+                paragraph(None, Some("Normal")),
+                paragraph(Some("Normal"), None),
+            ),
+            (
+                paragraph(Some("Normal"), None),
+                paragraph(None, Some("Normal")),
+            ),
+        ] {
+            let mut blocks = vec![first, second];
+            apply_contextual_spacing_blocks(&mut blocks);
+            assert_eq!(after(&blocks[0]), 0.0);
+        }
+    }
+
+    #[test]
+    fn custom_default_keeps_explicit_normal_distinct() {
+        let mut blocks = vec![
+            paragraph(None, Some("BodyDefault")),
+            paragraph(Some("Normal"), None),
+        ];
+        apply_contextual_spacing_blocks(&mut blocks);
+        assert_eq!(after(&blocks[0]), 8.0);
+        let mut matched = vec![
+            paragraph(None, Some("BodyDefault")),
+            paragraph(Some("BodyDefault"), None),
+        ];
+        apply_contextual_spacing_blocks(&mut matched);
+        assert_eq!(after(&matched[0]), 0.0);
+    }
+
+    #[test]
+    fn differing_style_keeps_gap() {
+        let mut blocks = vec![
+            paragraph(None, Some("Normal")),
+            paragraph(Some("Different"), None),
+        ];
+        apply_contextual_spacing_blocks(&mut blocks);
+        assert_eq!(after(&blocks[0]), 8.0);
+    }
 }

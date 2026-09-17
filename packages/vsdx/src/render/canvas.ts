@@ -74,16 +74,16 @@ function paintStyle(ctx: CanvasRenderingContext2D, paint: Paint, box: { x: numbe
   if (paint.stops.length === 0) return first;
   const radians = ((paint.angleDeg ?? 0) * Math.PI) / 180;
   const centerX = box.x + box.width / 2, centerY = box.y + box.height / 2;
-  const radius = Math.hypot(box.width, box.height) / 2;
+  const cos = Math.cos(radians), sin = Math.sin(radians);
+  const radius = (Math.abs(box.width * cos) + Math.abs(box.height * sin)) / 2;
   if (!Number.isFinite(radius) || radius === 0) return first;
-  const gradient = ctx.createLinearGradient(centerX - Math.cos(radians) * radius, centerY - Math.sin(radians) * radius, centerX + Math.cos(radians) * radius, centerY + Math.sin(radians) * radius);
+  const gradient = ctx.createLinearGradient(centerX - cos * radius, centerY - sin * radius, centerX + cos * radius, centerY + sin * radius);
   for (const stop of paint.stops) gradient.addColorStop(Math.max(0, Math.min(1, stop.position)), stop.color);
   return gradient;
 }
 function stroke(ctx: CanvasRenderingContext2D, value: Stroke): void { ctx.strokeStyle = value.color; ctx.lineWidth = value.width; ctx.setLineDash(value.dashed ? [Math.max(3, value.width * 2), Math.max(2, value.width)] : []); ctx.stroke(); }
 function paintTextBox(ctx: CanvasRenderingContext2D, text: TextBoxPrimitive): void {
   ctx.translate(0, 2 * text.y + text.height); ctx.scale(1, -1); ctx.textBaseline = 'top';
-  ctx.beginPath(); ctx.rect(text.x, text.y, text.width, text.height); ctx.clip();
   let offset = 0;
   const runs = text.paragraphs.flatMap(paragraph => paragraph.runs.map(run => {
     const start = offset;
