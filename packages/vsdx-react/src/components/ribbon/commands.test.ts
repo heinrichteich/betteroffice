@@ -91,7 +91,7 @@ test('a leading-equals redirect is followed', () => {
   expect(isCellWriteBlocked(shape, 'Angle')).toBe(true);
 });
 
-test('an unvault redirect target keeps the control enabled', () => {
+test('an unguarded redirect target keeps the control enabled', () => {
   const shape = shapeWith([
     { cellName: 'Angle', formula: 'SETATREF(Target)', value: '0' },
     { cellName: 'Target', formula: '0', value: '0' },
@@ -99,11 +99,23 @@ test('an unvault redirect target keeps the control enabled', () => {
   expect(isCellWriteBlocked(shape, 'Angle')).toBe(false);
 });
 
-test('an unvault cell stays enabled', () => {
+test('an unguarded cell stays enabled', () => {
   expect(isCellWriteBlocked(plainShape(), 'Angle')).toBe(false);
 });
 
-test('a vault size redirect disables handle resize', () => {
+test('a reference name containing guard or setatref keeps the control enabled', () => {
+  const shape = shapeWith([
+    { cellName: 'PinX', formula: '5', value: '5' },
+    { cellName: 'PinY', formula: '2', value: '2' },
+    { cellName: 'Width', formula: 'User.SetatrefWidth', value: '2' },
+    { cellName: 'Height', formula: '1', value: '1' },
+    { cellName: 'Angle', formula: 'User.GuardAngle', value: '0' },
+  ]);
+  expect(isCellWriteBlocked(shape, 'Angle')).toBe(false);
+  expect(isHandleResizeBlocked(shape)).toBe(false);
+});
+
+test('a guarded size redirect disables handle resize', () => {
   const shape = shapeWith([
     { cellName: 'PinX', formula: '5', value: '5' },
     { cellName: 'PinY', formula: '2', value: '2' },
@@ -114,7 +126,7 @@ test('a vault size redirect disables handle resize', () => {
   expect(isHandleResizeBlocked(shape)).toBe(true);
 });
 
-test('a vault delete redirect disables delete', () => {
+test('a guarded delete redirect disables delete', () => {
   const shape = shapeWith([
     { cellName: 'LockDelete', formula: 'SETATREF(Vault)', value: '0' },
     { cellName: 'Vault', formula: 'GUARD(0)', value: '0' },
@@ -122,7 +134,7 @@ test('a vault delete redirect disables delete', () => {
   expect(isDeleteBlocked(shape)).toBe(true);
 });
 
-test('an unvault shape keeps resize and delete enabled', () => {
+test('an unguarded shape keeps resize and delete enabled', () => {
   const shape = plainShape();
   expect(isHandleResizeBlocked(shape)).toBe(false);
   expect(isDeleteBlocked(shape)).toBe(false);

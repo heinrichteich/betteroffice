@@ -150,6 +150,8 @@ export type RunFormatting = {
   emphasisMark?: 'dot' | 'comma' | 'circle' | 'underDot';
   /** Hidden run (OOXML w:vanish, §17.3.2.41). Painter skips the run. */
   hidden?: boolean;
+  /** Run-level document-grid opt-out (OOXML w:snapToGrid, §17.3.2). Absent = on. */
+  snapToGrid?: boolean;
   /**
    * Per-run right-to-left direction (OOXML w:rtl, §17.3.2.30). Independent
    * from the paragraph's bidi flag — a single run may flip direction within
@@ -277,6 +279,7 @@ export type ImageRun = {
   width: number;
   height: number;
   alt?: string;
+  shapeType?: string;
   /** CSS transform string (rotation, flip) */
   transform?: string;
   /** Position for floating/anchored images */
@@ -337,6 +340,8 @@ export type ImageRun = {
   changeRevisionId?: number;
   pmStart?: number;
   pmEnd?: number;
+  /** Native inline DrawingML payload; present only for textless inline shapes. */
+  inlineShape?: unknown;
 };
 
 /** Run for an explicit w:br — ends the line, not the paragraph. */
@@ -376,6 +381,8 @@ export type Run = TextRun | TabRun | ImageRun | LineBreakRun | FieldRun;
 
 /** Paragraph spacing (w:spacing): above/below plus the w:lineRule line rule. */
 export type ParagraphSpacing = {
+  beforeLines?: number;
+  afterLines?: number;
   before?: number;
   after?: number;
   line?: number;
@@ -452,6 +459,7 @@ export type ParagraphAttrs = {
   widowControl?: boolean;
   pageBreakBefore?: boolean;
   styleId?: string;
+  effectiveStyleId?: string;
   contextualSpacing?: boolean;
   /** Right-to-left paragraph direction */
   bidi?: boolean;
@@ -498,6 +506,10 @@ export type ParagraphAttrs = {
   pPrIns?: import('../../types/content/trackedChange').RevisionInfo | null;
   /** Tracked-change marker on the paragraph mark (`<w:pPr><w:rPr><w:del/>`). */
   pPrDel?: import('../../types/content/trackedChange').RevisionInfo | null;
+  /** Paragraph-level document-grid opt-out (OOXML w:snapToGrid, §17.3.1). Absent = on. */
+  snapToGrid?: boolean;
+  /** Section grid pitch in px (w:docGrid w:linePitch), gated to an activating grid type. Absent = no snap. */
+  docGridPitchPx?: number;
 };
 
 /**
@@ -675,6 +687,7 @@ export type ImageBlock = {
   width: number;
   height: number;
   alt?: string;
+  shapeType?: string;
   /** CSS transform string (rotation, flip) */
   transform?: string;
   opacity?: number;
@@ -1481,6 +1494,8 @@ export type Page = {
   noteAreas?: NoteAreaContract[];
   /** Column layout for this page (if multi-column). */
   columns?: ColumnLayout;
+  /** Automatic parity filler: suppress header/footer, keep physical page. */
+  parityFiller?: boolean;
 };
 
 /**

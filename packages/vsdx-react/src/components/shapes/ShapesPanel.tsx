@@ -1,7 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, KeyboardEvent, ReactElement } from 'react';
+import { useMemo, useRef, useState } from 'react';
+import type { CSSProperties, DragEvent, KeyboardEvent, ReactElement } from 'react';
 import type { TFunction } from '@betteroffice/vsdx-i18n';
 import type { ShapeStencil, StandardShape } from './shapeLibrary';
+
+/** Native drag payload identifying a stencil entry. */
+export const STENCIL_DRAG_MIME = 'application/x-betteroffice-shape';
 
 export interface ShapesPanelProps {
   shapes?: readonly StandardShape[];
@@ -64,12 +67,11 @@ export function ShapesPanel({ shapes, stencils, activeStencilId, onSelectStencil
   }, [stencils, shapes]);
   const activeStencil = resolvedStencils.find((stencil) => stencil.id === activeStencilId) ?? resolvedStencils[0];
   const previousStencilId = useRef(activeStencil.id);
-  useEffect(() => {
-    if (previousStencilId.current === activeStencil.id) return;
+  if (previousStencilId.current !== activeStencil.id) {
     previousStencilId.current = activeStencil.id;
     setQuery('');
     setFocusIndex(0);
-  }, [activeStencil.id]);
+  }
   const selectStencil = (id: string) => {
     if (id !== activeStencil.id) onSelectStencil?.(id);
     if (collapsed) onToggleCollapsed();
@@ -130,6 +132,8 @@ export function ShapesPanel({ shapes, stencils, activeStencilId, onSelectStencil
                           type="button"
                           tabIndex={index === activeIndex ? 0 : -1}
                           aria-label={t(shape.nameKey)}
+                          draggable
+                          onDragStart={(event: DragEvent<HTMLButtonElement>) => { event.dataTransfer.setData(STENCIL_DRAG_MIME, shape.id); event.dataTransfer.effectAllowed = 'copy'; }}
                           onFocus={() => setFocusIndex(index)}
                           onClick={() => onInsert(shape)}
                           onKeyDown={(event) => moveFocus(event, index)}
