@@ -1,7 +1,7 @@
 use ooxml_drawingml::GeometryPathCommand;
 use serde::{Deserialize, Serialize};
 
-pub const CONTRACT_VERSION: u32 = 4;
+pub const CONTRACT_VERSION: u32 = 6;
 
 /// Replay primitives in ascending `z_order` (back-to-front); hit test in descending order.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -10,6 +10,9 @@ pub struct VsdxDisplayList {
     pub contract_version: u32,
     pub width: f32,
     pub height: f32,
+    /// One sheet of printer paper in the same page pixels as `width` and `height`.
+    pub print_width: f32,
+    pub print_height: f32,
     /// The only transform from Visio inches/Y-up into canvas pixels/Y-down.
     pub paint_transform: PaintTransform,
     pub primitives: Vec<Primitive>,
@@ -26,6 +29,8 @@ impl<'de> Deserialize<'de> for VsdxDisplayList {
             contract_version: u32,
             width: f32,
             height: f32,
+            print_width: f32,
+            print_height: f32,
             paint_transform: PaintTransform,
             primitives: Vec<Primitive>,
         }
@@ -41,6 +46,8 @@ impl<'de> Deserialize<'de> for VsdxDisplayList {
             contract_version: wire.contract_version,
             width: wire.width,
             height: wire.height,
+            print_width: wire.print_width,
+            print_height: wire.print_height,
             paint_transform: wire.paint_transform,
             primitives: wire.primitives,
         })
@@ -141,8 +148,14 @@ impl Affine {
     rename_all_fields = "camelCase"
 )]
 pub enum Paint {
-    Solid { color: String },
-    Gradient { stops: Vec<GradientStop> },
+    Solid {
+        color: String,
+    },
+    Gradient {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        angle_deg: Option<f32>,
+        stops: Vec<GradientStop>,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -173,6 +186,9 @@ pub enum Primitive {
         stroke: Option<Stroke>,
         #[serde(default, skip_serializing_if = "Affine::is_identity")]
         transform: Affine,
+        /// Paint channels that fell back to the Visio default; empty when fully resolved.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        diagnostics: Vec<Diagnostic>,
     },
     Image {
         id: String,
@@ -296,7 +312,12 @@ impl DiagnosticCategory {
             | "missing-tab-position"
             | "justify-fallback"
             | "unresolvable-character-pos"
-            | "unresolvable-character-case" => Self::Fidelity,
+            | "unresolvable-character-case"
+            | "unresolvable-fill-colour"
+            | "unresolvable-fill-gradient"
+            | "lossy-fill-gradient"
+            | "unresolvable-stroke-colour"
+            | "unresolvable-stroke-width" => Self::Fidelity,
             _ => Self::Integrity,
         }
     }

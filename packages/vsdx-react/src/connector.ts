@@ -279,7 +279,7 @@ export function quickShapePlacement(source: ShapeSnapshot, side: AutoConnectSide
   };
 }
 
-/** Matches the engine RoutStyle rule: nonzero style bends horizontal-first. */
+/** Matches the engine's ShapeRouteStyle 1 route: one bend, horizontal first. */
 export function routeConnector(from: ModelPoint, to: ModelPoint): ModelPoint[] {
   const start = { x: from.x, y: from.y };
   const end = { x: to.x, y: to.y };
@@ -316,7 +316,7 @@ export function connectorDraft(from: ModelPoint, to: ModelPoint): FormulaShapeDr
       cell('PinY', formatInches(midY)),
       cell('Width', formatInches(Math.max(Math.abs(to.x - from.x), MIN_SPAN_INCHES))),
       cell('Height', formatInches(Math.max(Math.abs(to.y - from.y), MIN_SPAN_INCHES))),
-      cell('RoutStyle', '1'),
+      cell('ShapeRouteStyle', '1'),
       cell('EndArrow', '4'),
       cell('LineColor', 'RGB(23,32,51)'),
       cell('LineWeight', '0.02'),

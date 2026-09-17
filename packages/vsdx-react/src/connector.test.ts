@@ -45,9 +45,11 @@ function shape(cells: Record<string, string>): ShapeSnapshot {
 }
 
 const frame: PageDisplayList = {
-  contractVersion: 4,
+  contractVersion: 6,
   width: 816,
   height: 1056,
+  printWidth: 816,
+  printHeight: 1056,
   paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 },
   primitives: [],
 };
@@ -97,7 +99,7 @@ test('detects connectors by OneD or by a full endpoint set', () => {
   expect(isConnectorShape(shape({ PinX: '1', Width: '1' }))).toBe(false);
 });
 
-test('routes horizontal-first like the engine RoutStyle rule', () => {
+test('routes horizontal-first like the engine ShapeRouteStyle rule', () => {
   expect(routeConnector({ x: 1, y: 1 }, { x: 4, y: 3 })).toEqual([{ x: 1, y: 1 }, { x: 4, y: 1 }, { x: 4, y: 3 }]);
   expect(routeConnector({ x: 1, y: 2 }, { x: 4, y: 2 })).toEqual([{ x: 1, y: 2 }, { x: 4, y: 2 }]);
   expect(routeConnector({ x: 1, y: 1 }, { x: 1, y: 5 })).toEqual([{ x: 1, y: 1 }, { x: 1, y: 5 }]);
@@ -115,7 +117,7 @@ test('drafts an orthogonal connector with a target-end arrow', () => {
   const formulas = new Map(draft.cells.map((cell) => [cell.name, cell.formula]));
   expect(draft.name).toBe('Dynamic connector');
   expect(formulas.get('OneD')).toBe('1');
-  expect(formulas.get('RoutStyle')).toBe('1');
+  expect(formulas.get('ShapeRouteStyle')).toBe('1');
   expect(formulas.get('EndArrow')).toBe('4');
   expect([formulas.get('BeginX'), formulas.get('BeginY'), formulas.get('EndX'), formulas.get('EndY')]).toEqual(['1', '1', '4', '3']);
   expect(Number(formulas.get('Width'))).toBeCloseTo(3);
