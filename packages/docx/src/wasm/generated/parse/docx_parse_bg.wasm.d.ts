@@ -1,6 +1,7 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const decodeTiffPng: (a: number, b: number) => [number, number, number, number];
 export const parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
 export const parse_docx_s2: (a: number, b: number) => [number, number, number, number];
 export const parse_docx_s3: (a: number, b: number) => [number, number, number, number];

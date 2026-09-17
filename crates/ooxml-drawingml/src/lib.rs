@@ -4,6 +4,8 @@
 pub mod chart;
 mod color;
 mod geometry;
+#[cfg(feature = "tiff")]
+pub mod media;
 mod picture;
 mod shape;
 mod style;
