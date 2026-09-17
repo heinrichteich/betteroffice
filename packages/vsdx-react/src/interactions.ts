@@ -1,5 +1,6 @@
 import { canvasPointToModel, modelPointToCanvas } from '@betteroffice/vsdx';
-import type { Affine, ModelPoint, PageDisplayList, PagePrimitive, TextBoxPrimitive, ShapeSnapshot } from '@betteroffice/vsdx';
+import type { Affine, ModelPoint, PageDisplayList, PagePrimitive, ShapeSnapshot, TextBoxPrimitive } from '@betteroffice/vsdx';
+import { GUARD_CALL } from './components/ribbon/commands';
 export type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 export const RESIZE_HANDLES: readonly ResizeHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 export type RotateHandle = 'rotate';
@@ -19,7 +20,7 @@ export const CONTROL_HANDLE_CSS = 7;
 export const ROTATION_SNAP_STEP = Math.PI / 12;
 export const CANVAS_KEYBOARD_DPI = 96;
 export const CANVAS_KEYBOARD_NUDGE_MULTIPLIER = 10;
-export type CanvasKeyboardIntent = { kind: 'undo' } | { kind: 'redo' } | { kind: 'delete' } | { kind: 'escape' } | { kind: 'rotateRight' } | { kind: 'rotateLeft' } | { kind: 'save' } | { kind: 'nudge'; dx: number; dy: number };
+export type CanvasKeyboardIntent = { kind: 'undo' } | { kind: 'redo' } | { kind: 'delete' } | { kind: 'escape' } | { kind: 'save' } | { kind: 'nudge'; dx: number; dy: number };
 export interface CanvasKeyboardEventLike { key: string; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean; altKey?: boolean; target?: unknown; }
 /** One screen pixel in model inches at the given zoom. */
 export const keyboardNudgeStep = (zoom: number): number => {
@@ -41,11 +42,10 @@ export const isEditableKeyboardTarget = (target: unknown): boolean => {
   }
   return false;
 };
-/** Owned Ctrl shortcuts that shadow browser commands and must never reach the browser. */
+/** Ctrl+S saves the diagram, so it must never reach the browser's own save. */
 export const isOwnedBrowserShortcut = (event: CanvasKeyboardEventLike): boolean => {
   if (!(event.ctrlKey || event.metaKey) || event.altKey) return false;
-  const lower = event.key.toLowerCase();
-  return lower === 'r' || lower === 'l' || lower === 's';
+  return event.key.toLowerCase() === 's';
 };
 /** Pure key-to-intent mapping for the editor canvas. Y is up, so ArrowUp yields +dy. */
 export const canvasKeyboardIntent = (event: CanvasKeyboardEventLike, zoom: number): CanvasKeyboardIntent | null => {
@@ -59,8 +59,6 @@ export const canvasKeyboardIntent = (event: CanvasKeyboardEventLike, zoom: numbe
   if (key === 'Escape') return mod || alt ? null : { kind: 'escape' };
   if (mod && !alt) {
     const lower = key.toLowerCase();
-    if (lower === 'r') return { kind: 'rotateRight' };
-    if (lower === 'l') return { kind: 'rotateLeft' };
     if (lower === 's') return { kind: 'save' };
     if (lower === 'z' && !shift) return { kind: 'undo' };
     if (lower === 'y' && !shift) return { kind: 'redo' };
@@ -100,7 +98,15 @@ const yDownHandle = (handle: ResizeHandle): ResizeHandle => {
   return handle;
 };
 export const snapRotationAngle = (angle: number, snap: boolean): number => snap ? Math.round(angle / ROTATION_SNAP_STEP) * ROTATION_SNAP_STEP : angle;
-const locPinInches = (start: DragStart, size = start.size): ModelPoint => (size.width > 0 && size.height > 0 ? start.locPinAtSize?.(size.width, size.height) : undefined) ?? {
+/** The engine refuses a LocPin it cannot evaluate; the stored value is what the renderer falls back to. */
+const probedLocPin = (start: DragStart, size: { width: number; height: number }): ModelPoint | undefined => {
+  if (!(size.width > 0) || !(size.height > 0)) return undefined;
+  try {
+    const probed = start.locPinAtSize?.(size.width, size.height);
+    return probed && Number.isFinite(probed.x) && Number.isFinite(probed.y) ? probed : undefined;
+  } catch { return undefined; }
+};
+const locPinInches = (start: DragStart, size = start.size): ModelPoint => probedLocPin(start, size) ?? {
   x: start.locPin?.x ?? size.width / 2,
   y: start.locPin?.y ?? size.height / 2,
 };
@@ -222,7 +228,7 @@ export const rotationGripPosition = (corners: readonly ModelPoint[], zoom: numbe
   const offset = SELECTION_ROTATE_OFFSET_CSS / Math.max(zoom, 1e-6);
   return { x: topCenter.x + (outX / length) * offset, y: topCenter.y + (outY / length) * offset };
 };
-export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: readonly ModelPoint[], dpr: number, scale: number, resizeHandles: readonly ResizeHandle[] = RESIZE_HANDLES): void => {
+export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: readonly ModelPoint[], dpr: number, scale: number, resizeHandles: readonly ResizeHandle[] = RESIZE_HANDLES, showRotate = true): void => {
   if (corners.length < 4) return;
   const zoom = Number.isFinite(scale) && scale > 0 ? scale : 1;
   const handleRadius = SELECTION_HANDLE_CSS / zoom / 2;
@@ -240,10 +246,12 @@ export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: 
     for (let index = 1; index < corners.length; index += 1) context.lineTo(corners[index].x, corners[index].y);
     context.closePath();
     context.stroke();
-    context.beginPath();
-    context.moveTo(topCenter.x, topCenter.y);
-    context.lineTo(grip.x, grip.y);
-    context.stroke();
+    if (showRotate) {
+      context.beginPath();
+      context.moveTo(topCenter.x, topCenter.y);
+      context.lineTo(grip.x, grip.y);
+      context.stroke();
+    }
     for (const key of resizeHandles) {
       const anchor = handles[key];
       context.beginPath();
@@ -252,6 +260,7 @@ export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: 
       context.fill();
       context.stroke();
     }
+    if (!showRotate) return;
     context.beginPath();
     context.arc(grip.x, grip.y, gripRadius, 0, Math.PI * 2);
     context.fillStyle = SELECTION_HANDLE_FILL;
@@ -389,7 +398,6 @@ export const textEditOverlay = (frame: PageDisplayList, primitiveId: string, zoo
     },
   };
 };
-
 export interface ControlHandle { row: string; x: number; y: number; xCon: number; yCon: number; }
 export interface ControlHandlePosition { row: string; canvas: ModelPoint; lockedX: boolean; lockedY: boolean; }
 /** A handle hides when either behaviour cell selects a hidden variant. */
@@ -399,13 +407,20 @@ const controlAxisLocked = (behavior: number): boolean => Number.isFinite(behavio
 export const controlHandleLockedX = (handle: Pick<ControlHandle, 'xCon'>): boolean => controlAxisLocked(handle.xCon);
 /** A handle pins an axis when its behaviour cell selects a locked variant. */
 export const controlHandleLockedY = (handle: Pick<ControlHandle, 'yCon'>): boolean => controlAxisLocked(handle.yCon);
+const sectionCell = (shape: ShapeSnapshot, section: string, row: string, cell: string) =>
+  shape.cells.find((entry) => entry.locator.section === section && typeof entry.locator.row === 'object' && entry.locator.row !== null && 'name' in entry.locator.row && (entry.locator.row as { name: string }).name === row && (entry.locator.cellName === cell || entry.name === cell));
 const sectionNumber = (shape: ShapeSnapshot, section: string, row: string, cell: string): number | undefined => {
-  const found = shape.cells.find((entry) => entry.locator.section === section && typeof entry.locator.row === 'object' && entry.locator.row !== null && 'name' in entry.locator.row && (entry.locator.row as { name: string }).name === row && (entry.locator.cellName === cell || entry.name === cell));
+  const found = sectionCell(shape, section, row, cell);
   if (!found) return undefined;
   const raw = (found.value ?? found.formula ?? '').trim();
   if (!raw) return undefined;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : undefined;
+};
+/** True when a Control X/Y write would be refused outright; a plain SETATREF redirect is not. */
+export const controlCellWriteBlocked = (shape: ShapeSnapshot, row: string, cell: 'X' | 'Y'): boolean => {
+  const formula = sectionCell(shape, 'Control', row, cell)?.formula ?? '';
+  return GUARD_CALL.test(formula) || /\bSETATREF(EXPR|EVAL)\s*\(/i.test(formula);
 };
 /** Resolves the draggable control handles of a shape from its snapshot cells. */
 export const controlHandlesForShape = (shape: ShapeSnapshot): ControlHandle[] => {

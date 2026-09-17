@@ -56,6 +56,8 @@ pub(super) struct CharAdv {
     pub utf16_len: u32,
     pub advance: f32,
     pub is_space: bool,
+    /// ASCII space or U+3000: trailing instances ignore wrap fit, never justify-compressed.
+    pub is_fit_space: bool,
     pub level: u8,
     pub logical_order: u32,
     pub font_size_pt: f32,
@@ -437,7 +439,7 @@ fn prepare_field_run(
 ) -> Result<PreparedField, MeasureError> {
     let base_size_pt = run.font_size.unwrap_or(input.defaults.font_size);
     validate_pt_size(base_size_pt, "run.fontSize")?;
-    let (font_size_pt, baseline_shift_px) = script_metrics(base_size_pt, run);
+    let (font_size_pt, _) = script_metrics(base_size_pt, run);
     let family = run
         .font_family
         .as_deref()
@@ -458,9 +460,9 @@ fn prepare_field_run(
     )?;
     Ok(PreparedField {
         width,
-        font_size_pt,
+        font_size_pt: base_size_pt,
         metrics_font: chain[0],
-        baseline_shift_px,
+        baseline_shift_px: 0.0,
         bidi_level,
     })
 }
@@ -607,6 +609,7 @@ fn prepare_text_run(
         font: FontId,
         metrics_font: FontId,
         font_size_pt: f32,
+        line_font_size_pt: f32,
         baseline_shift_px: f32,
         /// 1.0, or `SMALL_CAPS_ADVANCE_SCALE` for a synthesized small cap.
         advance_scale: f32,
@@ -835,6 +838,7 @@ fn prepare_text_run(
             font,
             metrics_font: chain[0],
             font_size_pt,
+            line_font_size_pt: base_size_pt,
             baseline_shift_px,
             advance_scale,
             level: levels[char_index],
@@ -933,11 +937,17 @@ fn prepare_text_run(
                 is_space: plan[start..end]
                     .iter()
                     .all(|item| matches!(item.shaped, ShapedChars::One(' '))),
+                is_fit_space: plan[start..end].iter().all(|item| {
+                    matches!(
+                        item.shaped,
+                        ShapedChars::One(' ') | ShapedChars::One('\u{3000}')
+                    )
+                }),
                 level: pc.level,
                 logical_order: pc.source_index as u32,
-                font_size_pt: pc.font_size_pt,
+                font_size_pt: pc.line_font_size_pt,
                 metrics_font: pc.metrics_font,
-                baseline_shift_px: pc.baseline_shift_px,
+                baseline_shift_px: 0.0,
             });
         }
 

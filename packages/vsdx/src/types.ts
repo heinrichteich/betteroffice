@@ -11,6 +11,9 @@ export interface DiagramSnapshot { pages: PageSnapshot[]; }
 export interface CellFormulaReceipt { pageId: string; shapeId: string; cellName: string; before: string | null; after: string; }
 export interface ShapeReceipt { pageId: string; shapeId: string; fromIndex: number | null; toIndex: number | null; }
 export interface TextReceipt { pageId: string; shapeId: string; before: string; after: string; }
+export interface ConnectedShapeReceipt { shape: ShapeReceipt; connector: ShapeReceipt; }
+export interface ConnectorRoutePoint { x: number; y: number; }
+export interface ConnectorRouteReceipt { pageId: string; shapeId: string; points: number; }
 export interface FormulaShapeDraft { name?: string; cells: Array<{ locator: CellLocator & { rowType?: string }; name?: string; formula?: string }> }
 export interface ConnectorGlue { shapeId: string; toCell?: string; }
 export interface VsdxFontFace { family: string; bold?: boolean; italic?: boolean; bytes: Uint8Array; }
@@ -28,7 +31,9 @@ export interface TextBoxPrimitive extends PrimitiveBase { kind: 'textBox'; x: nu
 export interface PlaceholderPrimitive extends PrimitiveBase { kind: 'placeholder'; x: number; y: number; width: number; height: number; reason: string; }
 export interface GroupPrimitive extends PrimitiveBase { kind: 'group'; primitives: PagePrimitive[]; transform?: Affine; }
 export type PagePrimitive = ShapePrimitive | ImagePrimitive | TextBoxPrimitive | PlaceholderPrimitive | GroupPrimitive;
-export interface PageDisplayList { contractVersion: 5; width: number; height: number; paintTransform: Affine; primitives: PagePrimitive[]; }
+export interface PageDisplayList { contractVersion: 6; width: number; height: number; printWidth: number; printHeight: number; paintTransform: Affine; primitives: PagePrimitive[]; connectors?: ConnectorChrome[]; }
+export type ConnectorEndpointGlue = 'free' | 'shape' | 'point';
+export interface ConnectorChrome { id: string; begin: ConnectorEndpointGlue; end: ConnectorEndpointGlue; routable: boolean; }
 export type HitTestResult = { kind: 'shape'; shapeId: string } | { kind: 'text'; shapeId: string; position: number };
 export interface HistoryResult { applied: boolean; snapshot: DiagramSnapshot; }
 export type CollaborationUpdateOrigin = 'local' | 'remote';

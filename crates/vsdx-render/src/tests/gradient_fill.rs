@@ -62,6 +62,18 @@ fn shape_fill(list: &VsdxDisplayList) -> Option<Paint> {
     }
 }
 
+fn fidelity_codes(list: &VsdxDisplayList) -> Vec<&str> {
+    list.primitives
+        .iter()
+        .flat_map(|primitive| match primitive {
+            Primitive::Shape { diagnostics, .. } => diagnostics.as_slice(),
+            _ => &[],
+        })
+        .filter(|diagnostic| diagnostic.category == DiagnosticCategory::Fidelity)
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect()
+}
+
 #[test]
 fn linear_gradient_resolves_stops_through_the_colour_path() {
     let mut package = package(vec![gradient_shape(
@@ -166,16 +178,7 @@ fn gradient_without_an_angle_falls_back_to_solid_without_a_diagnostic() {
     });
     let list = render(vec![shape]);
     assert!(matches!(shape_fill(&list), Some(Paint::Solid { .. })));
-    assert!(
-        !list
-            .primitives
-            .iter()
-            .flat_map(|primitive| match primitive {
-                Primitive::Shape { diagnostics, .. } => diagnostics.as_slice(),
-                _ => &[],
-            })
-            .any(|diagnostic| diagnostic.code == "unresolvable-fill-gradient")
-    );
+    assert!(!fidelity_codes(&list).contains(&"unresolvable-fill-gradient"));
 }
 
 #[test]
@@ -186,39 +189,75 @@ fn gradient_with_fewer_than_two_stops_reports_and_falls_back_to_solid() {
         vec![stop_row(0, ("GUARD(RGB(1,2,3))", "#010203"), "0")],
     )]);
     assert!(matches!(shape_fill(&list), Some(Paint::Solid { .. })));
-    assert!(
-        list.primitives
-            .iter()
-            .flat_map(|primitive| match primitive {
-                Primitive::Shape { diagnostics, .. } => diagnostics.as_slice(),
-                _ => &[],
-            })
-            .any(|diagnostic| diagnostic.code == "unresolvable-fill-gradient"
-                && diagnostic.category == DiagnosticCategory::Fidelity)
-    );
+    assert!(fidelity_codes(&list).contains(&"unresolvable-fill-gradient"));
 }
 
 #[test]
-fn gradient_stop_with_transparency_falls_back_to_solid() {
+fn a_transparent_stop_keeps_the_gradient_and_reports_the_lost_transparency() {
     let list = render(vec![gradient_shape(
         1,
         "0",
         vec![
             stop_row_with_trans(0, ("GUARD(RGB(255,0,0))", "#FF0000"), "0", "0"),
-            stop_row_with_trans(1, ("GUARD(RGB(0,0,255))", "#0000FF"), "1", "50"),
+            stop_row_with_trans(1, ("GUARD(RGB(0,255,0))", "#00FF00"), "0.5", "0.5"),
+            stop_row_with_trans(2, ("GUARD(RGB(0,0,255))", "#0000FF"), "1", "0"),
+        ],
+    )]);
+    match shape_fill(&list) {
+        Some(Paint::Gradient { stops, .. }) => assert_eq!(
+            stops
+                .iter()
+                .map(|stop| stop.color.as_str())
+                .collect::<Vec<_>>(),
+            ["#FF0000", "#00FF00", "#0000FF"]
+        ),
+        other => unreachable!("expected gradient, got {other:?}"),
+    }
+    assert!(fidelity_codes(&list).contains(&"lossy-fill-gradient"));
+}
+
+#[test]
+fn a_non_linear_gradient_direction_reports_and_falls_back_to_solid() {
+    let mut shape = gradient_shape(
+        1,
+        "0",
+        vec![
+            stop_row(0, ("GUARD(RGB(255,0,0))", "#FF0000"), "0"),
+            stop_row(1, ("GUARD(RGB(0,0,255))", "#0000FF"), "1"),
+        ],
+    );
+    shape
+        .children
+        .push(ShapeChild::Cell(cell("FillGradientDir", "5")));
+    let list = render(vec![shape]);
+    assert!(matches!(shape_fill(&list), Some(Paint::Solid { .. })));
+    assert!(fidelity_codes(&list).contains(&"unresolvable-fill-gradient"));
+}
+
+#[test]
+fn an_unresolvable_stop_colour_reports_and_falls_back_to_solid() {
+    let list = render(vec![gradient_shape(
+        1,
+        "0",
+        vec![
+            stop_row(0, ("GUARD(RGB(255,0,0))", "#FF0000"), "0"),
+            SectionChild::Row(Row {
+                index: Some(1),
+                name: None,
+                local_name: None,
+                row_type: None,
+                del: false,
+                children: vec![
+                    RowChild::Cell(stop_cell("GradientStopColor", None, Some("not a colour"))),
+                    RowChild::Cell(stop_cell("GradientStopPosition", None, Some("1"))),
+                ],
+                other_attrs: vec![],
+            }),
+            stop_row(2, ("GUARD(RGB(0,0,255))", "#0000FF"), "1"),
         ],
     )]);
     assert!(matches!(shape_fill(&list), Some(Paint::Solid { .. })));
-    assert!(
-        list.primitives
-            .iter()
-            .flat_map(|primitive| match primitive {
-                Primitive::Shape { diagnostics, .. } => diagnostics.as_slice(),
-                _ => &[],
-            })
-            .any(|diagnostic| diagnostic.code == "unresolvable-fill-gradient"
-                && diagnostic.category == DiagnosticCategory::Fidelity)
-    );
+    assert!(fidelity_codes(&list).contains(&"unresolvable-fill-gradient"));
 }
 
 #[test]

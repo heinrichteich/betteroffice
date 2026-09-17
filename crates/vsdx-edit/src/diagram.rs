@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use vsdx_eval::{MutationContext, MutationOutcome, decide_mutation, evaluate};
+use vsdx_eval::{
+    Evaluation, Expr, MutationContext, MutationOutcome, References, Value, decide_mutation,
+    evaluate,
+};
 use vsdx_parse::{
     Cell, CellLocator, CellRow, CellSheet, MutationGesture, ParseLimits, RowChild, SectionChild,
     Shape, ShapeChild, ShapesChild, SheetChild, StructuralEdit,
@@ -13,17 +16,20 @@ use yrs::{
 };
 
 use crate::{
-    CONNECTS, CellFormulaReceipt, CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx,
-    EditError, EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES, ShapeDraft,
-    ShapeReceipt, ShapeSnapshot, TextReceipt,
+    CONNECTS, CellFormulaReceipt, CellSnapshot, ConnectorRouteReceipt, DiagramSession,
+    DiagramSnapshot, EditCtx, EditError, EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS,
+    STORIES, ShapeDraft, ShapeReceipt, ShapeSnapshot, TextReceipt,
 };
 
 mod connect;
+mod containers;
 
 const SCHEMA_VERSION: f64 = 2.0;
-const LEGACY_SCHEMA_VERSION: f64 = 1.0;
-const MIGRATE_ORIGIN: &str = "vsdx:migrate";
+/// Stories held resolved text tokens as JSON before this version.
+const TOKEN_STORY_SCHEMA_VERSION: f64 = 1.0;
 pub(crate) const MAX_SHAPE_NESTING: usize = 256;
+const MAX_CONNECTOR_ROUTE_POINTS: usize = 256;
+const ROUTE_POINT_EPSILON: f64 = 1e-9;
 type SectionRows<'a> = Vec<(
     (String, Option<u32>),
     Vec<(Option<CellRow>, Vec<&'a CellSnapshot>)>,
@@ -702,6 +708,180 @@ fn seed_cell(
     }
 }
 
+/// Seeds a hand-routed Geometry cell with no baseline or cached value.
+fn seed_route_cell(
+    cells: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    locator: &CellLocator,
+    formula: &str,
+    row_type: &str,
+) {
+    let key = locator_key(locator);
+    let cell = cells.insert(txn, key.as_str(), MapPrelim::default());
+    cell.insert(txn, "name", locator.cell_name.as_str());
+    if let Some(section) = &locator.section {
+        cell.insert(txn, "section", section.as_str());
+    }
+    if let Some(CellRow::Index(index)) = &locator.row {
+        cell.insert(txn, "rowIndex", *index as f64);
+    }
+    cell.insert(txn, "rowType", row_type);
+    cell.insert(txn, "formula", formula);
+}
+
+struct GeometryRow {
+    row_type: Option<String>,
+    has_x: bool,
+    has_y: bool,
+}
+
+impl GeometryRow {
+    fn has(&self, name: &str) -> bool {
+        match name {
+            "X" => self.has_x,
+            _ => self.has_y,
+        }
+    }
+}
+
+/// Reuses the filed row indices in order, then appends past the highest one.
+fn route_row_index(filed: &[u32], slot: usize) -> u32 {
+    match filed.get(slot) {
+        Some(index) => *index,
+        None => filed.last().map_or(slot as u32, |last| {
+            last.saturating_add((slot - filed.len() + 1) as u32)
+        }),
+    }
+}
+
+fn allow_route_cell(
+    context: &CrdtMutationContext,
+    locator: CellLocator,
+    formula: &str,
+) -> EditResult<()> {
+    match decide_mutation(
+        context,
+        locator.clone(),
+        MutationGesture::CellEdit,
+        formula.to_owned(),
+        &ParseLimits::default(),
+    ) {
+        MutationOutcome::Allowed { target, .. } if target == locator => Ok(()),
+        MutationOutcome::Allowed { .. } => Err(EditError::InvalidState(
+            "connector route edit bypasses formula redirect".to_owned(),
+        )),
+        MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+            Err(EditError::InvalidState(reason))
+        }
+    }
+}
+
+/// A 1D shape resolves the way the glue resolver decides it: explicit OneD wins,
+/// otherwise all four endpoint cells must resolve.
+fn connector_route_shape(shape: &vsdx_resolve::ResolvedShape) -> bool {
+    match route_shape_number(shape, "OneD") {
+        Some(value) => value != 0.0,
+        None => ["BeginX", "BeginY", "EndX", "EndY"]
+            .into_iter()
+            .all(|name| route_shape_number(shape, name).is_some()),
+    }
+}
+
+fn route_shape_number(shape: &vsdx_resolve::ResolvedShape, name: &str) -> Option<f64> {
+    let Lookup::Found(cell) = shape.cell(name)? else {
+        return None;
+    };
+    route_cell_number(Some(&cell.cell), shape)
+}
+
+fn route_cell_number(cell: Option<&Cell>, shape: &vsdx_resolve::ResolvedShape) -> Option<f64> {
+    let cell = cell?;
+    if let Some(formula) = cell.formula.as_deref()
+        && let vsdx_eval::Evaluation::Evaluated(result) = evaluate(
+            formula.trim_start_matches('='),
+            shape,
+            &ParseLimits::default(),
+        )
+        && let vsdx_eval::Value::Number(number) = result.value
+        && number.number.is_finite()
+    {
+        return Some(number.number);
+    }
+    cell.value
+        .as_deref()?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
+struct RouteFrame {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64,
+}
+
+impl RouteFrame {
+    fn unproject(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let determinant = self.a * self.d - self.b * self.c;
+        if !determinant.is_finite() || determinant.abs() < 1e-12 {
+            return None;
+        }
+        let x = x - self.e;
+        let y = y - self.f;
+        let local = (
+            (self.d * x - self.c * y) / determinant,
+            (self.a * y - self.b * x) / determinant,
+        );
+        (local.0.is_finite() && local.1.is_finite()).then_some(local)
+    }
+}
+
+/// The connector's local frame, mirroring the resolver's unparented bounds affine.
+fn connector_route_frame(shape: &vsdx_resolve::ResolvedShape) -> Option<RouteFrame> {
+    let pin_x = route_shape_number(shape, "PinX")?;
+    let pin_y = route_shape_number(shape, "PinY")?;
+    let width = route_shape_number(shape, "Width")?;
+    let height = route_shape_number(shape, "Height")?;
+    if ![pin_x, pin_y, width, height]
+        .into_iter()
+        .all(|value| (value as f32).is_finite())
+        || width == 0.0
+        || height == 0.0
+    {
+        return None;
+    }
+    let loc_pin_x = route_shape_number(shape, "LocPinX").unwrap_or(width / 2.0);
+    let loc_pin_y = route_shape_number(shape, "LocPinY").unwrap_or(height / 2.0);
+    let angle = route_shape_number(shape, "Angle").unwrap_or(0.0);
+    let flip_x = route_shape_number(shape, "FlipX").is_some_and(|value| value != 0.0);
+    let flip_y = route_shape_number(shape, "FlipY").is_some_and(|value| value != 0.0);
+    let (sin, cos) = angle.sin_cos();
+    let (flip_x, flip_y) = (
+        if flip_x { -1.0 } else { 1.0 },
+        if flip_y { -1.0 } else { 1.0 },
+    );
+    Some(RouteFrame {
+        a: cos * flip_x,
+        b: sin * flip_x,
+        c: -sin * flip_y,
+        d: cos * flip_y,
+        e: pin_x - cos * (flip_x * loc_pin_x) + sin * (flip_y * loc_pin_y),
+        f: pin_y - sin * (flip_x * loc_pin_x) - cos * (flip_y * loc_pin_y),
+    })
+}
+
+fn decimal(value: f64) -> String {
+    if value == 0.0 {
+        "0".to_owned()
+    } else {
+        value.to_string()
+    }
+}
+
 impl DiagramSession {
     pub fn snapshot(&self) -> EditResult<DiagramSnapshot> {
         snapshot_doc(&self.doc)
@@ -764,6 +944,15 @@ impl DiagramSession {
         };
         let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
         let before = map_string(&cell, &txn, "formula");
+        if before.as_deref() == Some(formula.as_str()) {
+            return Ok(CellFormulaReceipt {
+                page_id: page_id.to_owned(),
+                shape_id: shape_id.to_owned(),
+                cell_name: target.cell_name,
+                before,
+                after: formula,
+            });
+        }
         cell.insert(&mut txn, "formula", formula.as_str());
         Ok(CellFormulaReceipt {
             page_id: page_id.to_owned(),
@@ -772,6 +961,78 @@ impl DiagramSession {
             before,
             after: formula,
         })
+    }
+
+    /// Writes a `Control` row's `X` and `Y` in one transaction, so a handle drag is one undo entry.
+    pub fn set_control_handle(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        row: &str,
+        x_formula: Option<String>,
+        y_formula: Option<String>,
+    ) -> EditResult<Vec<CellFormulaReceipt>> {
+        let requested = [("X", x_formula), ("Y", y_formula)]
+            .into_iter()
+            .filter_map(|(name, formula)| formula.map(|formula| (name, formula)))
+            .collect::<Vec<_>>();
+        if requested.is_empty() {
+            return Err(EditError::InvalidState(
+                "control handle edit writes no axis".to_owned(),
+            ));
+        }
+        let mut txn = self.transact_for(context);
+        let context_for_policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
+        let mut targets = Vec::with_capacity(requested.len());
+        for (name, formula) in requested {
+            let locator = CellLocator {
+                sheet: CellSheet::Page(0),
+                shape_id: None,
+                section: Some("Control".to_owned()),
+                section_index: None,
+                row: Some(CellRow::Name(row.to_owned())),
+                cell_name: name.to_owned(),
+            };
+            match decide_mutation(
+                &context_for_policy,
+                context_for_policy.locator(locator),
+                MutationGesture::CellEdit,
+                formula.clone(),
+                &ParseLimits::default(),
+            ) {
+                MutationOutcome::Allowed { target, .. } => targets.push((target, formula)),
+                MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                    return Err(EditError::InvalidState(reason));
+                }
+            }
+        }
+        for (index, (target, _)) in targets.iter().enumerate() {
+            if targets[..index].iter().any(|(seen, _)| seen == target) {
+                return Err(EditError::InvalidState(format!(
+                    "redirects converge on {} more than once",
+                    target.cell_name
+                )));
+            }
+        }
+        let mut prepared = Vec::with_capacity(targets.len());
+        for (target, formula) in targets {
+            let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
+            prepared.push((target, formula, cell));
+        }
+        let mut receipts = Vec::with_capacity(prepared.len());
+        for (target, formula, cell) in prepared {
+            let before = map_string(&cell, &txn, "formula");
+            cell.insert(&mut txn, "formula", formula.as_str());
+            receipts.push(CellFormulaReceipt {
+                page_id: page_id.to_owned(),
+                shape_id: shape_id.to_owned(),
+                cell_name: target.cell_name,
+                before,
+                after: formula,
+            });
+        }
+        Ok(receipts)
     }
 
     pub fn shape_text(&self, page_id: &str, shape_id: &str) -> EditResult<String> {
@@ -971,6 +1232,160 @@ impl DiagramSession {
         insert_shape(&mut txn, self.client_id, page_id, draft)
     }
 
+    /// Rewrites a 1D connector's filed route from scene-space points in one transaction.
+    pub fn set_connector_route(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        points: &[(f64, f64)],
+    ) -> EditResult<ConnectorRouteReceipt> {
+        if points.len() < 2 || points.len() > MAX_CONNECTOR_ROUTE_POINTS {
+            return Err(EditError::InvalidState(
+                "connector route needs between 2 and 256 points".to_owned(),
+            ));
+        }
+        if points.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
+            return Err(EditError::InvalidState(
+                "connector route points must be finite".to_owned(),
+            ));
+        }
+        let mut txn = self.transact_for(context);
+        let context_for_policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
+        let shape = map_ref(&sheets, &txn, shape_id)?;
+        if map_string(&shape, &txn, "parentId").is_some() {
+            return Err(EditError::InvalidState(
+                "nested connector routes are not hand-routable".to_owned(),
+            ));
+        }
+        let page_number = page_id
+            .trim_start_matches("page:")
+            .parse()
+            .unwrap_or_default();
+        let source_id = map_number(&shape, &txn, "sourceId").unwrap_or_default() as u32;
+        let cells = map_map(&shape, &txn, "cells")?;
+        let references = local_references(&cells, &txn)?;
+        if !connector_route_shape(&references) {
+            return Err(EditError::InvalidState(
+                "shape is not a 1D connector".to_owned(),
+            ));
+        }
+        let frame = connector_route_frame(&references).ok_or_else(|| {
+            EditError::InvalidState("connector frame cells do not resolve".to_owned())
+        })?;
+        let mut local = points
+            .iter()
+            .map(|point| frame.unproject(point.0, point.1))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                EditError::InvalidState("connector frame is not invertible".to_owned())
+            })?;
+        local.dedup_by(|right, left| {
+            (right.0 - left.0).abs() < ROUTE_POINT_EPSILON
+                && (right.1 - left.1).abs() < ROUTE_POINT_EPSILON
+        });
+        if local.len() < 2 {
+            return Err(EditError::InvalidState(
+                "connector route needs two distinct points".to_owned(),
+            ));
+        }
+        let mut rows = std::collections::BTreeMap::new();
+        for value in cells.iter(&txn).filter_map(|(_, value)| match value {
+            Out::YMap(cell) => Some(cell),
+            _ => None,
+        }) {
+            let locator = cell_locator(&value, &txn, 0, 0)?;
+            if locator.section.as_deref() != Some("Geometry") {
+                continue;
+            }
+            if locator.section_index.is_some() {
+                return Err(EditError::InvalidState(
+                    "indexed connector Geometry sections are not hand-routable".to_owned(),
+                ));
+            }
+            let Some(CellRow::Index(index)) = locator.row else {
+                continue;
+            };
+            let entry = rows.entry(index).or_insert(GeometryRow {
+                row_type: map_string(&value, &txn, "rowType"),
+                has_x: false,
+                has_y: false,
+            });
+            match locator.cell_name.as_str() {
+                "X" => entry.has_x = true,
+                "Y" => entry.has_y = true,
+                _ => {}
+            }
+        }
+        let filed = rows.keys().copied().collect::<Vec<_>>();
+        let last = *local.last().expect("route has at least two points");
+        let mut planned = Vec::new();
+        for (slot, point) in local
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(
+                last,
+                filed.len().saturating_sub(local.len()),
+            ))
+            .enumerate()
+        {
+            let index = route_row_index(&filed, slot);
+            let expected = if slot == 0 { "MoveTo" } else { "LineTo" };
+            let filed_type = rows.get(&index).and_then(|row| row.row_type.clone());
+            if filed_type
+                .as_deref()
+                .is_some_and(|actual| actual != expected)
+            {
+                return Err(EditError::InvalidState(
+                    "connector Geometry is not a single straight run".to_owned(),
+                ));
+            }
+            let row_type = filed_type.unwrap_or_else(|| expected.to_owned());
+            for (name, value) in [("X", point.0), ("Y", point.1)] {
+                if slot >= local.len() && !rows.get(&index).is_some_and(|row| row.has(name)) {
+                    continue;
+                }
+                let locator = CellLocator {
+                    sheet: CellSheet::Page(page_number),
+                    shape_id: Some(source_id),
+                    section: Some("Geometry".into()),
+                    section_index: None,
+                    row: Some(CellRow::Index(index)),
+                    cell_name: name.into(),
+                };
+                let formula = decimal(value);
+                allow_route_cell(&context_for_policy, locator.clone(), &formula)?;
+                planned.push((locator, formula, row_type.clone()));
+            }
+        }
+        let prepared = planned
+            .iter()
+            .map(|(locator, formula, row_type)| {
+                match cell_map(&mut txn, page_id, shape_id, locator) {
+                    Ok(cell) => Ok((Some(cell), locator, formula, row_type)),
+                    Err(EditError::CellNotFound(_)) => Ok((None, locator, formula, row_type)),
+                    Err(error) => Err(error),
+                }
+            })
+            .collect::<EditResult<Vec<_>>>()?;
+        for (cell, locator, formula, row_type) in prepared {
+            match cell {
+                Some(cell) => {
+                    cell.insert(&mut txn, "formula", formula.as_str());
+                }
+                None => seed_route_cell(&cells, &mut txn, locator, formula, row_type),
+            }
+        }
+        Ok(ConnectorRouteReceipt {
+            page_id: page_id.to_owned(),
+            shape_id: shape_id.to_owned(),
+            points: local.len() as u32,
+        })
+    }
+
     pub fn delete_shape(
         &self,
         context: &EditCtx,
@@ -1072,6 +1487,14 @@ impl DiagramSession {
             .into_iter()
             .map(decide)
             .collect::<EditResult<Vec<_>>>()?;
+        for (index, (target, _)) in targets.iter().enumerate() {
+            if targets[..index].iter().any(|(seen, _)| seen == target) {
+                return Err(EditError::InvalidState(format!(
+                    "redirects converge on {} more than once",
+                    target.cell_name
+                )));
+            }
+        }
         let prepared = targets
             .into_iter()
             .map(|(target, formula)| {
@@ -1122,8 +1545,14 @@ fn insert_shape(
     largest.checked_add(1).ok_or_else(|| {
         EditError::InvalidState("cannot allocate a materialized source ID".to_owned())
     })?;
-    let sequence = txn.state_vector().get(&yrs::ClientID::new(client_id));
-    let id = format!("{id_prefix}{sequence}");
+    let mut sequence = txn.state_vector().get(&yrs::ClientID::new(client_id));
+    let id = loop {
+        let candidate = format!("{id_prefix}{sequence}");
+        if sheets.get(&*txn, candidate.as_str()).is_none() {
+            break candidate;
+        }
+        sequence += 1;
+    };
     let shape = sheets.insert(txn, id.as_str(), MapPrelim::default());
     shape.insert(txn, "id", id.as_str());
     shape.insert(txn, "pageId", page_id);
@@ -1227,47 +1656,32 @@ fn validate_shape_draft(draft: &ShapeDraft) -> EditResult<()> {
 }
 
 pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
-    migrate_doc(doc)?;
     validate_schema(doc)?;
     serializable_doc(doc)
 }
 
-/// Carries a version 1 document forward: stories held resolved text tokens
-/// as JSON, while version 2 stores the plain text behind them.
+/// Carries a stored document forward; an unknown version is left for [`validate_schema`].
 pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
-    let version = {
-        let txn = doc.transact();
-        let meta = required_map(&txn, META)?;
-        map_number(&meta, &txn, "schemaVersion")
-    };
-    if version == Some(SCHEMA_VERSION) {
-        return Ok(());
-    }
-    if version != Some(LEGACY_SCHEMA_VERSION) {
-        return Err(EditError::InvalidState(
-            "unsupported diagram schema version".to_owned(),
-        ));
-    }
     let rewrites = {
         let txn = doc.transact();
-        let Some(stories) = txn.get_map(STORIES) else {
-            return Err(EditError::InvalidState(
-                "missing vsdx:stories map".to_owned(),
-            ));
-        };
-        let mut rewrites = Vec::new();
-        for (key, value) in stories.iter(&txn) {
-            let Out::Any(Any::String(value)) = value else {
-                continue;
-            };
-            if let Ok(tokens) = serde_json::from_str::<Vec<vsdx_resolve::ResolvedTextToken>>(&value)
-            {
-                rewrites.push((key.to_owned(), plain_text(&tokens)));
-            }
+        let meta = required_map(&txn, META)?;
+        if map_number(&meta, &txn, "schemaVersion") != Some(TOKEN_STORY_SCHEMA_VERSION) {
+            return Ok(());
         }
-        rewrites
+        let stories = required_map(&txn, STORIES)?;
+        stories
+            .iter(&txn)
+            .filter_map(|(key, value)| {
+                let Out::Any(Any::String(value)) = value else {
+                    return None;
+                };
+                serde_json::from_str::<Vec<vsdx_resolve::ResolvedTextToken>>(&value)
+                    .ok()
+                    .map(|tokens| (key.to_owned(), plain_text(&tokens)))
+            })
+            .collect::<Vec<_>>()
     };
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let mut txn = doc.transact_mut_with(crate::MIGRATE_ORIGIN);
     let stories = required_map(&txn, STORIES)?;
     for (key, text) in &rewrites {
         stories.insert(&mut txn, key.as_str(), text.as_str());
@@ -1447,7 +1861,6 @@ pub(crate) fn normalize_concurrent_orders(staged: &Doc) -> EditResult<()> {
 }
 
 pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<()> {
-    migrate_doc(staged)?;
     validate_schema(staged)?;
     validate_immutable_metadata(before, staged)?;
     validate_session_topology(before, staged)?;
@@ -2320,6 +2733,173 @@ fn evaluate_cached_formula(
     }
 }
 
+pub(crate) fn loc_pin_at_size<T: ReadTxn>(
+    txn: &T,
+    shape_id: &str,
+    width: f64,
+    height: f64,
+) -> EditResult<(f64, f64)> {
+    let sheets = required_map(txn, SHEETS)?;
+    let shape = map_ref(&sheets, txn, shape_id)?;
+    let cells = map_map(&shape, txn, "cells")?;
+    let base = local_references(&cells, txn)?;
+    let overrides = SizeOverrideRefs {
+        base: &base,
+        width: width.to_string(),
+        height: height.to_string(),
+    };
+    Ok((
+        loc_pin_component(&base, &overrides, "LocPinX", width),
+        loc_pin_component(&base, &overrides, "LocPinY", height),
+    ))
+}
+
+struct SizeOverrideRefs<'a> {
+    base: &'a vsdx_resolve::ResolvedShape,
+    width: String,
+    height: String,
+}
+
+impl References for SizeOverrideRefs<'_> {
+    fn formula(&self, name: &str) -> Option<&str> {
+        if is_size_cell(name) {
+            None
+        } else {
+            self.base.formula(name)
+        }
+    }
+
+    fn value(&self, name: &str) -> Option<(&str, Option<&str>)> {
+        self.size_value(name).or_else(|| self.base.value(name))
+    }
+
+    fn formula_in(&self, sheet: Option<u32>, name: &str) -> Option<&str> {
+        if sheet.is_none() && is_size_cell(name) {
+            None
+        } else {
+            self.base.formula_in(sheet, name)
+        }
+    }
+
+    fn value_in(&self, sheet: Option<u32>, name: &str) -> Option<(&str, Option<&str>)> {
+        if sheet.is_none() {
+            self.size_value(name)
+                .or_else(|| self.base.value_in(sheet, name))
+        } else {
+            self.base.value_in(sheet, name)
+        }
+    }
+
+    fn formula_in_scoped(
+        &self,
+        sheet: Option<u32>,
+        scope: Option<&str>,
+        name: &str,
+    ) -> Option<&str> {
+        if sheet.is_none() && scope.is_none() && is_size_cell(name) {
+            None
+        } else {
+            self.base.formula_in_scoped(sheet, scope, name)
+        }
+    }
+
+    fn value_in_scoped(
+        &self,
+        sheet: Option<u32>,
+        scope: Option<&str>,
+        name: &str,
+    ) -> Option<(&str, Option<&str>)> {
+        if sheet.is_none() && scope.is_none() {
+            self.size_value(name)
+                .or_else(|| self.base.value_in_scoped(sheet, scope, name))
+        } else {
+            self.base.value_in_scoped(sheet, scope, name)
+        }
+    }
+
+    fn reference_key(&self, sheet: Option<u32>, name: &str) -> String {
+        self.base.reference_key(sheet, name)
+    }
+}
+
+impl SizeOverrideRefs<'_> {
+    fn size_value(&self, name: &str) -> Option<(&str, Option<&str>)> {
+        if name.eq_ignore_ascii_case("Width") {
+            Some((&self.width, None))
+        } else if name.eq_ignore_ascii_case("Height") {
+            Some((&self.height, None))
+        } else {
+            None
+        }
+    }
+}
+
+fn is_size_cell(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Width") || name.eq_ignore_ascii_case("Height")
+}
+
+fn numeric_reference(references: &impl References, name: &str) -> Option<f64> {
+    let formula = references.formula(name)?;
+    match evaluate(
+        formula.trim_start_matches('='),
+        references,
+        &ParseLimits::default(),
+    ) {
+        Evaluation::Evaluated(result) => match result.value {
+            Value::Number(number) => Some(number.number),
+            Value::Color(_) => None,
+        },
+        _ => None,
+    }
+}
+
+fn references_pin(expression: &Expr) -> bool {
+    match expression {
+        Expr::Reference(name) => {
+            !name.contains('!') && {
+                let cell = name.rsplit('.').next().unwrap_or(name);
+                cell.eq_ignore_ascii_case("PinX") || cell.eq_ignore_ascii_case("PinY")
+            }
+        }
+        Expr::Unary(inner) => references_pin(inner),
+        Expr::Binary(left, _, right) => references_pin(left) || references_pin(right),
+        Expr::Call(_, arguments) => arguments.iter().any(references_pin),
+        Expr::Number(_, _) | Expr::String(_) => false,
+    }
+}
+
+fn loc_pin_component(
+    base: &vsdx_resolve::ResolvedShape,
+    overrides: &SizeOverrideRefs<'_>,
+    name: &str,
+    proposed_size: f64,
+) -> f64 {
+    let current = numeric_reference(base, name)
+        .or_else(|| {
+            base.value(name)
+                .and_then(|(value, _)| value.parse::<f64>().ok())
+        })
+        .unwrap_or(proposed_size / 2.0);
+    let Some(formula) = base.formula(name) else {
+        return current;
+    };
+    let trimmed = formula.trim_start_matches('=').trim();
+    if trimmed.is_empty() {
+        return current;
+    }
+    match vsdx_eval::parse(trimmed, &ParseLimits::default()) {
+        Ok(expression) if references_pin(&expression) => current,
+        Ok(_) => match evaluate(trimmed, overrides, &ParseLimits::default()) {
+            Evaluation::Evaluated(result) => match result.value {
+                Value::Number(number) => number.number,
+                Value::Color(_) => current,
+            },
+            _ => current,
+        },
+        Err(_) => current,
+    }
+}
+
 fn materialized_source_ids<T: ReadTxn>(
     sheets: &MapRef,
     txn: &T,
@@ -2387,6 +2967,7 @@ fn semantic_cell_edits(doc: &Doc) -> EditResult<Vec<vsdx_parse::SemanticCellEdit
                         gesture: gesture_for_cell(&locator.cell_name),
                         formula: Some(formula),
                         value,
+                        row_type: map_string(&cell, &txn, "rowType"),
                     });
                 }
             }
@@ -3330,38 +3911,88 @@ mod tests {
             .to_vec()
     }
 
-    #[test]
-    fn legacy_json_stories_migrate_to_plain_text_on_open() {
-        let source = include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx");
-        let session = DiagramSession::open(source, 3).unwrap();
-        let plain = session.shape_text("page:1", "page:1:shape:3").unwrap();
-        assert!(!plain.is_empty());
-        let legacy = serde_json::to_string(&vec![vsdx_resolve::ResolvedTextToken::Literal(
-            plain.clone(),
-        )])
-        .unwrap();
-        assert_ne!(legacy, plain);
-        {
-            let mut txn = session.doc.transact_mut();
-            txn.get_map(STORIES)
-                .unwrap()
-                .insert(&mut txn, "page:1:shape:3", legacy.as_str());
-            txn.get_map(META)
-                .unwrap()
-                .insert(&mut txn, "schemaVersion", LEGACY_SCHEMA_VERSION);
+    fn story_values(doc: &Doc) -> std::collections::BTreeMap<String, String> {
+        let txn = doc.transact();
+        txn.get_map(STORIES)
+            .unwrap()
+            .iter(&txn)
+            .map(|(id, value)| {
+                let Out::Any(Any::String(text)) = value else {
+                    panic!("story {id} is not a string");
+                };
+                (id.to_owned(), text.to_string())
+            })
+            .collect()
+    }
+
+    fn stamp_token_stories(
+        session: &DiagramSession,
+        stories: &std::collections::BTreeMap<String, String>,
+    ) {
+        let mut txn = session.doc.transact_mut_with(crate::HYDRATE_ORIGIN);
+        let map = txn.get_or_insert_map(STORIES);
+        for (id, text) in stories {
+            let tokens = if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![vsdx_resolve::ResolvedTextToken::Literal(text.clone())]
+            };
+            let json = serde_json::to_string(&tokens).unwrap();
+            map.insert(&mut txn, id.as_str(), json.as_str());
         }
-        let update = session.encode_state_as_update_v1();
-        let reopened = DiagramSession::open_from_update(&update, 4).unwrap();
+        txn.get_or_insert_map(META)
+            .insert(&mut txn, "schemaVersion", TOKEN_STORY_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_token_stories_migrate_to_plain_text_on_open() {
+        let session = DiagramSession::open(GROUP_MASTER_TEXT, 3).unwrap();
+        let expected = story_values(&session.doc);
+        assert!(expected.values().any(|text| text == "group label"));
+        assert!(expected.values().any(String::is_empty));
+        stamp_token_stories(&session, &expected);
+        assert!(
+            story_values(&session.doc)
+                .values()
+                .all(|text| text.starts_with('['))
+        );
+
+        let reopened =
+            DiagramSession::open_from_update(&session.encode_state_as_update_v1(), 4).unwrap();
+        assert_eq!(story_values(&reopened.doc), expected);
         assert_eq!(
-            reopened.shape_text("page:1", "page:1:shape:3").unwrap(),
-            plain
+            reopened.shape_text("page:1", SUB_SHAPE).unwrap(),
+            "group label"
         );
         let txn = reopened.doc.transact();
         assert_eq!(
-            map_number(&txn.get_map(META).unwrap(), &txn, "schemaVersion"),
+            map_number(&required_map(&txn, META).unwrap(), &txn, "schemaVersion"),
             Some(SCHEMA_VERSION)
         );
+        drop(txn);
         assert!(semantic_text_edits(&reopened.doc).unwrap().is_empty());
+        assert!(!reopened.can_undo());
+        assert_eq!(
+            reopened.save().unwrap(),
+            vsdx_parse::write_vsdx(&vsdx_parse::parse_vsdx(GROUP_MASTER_TEXT).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn remote_update_cannot_downgrade_the_schema_version() {
+        let live = DiagramSession::open(GROUP_MASTER_TEXT, 5).unwrap();
+        let peer = DiagramSession::open(GROUP_MASTER_TEXT, 6).unwrap();
+        let expected = story_values(&live.doc);
+        stamp_token_stories(&peer, &expected);
+
+        let error = live
+            .apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap_err();
+        assert!(
+            matches!(&error, EditError::InvalidState(reason) if reason.contains("schema version")),
+            "unexpected error {error:?}"
+        );
+        assert_eq!(story_values(&live.doc), expected);
     }
 
     #[test]
