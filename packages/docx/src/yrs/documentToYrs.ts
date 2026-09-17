@@ -119,6 +119,12 @@ interface LoweringContext {
   styleResolver: StyleResolver | null;
   theme: Theme | null;
   plans: StoryPlan[];
+  compatibilityMode: number;
+}
+
+function compatibilityModeFromDocument(document: Document): number {
+  const mode = document.package.settings?.compatibilityFlags?.compatibilityMode;
+  return typeof mode === 'number' && Number.isFinite(mode) ? Math.trunc(mode) : 12;
 }
 
 const BOOLEAN_MARKS = new Set([
@@ -240,6 +246,9 @@ function formattingToMarks(formatting: TextFormatting | undefined): MarkDescript
   if (formatting.outline) add('textOutline');
   if (formatting.hidden) add('hidden');
   if (formatting.rtl) add('rtl');
+  // Document-grid opt-out (w:snapToGrid, default on): only an authored off
+  // becomes a mark, mirroring how the layout bridge reads it.
+  if (formatting.snapToGrid === false) marks.push({ name: 'snapToGrid', attrs: {} });
   if (formatting.effect && formatting.effect !== 'none') {
     add('textEffect', { effect: formatting.effect });
   }
@@ -256,6 +265,8 @@ function marksToYrsAttrs(marks: readonly MarkDescriptor[]): YrsAttrs {
     if (mark.name === 'comment' || mark.name === 'footnoteRef') continue;
     if (BOOLEAN_MARKS.has(mark.name)) {
       attrs[mark.name] = true;
+    } else if (mark.name === 'snapToGrid') {
+      attrs.snapToGrid = false;
     } else if (mark.name === 'highlight') {
       attrs.highlight = mark.attrs.color;
     } else if (mark.name === 'insertion' || mark.name === 'deletion') {
@@ -320,9 +331,20 @@ function runMarks(
   const runStyleFormatting = run.formatting?.styleId
     ? styleResolver?.getRunStyleOwnProperties(run.formatting.styleId)
     : undefined;
-  return formattingToMarks(
+  const marks = formattingToMarks(
     mergeTextFormatting(mergeTextFormatting(styleFormatting, runStyleFormatting), run.formatting)
   );
+  const styleId = run.formatting?.styleId;
+  const styleName = styleId ? styleResolver?.getStyle(styleId)?.name : undefined;
+  if ([styleId, styleName].some((name) => /^(?:Followed)?Hyperlink$/i.test(name ?? ''))) {
+    for (const [property, name] of [['color', 'textColor'], ['underline', 'underline']] as const) {
+      if (run.formatting?.[property] === undefined && runStyleFormatting?.[property] !== undefined) {
+        const mark = marks.find((mark) => mark.name === name);
+        if (mark) mark.attrs.inheritedHyperlink = true;
+      }
+    }
+  }
+  return marks;
 }
 
 function imagePayload(image: Image): Attrs {
@@ -392,6 +414,7 @@ function imagePayload(image: Image): Attrs {
     distRight: image.wrap.distR != null ? emuToPixels(image.wrap.distR) : null,
     position: image.position
       ? {
+          relativeHeight: image.position.relativeHeight,
           horizontal: image.position.horizontal
             ? {
                 relativeTo: image.position.horizontal.relativeTo,
@@ -417,6 +440,7 @@ function imagePayload(image: Image): Attrs {
     cropRight: image.crop?.right ?? null,
     cropBottom: image.crop?.bottom ?? null,
     cropLeft: image.crop?.left ?? null,
+    shapeType: image.shapeType ?? null,
     opacity: image.opacity ?? null,
     effectExtentTop: image.padding?.top ? emuToPixels(image.padding.top) : null,
     effectExtentBottom: image.padding?.bottom ? emuToPixels(image.padding.bottom) : null,
@@ -609,6 +633,8 @@ function runContentToUnits(
       ];
     case 'drawing':
       return [embedUnit('image', imagePayload(content.image))];
+    case 'horizontalRule':
+      return [embedUnit('horizontalRule', { rule: content.rule }, marks, commentId)];
     case 'shape':
       return [embedUnit('shape', shapePayload(content.shape))];
     case 'chart':
@@ -828,6 +854,9 @@ function paragraphAttrs(
     listMarkerHidden: paragraph.listRendering?.markerHidden || null,
     listMarkerFontFamily: paragraph.listRendering?.markerFontFamily || null,
     listMarkerFontSize: paragraph.listRendering?.markerFontSize || null,
+    listMarkerBold: paragraph.listRendering?.markerBold ?? null,
+    listMarkerItalic: paragraph.listRendering?.markerItalic ?? null,
+    listMarkerColor: paragraph.listRendering?.markerColor ?? null,
     listMarkerSuffix: paragraph.listRendering?.markerSuffix || null,
     listLevelNumFmts: paragraph.listRendering?.levelNumFmts || null,
     listAbstractNumId: paragraph.listRendering?.abstractNumId ?? null,
@@ -841,6 +870,10 @@ function paragraphAttrs(
     attrs.alignment = formatting?.alignment ?? stylePpr?.alignment ?? null;
     attrs.spaceBefore = formatting?.spaceBefore ?? stylePpr?.spaceBefore ?? null;
     attrs.spaceAfter = formatting?.spaceAfter ?? stylePpr?.spaceAfter ?? null;
+    attrs.spaceBeforeLines = formatting?.spaceBeforeLines ?? stylePpr?.spaceBeforeLines ?? null;
+    attrs.spaceAfterLines = formatting?.spaceAfterLines ?? stylePpr?.spaceAfterLines ?? null;
+    attrs.beforeAutospacing = formatting?.beforeAutospacing ?? stylePpr?.beforeAutospacing ?? null;
+    attrs.afterAutospacing = formatting?.afterAutospacing ?? stylePpr?.afterAutospacing ?? null;
     attrs.lineSpacing = formatting?.lineSpacing ?? stylePpr?.lineSpacing ?? null;
     attrs.lineSpacingRule = formatting?.lineSpacingRule ?? stylePpr?.lineSpacingRule ?? null;
     attrs.spacingExplicit = formatting?.spacingExplicit || null;
@@ -869,6 +902,7 @@ function paragraphAttrs(
     attrs.keepLines = formatting?.keepLines ?? stylePpr?.keepLines ?? null;
     attrs.widowControl = formatting?.widowControl ?? stylePpr?.widowControl ?? null;
     attrs.contextualSpacing = formatting?.contextualSpacing ?? stylePpr?.contextualSpacing ?? null;
+    attrs.snapToGrid = formatting?.snapToGrid ?? stylePpr?.snapToGrid ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? stylePpr?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? stylePpr?.bidi ?? null;
 
@@ -889,6 +923,10 @@ function paragraphAttrs(
     attrs.alignment = formatting?.alignment ?? null;
     attrs.spaceBefore = formatting?.spaceBefore ?? null;
     attrs.spaceAfter = formatting?.spaceAfter ?? null;
+    attrs.spaceBeforeLines = formatting?.spaceBeforeLines ?? null;
+    attrs.spaceAfterLines = formatting?.spaceAfterLines ?? null;
+    attrs.beforeAutospacing = formatting?.beforeAutospacing ?? null;
+    attrs.afterAutospacing = formatting?.afterAutospacing ?? null;
     attrs.lineSpacing = formatting?.lineSpacing ?? null;
     attrs.lineSpacingRule = formatting?.lineSpacingRule ?? null;
     attrs.spacingExplicit = formatting?.spacingExplicit || null;
@@ -905,6 +943,7 @@ function paragraphAttrs(
     attrs.keepNext = formatting?.keepNext ?? null;
     attrs.keepLines = formatting?.keepLines ?? null;
     attrs.widowControl = formatting?.widowControl ?? null;
+    attrs.snapToGrid = formatting?.snapToGrid ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? null;
     attrs.defaultTextFormatting = formatting?.runProperties ?? null;
@@ -1341,7 +1380,8 @@ function projectRow(
 function projectTable(
   table: Table,
   styleResolver: StyleResolver | null,
-  theme: Theme | null
+  theme: Theme | null,
+  compatibilityMode: number
 ): ProjectedTable {
   const defaultStyle = styleResolver?.getDefaultTableStyle();
   const styleId = table.formatting?.styleId;
@@ -1391,6 +1431,9 @@ function projectTable(
     cellMargins: defaultMargins ?? null,
     look: table.formatting?.look ?? null,
     bidi: table.formatting?.bidi || null,
+    // Omit the default so pre-existing yrs snapshots (no field) keep matching;
+    // the bridge treats an absent mode as 12.
+    compatibilityMode: compatibilityMode === 12 ? null : compatibilityMode,
     _originalFormatting: originalFormatting,
   };
   if (table.propertyChanges?.length) attrs.tblPrChange = table.propertyChanges;
@@ -1477,7 +1520,12 @@ function visitStory(
     }
     if (block.type === 'table') {
       const currentTable = tableIndex++;
-      const table = projectTable(block, context.styleResolver, context.theme);
+      const table = projectTable(
+        block,
+        context.styleResolver,
+        context.theme,
+        context.compatibilityMode
+      );
       const rows = table.rows.map((row, rowIndex) => ({
         trPr: row.attrs,
         cells: row.cells.map((cell, cellIndex) => ({
@@ -1603,6 +1651,7 @@ export function documentToYrs(session: YrsSession, document: Document): void {
     styleResolver: document.package.styles ? createStyleResolver(document.package.styles) : null,
     theme: document.package.theme ?? null,
     plans: [],
+    compatibilityMode: compatibilityModeFromDocument(document),
   };
   visitStory(context, 'body', document.package.document.content, {
     includePageBreaks: true,

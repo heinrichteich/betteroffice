@@ -4,12 +4,13 @@ import { resolve } from 'node:path';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import * as vsdx from '@betteroffice/vsdx';
 import type { DiagramHandle, ModelPoint, PageDisplayList, PageSnapshot } from '@betteroffice/vsdx';
-import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
-import { VsdxEditor, marqueeEnclosedShapes, selectionCorners } from './VsdxEditor';
 import { findShapePlacement, numericCellValue } from './components/ribbon/commands';
 import { normalizeMarquee } from './interactions';
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
+
+const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+const { VsdxEditor, marqueeEnclosedShapes, selectionCorners } = await import('./VsdxEditor');
 
 const root = resolve(import.meta.dir, '../../..');
 let source: Uint8Array;
@@ -40,23 +41,24 @@ function recorder(calls: string[]): CanvasRenderingContext2D {
 
 beforeEach(() => {
   canvasPrototype.getContext = function (this: HTMLCanvasElement) {
-    const all = Array.from(document.querySelectorAll('canvas'));
-    return recorder(all.indexOf(this) === 1 ? overlayCalls : mainCalls);
+    return recorder(this.hasAttribute('aria-hidden') ? overlayCalls : mainCalls);
   } as never;
 });
 
 afterEach(() => {
   cleanup();
+  canvasPrototype.getContext = realGetContext;
   overlayCalls.length = 0;
   mainCalls.length = 0;
-  canvasPrototype.getContext = realGetContext;
-  document.body.innerHTML = '';
 });
 
+/** The rulers add their own canvases, so the drawing pair is found by label, not by index. */
 function canvases(): { main: HTMLCanvasElement; overlay: HTMLCanvasElement } {
-  const found = Array.from(document.querySelectorAll('canvas'));
-  expect(found).toHaveLength(2);
-  return { main: found[0] as HTMLCanvasElement, overlay: found[1] as HTMLCanvasElement };
+  const main = document.querySelector<HTMLCanvasElement>('canvas[aria-label]');
+  expect(main).not.toBeNull();
+  const overlay = main!.parentElement!.querySelector<HTMLCanvasElement>('canvas[aria-hidden]');
+  expect(overlay).not.toBeNull();
+  return { main: main!, overlay: overlay! };
 }
 
 function label(): string | null {
@@ -81,6 +83,12 @@ async function readyEditor(): Promise<{ main: HTMLCanvasElement; handle: Diagram
   main.releasePointerCapture = () => {};
   main.hasPointerCapture = () => false;
   return { main, handle: handle! };
+}
+
+/** Click selection resolves a hit to its top-level shape, so the marquee must agree. */
+function topLevelId(page: PageSnapshot, shapeId: string): string {
+  const top = page.shapes.find((shape) => shape.id === shapeId || findShapePlacement(shape.children, shapeId) !== null);
+  return top?.id ?? shapeId;
 }
 
 function selectableQuads(page: PageSnapshot, frame: PageDisplayList): Array<{ id: string; corners: ModelPoint[] }> {
@@ -198,15 +206,16 @@ test('a drag that starts on a shape moves it instead of starting a marquee', asy
   expect(target).toBeDefined();
   const { centre, hit } = target!;
   expect(hit).not.toBeNull();
-  const placement = findShapePlacement(page.shapes, hit!.shapeId);
+  const selectedId = topLevelId(page, hit!.shapeId);
+  const placement = findShapePlacement(page.shapes, selectedId);
   expect(placement).not.toBeNull();
   const pinBefore = numericCellValue(placement!.shape, 'PinX');
   down(main, centre);
-  await waitFor(() => expect(label()).toBe(`Page 1 of 1; selected shape ${hit!.shapeId}`));
+  await waitFor(() => expect(label()).toBe(`Page 1 of 1; selected shape ${selectedId}`));
   await act(async () => { move(main, [centre[0] + 48, centre[1] + 48]); up(main, [centre[0] + 48, centre[1] + 48]); });
   const after = handle.snapshot();
-  const moved = findShapePlacement(after.pages[0].shapes, hit!.shapeId);
+  const moved = findShapePlacement(after.pages[0].shapes, selectedId);
   expect(moved).not.toBeNull();
   expect(numericCellValue(moved!.shape, 'PinX')).not.toBe(pinBefore);
-  expect(label()).toBe(`Page 1 of 1; selected shape ${hit!.shapeId}`);
+  expect(label()).toBe(`Page 1 of 1; selected shape ${selectedId}`);
 });

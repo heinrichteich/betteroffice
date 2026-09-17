@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::f64::consts::PI;
 
 use docx_layout::types::{
     AxisPosition, BlockId, BoxEdges, ImageRunPosition, LineBreakRun, ParagraphAttrs,
     ParagraphBlock, Run, RunFormatting, ShapeBlock, TabRun, TextRun,
 };
+use docx_parse::{drawingml::resolve_color_value_to_hex, scalars::ColorValue};
 use serde_json::{Map, Value, json};
 
 use super::RenderEnv;
@@ -20,6 +22,77 @@ pub(super) fn lower_shape_json(
     lower_shape(shape, format!("shape:{pm_start}"), env, Some(pm_start))
 }
 
+pub(super) fn inline_native_shape(shape: &ShapeBlock) -> bool {
+    if shape.position.is_some() || shape.wrap_type.is_some() {
+        return false;
+    }
+    if shape.shape_type == "textBox" {
+        return false;
+    }
+    if !(shape.width.is_finite() && shape.height.is_finite()) {
+        return false;
+    }
+    if !(shape.width > 0.0 && shape.height > 0.0) {
+        return false;
+    }
+    if !shape_bbox_finite(shape) {
+        return false;
+    }
+    shape_textless(shape)
+}
+
+fn shape_bbox_finite(shape: &ShapeBlock) -> bool {
+    for value in &shape.geometry_path {
+        if let Some(object) = value.as_object() {
+            for (_, number) in object {
+                if let Some(number) = number.as_f64()
+                    && !number.is_finite()
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    for child in &shape.children {
+        if let Some(x) = child.x
+            && !x.is_finite()
+        {
+            return false;
+        }
+        if let Some(y) = child.y
+            && !y.is_finite()
+        {
+            return false;
+        }
+        if !(child.width.is_finite() && child.height.is_finite()) {
+            return false;
+        }
+        if !shape_bbox_finite(child) {
+            return false;
+        }
+    }
+    true
+}
+
+fn shape_textless(shape: &ShapeBlock) -> bool {
+    if shape.shape_type == "textBox" {
+        return false;
+    }
+    if shape
+        .inner_text
+        .as_ref()
+        .is_some_and(|paragraphs| !paragraphs.is_empty())
+    {
+        return false;
+    }
+    shape.children.iter().all(|child| {
+        if child.shape_type == "textBox" {
+            return false;
+        }
+        shape_textless(child)
+    })
+}
+
 fn lower_shape(
     shape: &Value,
     block_id: String,
@@ -32,7 +105,14 @@ fn lower_shape(
     let geometry_path = array(shape, "geometryPath")
         .filter(|path| !path.is_empty())
         .cloned()
-        .or_else(|| preset_geometry(&shape_type))?;
+        .or_else(|| preset_geometry(&shape_type))
+        .or_else(|| shared_plus_geometry(&shape_type, shape))
+        .or_else(|| {
+            object(shape, "position")
+                .is_some()
+                .then(|| preset_geometry("rect"))
+                .flatten()
+        })?;
     let size = object(shape, "size");
     let width = size
         .and_then(|value| number_in(value, "width"))
@@ -463,6 +543,32 @@ fn shape_run_formatting(source: Option<&Value>) -> RunFormatting {
 
 fn resolve_shape_color(value: Option<&Value>) -> Option<String> {
     let value = value?.as_object()?;
+    let base = shape_base_color(value)?;
+    let mut color = ColorValue {
+        theme_tint: string_in(value, "themeTint"),
+        theme_shade: string_in(value, "themeShade"),
+        luminance_modulation: number_in(value, "luminanceModulation"),
+        luminance_offset: number_in(value, "luminanceOffset"),
+        saturation_modulation: number_in(value, "saturationModulation"),
+        ..ColorValue::default()
+    };
+    if ["rgb", "themeColor"].iter().all(|key| {
+        value
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    }) {
+        color.theme_tint = None;
+        color.theme_shade = None;
+    }
+    if color == ColorValue::default() {
+        return Some(base);
+    }
+    color.rgb = Some(base.clone());
+    resolve_color_value_to_hex(Some(&color)).or(Some(base))
+}
+
+fn shape_base_color(value: &Map<String, Value>) -> Option<String> {
     if let Some(rgb) = value
         .get("rgb")
         .and_then(Value::as_str)
@@ -876,9 +982,129 @@ fn preset_geometry(shape_type: &str) -> Option<Vec<Value>> {
     })
 }
 
+fn shared_plus_geometry(shape_type: &str, shape: &Value) -> Option<Vec<Value>> {
+    if shape_type != "plus" {
+        return None;
+    }
+    let size = object(shape, "size");
+    let width = size
+        .and_then(|value| number_in(value, "width"))
+        .unwrap_or(0.0);
+    let height = size
+        .and_then(|value| number_in(value, "height"))
+        .unwrap_or(0.0);
+    let aspect = if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
+        width / height
+    } else {
+        1.0
+    };
+    let path = docx_parse::drawingml::preset_geometry_to_path("plus", &HashMap::new(), aspect)?;
+    path.into_iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
+        .filter(|path| !path.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shape_color_modifiers_follow_shared_hsl_and_tint_rules() {
+        for (color, expected) in [
+            (
+                json!({"themeColor":"accent4","luminanceModulation":0.4,"luminanceOffset":0.6}),
+                "#FFE699",
+            ),
+            (
+                json!({"rgb":"4472C4","luminanceModulation":0.6,"luminanceOffset":0.4}),
+                "#8FAADC",
+            ),
+            (
+                json!({"rgb":"4472C4","luminanceModulation":0.75}),
+                "#2F5597",
+            ),
+            (
+                json!({"rgb":"4472C4","saturationModulation":0.0}),
+                "#848484",
+            ),
+            (json!({"rgb":"204060","themeShade":"80"}), "#102030"),
+            (json!({"rgb":"204060","themeTint":"80"}), "#8F9FAF"),
+            (
+                json!({"rgb":"FFC000","luminanceModulation":0.0,"luminanceOffset":0.0}),
+                "#000000",
+            ),
+            (
+                json!({"rgb":"FFC000","luminanceModulation":2.0,"luminanceOffset":0.6}),
+                "#FFFFFF",
+            ),
+            (
+                json!({"rgb":"FFC000","luminanceModulation":-1.0}),
+                "#FFC000",
+            ),
+        ] {
+            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn shape_color_modifiers_preserve_existing_base_color_selection() {
+        for (slot, expected) in [
+            ("tx1", "#000000"),
+            ("dark1", "#000000"),
+            ("bg1", "#FFFFFF"),
+            ("light1", "#FFFFFF"),
+            ("tx2", "#44546A"),
+            ("bg2", "#E7E6E6"),
+            ("hyperlink", "#0563C1"),
+            ("followedhyperlink", "#954F72"),
+            ("AcCeNt4", "#FFC000"),
+        ] {
+            let color = json!({"themeColor":slot,"luminanceModulation":1.0});
+            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), Some(expected));
+        }
+        for (color, expected) in [
+            (json!({"themeColor":"unknown","luminanceOffset":0.6}), None),
+            (
+                json!({"rgb":"aabbcc","themeColor":"accent4"}),
+                Some("#aabbcc"),
+            ),
+            (
+                json!({"rgb":"FF0000","themeColor":"accent4","luminanceModulation":0.5}),
+                Some("#800000"),
+            ),
+            (
+                json!({"rgb":"aabbcc","luminanceModulation":"invalid"}),
+                Some("#aabbcc"),
+            ),
+            (json!({"rgb":"aabbcc","alpha":0.5}), Some("#aabbcc")),
+        ] {
+            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn shape_color_cached_theme_rgb_keeps_its_resolved_tint_and_shade() {
+        for (color, expected) in [
+            (
+                json!({"rgb":"833C0B","themeColor":"accent2","themeShade":"80"}),
+                "#833C0B",
+            ),
+            (
+                json!({"rgb":"B4C7E7","themeColor":"accent1","themeTint":"66"}),
+                "#B4C7E7",
+            ),
+            (json!({"rgb":"833C0B","themeShade":"80"}), "#421E06"),
+            (json!({"themeColor":"accent2","themeShade":"80"}), "#773F19"),
+            (
+                json!({"rgb":"833C0B","themeColor":"accent2","themeShade":"80","luminanceModulation":0.0,"luminanceOffset":1.0}),
+                "#FFFFFF",
+            ),
+        ] {
+            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), Some(expected));
+        }
+    }
 
     #[test]
     fn shape_wrap_distances_lower_from_emu_to_pixels() {
@@ -1079,5 +1305,238 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn unknown_preset_requires_an_object_anchor_for_fallback() {
+        for position in [
+            Value::Null,
+            json!(true),
+            json!(1),
+            json!("anchor"),
+            json!([]),
+        ] {
+            let shape = json!({"shapeType": "unknown", "position": position});
+            assert!(lower_shape_json(&shape, 527, &RenderEnv::default()).is_none());
+        }
+    }
+
+    #[test]
+    fn anchored_unknown_preset_keeps_anchor_with_rect_fallback() {
+        let anchored = json!({
+            "shapeType": "bracketPair",
+            "size": {"width": 5715000, "height": 685800},
+            "position": {
+                "horizontal": {"relativeTo": "column", "posOffset": -114935},
+                "vertical": {"relativeTo": "paragraph", "posOffset": 5715},
+                "relativeHeight": 251659776.0
+            },
+            "wrap": {"type": "inFront"}
+        });
+        let block = lower_shape_json(&anchored, 528, &RenderEnv::default()).unwrap();
+        assert_eq!(block.shape_type, "bracketPair");
+        assert!((block.width - 600.0).abs() < 1e-6);
+        assert!((block.height - 72.0).abs() < 1e-6);
+        assert!(block.position.is_some());
+        assert_eq!(block.wrap_type.as_deref(), Some("inFront"));
+        let inline = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 685800}
+        });
+        let block = lower_shape_json(&inline, 529, &RenderEnv::default()).unwrap();
+        assert!(block.position.is_none());
+        assert!((block.height - 72.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn plus_without_authored_geometry_uses_shared_default() {
+        let shape = json!({
+            "shapeType": "plus",
+            "size": {"width": 557530, "height": 538480}
+        });
+        let block = lower_shape_json(&shape, 530, &RenderEnv::default()).unwrap();
+        assert_eq!(block.geometry_path.len(), 13);
+        assert_eq!(
+            block.geometry_path[0],
+            json!({"type": "move", "x": 0.0, "y": 0.25})
+        );
+        assert_eq!(block.geometry_path[12], json!({"type": "close"}));
+    }
+
+    #[test]
+    fn plus_authored_geometry_is_preserved_over_shared_default() {
+        let authored = vec![
+            json!({"type": "move", "x": 0.0, "y": 0.39887}),
+            json!({"type": "line", "x": 0.3852, "y": 0.39887}),
+        ];
+        let shape = json!({
+            "shapeType": "plus",
+            "size": {"width": 557530, "height": 538480},
+            "geometryPath": authored
+        });
+        let block = lower_shape_json(&shape, 531, &RenderEnv::default()).unwrap();
+        assert_eq!(block.geometry_path, authored);
+    }
+
+    #[test]
+    fn inline_textless_shape_qualifies_with_full_payload() {
+        let shape = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "geometryPath": [
+                {"type": "move", "x": 0.1, "y": 0.2},
+                {"type": "line", "x": 0.9, "y": 0.8},
+                {"type": "close"}
+            ],
+            "fill": {"type": "solid", "color": {"rgb": "112233"}},
+            "outline": {"color": {"rgb": "445566"}, "width": 19050},
+            "transform": {"rotation": 12, "flipH": true},
+            "children": [
+                {"shapeType": "ellipse", "size": {"width": 91440, "height": 91440}}
+            ]
+        });
+        let block = lower_shape_json(&shape, 600, &RenderEnv::default()).unwrap();
+        assert!(inline_native_shape(&block));
+        assert_eq!(block.geometry_path.len(), 3);
+        assert_eq!(block.children.len(), 1);
+        assert!(block.fill.is_some());
+        assert!(block.stroke.is_some());
+    }
+
+    #[test]
+    fn anchored_text_and_textbox_shapes_stay_blocks() {
+        let anchored = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "position": {
+                "horizontal": {"relativeTo": "column", "posOffset": 0},
+                "vertical": {"relativeTo": "paragraph", "posOffset": 0}
+            },
+            "wrap": {"type": "square"}
+        });
+        let block = lower_shape_json(&anchored, 601, &RenderEnv::default()).unwrap();
+        assert!(!inline_native_shape(&block));
+        let textbox = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "textBody": {"content": [{
+                "paraId": "p1",
+                "content": [{
+                    "type": "run",
+                    "content": [{"type": "text", "text": "hi"}]
+                }]
+            }]}
+        });
+        let block = lower_shape_json(&textbox, 602, &RenderEnv::default()).unwrap();
+        assert!(!inline_native_shape(&block));
+        let child_text = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "children": [
+                {"shapeType": "ellipse", "size": {"width": 91440, "height": 91440}},
+                {
+                    "shapeType": "rect",
+                    "size": {"width": 91440, "height": 91440},
+                    "textBody": {"content": [{
+                        "paraId": "p2",
+                        "content": [{
+                            "type": "run",
+                            "content": [{"type": "text", "text": "no"}]
+                        }]
+                    }]}
+                }
+            ]
+        });
+        let block = lower_shape_json(&child_text, 603, &RenderEnv::default()).unwrap();
+        assert!(!inline_native_shape(&block));
+        let textbox_kind = json!({
+            "shapeType": "textBox",
+            "size": {"width": 914400, "height": 457200}
+        });
+        let block = lower_shape_json(&textbox_kind, 604, &RenderEnv::default()).unwrap();
+        assert!(!inline_native_shape(&block));
+    }
+
+    #[test]
+    fn tab_break_and_empty_paragraphs_stay_blocks() {
+        for (name, content) in [
+            (
+                "tab",
+                json!([{
+                    "paraId": "p1",
+                    "content": [{
+                        "type": "run",
+                        "content": [{"type": "tab"}]
+                    }]
+                }]),
+            ),
+            (
+                "break",
+                json!([{
+                    "paraId": "p1",
+                    "content": [{
+                        "type": "run",
+                        "content": [{"type": "break"}]
+                    }]
+                }]),
+            ),
+            (
+                "empty",
+                json!([{
+                    "paraId": "p1",
+                    "content": [{
+                        "type": "run",
+                        "content": []
+                    }]
+                }]),
+            ),
+        ] {
+            let shape = json!({
+                "shapeType": "rect",
+                "size": {"width": 914400, "height": 457200},
+                "textBody": {"content": content}
+            });
+            let block = lower_shape_json(&shape, 606, &RenderEnv::default()).unwrap();
+            assert!(
+                block
+                    .inner_text
+                    .as_ref()
+                    .is_some_and(|text| !text.is_empty()),
+                "{name} has paragraph collection"
+            );
+            assert!(!inline_native_shape(&block), "{name}");
+        }
+        let nested_textbox = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "children": [{
+                "shapeType": "textBox",
+                "size": {"width": 91440, "height": 91440}
+            }]
+        });
+        let block = lower_shape_json(&nested_textbox, 607, &RenderEnv::default()).unwrap();
+        assert!(!inline_native_shape(&block), "recursive textBox");
+    }
+
+    #[test]
+    fn nonfinite_bbox_never_qualifies_inline() {
+        let shape = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "geometryPath": [
+                {"type": "move", "x": 0.0, "y": 0.0},
+                {"type": "line", "x": 1.0, "y": 1.0}
+            ],
+            "children": [
+                {"shapeType": "ellipse", "size": {"width": 91440, "height": 91440}}
+            ]
+        });
+        let mut block = lower_shape_json(&shape, 605, &RenderEnv::default()).unwrap();
+        assert!(inline_native_shape(&block));
+        block.width = f64::INFINITY;
+        assert!(!inline_native_shape(&block));
+        block.width = 96.0;
+        block.children[0].width = f64::NAN;
+        assert!(!inline_native_shape(&block));
     }
 }
