@@ -88,6 +88,16 @@ pub struct ShapeReceipt {
     pub to_index: Option<u32>,
 }
 
+/// Typed receipt for a committed shape-text edit.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextReceipt {
+    pub page_id: String,
+    pub shape_id: String,
+    pub before: String,
+    pub after: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeDraft {
