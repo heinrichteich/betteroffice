@@ -74,6 +74,17 @@ export function quoteShapeDataValue(text: string): string {
   return `"${text.replace(/"/g, '""')}"`;
 }
 
+const NUMERIC_LITERAL = /^=?\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*$/;
+
+/** True when the panel can encode this row's value without changing its meaning. */
+export function isShapeDataValueEditable(row: Pick<ShapeDataRow, 'type' | 'formula'>): boolean {
+  const formula = row.formula;
+  if (formula && (/\bGUARD\s*\(/i.test(formula) || /\bSETATREF(EXPR|EVAL)\s*\(/i.test(formula))) return false;
+  if (row.type === 'date' || row.type === 'duration' || row.type === 'currency') return false;
+  if (row.type === 'number') return !formula || NUMERIC_LITERAL.test(formula);
+  return true;
+}
+
 export function formatOptions(format: string | null | undefined): string[] {
   if (!format) return [];
   return format.split(';').map((option) => option.trim()).filter((option) => option !== '');
@@ -121,7 +132,11 @@ export function shapeDataRows(shape: ShapeSnapshot | null | undefined): ShapeDat
       ask: truthyOf(byName(cells, 'Ask')) || truthyOf(byName(cells, 'Verify')),
     });
   }
-  rows.sort((left, right) => (left.sortKey ?? '').localeCompare(right.sortKey ?? ''));
+  rows.sort((left, right) => {
+    const a = left.sortKey ?? '';
+    const b = right.sortKey ?? '';
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
   return rows;
 }
 

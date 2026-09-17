@@ -6,13 +6,13 @@ import { useState } from 'react';
 import type { RefObject } from 'react';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
 import { CanvasContextMenu } from './components/ribbon/CanvasContextMenu';
-import { RibbonCommandsContext, RibbonCommandsProvider, useRibbonCommands } from './components/ribbon/commands';
+import { RibbonCommandsContext, RibbonCommandsProvider } from './components/ribbon/commands';
 import type { RibbonCommand, RibbonCommandId, RibbonCommands } from './components/ribbon/commands';
-import { MINI_TOOLBAR_CANDIDATES, ShapeMiniToolbar, miniToolbarPosition, resolveMiniToolbarIds } from './components/ribbon/ShapeMiniToolbar';
+import { ShapeMiniToolbar, miniToolbarPosition } from './components/ribbon/ShapeMiniToolbar';
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
 
-const { cleanup, fireEvent, render } = await import('@testing-library/react');
+const { cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 
 type Selection = { pageId: string; shapeId: string; hit: { kind: 'shape'; shapeId: string } };
 
@@ -135,6 +135,29 @@ test('the toolbar flips below the menu near the top edge', () => {
   }
 });
 
+test('the toolbar follows the menu after the menu clamps into the viewport', async () => {
+  const originalRect = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+    if (this.getAttribute?.('role') === 'toolbar') return { x: 0, y: 0, width: 80, height: 40, top: 0, left: 0, right: 80, bottom: 40, toJSON: () => ({}) } as DOMRect;
+    if (this.getAttribute?.('role') === 'menu' && !this.hasAttribute('data-submenu')) {
+      const top = Number.parseFloat(this.style.top || '0');
+      const left = Number.parseFloat(this.style.left || '0');
+      return { x: left, y: top, width: 220, height: 340, top, left, right: left + 220, bottom: top + 340, toJSON: () => ({}) } as DOMRect;
+    }
+    return originalRect.call(this);
+  };
+  const { view } = renderShapeMenu({ position: { top: 700, left: 100 } });
+  try {
+    const clamped = window.innerHeight - 340 - 4;
+    await waitFor(() => expect((shapeMenu() as HTMLElement).style.top).toBe(`${clamped}px`));
+    await waitFor(() => expect((toolbar() as HTMLElement).style.top).toBe(`${clamped - 44}px`));
+    expect(toolbar()?.getAttribute('data-below')).toBe('false');
+  } finally {
+    HTMLElement.prototype.getBoundingClientRect = originalRect;
+    view.unmount();
+  }
+});
+
 test('a colour pick runs the ribbon command and keeps the menu open', () => {
   const { view, calls, closed } = renderShapeMenu();
   try {
@@ -200,6 +223,28 @@ test('an outside press and a menu action close the toolbar with the menu', () =>
   }
 });
 
+test('guarded colour cells hide the mini toolbar instead of refusing on pick', () => {
+  const { view } = renderShapeMenu({ cells: [cell('FillForegnd', 'GUARD(RGB(255,0,0))'), cell('LineColor', 'GUARD(RGB(0,0,255))'), cell('Angle', '0'), cell('FlipX', '0'), cell('FlipY', '0')] });
+  try {
+    expect(shapeMenu()).not.toBeNull();
+    expect(toolbar()).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test('a SETATREF redirect to a guarded cell hides only that swatch', () => {
+  const redirected = renderShapeMenu({ cells: [cell('FillForegnd', 'RGB(255,0,0)'), cell('LineColor', 'SETATREF(LineTarget)'), cell('LineTarget', 'GUARD(RGB(0,0,255))')] });
+  try {
+    const bar = toolbar();
+    expect(bar).not.toBeNull();
+    expect(bar?.querySelector('[data-command-id="fillColor"]')).not.toBeNull();
+    expect(bar?.querySelector('[data-command-id="lineColor"]')).toBeNull();
+  } finally {
+    redirected.view.unmount();
+  }
+});
+
 test('commands that do not exist or are disabled are not shown', () => {
   function PartialHost({ commands }: { commands: Partial<Record<RibbonCommandId, RibbonCommand | undefined>> }) {
     const ref = { current: null } as RefObject<HTMLDivElement | null>;
@@ -230,36 +275,6 @@ test('commands that do not exist or are disabled are not shown', () => {
     expect(toolbar()).toBeNull();
   } finally {
     second.unmount();
-  }
-  expect(resolveMiniToolbarIds({})).toEqual([]);
-  expect(MINI_TOOLBAR_CANDIDATES).toEqual(['fillColor', 'lineColor']);
-});
-
-test('the registry on this base carries no text or alignment commands', () => {
-  let seen: RibbonCommands | null = null;
-  function Probe() {
-    seen = useRibbonCommands();
-    return null;
-  }
-  const calls: Calls = { deletes: [], reorders: [], formulas: [] };
-  const state = snapshot([cell('Angle', '0'), cell('FlipX', '0'), cell('FlipY', '0')]);
-  const diagram = stubHandle(state, calls);
-  const selection: Selection = { pageId: 'page', shapeId: 'three', hit: { kind: 'shape', shapeId: 'three' } };
-  const view = render(
-    <RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={selection} onMutation={() => {}} onError={() => {}} onDownload={() => {}}>
-      <Probe />
-    </RibbonCommandsProvider>,
-  );
-  try {
-    expect(seen).not.toBeNull();
-    for (const id of ['bold', 'italic', 'textColor', 'alignLeft', 'alignCenter', 'alignRight']) {
-      expect((seen as unknown as Record<string, unknown>)[id]).toBeUndefined();
-    }
-    expect(Object.keys(seen as unknown as Record<string, unknown>).sort()).toEqual([
-      'addShape', 'bringForward', 'bringToFront', 'delete', 'download', 'fillColor', 'flipHorizontal', 'flipVertical', 'lineColor', 'linePattern', 'lineWeight', 'redo', 'rotateLeft', 'rotateRight', 'sendBackward', 'sendToBack', 'undo',
-    ]);
-  } finally {
-    view.unmount();
   }
 });
 

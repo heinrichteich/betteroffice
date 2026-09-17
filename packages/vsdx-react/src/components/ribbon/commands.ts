@@ -1,13 +1,13 @@
 import { createContext, createElement, useContext, useMemo } from 'react';
 import type { ReactNode } from 'react';
-import type { DiagramHandle, DiagramSnapshot, PageDisplayList, PagePrimitive, PageSnapshot, PaletteEntry, ShapeSnapshot } from '@betteroffice/vsdx';
+import type { DiagramHandle, DiagramSnapshot, PageDisplayList, PagePrimitive, PageSnapshot, Paint, ShapePrimitive, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { VsdxShapeSelection } from '../../VsdxEditor';
 import { standardShapeById } from '../shapes/shapeLibrary';
 
 export type RibbonCommandId =
   | 'undo' | 'redo' | 'delete' | 'fillColor' | 'lineColor' | 'lineWeight' | 'linePattern'
   | 'bringToFront' | 'bringForward' | 'sendBackward' | 'sendToBack'
-  | 'rotateLeft' | 'rotateRight' | 'flipHorizontal' | 'flipVertical' | 'addShape' | 'download';
+  | 'rotateLeft' | 'rotateRight' | 'flipHorizontal' | 'flipVertical' | 'addShape' | 'download' | 'pageBreaks';
 
 export interface RibbonCommand { id: RibbonCommandId; run: (value?: string) => void; enabled: boolean; active?: boolean; value?: string; }
 export type RibbonCommands = Record<RibbonCommandId, RibbonCommand>;
@@ -23,8 +23,12 @@ export interface RibbonCommandsProviderProps {
   onMutation: () => void;
   onError: (error: unknown) => void;
   onDownload: (bytes: Uint8Array) => void;
+  pageBreaks?: PageBreakToggle;
   children: ReactNode;
 }
+
+/** Whether the page-break overlay is shown, and how to flip it. */
+export interface PageBreakToggle { shown: boolean; toggle: () => void; }
 
 export interface ShapePlacement { shape: ShapeSnapshot; index: number; siblings: readonly ShapeSnapshot[]; }
 
@@ -63,57 +67,11 @@ function cellFormula(shape: ShapeSnapshot | null, name: string): string | undefi
   return current?.formula ?? current?.value ?? undefined;
 }
 
-function color(value: string | undefined, formula: string | undefined, palette: readonly PaletteEntry[] | undefined, fallback: string): string {
-  for (const candidate of [value, formula]) {
-    const hex = candidate?.match(/#[0-9a-f]{6}/i)?.[0];
-    if (hex) return hex;
-  }
-  for (const candidate of [value, formula]) {
-    const rgb = candidate?.match(/^RGB\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$/i);
-    if (rgb) return `#${rgb.slice(1).map((channel) => Math.min(255, Number(channel)).toString(16).padStart(2, '0')).join('')}`;
-  }
-  for (const candidate of [value, formula]) {
-    const index = Number((candidate ?? '').trim());
-    if (Number.isInteger(index)) {
-      const entry = palette?.find((item) => item.index === index)?.color;
-      if (entry) return entry;
-    }
-  }
-  return fallback;
-}
-
-function swatchColor(shape: ShapeSnapshot | null, name: string, palette: readonly PaletteEntry[] | undefined, fallback: string): string {
-  const cell = findCell(shape, name);
-  return color(cell?.value ?? undefined, cell?.formula ?? undefined, palette, fallback);
-}
-
-/** Resolved fill and stroke hex for a shape primitive already evaluated by the renderer. */
-export function swatchFromPrimitive(primitive: PagePrimitive | null): { fill?: string; stroke?: string } {
-  if (!primitive || primitive.kind !== 'shape') return {};
-  const fill = primitive.fill?.kind === 'solid'
-    ? primitive.fill.color
-    : primitive.fill?.kind === 'gradient' ? primitive.fill.stops[0]?.color : undefined;
-  const stroke = primitive.kind === 'shape' ? primitive.stroke?.color : undefined;
-  const hex = (value: string | undefined) => value?.match(/^#[0-9a-f]{6}$/i)?.[0];
-  return { ...(hex(fill) ? { fill: hex(fill) } : {}), ...(hex(stroke) ? { stroke: hex(stroke) } : {}) };
-}
-
-export function findPrimitive(primitives: readonly PagePrimitive[], id: string, depth = 0): PagePrimitive | null {
-  if (depth >= 256) return null;
-  for (const primitive of primitives) {
-    if (primitive.id === id) return primitive;
-    if (primitive.kind === 'group') {
-      const nested = findPrimitive(primitive.primitives, id, depth + 1);
-      if (nested) return nested;
-    }
-  }
-  return null;
-}
-
-/** Renderer-resolved swatch colours for the selected shape, if its primitive is present. */
-export function resolvedSwatch(frame: PageDisplayList | null | undefined, page: PageSnapshot | null, shape: ShapeSnapshot | null): { fill?: string; stroke?: string } {
-  if (!frame || !page || !shape) return {};
-  return swatchFromPrimitive(findPrimitive(frame.primitives, `${page.sourcePartPath}:${shape.sourceId}`));
+function color(value: string | undefined, fallback: string): string {
+  const hex = value?.match(/#[0-9a-f]{6}/i)?.[0];
+  if (hex) return hex;
+  const rgb = value?.match(/^RGB\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$/i);
+  return rgb ? `#${rgb.slice(1).map((channel) => Math.min(255, Number(channel)).toString(16).padStart(2, '0')).join('')}` : fallback;
 }
 
 function colorFormula(value = '#000000'): string {
@@ -122,11 +80,45 @@ function colorFormula(value = '#000000'): string {
 }
 
 /** Matches a GUARD function call without matching reference names containing guard. */
-const GUARD_CALL = /(^|[^A-Z0-9_.])GUARD\s*\(/i;
+export const GUARD_CALL = /(^|[^A-Z0-9_.])GUARD\s*\(/i;
 
 export function numberValue(value: string | undefined): number {
   const result = Number(value ?? '0');
   return Number.isFinite(result) ? result : 0;
+}
+
+/** Largest LinePattern index Visio documents. 0 clears the stroke, 1 is solid. */
+export const LINE_PATTERN_MAX = 23;
+
+/** Selectable dash pattern indexes. Only 0 and 1 have stable Visio-wide meanings. */
+export const LINE_PATTERN_VALUES: readonly string[] = Array.from({ length: LINE_PATTERN_MAX + 1 }, (_, index) => String(index));
+
+const LINE_WEIGHT_PATTERN = /^(-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*(in|dl|cm|mm|pt|pica|ft|m)?$/i;
+
+/** Validated line weight, or null when the text is not a positive length. */
+export function parseLineWeightInput(raw: string): string | null {
+  const match = raw.trim().match(LINE_WEIGHT_PATTERN);
+  if (!match) return null;
+  const magnitude = Number(match[1]);
+  if (!Number.isFinite(magnitude) || magnitude <= 0) return null;
+  const unit = (match[2] ?? '').toLowerCase();
+  return unit ? `${match[1]} ${unit}` : match[1];
+}
+
+/** Validated line pattern index, or null when outside 0..LINE_PATTERN_MAX. */
+export function parseLinePatternInput(raw: string): string | null {
+  const text = raw.trim();
+  if (!/^\d+$/.test(text)) return null;
+  const index = Number(text);
+  return Number.isSafeInteger(index) && index >= 0 && index <= LINE_PATTERN_MAX ? String(index) : null;
+}
+
+/** True when a raw ribbon value would change the stored formula. */
+export function isFormulaChange(current: string | undefined, raw: string, parse: (value: string) => string | null): boolean {
+  const next = parse(raw);
+  if (next === null) return false;
+  const baseline = current !== undefined ? parse(current) : null;
+  return baseline === null ? raw.trim() !== (current ?? '') : next !== baseline;
 }
 
 export function numericCellValue(shape: ShapeSnapshot, name: string, fallback?: number): number {
@@ -147,10 +139,40 @@ export function cellIsGuarded(shape: ShapeSnapshot | null, name: string): boolea
   return GUARD_CALL.test(cellFormula(shape, name) ?? '');
 }
 
+const SETATREF_REDIRECT = /^\s*=?\s*setatref\s*\(\s*([^()]*?)\s*\)\s*$/i;
+
+/** Matches any SETATREF call without matching reference names containing setatref. */
+const SETATREF_CALL = /(^|[^A-Z0-9_.])SETATREF[A-Z]*\s*\(/i;
+
+function singleSetatrefTarget(formula: string): string | undefined {
+  const target = SETATREF_REDIRECT.exec(formula)?.[1].trim();
+  if (!target || target.includes(',') || target.includes('!') || target.includes('.')) return undefined;
+  return target;
+}
+
+/** Blocked when a GUARD sits on the cell or on any SETATREF hop to it. */
+function guardChainBlocked(shape: ShapeSnapshot | null, name: string): boolean {
+  if (!shape) return false;
+  const seen = new Set<string>();
+  let current = name;
+  for (let hop = 0; hop <= 10; hop += 1) {
+    if (seen.has(current)) return true;
+    seen.add(current);
+    const formula = cellFormula(shape, current);
+    if (formula === undefined) return false;
+    if (cellIsGuarded(shape, current)) return true;
+    const target = singleSetatrefTarget(formula);
+    if (target === undefined) return SETATREF_CALL.test(formula);
+    if (!findCell(shape, target)) return true;
+    current = target;
+  }
+  return true;
+}
+
 /** True when a delete would be refused by LockDelete or a GUARD on it. */
 export function isDeleteBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
-  return lockCellEnabled(shape, 'LockDelete') || cellIsGuarded(shape, 'LockDelete');
+  return lockCellEnabled(shape, 'LockDelete') || guardChainBlocked(shape, 'LockDelete');
 }
 
 export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'LockHeight', 'LockAspect'] as const;
@@ -159,13 +181,48 @@ export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'Lock
 export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
   if (!shape) return false;
   if (HANDLE_RESIZE_LOCKS.some((lock) => lockCellEnabled(shape, lock))) return true;
-  return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => cellIsGuarded(shape, cell));
+  return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => guardChainBlocked(shape, cell));
 }
 
-/** True when a single-cell write would be refused by a GUARD on that cell. */
+/** True when a single-cell write would be refused by the mutation policy. */
 export function isCellWriteBlocked(shape: ShapeSnapshot | null, cellName: string): boolean {
   if (!shape) return false;
-  return cellIsGuarded(shape, cellName);
+  return guardChainBlocked(shape, cellName);
+}
+
+/** A shape's own geometry primitive; text boxes share its id, so kind is part of the match. */
+function findShapePrimitive(primitives: readonly PagePrimitive[], id: string, depth = 0): ShapePrimitive | null {
+  if (depth >= 256) return null;
+  for (const primitive of primitives) {
+    if (primitive.kind === 'shape' && primitive.id === id) return primitive;
+    if (primitive.kind === 'group') {
+      const nested = findShapePrimitive(primitive.primitives, id, depth + 1);
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
+
+const HEX_COLOUR = /^#[0-9a-f]{6}$/i;
+
+/** A gradient stands in for its first stop, the way Visio's fill swatch shows it. */
+function paintSwatch(paint: Paint | undefined): string | undefined {
+  const colour = paint?.kind === 'solid' ? paint.color : paint?.kind === 'gradient' ? paint.stops[0]?.color : undefined;
+  return colour !== undefined && HEX_COLOUR.test(colour) ? colour : undefined;
+}
+
+/** Rendered stroke/fill colours for a shape, when the display list resolves one. */
+export function frameSwatch(
+  frame: PageDisplayList | null | undefined,
+  page: PageSnapshot | null,
+  shape: ShapeSnapshot | null,
+): { fill?: string; line?: string } {
+  if (!frame || !page || !shape) return {};
+  const primitive = findShapePrimitive(frame.primitives, `${page.sourcePartPath}:${shape.sourceId}`);
+  if (!primitive) return {};
+  const fill = paintSwatch(primitive.fill);
+  const line = primitive.stroke && HEX_COLOUR.test(primitive.stroke.color) ? primitive.stroke.color : undefined;
+  return { fill, line };
 }
 
 export function createRibbonCommands(
@@ -175,20 +232,19 @@ export function createRibbonCommands(
   onMutation: () => void,
   onError: (error: unknown) => void,
   onDownload: (bytes: Uint8Array) => void,
-  frame?: PageDisplayList | null
+  frame?: PageDisplayList | null,
+  pageBreaks?: PageBreakToggle
 ): RibbonCommands {
   const execute = (operation: (current: DiagramHandle, selected: VsdxShapeSelection | null) => void, needsSelection = false) => () => {
     if (!handle || (needsSelection && !selection)) return;
     try { operation(handle, selection); onMutation(); } catch (error) { onError(error); }
   };
-  const diagram = handle ? handle.snapshot() : null;
-  const pages = diagram?.pages ?? [];
-  const palette = diagram?.palette;
+  const pages = handle ? handle.snapshot().pages : [];
   const current = placementIn(pages, selection);
   const shape = current?.shape ?? null;
   const selected = Boolean(current && selection);
-  const activePage = pages.find((item) => item.id === selection?.pageId) ?? pageById(pages, pageId);
-  const swatch = resolvedSwatch(frame ?? null, activePage, shape);
+  const activePage = selection ? pages.find((page) => page.id === selection.pageId) ?? null : null;
+  const swatch = frameSwatch(frame, activePage, shape);
   const topIndex = current ? current.siblings.length - 1 : 0;
   const livePlacement = (currentHandle: DiagramHandle, currentSelection: VsdxShapeSelection | null) => placementIn(currentHandle.snapshot().pages, currentSelection);
   const formula = (cellName: string, value: string) => execute((currentHandle, currentSelection) => {
@@ -207,10 +263,24 @@ export function createRibbonCommands(
     undo: { id: 'undo', enabled: Boolean(handle?.canUndo()), run: execute((currentHandle) => { currentHandle.undo(); }) },
     redo: { id: 'redo', enabled: Boolean(handle?.canRedo()), run: execute((currentHandle) => { currentHandle.redo(); }) },
     delete: { id: 'delete', enabled: selected && !isDeleteBlocked(shape), run: execute((currentHandle, currentSelection) => { currentHandle.deleteShape(currentSelection!.pageId, currentSelection!.shapeId); }, true) },
-    fillColor: { id: 'fillColor', enabled: selected, value: swatch.fill ?? swatchColor(shape, 'FillForegnd', palette, '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
-    lineColor: { id: 'lineColor', enabled: selected, value: swatch.stroke ?? swatchColor(shape, 'LineColor', palette, '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },
-    lineWeight: { id: 'lineWeight', enabled: selected, value: cellFormula(shape, 'LineWeight'), run: (value?: string) => { if (value) formula('LineWeight', value)(); } },
-    linePattern: { id: 'linePattern', enabled: selected, value: cellFormula(shape, 'LinePattern'), run: (value?: string) => { if (value) formula('LinePattern', value)(); } },
+    fillColor: { id: 'fillColor', enabled: selected && !isCellWriteBlocked(shape, 'FillForegnd'), value: swatch.fill ?? color(cellValue(shape, 'FillForegnd'), '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
+    lineColor: { id: 'lineColor', enabled: selected && !isCellWriteBlocked(shape, 'LineColor'), value: swatch.line ?? color(cellValue(shape, 'LineColor'), '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },
+    lineWeight: {
+      id: 'lineWeight', enabled: selected && !isCellWriteBlocked(shape, 'LineWeight'), value: cellFormula(shape, 'LineWeight'), run: (value?: string) => {
+        if (value === undefined) return;
+        const next = parseLineWeightInput(value);
+        if (next === null || !isFormulaChange(cellFormula(shape, 'LineWeight'), value, parseLineWeightInput)) return;
+        formula('LineWeight', next)();
+      },
+    },
+    linePattern: {
+      id: 'linePattern', enabled: selected && !isCellWriteBlocked(shape, 'LinePattern'), value: cellFormula(shape, 'LinePattern'), run: (value?: string) => {
+        if (value === undefined) return;
+        const next = parseLinePatternInput(value);
+        if (next === null || !isFormulaChange(cellFormula(shape, 'LinePattern'), value, parseLinePatternInput)) return;
+        formula('LinePattern', next)();
+      },
+    },
     bringToFront: { id: 'bringToFront', enabled: selected && current!.index < topIndex, run: reorderTo((placement) => placement.siblings.length - 1, (placement) => placement.index < placement.siblings.length - 1) },
     bringForward: { id: 'bringForward', enabled: selected && current!.index < topIndex, run: reorderTo((placement) => placement.index + 1, (placement) => placement.index < placement.siblings.length - 1) },
     sendBackward: { id: 'sendBackward', enabled: selected && current!.index > 0, run: reorderTo((placement) => placement.index - 1, (placement) => placement.index > 0) },
@@ -227,16 +297,17 @@ export function createRibbonCommands(
         if (!page) throw new Error(`vsdx page ${pageId ?? ''} is no longer part of the diagram`);
         const rectangle = standardShapeById('rectangle');
         if (!rectangle) throw new Error('vsdx standard rectangle shape is unavailable');
-        currentHandle.addShape(page.id, rectangle.draft(1, 1, 1, 1));
+        currentHandle.addShape(page.id, rectangle.draft(1, 1, rectangle.defaultSize.width, rectangle.defaultSize.height));
       }),
     },
     download: { id: 'download', enabled: Boolean(handle), run: () => { if (!handle) return; try { onDownload(handle.save()); } catch (error) { onError(error); } } },
+    pageBreaks: { id: 'pageBreaks', enabled: Boolean(frame && pageBreaks), active: Boolean(pageBreaks?.shown), run: () => pageBreaks?.toggle() },
   } as RibbonCommands;
   return commands;
 }
 
-export function RibbonCommandsProvider({ handle, snapshot, pageId, selection, frame, onMutation, onError, onDownload, children }: RibbonCommandsProviderProps) {
-  const commands = useMemo(() => createRibbonCommands(handle, selection, pageId, onMutation, onError, onDownload, frame ?? null), [handle, snapshot, pageId, selection, frame, onMutation, onError, onDownload]);
+export function RibbonCommandsProvider({ handle, snapshot, pageId, selection, frame, onMutation, onError, onDownload, pageBreaks, children }: RibbonCommandsProviderProps) {
+  const commands = useMemo(() => createRibbonCommands(handle, selection, pageId, onMutation, onError, onDownload, frame, pageBreaks), [handle, snapshot, pageId, selection, frame, onMutation, onError, onDownload, pageBreaks]);
   return createElement(RibbonCommandsContext.Provider, { value: commands }, children);
 }
 

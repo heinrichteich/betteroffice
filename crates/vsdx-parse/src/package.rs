@@ -162,7 +162,12 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         load_relationships(&document_path, &parts, &mut relationships, &mut budget)?;
     let pages_part_path = target_by_type(document_relationships, relationship_types::PAGES);
     let masters_part_path = target_by_type(document_relationships, relationship_types::MASTERS);
-    let theme_part_paths = targets_by_type(document_relationships, relationship_types::THEME);
+    let mut theme_part_paths = targets_by_type(document_relationships, relationship_types::THEME);
+    for path in targets_by_type(document_relationships, relationship_types::THEME_OOX) {
+        if !theme_part_paths.contains(&path) {
+            theme_part_paths.push(path);
+        }
+    }
     let windows_part_path = target_by_type(document_relationships, relationship_types::WINDOWS);
     let mut page_part_paths = Vec::new();
     if let Some(path) = &pages_part_path {
@@ -257,16 +262,19 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
     });
     let page_contents = parse_part_sheets(&page_part_paths, &mut xml_parts, &mut budget)?;
     let master_contents = parse_part_sheets(&master_part_paths, &mut xml_parts, &mut budget)?;
-    let themes = theme_part_paths
-        .iter()
-        .enumerate()
-        .map(|(index, path)| {
-            let root = xml_parts
-                .get(path)
-                .ok_or_else(|| VsdxError::MissingPart(path.clone()))?;
-            Ok(((index + 1) as u32, parse_theme(root, path)?))
-        })
-        .collect::<Result<_, VsdxError>>()?;
+    let mut themes: BTreeMap<u32, Theme> = BTreeMap::new();
+    for (index, path) in theme_part_paths.iter().enumerate() {
+        let root = xml_parts
+            .get(path)
+            .ok_or_else(|| VsdxError::MissingPart(path.clone()))?;
+        let theme = parse_theme(root, path)?;
+        themes.insert((index + 1) as u32, theme.clone());
+        if let Some(id) = theme_scheme_enum(root)
+            && !themes.contains_key(&id)
+        {
+            themes.insert(id, theme);
+        }
+    }
     let sheet_part_paths: HashSet<&str> = std::iter::once(document_path.as_str())
         .chain(pages_part_path.iter().map(String::as_str))
         .chain(masters_part_path.iter().map(String::as_str))
@@ -346,6 +354,23 @@ fn parse_theme(root: &XmlElement, part: &str) -> Result<Theme, VsdxError> {
         theme.color_scheme.set(slot, value.to_owned());
     }
     Ok(theme)
+}
+
+fn theme_scheme_enum(root: &XmlElement) -> Option<u32> {
+    let elements = root.children_named("themeElements").next()?;
+    let scheme = elements.children_named("clrScheme").next()?;
+    let list = scheme.children_named("extLst").next()?;
+    for ext in list.children_named("ext") {
+        for id in ext.children_named("schemeID") {
+            if let Some(value) = id
+                .attribute("schemeEnum")
+                .and_then(|value| value.parse().ok())
+            {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 fn catalog_part_ids(
@@ -1507,7 +1532,12 @@ fn add_shape(
                 offset: end - 2,
                 length: 2,
             },
-            [b">".as_slice(), new_shape.as_slice(), b"</Shapes>"].concat(),
+            [
+                b">".as_slice(),
+                new_shape.as_slice(),
+                format!("</{}>", shapes.name).as_bytes(),
+            ]
+            .concat(),
         )
     } else {
         let close = part.bytes[..end]
@@ -2276,6 +2306,40 @@ fn targets_by_type(relationships: &[Relationship], kind: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn collects_themes_from_both_relationship_types_and_scheme_ids() {
+        fn theme(name: &str, accent: &str, scheme: Option<&str>) -> Vec<u8> {
+            let ext = scheme.map_or(String::new(), |value| {
+                format!(
+                    "<a:extLst><a:ext uri='{{x}}'><vt:schemeID xmlns:vt='http://schemas.microsoft.com/office/visio/2012/main' schemeEnum='{value}'/></a:ext></a:extLst>"
+                )
+            });
+            format!(
+                "<a:theme xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main' name='{name}'><a:themeElements><a:clrScheme name='{name}'><a:accent1><a:srgbClr val='{accent}'/></a:accent1>{ext}</a:clrScheme></a:themeElements></a:theme>"
+            )
+            .into_bytes()
+        }
+        let package = rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec()),
+            ("visio/document.xml".to_owned(), b"<VisioDocument/>".to_vec()),
+            ("visio/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/theme' Target='theme/theme1.xml'/><Relationship Id='r2' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme' Target='theme/theme2.xml'/></Relationships>"#.to_vec()),
+            ("visio/theme/theme1.xml".to_owned(), theme("First", "AAAAAA", Some("5"))),
+            ("visio/theme/theme2.xml".to_owned(), theme("Second", "BBBBBB", None)),
+        ])
+        .unwrap();
+        let parsed = parse_vsdx(&package).unwrap();
+        let accent = |index: u32| {
+            parsed
+                .themes
+                .get(&index)
+                .map(|theme| theme.color_scheme.accent1.clone())
+        };
+        assert_eq!(accent(1).as_deref(), Some("AAAAAA"));
+        assert_eq!(accent(2).as_deref(), Some("BBBBBB"));
+        assert_eq!(accent(5).as_deref(), Some("AAAAAA"));
+    }
+
+    #[test]
     fn opens_parts_that_carry_no_relationship_part() {
         let content_types = ("[Content_Types].xml".to_owned(), br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec());
         let root_rels = ("_rels/.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec());
@@ -2862,6 +2926,26 @@ mod tests {
             reparsed.part_bytes(&path).unwrap(),
             b"<PageContents><Shapes><Shape ID='1'/><Shape ID='2'/></Shapes><Connects><Connect FromSheet=\"2\" FromCell=\"BeginX\" ToSheet=\"1\" ToCell=\"PinX\"/></Connects></PageContents>"
         );
+        validate_structure(&reparsed).unwrap();
+    }
+
+    #[test]
+    fn add_shape_preserves_a_prefixed_empty_shapes_container() {
+        let source = b"<v:PageContents xmlns:v='http://schemas.microsoft.com/office/visio/2012/main'><v:Shapes/></v:PageContents>";
+        let (package, path) = package_with_page_xml(source);
+        let saved = save_structural_edits(
+            &package,
+            &[StructuralEdit::AddShape {
+                page_id: package.page_part_ids[&path],
+                shape_xml: b"<v:Shape><v:Cell N='Width' V='1'/></v:Shape>".to_vec(),
+            }],
+        )
+        .unwrap();
+        let reparsed = parse_vsdx(&saved).unwrap();
+        let after = std::str::from_utf8(reparsed.part_bytes(&path).unwrap()).unwrap();
+        assert!(after.contains("</v:Shapes>"), "{after}");
+        assert!(!after.contains("</Shapes>"), "{after}");
+        assert_eq!(reparsed.page_contents[&path].shapes().count(), 1);
         validate_structure(&reparsed).unwrap();
     }
 

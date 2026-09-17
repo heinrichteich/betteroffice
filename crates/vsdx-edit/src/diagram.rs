@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use vsdx_eval::{MutationContext, MutationOutcome, decide_mutation, evaluate};
+use vsdx_eval::{
+    Evaluation, Expr, MutationContext, MutationOutcome, References, Value, decide_mutation,
+    evaluate,
+};
 use vsdx_parse::{
     Cell, CellLocator, CellRow, CellSheet, MutationGesture, ParseLimits, RowChild, SectionChild,
     Shape, ShapeChild, ShapesChild, SheetChild, StructuralEdit,
@@ -14,15 +17,16 @@ use yrs::{
 
 use crate::{
     CONNECTS, CellFormulaReceipt, CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx,
-    EditError, EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, PaletteEntry, SHEETS, STORIES,
-    ShapeDraft, ShapeReceipt, ShapeSnapshot, TextReceipt,
+    EditError, EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES, ShapeDraft,
+    ShapeReceipt, ShapeSnapshot, TextReceipt,
 };
 
 mod connect;
+mod containers;
 
 const SCHEMA_VERSION: f64 = 2.0;
-const LEGACY_SCHEMA_VERSION: f64 = 1.0;
-const MIGRATE_ORIGIN: &str = "vsdx:migrate";
+/// Stories held resolved text tokens as JSON before this version.
+const TOKEN_STORY_SCHEMA_VERSION: f64 = 1.0;
 pub(crate) const MAX_SHAPE_NESTING: usize = 256;
 type SectionRows<'a> = Vec<(
     (String, Option<u32>),
@@ -54,9 +58,6 @@ pub(crate) fn seed_doc(
     );
     meta.insert(&mut txn, "pageWidth", 0.0);
     meta.insert(&mut txn, "pageHeight", 0.0);
-    if let Ok(palette) = serde_json::to_string(&document_palette(&package.colors)) {
-        meta.insert(&mut txn, "paletteJson", palette);
-    }
     let order = txn.get_or_insert_array(PAGE_ORDER);
     let pages = txn.get_or_insert_map(PAGES);
     let sheets = txn.get_or_insert_map(SHEETS);
@@ -100,39 +101,6 @@ pub(crate) fn seed_doc(
         }
     }
     Ok(())
-}
-
-/// Document colour table projected for swatches; mirrors vsdx-render palette matching.
-pub(crate) fn document_palette(colors: &[vsdx_parse::XmlRecord]) -> Vec<PaletteEntry> {
-    let mut palette = Vec::new();
-    for record in colors {
-        let Some(index) = record.attributes.iter().find_map(|(name, value)| {
-            matches!(name.as_str(), "IX" | "Index")
-                .then(|| value.parse::<i64>().ok())
-                .flatten()
-        }) else {
-            continue;
-        };
-        let Some(color) = record
-            .attributes
-            .iter()
-            .find_map(|(name, value)| {
-                matches!(name.as_str(), "RGB" | "Color" | "Value").then_some(value)
-            })
-            .map(|value| value.trim_start_matches('#'))
-            .filter(|value| value.len() == 6 && value.chars().all(|ch| ch.is_ascii_hexdigit()))
-            .map(|value| format!("#{value}"))
-        else {
-            continue;
-        };
-        if palette
-            .iter()
-            .all(|entry: &PaletteEntry| entry.index != index)
-        {
-            palette.push(PaletteEntry { index, color });
-        }
-    }
-    palette
 }
 
 pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage> {
@@ -800,6 +768,15 @@ impl DiagramSession {
         };
         let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
         let before = map_string(&cell, &txn, "formula");
+        if before.as_deref() == Some(formula.as_str()) {
+            return Ok(CellFormulaReceipt {
+                page_id: page_id.to_owned(),
+                shape_id: shape_id.to_owned(),
+                cell_name: target.cell_name,
+                before,
+                after: formula,
+            });
+        }
         cell.insert(&mut txn, "formula", formula.as_str());
         Ok(CellFormulaReceipt {
             page_id: page_id.to_owned(),
@@ -808,6 +785,78 @@ impl DiagramSession {
             before,
             after: formula,
         })
+    }
+
+    /// Writes a `Control` row's `X` and `Y` in one transaction, so a handle drag is one undo entry.
+    pub fn set_control_handle(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        row: &str,
+        x_formula: Option<String>,
+        y_formula: Option<String>,
+    ) -> EditResult<Vec<CellFormulaReceipt>> {
+        let requested = [("X", x_formula), ("Y", y_formula)]
+            .into_iter()
+            .filter_map(|(name, formula)| formula.map(|formula| (name, formula)))
+            .collect::<Vec<_>>();
+        if requested.is_empty() {
+            return Err(EditError::InvalidState(
+                "control handle edit writes no axis".to_owned(),
+            ));
+        }
+        let mut txn = self.transact_for(context);
+        let context_for_policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
+        let mut targets = Vec::with_capacity(requested.len());
+        for (name, formula) in requested {
+            let locator = CellLocator {
+                sheet: CellSheet::Page(0),
+                shape_id: None,
+                section: Some("Control".to_owned()),
+                section_index: None,
+                row: Some(CellRow::Name(row.to_owned())),
+                cell_name: name.to_owned(),
+            };
+            match decide_mutation(
+                &context_for_policy,
+                context_for_policy.locator(locator),
+                MutationGesture::CellEdit,
+                formula.clone(),
+                &ParseLimits::default(),
+            ) {
+                MutationOutcome::Allowed { target, .. } => targets.push((target, formula)),
+                MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                    return Err(EditError::InvalidState(reason));
+                }
+            }
+        }
+        for (index, (target, _)) in targets.iter().enumerate() {
+            if targets[..index].iter().any(|(seen, _)| seen == target) {
+                return Err(EditError::InvalidState(format!(
+                    "redirects converge on {} more than once",
+                    target.cell_name
+                )));
+            }
+        }
+        let mut prepared = Vec::with_capacity(targets.len());
+        for (target, formula) in targets {
+            let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
+            prepared.push((target, formula, cell));
+        }
+        let mut receipts = Vec::with_capacity(prepared.len());
+        for (target, formula, cell) in prepared {
+            let before = map_string(&cell, &txn, "formula");
+            cell.insert(&mut txn, "formula", formula.as_str());
+            receipts.push(CellFormulaReceipt {
+                page_id: page_id.to_owned(),
+                shape_id: shape_id.to_owned(),
+                cell_name: target.cell_name,
+                before,
+                after: formula,
+            });
+        }
+        Ok(receipts)
     }
 
     pub fn shape_text(&self, page_id: &str, shape_id: &str) -> EditResult<String> {
@@ -1108,6 +1157,14 @@ impl DiagramSession {
             .into_iter()
             .map(decide)
             .collect::<EditResult<Vec<_>>>()?;
+        for (index, (target, _)) in targets.iter().enumerate() {
+            if targets[..index].iter().any(|(seen, _)| seen == target) {
+                return Err(EditError::InvalidState(format!(
+                    "redirects converge on {} more than once",
+                    target.cell_name
+                )));
+            }
+        }
         let prepared = targets
             .into_iter()
             .map(|(target, formula)| {
@@ -1158,8 +1215,14 @@ fn insert_shape(
     largest.checked_add(1).ok_or_else(|| {
         EditError::InvalidState("cannot allocate a materialized source ID".to_owned())
     })?;
-    let sequence = txn.state_vector().get(&yrs::ClientID::new(client_id));
-    let id = format!("{id_prefix}{sequence}");
+    let mut sequence = txn.state_vector().get(&yrs::ClientID::new(client_id));
+    let id = loop {
+        let candidate = format!("{id_prefix}{sequence}");
+        if sheets.get(&*txn, candidate.as_str()).is_none() {
+            break candidate;
+        }
+        sequence += 1;
+    };
     let shape = sheets.insert(txn, id.as_str(), MapPrelim::default());
     shape.insert(txn, "id", id.as_str());
     shape.insert(txn, "pageId", page_id);
@@ -1263,47 +1326,32 @@ fn validate_shape_draft(draft: &ShapeDraft) -> EditResult<()> {
 }
 
 pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
-    migrate_doc(doc)?;
     validate_schema(doc)?;
     serializable_doc(doc)
 }
 
-/// Carries a version 1 document forward: stories held resolved text tokens
-/// as JSON, while version 2 stores the plain text behind them.
+/// Carries a stored document forward; an unknown version is left for [`validate_schema`].
 pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
-    let version = {
-        let txn = doc.transact();
-        let meta = required_map(&txn, META)?;
-        map_number(&meta, &txn, "schemaVersion")
-    };
-    if version == Some(SCHEMA_VERSION) {
-        return Ok(());
-    }
-    if version != Some(LEGACY_SCHEMA_VERSION) {
-        return Err(EditError::InvalidState(
-            "unsupported diagram schema version".to_owned(),
-        ));
-    }
     let rewrites = {
         let txn = doc.transact();
-        let Some(stories) = txn.get_map(STORIES) else {
-            return Err(EditError::InvalidState(
-                "missing vsdx:stories map".to_owned(),
-            ));
-        };
-        let mut rewrites = Vec::new();
-        for (key, value) in stories.iter(&txn) {
-            let Out::Any(Any::String(value)) = value else {
-                continue;
-            };
-            if let Ok(tokens) = serde_json::from_str::<Vec<vsdx_resolve::ResolvedTextToken>>(&value)
-            {
-                rewrites.push((key.to_owned(), plain_text(&tokens)));
-            }
+        let meta = required_map(&txn, META)?;
+        if map_number(&meta, &txn, "schemaVersion") != Some(TOKEN_STORY_SCHEMA_VERSION) {
+            return Ok(());
         }
-        rewrites
+        let stories = required_map(&txn, STORIES)?;
+        stories
+            .iter(&txn)
+            .filter_map(|(key, value)| {
+                let Out::Any(Any::String(value)) = value else {
+                    return None;
+                };
+                serde_json::from_str::<Vec<vsdx_resolve::ResolvedTextToken>>(&value)
+                    .ok()
+                    .map(|tokens| (key.to_owned(), plain_text(&tokens)))
+            })
+            .collect::<Vec<_>>()
     };
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let mut txn = doc.transact_mut_with(crate::MIGRATE_ORIGIN);
     let stories = required_map(&txn, STORIES)?;
     for (key, text) in &rewrites {
         stories.insert(&mut txn, key.as_str(), text.as_str());
@@ -1483,7 +1531,6 @@ pub(crate) fn normalize_concurrent_orders(staged: &Doc) -> EditResult<()> {
 }
 
 pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<()> {
-    migrate_doc(staged)?;
     validate_schema(staged)?;
     validate_immutable_metadata(before, staged)?;
     validate_session_topology(before, staged)?;
@@ -2154,12 +2201,6 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
     let order = required_array(&txn, PAGE_ORDER)?;
     let pages = required_map(&txn, PAGES)?;
     let sheets = required_map(&txn, SHEETS)?;
-    let palette = txn
-        .get_map(META)
-        .as_ref()
-        .and_then(|meta| map_string(meta, &txn, "paletteJson"))
-        .and_then(|json| serde_json::from_str(&json).ok())
-        .unwrap_or_default();
     let mut result = Vec::new();
     validate_acyclic_parents(&sheets, &txn)?;
     for index in 0..order.len(&txn) {
@@ -2196,10 +2237,7 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
             shapes,
         });
     }
-    Ok(DiagramSnapshot {
-        pages: result,
-        palette,
-    })
+    Ok(DiagramSnapshot { pages: result })
 }
 
 fn snapshot_shape<T: ReadTxn>(
@@ -2362,6 +2400,173 @@ fn evaluate_cached_formula(
             vsdx_eval::Value::Color(_) => None,
         },
         _ => None,
+    }
+}
+
+pub(crate) fn loc_pin_at_size<T: ReadTxn>(
+    txn: &T,
+    shape_id: &str,
+    width: f64,
+    height: f64,
+) -> EditResult<(f64, f64)> {
+    let sheets = required_map(txn, SHEETS)?;
+    let shape = map_ref(&sheets, txn, shape_id)?;
+    let cells = map_map(&shape, txn, "cells")?;
+    let base = local_references(&cells, txn)?;
+    let overrides = SizeOverrideRefs {
+        base: &base,
+        width: width.to_string(),
+        height: height.to_string(),
+    };
+    Ok((
+        loc_pin_component(&base, &overrides, "LocPinX", width),
+        loc_pin_component(&base, &overrides, "LocPinY", height),
+    ))
+}
+
+struct SizeOverrideRefs<'a> {
+    base: &'a vsdx_resolve::ResolvedShape,
+    width: String,
+    height: String,
+}
+
+impl References for SizeOverrideRefs<'_> {
+    fn formula(&self, name: &str) -> Option<&str> {
+        if is_size_cell(name) {
+            None
+        } else {
+            self.base.formula(name)
+        }
+    }
+
+    fn value(&self, name: &str) -> Option<(&str, Option<&str>)> {
+        self.size_value(name).or_else(|| self.base.value(name))
+    }
+
+    fn formula_in(&self, sheet: Option<u32>, name: &str) -> Option<&str> {
+        if sheet.is_none() && is_size_cell(name) {
+            None
+        } else {
+            self.base.formula_in(sheet, name)
+        }
+    }
+
+    fn value_in(&self, sheet: Option<u32>, name: &str) -> Option<(&str, Option<&str>)> {
+        if sheet.is_none() {
+            self.size_value(name)
+                .or_else(|| self.base.value_in(sheet, name))
+        } else {
+            self.base.value_in(sheet, name)
+        }
+    }
+
+    fn formula_in_scoped(
+        &self,
+        sheet: Option<u32>,
+        scope: Option<&str>,
+        name: &str,
+    ) -> Option<&str> {
+        if sheet.is_none() && scope.is_none() && is_size_cell(name) {
+            None
+        } else {
+            self.base.formula_in_scoped(sheet, scope, name)
+        }
+    }
+
+    fn value_in_scoped(
+        &self,
+        sheet: Option<u32>,
+        scope: Option<&str>,
+        name: &str,
+    ) -> Option<(&str, Option<&str>)> {
+        if sheet.is_none() && scope.is_none() {
+            self.size_value(name)
+                .or_else(|| self.base.value_in_scoped(sheet, scope, name))
+        } else {
+            self.base.value_in_scoped(sheet, scope, name)
+        }
+    }
+
+    fn reference_key(&self, sheet: Option<u32>, name: &str) -> String {
+        self.base.reference_key(sheet, name)
+    }
+}
+
+impl SizeOverrideRefs<'_> {
+    fn size_value(&self, name: &str) -> Option<(&str, Option<&str>)> {
+        if name.eq_ignore_ascii_case("Width") {
+            Some((&self.width, None))
+        } else if name.eq_ignore_ascii_case("Height") {
+            Some((&self.height, None))
+        } else {
+            None
+        }
+    }
+}
+
+fn is_size_cell(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Width") || name.eq_ignore_ascii_case("Height")
+}
+
+fn numeric_reference(references: &impl References, name: &str) -> Option<f64> {
+    let formula = references.formula(name)?;
+    match evaluate(
+        formula.trim_start_matches('='),
+        references,
+        &ParseLimits::default(),
+    ) {
+        Evaluation::Evaluated(result) => match result.value {
+            Value::Number(number) => Some(number.number),
+            Value::Color(_) => None,
+        },
+        _ => None,
+    }
+}
+
+fn references_pin(expression: &Expr) -> bool {
+    match expression {
+        Expr::Reference(name) => {
+            !name.contains('!') && {
+                let cell = name.rsplit('.').next().unwrap_or(name);
+                cell.eq_ignore_ascii_case("PinX") || cell.eq_ignore_ascii_case("PinY")
+            }
+        }
+        Expr::Unary(inner) => references_pin(inner),
+        Expr::Binary(left, _, right) => references_pin(left) || references_pin(right),
+        Expr::Call(_, arguments) => arguments.iter().any(references_pin),
+        Expr::Number(_, _) | Expr::String(_) => false,
+    }
+}
+
+fn loc_pin_component(
+    base: &vsdx_resolve::ResolvedShape,
+    overrides: &SizeOverrideRefs<'_>,
+    name: &str,
+    proposed_size: f64,
+) -> f64 {
+    let current = numeric_reference(base, name)
+        .or_else(|| {
+            base.value(name)
+                .and_then(|(value, _)| value.parse::<f64>().ok())
+        })
+        .unwrap_or(proposed_size / 2.0);
+    let Some(formula) = base.formula(name) else {
+        return current;
+    };
+    let trimmed = formula.trim_start_matches('=').trim();
+    if trimmed.is_empty() {
+        return current;
+    }
+    match vsdx_eval::parse(trimmed, &ParseLimits::default()) {
+        Ok(expression) if references_pin(&expression) => current,
+        Ok(_) => match evaluate(trimmed, overrides, &ParseLimits::default()) {
+            Evaluation::Evaluated(result) => match result.value {
+                Value::Number(number) => number.number,
+                Value::Color(_) => current,
+            },
+            _ => current,
+        },
+        Err(_) => current,
     }
 }
 
@@ -3375,38 +3580,88 @@ mod tests {
             .to_vec()
     }
 
-    #[test]
-    fn legacy_json_stories_migrate_to_plain_text_on_open() {
-        let source = include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx");
-        let session = DiagramSession::open(source, 3).unwrap();
-        let plain = session.shape_text("page:1", "page:1:shape:3").unwrap();
-        assert!(!plain.is_empty());
-        let legacy = serde_json::to_string(&vec![vsdx_resolve::ResolvedTextToken::Literal(
-            plain.clone(),
-        )])
-        .unwrap();
-        assert_ne!(legacy, plain);
-        {
-            let mut txn = session.doc.transact_mut();
-            txn.get_map(STORIES)
-                .unwrap()
-                .insert(&mut txn, "page:1:shape:3", legacy.as_str());
-            txn.get_map(META)
-                .unwrap()
-                .insert(&mut txn, "schemaVersion", LEGACY_SCHEMA_VERSION);
+    fn story_values(doc: &Doc) -> std::collections::BTreeMap<String, String> {
+        let txn = doc.transact();
+        txn.get_map(STORIES)
+            .unwrap()
+            .iter(&txn)
+            .map(|(id, value)| {
+                let Out::Any(Any::String(text)) = value else {
+                    panic!("story {id} is not a string");
+                };
+                (id.to_owned(), text.to_string())
+            })
+            .collect()
+    }
+
+    fn stamp_token_stories(
+        session: &DiagramSession,
+        stories: &std::collections::BTreeMap<String, String>,
+    ) {
+        let mut txn = session.doc.transact_mut_with(crate::HYDRATE_ORIGIN);
+        let map = txn.get_or_insert_map(STORIES);
+        for (id, text) in stories {
+            let tokens = if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![vsdx_resolve::ResolvedTextToken::Literal(text.clone())]
+            };
+            let json = serde_json::to_string(&tokens).unwrap();
+            map.insert(&mut txn, id.as_str(), json.as_str());
         }
-        let update = session.encode_state_as_update_v1();
-        let reopened = DiagramSession::open_from_update(&update, 4).unwrap();
+        txn.get_or_insert_map(META)
+            .insert(&mut txn, "schemaVersion", TOKEN_STORY_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_token_stories_migrate_to_plain_text_on_open() {
+        let session = DiagramSession::open(GROUP_MASTER_TEXT, 3).unwrap();
+        let expected = story_values(&session.doc);
+        assert!(expected.values().any(|text| text == "group label"));
+        assert!(expected.values().any(String::is_empty));
+        stamp_token_stories(&session, &expected);
+        assert!(
+            story_values(&session.doc)
+                .values()
+                .all(|text| text.starts_with('['))
+        );
+
+        let reopened =
+            DiagramSession::open_from_update(&session.encode_state_as_update_v1(), 4).unwrap();
+        assert_eq!(story_values(&reopened.doc), expected);
         assert_eq!(
-            reopened.shape_text("page:1", "page:1:shape:3").unwrap(),
-            plain
+            reopened.shape_text("page:1", SUB_SHAPE).unwrap(),
+            "group label"
         );
         let txn = reopened.doc.transact();
         assert_eq!(
-            map_number(&txn.get_map(META).unwrap(), &txn, "schemaVersion"),
+            map_number(&required_map(&txn, META).unwrap(), &txn, "schemaVersion"),
             Some(SCHEMA_VERSION)
         );
+        drop(txn);
         assert!(semantic_text_edits(&reopened.doc).unwrap().is_empty());
+        assert!(!reopened.can_undo());
+        assert_eq!(
+            reopened.save().unwrap(),
+            vsdx_parse::write_vsdx(&vsdx_parse::parse_vsdx(GROUP_MASTER_TEXT).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn remote_update_cannot_downgrade_the_schema_version() {
+        let live = DiagramSession::open(GROUP_MASTER_TEXT, 5).unwrap();
+        let peer = DiagramSession::open(GROUP_MASTER_TEXT, 6).unwrap();
+        let expected = story_values(&live.doc);
+        stamp_token_stories(&peer, &expected);
+
+        let error = live
+            .apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap_err();
+        assert!(
+            matches!(&error, EditError::InvalidState(reason) if reason.contains("schema version")),
+            "unexpected error {error:?}"
+        );
+        assert_eq!(story_values(&live.doc), expected);
     }
 
     #[test]
@@ -3567,40 +3822,5 @@ mod tests {
             page.replace("<Text>renamed</Text>", ""),
             String::from_utf8(part(GROUP_MASTER_TEXT, PAGE_PART)).unwrap()
         );
-    }
-
-    #[test]
-    fn document_palette_resolves_indexed_entries() {
-        let colors: Vec<vsdx_parse::XmlRecord> = serde_json::from_value(serde_json::json!([
-            {"name": "ColorEntry", "attributes": [["IX", "1"], ["RGB", "0000FF"]]},
-            {"name": "ColorEntry", "attributes": [["Index", "2"], ["Color", "#00FF00"]]},
-            {"name": "ColorEntry", "attributes": [["IX", "7"], ["RGB", "zzzzzz"]]},
-            {"name": "ColorEntry", "attributes": [["RGB", "FF0000"]]},
-            {"name": "ColorEntry", "attributes": [["IX", "1"], ["RGB", "FFFFFF"]]},
-        ]))
-        .unwrap();
-        assert_eq!(
-            document_palette(&colors),
-            vec![
-                PaletteEntry {
-                    index: 1,
-                    color: "#0000FF".into()
-                },
-                PaletteEntry {
-                    index: 2,
-                    color: "#00FF00".into()
-                },
-            ]
-        );
-        let legacy: DiagramSnapshot = serde_json::from_str(r#"{"pages":[]}"#).unwrap();
-        assert!(legacy.palette.is_empty());
-    }
-
-    #[test]
-    fn snapshot_carries_the_document_palette() {
-        let source = include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx");
-        let session = DiagramSession::open(source, 3).unwrap();
-        let expected = document_palette(&vsdx_parse::parse_vsdx(source).unwrap().colors);
-        assert_eq!(session.snapshot().unwrap().palette, expected);
     }
 }

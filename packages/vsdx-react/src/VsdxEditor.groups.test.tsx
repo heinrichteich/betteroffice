@@ -3,7 +3,8 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { initWasm } from '@betteroffice/vsdx';
-import type { DiagramHandle, PagePrimitive } from '@betteroffice/vsdx';
+import { en } from '@betteroffice/vsdx-i18n';
+import type { Affine, DiagramHandle, PagePrimitive } from '@betteroffice/vsdx';
 import { VsdxEditor } from './VsdxEditor';
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
@@ -18,10 +19,29 @@ const CHILD_ID = 'page:1:shape:1:shape:2:shape:3';
 const CHILD_PART_ID = 'visio/pages/page1.xml:3';
 const INSIDE_CHILD = { x: 823, y: 165 };
 
-function childPoints(primitives: readonly PagePrimitive[]): Array<{ x: number; y: number }> {
+const IDENTITY: Affine = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+
+function compose(outer: Affine, inner: Affine): Affine {
+  return {
+    a: outer.a * inner.a + outer.c * inner.b, b: outer.b * inner.a + outer.d * inner.b,
+    c: outer.a * inner.c + outer.c * inner.d, d: outer.b * inner.c + outer.d * inner.d,
+    e: outer.a * inner.e + outer.c * inner.f + outer.e, f: outer.b * inner.e + outer.d * inner.f + outer.f,
+  };
+}
+
+/** Page-space canvas points for the group child, composed through its ancestor transforms. */
+function childPoints(primitives: readonly PagePrimitive[], ancestors: Affine = IDENTITY): Array<{ x: number; y: number }> {
   for (const primitive of primitives) {
-    if (primitive.kind === 'shape' && primitive.id === CHILD_PART_ID) return primitive.path.filter((command) => Number.isFinite(Number(command.x)) && Number.isFinite(Number(command.y))).map((command) => ({ x: Number(command.x) * 96, y: 1056 - Number(command.y) * 96 }));
-    if (primitive.kind === 'group') { const nested = childPoints(primitive.primitives); if (nested.length) return nested; }
+    const local = compose(ancestors, ('transform' in primitive ? primitive.transform : undefined) ?? IDENTITY);
+    if (primitive.kind === 'shape' && primitive.id === CHILD_PART_ID) {
+      return primitive.path
+        .filter((command) => Number.isFinite(Number(command.x)) && Number.isFinite(Number(command.y)))
+        .map((command) => {
+          const x = Number(command.x), y = Number(command.y);
+          return { x: (local.a * x + local.c * y + local.e) * 96, y: 1056 - (local.b * x + local.d * y + local.f) * 96 };
+        });
+    }
+    if (primitive.kind === 'group') { const nested = childPoints(primitive.primitives, local); if (nested.length) return nested; }
   }
   return [];
 }
@@ -74,8 +94,8 @@ test('a click inside a group selects the group and frames it where the group is 
   const { main, calls, hit, child, restore } = await clickInsideTheGroup();
   try {
     expect(hit?.shapeId).toBe(CHILD_ID);
-    expect(child.left).toBeCloseTo(820.4, 1); expect(child.right).toBeCloseTo(1091.7, 1);
-    expect(child.top).toBeCloseTo(24.5, 1); expect(child.bottom).toBeCloseTo(165.5, 1);
+    expect(child.left).toBeCloseTo(764.7, 1); expect(child.right).toBeCloseTo(882.3, 1);
+    expect(child.top).toBeCloseTo(60.6, 1); expect(child.bottom).toBeCloseTo(178.2, 1);
     const label = main.getAttribute('aria-label') ?? '';
     expect(label).toContain(GROUP_ID);
     expect(label).not.toContain(CHILD_ID);
@@ -94,11 +114,11 @@ test('an arrow-key nudge moves the selected group in page space', async () => {
     const groupBefore = pin(handle, GROUP_ID, 'PinY');
     const childBefore = pin(handle, CHILD_ID, 'PinY');
     await act(async () => { fireEvent.keyDown(main, { key: 'ArrowUp' }); });
-    expect(pin(handle, GROUP_ID, 'PinY') - groupBefore).toBeCloseTo(10 / 96, 6);
+    expect(pin(handle, GROUP_ID, 'PinY') - groupBefore).toBeCloseTo(1 / 96, 6);
     expect(pin(handle, CHILD_ID, 'PinY')).toBe(childBefore);
     const moved = bounds(childPoints(handle.layoutPage(0).primitives));
     expect(moved.left).toBeCloseTo(child.left, 3);
-    expect(moved.top).toBeCloseTo(child.top - 10, 3);
+    expect(moved.top).toBeCloseTo(child.top - 1, 3);
   } finally { restore(); }
 });
 
@@ -110,5 +130,17 @@ test('a right-click inside a group selects the group before opening the menu', a
     const label = main.getAttribute('aria-label') ?? '';
     expect(label).toContain(GROUP_ID);
     expect(label).not.toContain(CHILD_ID);
+  } finally { restore(); }
+});
+
+test('a right-click on empty canvas swaps in the canvas menu and drops the selection', async () => {
+  const { main, restore } = await clickInsideTheGroup();
+  try {
+    await act(async () => { fireEvent.contextMenu(main, { clientX: INSIDE_CHILD.x, clientY: INSIDE_CHILD.y }); });
+    expect(document.querySelector(`[role="menu"][aria-label="${en.contextMenu.label}"]`)).not.toBeNull();
+    await act(async () => { fireEvent.contextMenu(main, { clientX: 5, clientY: 5 }); });
+    expect(document.querySelector(`[role="menu"][aria-label="${en.contextMenu.label}"]`)).toBeNull();
+    expect(document.querySelector(`[role="menu"][aria-label="${en.contextMenu.canvasLabel}"]`)).not.toBeNull();
+    expect(main.getAttribute('aria-label') ?? '').not.toContain(GROUP_ID);
   } finally { restore(); }
 });

@@ -63,19 +63,10 @@ pub struct PageSnapshot {
     pub shapes: Vec<ShapeSnapshot>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PaletteEntry {
-    pub index: i64,
-    pub color: String,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagramSnapshot {
     pub pages: Vec<PageSnapshot>,
-    #[serde(default)]
-    pub palette: Vec<PaletteEntry>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -105,6 +96,14 @@ pub struct TextReceipt {
     pub shape_id: String,
     pub before: String,
     pub after: String,
+}
+
+/// Paired receipts for a shape inserted with its connector in one transaction.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectedShapeReceipt {
+    pub shape: ShapeReceipt,
+    pub connector: ShapeReceipt,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
