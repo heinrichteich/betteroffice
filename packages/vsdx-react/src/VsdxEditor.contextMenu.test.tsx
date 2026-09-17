@@ -291,7 +291,7 @@ test('a click on a hover-opened submenu trigger keeps the submenu open', () => {
   try {
     const trigger = parentMenu().querySelector('[data-submenu-id="bringToFront"]') as HTMLElement;
     expect(trigger).not.toBeNull();
-    fireEvent.mouseOver(trigger);
+    fireEvent.mouseEnter(trigger);
     expect(document.querySelector('[data-submenu="bringToFront"]')).not.toBeNull();
     fireEvent.click(trigger);
     expect(document.querySelector('[data-submenu="bringToFront"]')).not.toBeNull();
@@ -333,6 +333,24 @@ test('a fully guarded rotate submenu stays closed to keyboard and pointer', () =
     expect(document.activeElement?.getAttribute('data-submenu-id')).toBe('sendToBack');
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' });
     expect(document.activeElement?.getAttribute('data-command-id')).toBe('delete');
+  } finally {
+    view.unmount();
+  }
+});
+
+test('a guarded Angle leaves the rotate submenu open with only the flips enabled', () => {
+  const { view, calls } = renderMenu({ cells: [cell('Angle', 'GUARD(0)'), cell('FlipX', '0'), cell('FlipY', '0')] });
+  try {
+    expect((parentMenu().querySelector('[data-submenu-id="rotateRight"]') as HTMLButtonElement).disabled).toBe(false);
+    const submenu = openSubmenu('rotateRight');
+    const disabled = (id: string) => (submenu.querySelector(`[data-command-id="${id}"]`) as HTMLButtonElement).disabled;
+    expect(disabled('rotateRight')).toBe(true);
+    expect(disabled('rotateLeft')).toBe(true);
+    expect(disabled('flipHorizontal')).toBe(false);
+    expect(disabled('flipVertical')).toBe(false);
+    expect(document.activeElement?.getAttribute('data-command-id')).toBe('flipHorizontal');
+    fireEvent.click(submenu.querySelector('[data-command-id="rotateRight"]') as HTMLElement);
+    expect(calls.formulas).toEqual([]);
   } finally {
     view.unmount();
   }

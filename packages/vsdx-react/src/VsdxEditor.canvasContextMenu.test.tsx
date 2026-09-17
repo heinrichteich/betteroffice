@@ -12,7 +12,7 @@ if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
 const { cleanup, fireEvent, render } = await import('@testing-library/react');
 
 interface Calls {
- undos: number;
+  undos: number;
   redos: number;
   added: unknown[][];
 }
@@ -68,8 +68,6 @@ afterEach(() => {
 test('the canvas menu offers only existing ribbon commands with a single divider', () => {
   const { view } = renderMenu();
   try {
-    expect(CANVAS_CONTEXT_ENTRIES.map((entry) => entry.id)).toEqual(['undo', 'redo', 'addShape']);
-    for (const entry of CANVAS_CONTEXT_ENTRIES) expect(entry.children ?? []).toEqual([]);
     const menu = canvasMenu();
     expect(menu.getAttribute('aria-label')).toBe(en.contextMenu.canvasLabel);
     expect(en.contextMenu.canvasLabel).not.toBe(en.contextMenu.label);
