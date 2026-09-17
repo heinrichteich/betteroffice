@@ -74,18 +74,12 @@ pub struct SceneTransform {
     pub scene: SceneAffine,
 }
 
-pub fn bounds_affine(
-    bounds: ShapeBounds,
-    child_extent: Option<(f64, f64, f64, f64)>,
-) -> SceneAffine {
-    let (origin_x, origin_y, scale_x, scale_y) = child_extent
-        .map(|(x, y, width, height)| (x, y, bounds.width / width, bounds.height / height))
-        .unwrap_or((0.0, 0.0, 1.0, 1.0));
+/// Maps a sheet's local space into its parent: local (0,0) is the shape box corner and
+/// LocPin lands on Pin. A group's children share this space, so no extent scaling applies.
+pub fn bounds_affine(bounds: ShapeBounds) -> SceneAffine {
     let (sin, cos) = bounds.angle.sin_cos();
-    let flip_x = if bounds.flip_x { -1.0 } else { 1.0 };
-    let flip_y = if bounds.flip_y { -1.0 } else { 1.0 };
-    let sx = scale_x * flip_x;
-    let sy = scale_y * flip_y;
+    let sx = if bounds.flip_x { -1.0 } else { 1.0 };
+    let sy = if bounds.flip_y { -1.0 } else { 1.0 };
     let pin_x = bounds.x + bounds.loc_pin_x;
     let pin_y = bounds.y + bounds.loc_pin_y;
     SceneAffine {
@@ -93,11 +87,8 @@ pub fn bounds_affine(
         b: sin * sx,
         c: -sin * sy,
         d: cos * sy,
-        e: pin_x - cos * (sx * origin_x + flip_x * bounds.loc_pin_x)
-            + sin * (sy * origin_y + flip_y * bounds.loc_pin_y),
-        f: pin_y
-            - sin * (sx * origin_x + flip_x * bounds.loc_pin_x)
-            - cos * (sy * origin_y + flip_y * bounds.loc_pin_y),
+        e: pin_x - cos * sx * bounds.loc_pin_x + sin * sy * bounds.loc_pin_y,
+        f: pin_y - sin * sx * bounds.loc_pin_x - cos * sy * bounds.loc_pin_y,
     }
 }
 
@@ -402,51 +393,22 @@ fn connection_point(
     row: u32,
     transform: Option<SceneAffine>,
 ) -> Option<ConnectionPoint> {
-    if let Some(section) = shape.sections.get("Connection") {
-        let resolved_row = section.rows.get(&format!("IX:{row}"))?;
-        if resolved_row.deleted {
-            return None;
-        }
-        let value = |name: &str| match resolved_row.cells.get(name)? {
-            Lookup::Found(cell) => number_from_cell(shape, &cell.cell),
-            _ => None,
-        };
-        let (x, x_provenance) = value("X")?;
-        let (y, y_provenance) = value("Y")?;
-        return Some(ConnectionPoint {
-            row,
-            position: transform?.apply_point(x, y),
-            x_provenance,
-            y_provenance,
-        });
-    }
-    implied_connection_point(shape, row, transform)
-}
-
-/// Synthesised N/E/S/W for sectionless shapes, matching the editor hover points.
-fn implied_connection_point(
-    shape: &ResolvedShape,
-    row: u32,
-    transform: Option<SceneAffine>,
-) -> Option<ConnectionPoint> {
-    let (fx, fy) = match row {
-        0 => (0.5, 1.0),
-        1 => (1.0, 0.5),
-        2 => (0.5, 0.0),
-        3 => (0.0, 0.5),
-        _ => return None,
-    };
-    let width = number(shape, "Width")?;
-    let height = number(shape, "Height")?;
-    let (x, y) = (width * fx, height * fy);
-    if !x.is_finite() || !y.is_finite() {
+    let section = shape.sections.get("Connection")?;
+    let resolved_row = section.rows.get(&format!("IX:{row}"))?;
+    if resolved_row.deleted {
         return None;
     }
+    let value = |name: &str| match resolved_row.cells.get(name)? {
+        Lookup::Found(cell) => number_from_cell(shape, &cell.cell),
+        _ => None,
+    };
+    let (x, x_provenance) = value("X")?;
+    let (y, y_provenance) = value("Y")?;
     Some(ConnectionPoint {
         row,
         position: transform?.apply_point(x, y),
-        x_provenance: NumericProvenance::Formula,
-        y_provenance: NumericProvenance::Formula,
+        x_provenance,
+        y_provenance,
     })
 }
 
@@ -481,42 +443,12 @@ fn add_scene_transforms(
     let Some(bounds) = shape_bounds(shape.id, resolved, value) else {
         return;
     };
-    let children = shape.shapes().collect::<Vec<_>>();
-    let extent = child_extent(&children, shapes, value);
-    let local = bounds_affine(bounds, extent);
+    let local = bounds_affine(bounds);
     let scene = parent.compose(local);
     transforms.insert(shape.id, SceneTransform { local, scene });
-    for child in children {
+    for child in shape.shapes() {
         add_scene_transforms(child, scene, shapes, value, transforms);
     }
-}
-
-fn child_extent(
-    children: &[&Shape],
-    shapes: &BTreeMap<u32, ResolvedShape>,
-    value: impl Fn(u32, &ResolvedShape, &str) -> Option<f64> + Copy,
-) -> Option<(f64, f64, f64, f64)> {
-    let bounds = children
-        .iter()
-        .filter_map(|source| {
-            shapes
-                .get(&source.id)
-                .and_then(|shape| shape_bounds(source.id, shape, value))
-        })
-        .collect::<Vec<_>>();
-    let min_x = bounds.iter().map(|bounds| bounds.x).reduce(f64::min)?;
-    let min_y = bounds.iter().map(|bounds| bounds.y).reduce(f64::min)?;
-    let max_x = bounds
-        .iter()
-        .map(|bounds| bounds.x + bounds.width)
-        .reduce(f64::max)?;
-    let max_y = bounds
-        .iter()
-        .map(|bounds| bounds.y + bounds.height)
-        .reduce(f64::max)?;
-    let width = max_x - min_x;
-    let height = max_y - min_y;
-    (width > 0.0 && height > 0.0).then_some((min_x, min_y, width, height))
 }
 
 fn shape_bounds(

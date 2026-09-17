@@ -17,8 +17,6 @@ The VSDX engine processes Visio diagram packages. The packages are available fro
 
 `@betteroffice/vsdx` provides the Wasm engine and Canvas display-list painter. Initialize the Wasm module before opening a diagram.
 
-The editing core creates glued 1D connectors: `add_connector` binds both endpoints to shape pins or connection rows in one transaction, and remote glue naming a missing connection row is refused.
-
 `@betteroffice/vsdx-react` provides the React editor. Its strings are supplied by `@betteroffice/vsdx-i18n`. Pass font bytes to the editor so layout and painting use the same faces.
 
 The Python binding in `bindings/python-vsdx` reads pages, shapes, cells, and connections. It is held out of the PyPI release train. Build it from the repository with `python -m pip install ./bindings/python-vsdx`.

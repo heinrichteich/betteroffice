@@ -325,6 +325,13 @@ pub fn write_docx_s13_wasm(request_json: &str, original_docx: &[u8]) -> Result<V
     write_docx_s13(request, original_docx).map_err(js_error)
 }
 
+/// Decodes TIFF bytes to PNG bytes for browsers without a TIFF decoder.
+#[cfg(all(feature = "wasm", feature = "tiff"))]
+#[wasm_bindgen(js_name = decodeTiffPng)]
+pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, JsValue> {
+    ooxml_drawingml::media::decode_tiff_png(data).map_err(js_error)
+}
+
 #[cfg(feature = "wasm")]
 fn js_error(error: impl ToString) -> JsValue {
     JsValue::from_str(&error.to_string())

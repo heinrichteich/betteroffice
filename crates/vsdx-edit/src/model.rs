@@ -88,6 +88,24 @@ pub struct ShapeReceipt {
     pub to_index: Option<u32>,
 }
 
+/// Typed receipt for a committed shape-text edit.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextReceipt {
+    pub page_id: String,
+    pub shape_id: String,
+    pub before: String,
+    pub after: String,
+}
+
+/// Paired receipts for a shape inserted with its connector in one transaction.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectedShapeReceipt {
+    pub shape: ShapeReceipt,
+    pub connector: ShapeReceipt,
+}
+
 /// A hand-routed connector path written in scene-space points.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

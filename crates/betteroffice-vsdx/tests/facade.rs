@@ -895,3 +895,18 @@ fn batched_edits_authorize_against_earlier_edits_in_the_batch() {
             .is_err()
     );
 }
+
+#[test]
+fn export_pdf_renders_a_vector_document_with_selectable_text() {
+    let source = include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx");
+    let diagram = Diagram::open(source).unwrap();
+    let pdf = diagram.export_pdf().unwrap();
+    assert!(pdf.starts_with(b"%PDF-1.4"));
+    assert!(pdf.ends_with(b"%%EOF"));
+    let text = String::from_utf8_lossy(&pdf);
+    assert!(text.contains("/Type /Page ") && text.contains("BT") && text.contains("Tj"));
+    assert_eq!(
+        text.match_indices("/Type /Page ").count(),
+        diagram.package().page_part_paths.len()
+    );
+}

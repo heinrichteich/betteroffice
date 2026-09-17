@@ -48,6 +48,13 @@ pub struct SemanticCellEdit {
     pub row_type: Option<String>,
 }
 
+/// Plain-text content of a shape's `Text` element.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticTextEdit {
+    pub locator: CellLocator,
+    pub text: String,
+}
+
 /// The user action that requested a ShapeSheet mutation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MutationGesture {
@@ -129,7 +136,7 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
     let source_parts = ooxml_opc::unzip_parts_with_limits(data, limits.max_expanded_bytes)
         .map_err(VsdxError::Container)?;
     match ooxml_opc::detect_package_kind(&source_parts) {
-        Ok(ooxml_opc::DocumentKind::Vsdx) => {}
+        Ok(ooxml_opc::DocumentKind::Vsdx) | Ok(ooxml_opc::DocumentKind::Vstx) => {}
         Ok(kind) => return Err(VsdxError::UnsupportedDocumentKind(kind)),
         Err(ooxml_opc::DocumentKindError::ConflictingMainDocumentRelationships(targets)) => {
             return Err(VsdxError::ConflictingMainDocumentRelationships(targets));
@@ -158,7 +165,12 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         load_relationships(&document_path, &parts, &mut relationships, &mut budget)?;
     let pages_part_path = target_by_type(document_relationships, relationship_types::PAGES);
     let masters_part_path = target_by_type(document_relationships, relationship_types::MASTERS);
-    let theme_part_paths = targets_by_type(document_relationships, relationship_types::THEME);
+    let mut theme_part_paths = targets_by_type(document_relationships, relationship_types::THEME);
+    for path in targets_by_type(document_relationships, relationship_types::THEME_OOX) {
+        if !theme_part_paths.contains(&path) {
+            theme_part_paths.push(path);
+        }
+    }
     let windows_part_path = target_by_type(document_relationships, relationship_types::WINDOWS);
     let mut page_part_paths = Vec::new();
     if let Some(path) = &pages_part_path {
@@ -253,16 +265,19 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
     });
     let page_contents = parse_part_sheets(&page_part_paths, &mut xml_parts, &mut budget)?;
     let master_contents = parse_part_sheets(&master_part_paths, &mut xml_parts, &mut budget)?;
-    let themes = theme_part_paths
-        .iter()
-        .enumerate()
-        .map(|(index, path)| {
-            let root = xml_parts
-                .get(path)
-                .ok_or_else(|| VsdxError::MissingPart(path.clone()))?;
-            Ok(((index + 1) as u32, parse_theme(root, path)?))
-        })
-        .collect::<Result<_, VsdxError>>()?;
+    let mut themes: BTreeMap<u32, Theme> = BTreeMap::new();
+    for (index, path) in theme_part_paths.iter().enumerate() {
+        let root = xml_parts
+            .get(path)
+            .ok_or_else(|| VsdxError::MissingPart(path.clone()))?;
+        let theme = parse_theme(root, path)?;
+        themes.insert((index + 1) as u32, theme.clone());
+        if let Some(id) = theme_scheme_enum(root)
+            && !themes.contains_key(&id)
+        {
+            themes.insert(id, theme);
+        }
+    }
     let sheet_part_paths: HashSet<&str> = std::iter::once(document_path.as_str())
         .chain(pages_part_path.iter().map(String::as_str))
         .chain(masters_part_path.iter().map(String::as_str))
@@ -342,6 +357,23 @@ fn parse_theme(root: &XmlElement, part: &str) -> Result<Theme, VsdxError> {
         theme.color_scheme.set(slot, value.to_owned());
     }
     Ok(theme)
+}
+
+fn theme_scheme_enum(root: &XmlElement) -> Option<u32> {
+    let elements = root.children_named("themeElements").next()?;
+    let scheme = elements.children_named("clrScheme").next()?;
+    let list = scheme.children_named("extLst").next()?;
+    for ext in list.children_named("ext") {
+        for id in ext.children_named("schemeID") {
+            if let Some(value) = id
+                .attribute("schemeEnum")
+                .and_then(|value| value.parse().ok())
+            {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 fn catalog_part_ids(
@@ -515,6 +547,8 @@ struct ContainerGroup {
 }
 
 /// Merges container cells that share an insertion point into one section block.
+/// Rows join one group only when the section itself is new; an existing section
+/// keeps a group per row so each row resolves its own insertion point.
 fn group_container_cells(cells: &[NewContainerCell]) -> Vec<ContainerGroup> {
     let mut groups: Vec<ContainerGroup> = Vec::new();
     for cell in cells {
@@ -523,6 +557,11 @@ fn group_container_cells(cells: &[NewContainerCell]) -> Vec<ContainerGroup> {
                 && group.owner_span == cell.owner_span
                 && group.section == cell.section
                 && group.section_index == cell.section_index
+                && (cell.section.is_some()
+                    || group
+                        .rows
+                        .iter()
+                        .all(|row| row.row == cell.row && row.row_type == cell.row_type))
         }) {
             Some(group) => group,
             None => {
@@ -1010,6 +1049,157 @@ pub fn save_semantic_cell_edits(
             &new_container_cells,
         )
     }
+}
+
+/// Patches only the inner XML of each edited shape's `Text` element.
+pub fn save_semantic_text_edits(
+    package: &VsdxPackage,
+    edits: &[SemanticTextEdit],
+) -> Result<Vec<u8>, VsdxError> {
+    let limits = ParseLimits::default();
+    let mut part_edits: BTreeMap<String, Vec<crate::SpanEdit>> = BTreeMap::new();
+    for edit in edits {
+        validate_text_content(&edit.text, &limits)?;
+        let (page_id, shape_id) = match (&edit.locator.sheet, edit.locator.shape_id) {
+            (CellSheet::Page(page_id), Some(shape_id)) => (*page_id, shape_id),
+            _ => {
+                return Err(VsdxError::InvalidCellEdit {
+                    part: format!("{:?}", edit.locator.sheet),
+                    message: "text edits require a page shape".to_owned(),
+                });
+            }
+        };
+        let path = package
+            .page_part_ids
+            .iter()
+            .find_map(|(path, id)| (*id == page_id).then(|| path.clone()))
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: page_id.to_string(),
+                message: "page does not exist".to_owned(),
+            })?;
+        let part = package
+            .parts
+            .iter()
+            .find(|part| part.path == path)
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: path.clone(),
+                message: "part does not exist".to_owned(),
+            })?;
+        let shape = part
+            .spans
+            .iter()
+            .find(|span| {
+                local_name(&span.name) == "Shape"
+                    && attribute_equals(&part.bytes, span, "ID", &shape_id.to_string())
+            })
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: path.clone(),
+                message: format!("shape {shape_id} does not exist"),
+            })?;
+        let text = part.spans.iter().find(|span| {
+            local_name(&span.name) == "Text"
+                && nearest_parent(part, span.span, "Shape")
+                    .is_some_and(|parent| parent.span == shape.span)
+        });
+        let escaped = escape_text_content(&edit.text);
+        match text {
+            Some(text) => {
+                let outer_end = text.span.end().ok_or(VsdxError::InvalidSpan)?;
+                let open_end = tag_close(&part.bytes, text.span.offset, outer_end)
+                    .ok_or(VsdxError::InvalidSpan)?;
+                if part.bytes[open_end.saturating_sub(1)] == b'/' {
+                    part_edits.entry(path).or_default().push(crate::SpanEdit {
+                        span: text.span,
+                        replacement: format!("<{}>{escaped}</{}>", text.name, text.name)
+                            .into_bytes(),
+                    });
+                } else {
+                    let inner_start = open_end + 1;
+                    let closing = part.bytes[inner_start..outer_end]
+                        .iter()
+                        .rposition(|byte| *byte == b'<')
+                        .map(|relative| relative + inner_start)
+                        .ok_or(VsdxError::InvalidSpan)?;
+                    part_edits.entry(path).or_default().push(crate::SpanEdit {
+                        span: crate::SourceSpan {
+                            offset: inner_start,
+                            length: closing - inner_start,
+                        },
+                        replacement: escaped.into_bytes(),
+                    });
+                }
+            }
+            None => {
+                let outer_end = shape.span.end().ok_or(VsdxError::InvalidSpan)?;
+                if outer_end >= 2 && part.bytes[outer_end - 2..outer_end] == *b"/>" {
+                    part_edits.entry(path).or_default().push(crate::SpanEdit {
+                        span: crate::SourceSpan {
+                            offset: outer_end - 2,
+                            length: 2,
+                        },
+                        replacement: format!("><Text>{escaped}</Text></{}>", shape.name)
+                            .into_bytes(),
+                    });
+                } else {
+                    let closing = part.bytes[..outer_end]
+                        .iter()
+                        .rposition(|byte| *byte == b'<')
+                        .ok_or(VsdxError::InvalidSpan)?;
+                    part_edits.entry(path).or_default().push(crate::SpanEdit {
+                        span: crate::SourceSpan {
+                            offset: closing,
+                            length: 0,
+                        },
+                        replacement: format!("<Text>{escaped}</Text>").into_bytes(),
+                    });
+                }
+            }
+        }
+    }
+    if part_edits.values().all(|edits| edits.is_empty()) {
+        return write_vsdx(package);
+    }
+    let mut output = package.clone();
+    for (path, edits) in &part_edits {
+        let part = package
+            .parts
+            .iter()
+            .find(|part| &part.path == path)
+            .expect("validated source part");
+        let bytes = apply_span_edits(&part.bytes, edits)?;
+        let target = output
+            .parts
+            .iter_mut()
+            .find(|part| &part.path == path)
+            .expect("validated source part");
+        target.bytes = bytes;
+    }
+    let bytes = write_vsdx(&output)?;
+    parse_vsdx(&bytes)?;
+    Ok(bytes)
+}
+
+fn validate_text_content(value: &str, limits: &ParseLimits) -> Result<(), VsdxError> {
+    if value.len() > limits.max_xml_text_bytes {
+        return Err(VsdxError::PatchLimit { kind: "editBytes" });
+    }
+    if value.chars().any(|c| !matches!(c, '\u{9}' | '\u{A}' | '\u{D}' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}')) {
+        return Err(VsdxError::InvalidXmlCharacter);
+    }
+    Ok(())
+}
+
+fn escape_text_content(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            _ => output.push(character),
+        }
+    }
+    output
 }
 
 /// Applies structural edits and validates references; deletion removes incident Connects.
@@ -1528,14 +1718,34 @@ fn add_connect(
             message: "Connect ToCell must be PinX, PinY, or Connections.XN".to_owned(),
         });
     }
-    if let Some(connects) = direct_child(part, "Connects", None) {
-        let fragment = connect_fragment(
-            from_sheet,
-            from_cell,
-            to_sheet,
-            to_cell,
-            &prefixed_name(&connects.name, "Connect"),
-        )?;
+    let connects = direct_child(part, "Connects", None);
+    let contents = part
+        .spans
+        .iter()
+        .find(|span| local_name(&span.name) == "PageContents")
+        .ok_or_else(|| VsdxError::InvalidCellEdit {
+            part: part.path.clone(),
+            message: "page has no PageContents container".to_owned(),
+        })?;
+    let owner = connects.unwrap_or(contents);
+    let prefix = owner.name.rsplit_once(':').map_or("", |(prefix, _)| prefix);
+    let qualify = |name: &str| {
+        if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}:{name}")
+        }
+    };
+    let mut fragment = format!("<{} FromSheet=\"", qualify("Connect")).into_bytes();
+    fragment.extend_from_slice(from_sheet.to_string().as_bytes());
+    fragment.extend_from_slice(b"\" FromCell=\"");
+    push_quoted_fragment(&mut fragment, from_cell)?;
+    fragment.extend_from_slice(b"\" ToSheet=\"");
+    fragment.extend_from_slice(to_sheet.to_string().as_bytes());
+    fragment.extend_from_slice(b"\" ToCell=\"");
+    push_quoted_fragment(&mut fragment, to_cell)?;
+    fragment.extend_from_slice(b"\"/>");
+    if let Some(connects) = connects {
         let end = connects.span.end().ok_or(VsdxError::InvalidSpan)?;
         if end >= 2 && part.bytes[end - 2..end] == *b"/>" {
             let mut replacement = Vec::from(b">".as_slice());
@@ -1561,43 +1771,15 @@ fn add_connect(
             replacement: fragment,
         }]);
     }
-    let contents = part
-        .spans
-        .iter()
-        .find(|span| local_name(&span.name) == "PageContents")
-        .ok_or_else(|| VsdxError::InvalidCellEdit {
-            part: part.path.clone(),
-            message: "page has no PageContents container".to_owned(),
-        })?;
-    let connects_name = prefixed_name(&contents.name, "Connects");
-    let fragment = connect_fragment(
-        from_sheet,
-        from_cell,
-        to_sheet,
-        to_cell,
-        &prefixed_name(&contents.name, "Connect"),
-    )?;
     let end = contents.span.end().ok_or(VsdxError::InvalidSpan)?;
-    if end >= 2 && part.bytes[end - 2..end] == *b"/>" {
-        let mut replacement = Vec::from(b">".as_slice());
-        replacement.extend_from_slice(format!("<{connects_name}>").as_bytes());
-        replacement.extend_from_slice(&fragment);
-        replacement.extend_from_slice(format!("</{connects_name}></{}>", contents.name).as_bytes());
-        return Ok(vec![SpanEdit {
-            span: crate::SourceSpan {
-                offset: end - 2,
-                length: 2,
-            },
-            replacement,
-        }]);
-    }
     let close = part.bytes[..end]
         .iter()
         .rposition(|byte| *byte == b'<')
         .ok_or(VsdxError::InvalidSpan)?;
-    let mut replacement = format!("<{connects_name}>").into_bytes();
+    let container = qualify("Connects");
+    let mut replacement = format!("<{container}>").into_bytes();
     replacement.extend_from_slice(&fragment);
-    replacement.extend_from_slice(format!("</{connects_name}>").as_bytes());
+    replacement.extend_from_slice(format!("</{container}>").as_bytes());
     Ok(vec![SpanEdit {
         span: crate::SourceSpan {
             offset: close,
@@ -1605,25 +1787,6 @@ fn add_connect(
         },
         replacement,
     }])
-}
-
-fn connect_fragment(
-    from_sheet: u32,
-    from_cell: &str,
-    to_sheet: u32,
-    to_cell: &str,
-    connect_name: &str,
-) -> Result<Vec<u8>, VsdxError> {
-    let mut fragment = format!("<{connect_name} FromSheet=\"").into_bytes();
-    fragment.extend_from_slice(from_sheet.to_string().as_bytes());
-    fragment.extend_from_slice(b"\" FromCell=\"");
-    push_quoted_fragment(&mut fragment, from_cell)?;
-    fragment.extend_from_slice(b"\" ToSheet=\"");
-    fragment.extend_from_slice(to_sheet.to_string().as_bytes());
-    fragment.extend_from_slice(b"\" ToCell=\"");
-    push_quoted_fragment(&mut fragment, to_cell)?;
-    fragment.extend_from_slice(b"\"/>");
-    Ok(fragment)
 }
 
 fn valid_glue_target(cell: &str) -> bool {
@@ -2134,12 +2297,24 @@ fn local_name(name: &str) -> &str {
     name.rsplit_once(':').map_or(name, |(_, name)| name)
 }
 
-/// Qualifies `local` with the prefix of `source`, when it has one.
-fn prefixed_name(source: &str, local: &str) -> String {
-    source.rsplit_once(':').map_or_else(
-        || local.to_owned(),
-        |(prefix, _)| format!("{prefix}:{local}"),
-    )
+/// Offset of the `>` closing the tag opened at `start`, skipping quoted values.
+fn tag_close(source: &[u8], start: usize, end: usize) -> Option<usize> {
+    let mut index = start;
+    let mut quote = None;
+    while index < end {
+        let byte = source[index];
+        if let Some(active) = quote {
+            if byte == active {
+                quote = None;
+            }
+        } else if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+        } else if byte == b'>' {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
 }
 
 fn contains(parent: crate::SourceSpan, child: crate::SourceSpan) -> bool {
@@ -2231,6 +2406,40 @@ fn targets_by_type(relationships: &[Relationship], kind: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn collects_themes_from_both_relationship_types_and_scheme_ids() {
+        fn theme(name: &str, accent: &str, scheme: Option<&str>) -> Vec<u8> {
+            let ext = scheme.map_or(String::new(), |value| {
+                format!(
+                    "<a:extLst><a:ext uri='{{x}}'><vt:schemeID xmlns:vt='http://schemas.microsoft.com/office/visio/2012/main' schemeEnum='{value}'/></a:ext></a:extLst>"
+                )
+            });
+            format!(
+                "<a:theme xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main' name='{name}'><a:themeElements><a:clrScheme name='{name}'><a:accent1><a:srgbClr val='{accent}'/></a:accent1>{ext}</a:clrScheme></a:themeElements></a:theme>"
+            )
+            .into_bytes()
+        }
+        let package = rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec()),
+            ("visio/document.xml".to_owned(), b"<VisioDocument/>".to_vec()),
+            ("visio/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/theme' Target='theme/theme1.xml'/><Relationship Id='r2' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme' Target='theme/theme2.xml'/></Relationships>"#.to_vec()),
+            ("visio/theme/theme1.xml".to_owned(), theme("First", "AAAAAA", Some("5"))),
+            ("visio/theme/theme2.xml".to_owned(), theme("Second", "BBBBBB", None)),
+        ])
+        .unwrap();
+        let parsed = parse_vsdx(&package).unwrap();
+        let accent = |index: u32| {
+            parsed
+                .themes
+                .get(&index)
+                .map(|theme| theme.color_scheme.accent1.clone())
+        };
+        assert_eq!(accent(1).as_deref(), Some("AAAAAA"));
+        assert_eq!(accent(2).as_deref(), Some("BBBBBB"));
+        assert_eq!(accent(5).as_deref(), Some("AAAAAA"));
+    }
+
     #[test]
     fn opens_parts_that_carry_no_relationship_part() {
         let content_types = ("[Content_Types].xml".to_owned(), br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec());
@@ -2862,130 +3071,51 @@ mod tests {
         validate_structure(&reparsed).unwrap();
     }
 
-    /// Prefixed containers keep their qualified closing tag.
     #[test]
-    fn add_connect_preserves_prefixed_container_names() {
-        let source = b"<v:PageContents xmlns:v='urn:visio' xmlns='urn:visio'><v:Shapes><v:Shape ID='1'/><v:Shape ID='2'/></v:Shapes><v:Connects/></v:PageContents>";
+    fn add_shape_preserves_a_prefixed_empty_shapes_container() {
+        let source = b"<v:PageContents xmlns:v='http://schemas.microsoft.com/office/visio/2012/main'><v:Shapes/></v:PageContents>";
         let (package, path) = package_with_page_xml(source);
-        let page_id = package.page_part_ids[&path];
         let saved = save_structural_edits(
             &package,
-            &[StructuralEdit::AddConnect {
-                page_id,
-                from_sheet: 2,
-                from_cell: "BeginX".to_owned(),
-                to_sheet: 1,
-                to_cell: "PinX".to_owned(),
+            &[StructuralEdit::AddShape {
+                page_id: package.page_part_ids[&path],
+                shape_xml: b"<v:Shape><v:Cell N='Width' V='1'/></v:Shape>".to_vec(),
             }],
         )
         .unwrap();
         let reparsed = parse_vsdx(&saved).unwrap();
-        let after = reparsed.part_bytes(&path).unwrap();
-        assert!(
-            after
-                .windows(b"</v:Connects>".len())
-                .any(|window| window == b"</v:Connects>")
-        );
-        assert!(
-            !after
-                .windows(b"</Connects>".len())
-                .any(|window| window == b"</Connects>")
-        );
-        assert!(
-            after
-                .windows(b"<v:Connect FromSheet=\"2\"".len())
-                .any(|window| window == b"<v:Connect FromSheet=\"2\"")
-        );
-        assert!(
-            !after
-                .windows(b"<Connect ".len())
-                .any(|window| window == b"<Connect ")
-        );
-        validate_structure(&reparsed).unwrap();
-        assert_eq!(reparsed.page_contents[&path].connects().count(), 1);
-    }
-
-    /// A missing prefixed container is created with its page prefix.
-    #[test]
-    fn add_connect_creates_prefixed_container_with_page_prefix() {
-        let source = b"<v:PageContents xmlns:v='urn:visio' xmlns='urn:visio'><v:Shapes><v:Shape ID='1'/><v:Shape ID='2'/></v:Shapes></v:PageContents>";
-        let (package, path) = package_with_page_xml(source);
-        let page_id = package.page_part_ids[&path];
-        let saved = save_structural_edits(
-            &package,
-            &[StructuralEdit::AddConnect {
-                page_id,
-                from_sheet: 2,
-                from_cell: "EndX".to_owned(),
-                to_sheet: 1,
-                to_cell: "PinX".to_owned(),
-            }],
-        )
-        .unwrap();
-        let reparsed = parse_vsdx(&saved).unwrap();
-        let after = reparsed.part_bytes(&path).unwrap();
-        assert!(
-            after
-                .windows(b"<v:Connects>".len())
-                .any(|window| window == b"<v:Connects>")
-        );
-        assert!(
-            after
-                .windows(b"</v:Connects>".len())
-                .any(|window| window == b"</v:Connects>")
-        );
-        assert!(
-            after
-                .windows(b"<v:Connect FromSheet=\"2\"".len())
-                .any(|window| window == b"<v:Connect FromSheet=\"2\"")
-        );
-        assert!(
-            !after
-                .windows(b"<Connect ".len())
-                .any(|window| window == b"<Connect ")
-        );
-        assert!(
-            after
-                .windows(b"</v:PageContents>".len())
-                .any(|window| window == b"</v:PageContents>")
-        );
+        let after = std::str::from_utf8(reparsed.part_bytes(&path).unwrap()).unwrap();
+        assert!(after.contains("</v:Shapes>"), "{after}");
+        assert!(!after.contains("</Shapes>"), "{after}");
+        assert_eq!(reparsed.page_contents[&path].shapes().count(), 1);
         validate_structure(&reparsed).unwrap();
     }
 
     #[test]
-    fn add_connect_to_prefixed_fixture_reparses() {
-        let package =
-            parse_vsdx(include_bytes!("../tests/fixtures/prefixed-connects.vsdx")).unwrap();
-        let path = package.page_part_paths[0].clone();
-        let page_id = package.page_part_ids[&path];
-        let saved = save_structural_edits(
-            &package,
-            &[StructuralEdit::AddConnect {
-                page_id,
-                from_sheet: 1,
-                from_cell: "EndX".to_owned(),
-                to_sheet: 1,
-                to_cell: "PinY".to_owned(),
-            }],
-        )
-        .unwrap();
-        let reparsed = parse_vsdx(&saved).unwrap();
-        validate_structure(&reparsed).unwrap();
-        assert_eq!(
-            reparsed.page_contents[&path].connects().count(),
-            package.page_contents[&path].connects().count() + 1
-        );
-        let after = reparsed.part_bytes(&path).unwrap();
-        assert!(
-            after
-                .windows(b"<v:Connect FromSheet=\"1\" FromCell=\"EndX\"".len())
-                .any(|window| window == b"<v:Connect FromSheet=\"1\" FromCell=\"EndX\"")
-        );
-        assert!(
-            !after
-                .windows(b"<Connect ".len())
-                .any(|window| window == b"<Connect ")
-        );
+    fn add_connect_preserves_prefixed_containers() {
+        for container in ["<v:Connects/>", "<v:Connects></v:Connects>", ""] {
+            let source = format!(
+                "<v:PageContents xmlns:v='http://schemas.microsoft.com/office/visio/2012/main'><v:Shapes><v:Shape ID='1'/><v:Shape ID='2'/></v:Shapes>{container}</v:PageContents>"
+            );
+            let (package, path) = package_with_page_xml(source.as_bytes());
+            let saved = save_structural_edits(
+                &package,
+                &[StructuralEdit::AddConnect {
+                    page_id: package.page_part_ids[&path],
+                    from_sheet: 2,
+                    from_cell: "BeginX".to_owned(),
+                    to_sheet: 1,
+                    to_cell: "PinX".to_owned(),
+                }],
+            )
+            .unwrap();
+            let reparsed = parse_vsdx(&saved).unwrap();
+            let after = std::str::from_utf8(reparsed.part_bytes(&path).unwrap()).unwrap();
+            assert!(after.contains("<v:Connect "));
+            assert!(after.contains("</v:Connects>"));
+            assert_eq!(reparsed.page_contents[&path].connects().count(), 1);
+            validate_structure(&reparsed).unwrap();
+        }
     }
 
     #[test]
@@ -3278,6 +3408,125 @@ mod tests {
                 .values()
                 .any(|sheet| sheet_has_value(sheet, "patched"))
         );
+    }
+
+    #[test]
+    fn saves_shape_text_without_rewriting_other_parts_or_lexical_spans() {
+        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        let package = parse_vsdx(source).unwrap();
+        let part_path = package.page_part_paths.first().unwrap().clone();
+        let page_id = package.page_part_ids.get(&part_path).copied().unwrap();
+        let edit = SemanticTextEdit {
+            locator: CellLocator {
+                sheet: CellSheet::Page(page_id),
+                shape_id: Some(1),
+                section: None,
+                section_index: None,
+                row: None,
+                cell_name: "Text".to_owned(),
+            },
+            text: "Hello & <World>\nNew line".to_owned(),
+        };
+        let before: BTreeMap<_, _> = unzip_parts(source).unwrap().into_iter().collect();
+        let saved = save_semantic_text_edits(&package, std::slice::from_ref(&edit)).unwrap();
+        let after: BTreeMap<_, _> = unzip_parts(&saved).unwrap().into_iter().collect();
+        for (path, bytes) in &before {
+            if path == &part_path {
+                let original = package.part_bytes(path).unwrap();
+                let text = package
+                    .element_spans(path)
+                    .unwrap()
+                    .iter()
+                    .find(|span| {
+                        span.name == "Text"
+                            && original[span.span.offset..span.span.end().unwrap()]
+                                .windows(b"<fld".len())
+                                .any(|window| window == b"<fld")
+                    })
+                    .unwrap();
+                let outer_end = text.span.end().unwrap();
+                let inner_start = original[text.span.offset..outer_end]
+                    .iter()
+                    .position(|byte| *byte == b'>')
+                    .unwrap()
+                    + text.span.offset
+                    + 1;
+                let closing = original[inner_start..outer_end]
+                    .iter()
+                    .rposition(|byte| *byte == b'<')
+                    .unwrap()
+                    + inner_start;
+                assert_only_span_changed(
+                    original,
+                    &after[path],
+                    crate::SourceSpan {
+                        offset: inner_start,
+                        length: closing - inner_start,
+                    },
+                    "Hello &amp; &lt;World&gt;\nNew line".len(),
+                );
+            } else {
+                assert_eq!(&after[path], bytes, "{path}");
+            }
+        }
+        let reparsed = parse_vsdx(&saved).unwrap();
+        let sheet = reparsed.page_contents.get(&part_path).unwrap();
+        let shape = sheet.shapes().find(|shape| shape.id == 1).unwrap();
+        let round_tripped = shape
+            .text()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|token| match token {
+                crate::TextToken::Literal(value) => Some(value.clone()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(round_tripped, "Hello & <World>\nNew line");
+    }
+
+    #[test]
+    fn saving_shape_text_rejects_non_shape_targets_and_forbidden_characters() {
+        let package = parse_vsdx(include_bytes!("../tests/fixtures/foundation.vsdx")).unwrap();
+        let part_path = package.page_part_paths.first().unwrap().clone();
+        let page_id = package.page_part_ids.get(&part_path).copied().unwrap();
+        let locator = |shape_id: Option<u32>| CellLocator {
+            sheet: CellSheet::Page(page_id),
+            shape_id,
+            section: None,
+            section_index: None,
+            row: None,
+            cell_name: "Text".to_owned(),
+        };
+        assert!(matches!(
+            save_semantic_text_edits(
+                &package,
+                &[SemanticTextEdit {
+                    locator: locator(None),
+                    text: "x".to_owned()
+                }]
+            ),
+            Err(VsdxError::InvalidCellEdit { .. })
+        ));
+        assert!(matches!(
+            save_semantic_text_edits(
+                &package,
+                &[SemanticTextEdit {
+                    locator: locator(Some(999)),
+                    text: "x".to_owned()
+                }]
+            ),
+            Err(VsdxError::InvalidCellEdit { .. })
+        ));
+        assert!(matches!(
+            save_semantic_text_edits(
+                &package,
+                &[SemanticTextEdit {
+                    locator: locator(Some(1)),
+                    text: "bad\0".to_owned()
+                }]
+            ),
+            Err(VsdxError::InvalidXmlCharacter)
+        ));
     }
 
     #[test]
@@ -4279,7 +4528,7 @@ mod tests {
         for content_type in [
             "application/vnd.ms-visio.drawing.macroEnabled.main+xml",
             "application/vnd.ms-visio.stencil.main+xml",
-            "application/vnd.ms-visio.template.main+xml",
+            "application/vnd.ms-visio.template.macroEnabled.main+xml",
         ] {
             let package = rezip_parts(&[
                 ("_rels/.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec()),
@@ -4301,6 +4550,20 @@ mod tests {
             parse_vsdx(&package),
             Err(VsdxError::ConflictingMainDocumentRelationships(_))
         ));
+    }
+
+    #[test]
+    fn opens_template_packages_and_round_trips_byte_for_byte() {
+        let source = include_bytes!("../tests/fixtures/template.vstx");
+        let package = parse_vsdx(source).unwrap();
+        let content_types = package.part_bytes("[Content_Types].xml").unwrap();
+        assert!(
+            std::str::from_utf8(content_types)
+                .unwrap()
+                .contains("application/vnd.ms-visio.template.main+xml")
+        );
+        let written = write_vsdx(&package).unwrap();
+        assert_eq!(unzip_parts(&written).unwrap(), unzip_parts(source).unwrap());
     }
 
     #[test]
