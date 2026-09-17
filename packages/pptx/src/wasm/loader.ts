@@ -1,4 +1,5 @@
 import initWasmModule, {
+  decodeTiffPng,
   parsePptxJson,
   PptxDocument,
   PptxRenderer,
@@ -177,6 +178,11 @@ export function wasmVersion(): string {
 export function inspectPresentation(bytes: Uint8Array): unknown {
   requireInitialized();
   return call(() => parsePptxJson(bytes));
+}
+
+export function decodeTiffImage(bytes: Uint8Array): Uint8Array {
+  requireInitialized();
+  return construct(() => decodeTiffPng(bytes));
 }
 
 export function openPresentation(
