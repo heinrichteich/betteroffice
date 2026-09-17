@@ -65,6 +65,7 @@ interface YrsImageAttrs {
   distLeft?: number;
   distRight?: number;
   position?: {
+    relativeHeight?: number;
     horizontal?: { relativeTo?: string; posOffset?: number; align?: string };
     vertical?: { relativeTo?: string; posOffset?: number; align?: string };
   };
@@ -77,6 +78,7 @@ interface YrsImageAttrs {
   cropRight?: number;
   cropBottom?: number;
   cropLeft?: number;
+  shapeType?: string;
   opacity?: number;
   layoutInCell?: boolean;
   allowOverlap?: boolean;
@@ -136,6 +138,7 @@ const PARAGRAPH_ATTR_DEFAULTS: Attrs = {
   keepLines: null,
   widowControl: null,
   contextualSpacing: null,
+  snapToGrid: null,
   defaultTextFormatting: null,
   sectionBreakType: null,
   bidi: null,
@@ -631,6 +634,7 @@ function imageRunFromPayload(payload: Attrs): Run {
     src: asString(attrs.src) || '',
     alt: asString(attrs.alt) || undefined,
     title: asString(attrs.title) || undefined,
+    shapeType: asString(attrs.shapeType) || undefined,
     size: {
       width: pixelsToEmu(Number(attrs.width) || 0),
       height: pixelsToEmu(Number(attrs.height) || 0),
@@ -649,6 +653,7 @@ function imageRunFromPayload(payload: Attrs): Run {
 
   if (attrs.position?.horizontal && attrs.position.vertical) {
     image.position = {
+      relativeHeight: attrs.position.relativeHeight,
       horizontal: {
         relativeTo: (attrs.position.horizontal.relativeTo || 'column') as NonNullable<
           Image['position']

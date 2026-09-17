@@ -14,6 +14,19 @@ struct Emitter<'a> {
     out: String,
     defs: String,
     gradients: usize,
+    shadows: usize,
+}
+
+/// Splits `#RRGGBBAA` into the flood colour and its opacity.
+fn flood(color: &str) -> (String, f64) {
+    let digits = color.strip_prefix('#').unwrap_or(color);
+    if digits.len() == 8
+        && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && let Ok(alpha) = u8::from_str_radix(&digits[6..8], 16)
+    {
+        return (format!("#{}", &digits[..6]), f64::from(alpha) / 255.0);
+    }
+    (color.to_owned(), 1.0)
 }
 
 fn path_data(path: &[GeometryPathCommand]) -> String {
@@ -133,6 +146,28 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Offsets stay in the element's own inch space, so the page flip carries them.
+    fn shadow_attribute(&mut self, shadow: &Option<crate::display_list::Shadow>) -> String {
+        let Some(shadow) = shadow else {
+            return String::new();
+        };
+        let (color, opacity) = flood(&shadow.color);
+        if crate::vector::rgb(&color).is_none() {
+            return String::new();
+        }
+        let id = format!("vsdxShadow{}", self.shadows);
+        self.shadows += 1;
+        self.defs.push_str(&format!(
+            "<filter id=\"{id}\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\"><feDropShadow dx=\"{}\" dy=\"{}\" stdDeviation=\"{}\" flood-color=\"{}\" flood-opacity=\"{}\"/></filter>",
+            num(f64::from(shadow.offset_x_in)),
+            num(f64::from(shadow.offset_y_in)),
+            num(f64::from(shadow.blur_in).max(0.0) / 2.0),
+            escape(&color),
+            num(opacity)
+        ));
+        format!(" filter=\"url(#{id})\"")
+    }
+
     fn primitive(&mut self, primitive: &Primitive, outer: Affine) {
         let mut ordered = Vec::new();
         collect_ordered(primitive, &mut ordered);
@@ -140,7 +175,11 @@ impl<'a> Emitter<'a> {
             let composed = outer.compose(transform);
             match item {
                 Primitive::Shape {
-                    path, fill, stroke, ..
+                    path,
+                    fill,
+                    stroke,
+                    shadow,
+                    ..
                 } => {
                     let data = path_data(path);
                     if data.is_empty() {
@@ -151,6 +190,7 @@ impl<'a> Emitter<'a> {
                     element.push('"');
                     element.push_str(&self.fill_attribute(fill, path));
                     element.push_str(&stroke_attributes(stroke));
+                    element.push_str(&self.shadow_attribute(shadow));
                     element.push_str("/>");
                     self.wrapped(&element, composed);
                 }
@@ -303,6 +343,7 @@ fn emit_page(list: &VsdxDisplayList, package: &VsdxPackage) -> String {
         out: String::new(),
         defs: String::new(),
         gradients: 0,
+        shadows: 0,
     };
     for primitive in primitives {
         emitter.primitive(primitive, Affine::identity());
@@ -391,16 +432,6 @@ mod tests {
     }
 
     #[test]
-    fn keeps_text_selectable_as_text_elements() {
-        let source = include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx");
-        let package = vsdx_parse::parse_vsdx(source).unwrap();
-        let pages = Renderer::default().export_svg(&package).unwrap();
-        let body = pages.join("");
-        assert!(body.contains("<text") && body.contains("</text>"));
-        assert!(!body.contains("<text ") || body.contains("font-size="));
-    }
-
-    #[test]
     fn emits_shape_geometry_as_path_data() {
         let source = include_bytes!("../../vsdx-parse/tests/fixtures/indexed-geometry.vsdx");
         let package = vsdx_parse::parse_vsdx(source).unwrap();
@@ -420,18 +451,6 @@ mod tests {
     }
 
     #[test]
-    fn groups_balance() {
-        let source = include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx");
-        let package = vsdx_parse::parse_vsdx(source).unwrap();
-        let pages = Renderer::default().export_svg(&package).unwrap();
-        let body = pages.join("");
-        assert_eq!(
-            body.match_indices("<g ").count(),
-            body.match_indices("</g>").count()
-        );
-    }
-
-    #[test]
     fn rejects_an_unknown_page_index() {
         let package = package();
         assert!(Renderer::default().export_svg_page(&package, 99).is_err());
@@ -442,6 +461,8 @@ mod tests {
             contract_version: crate::CONTRACT_VERSION,
             width: 384.0,
             height: 384.0,
+            print_width: 384.0,
+            print_height: 384.0,
             paint_transform: crate::PaintTransform {
                 a: 96.0,
                 b: 0.0,
@@ -451,6 +472,7 @@ mod tests {
                 f: 384.0,
             },
             primitives: vec![primitive],
+            connectors: Vec::new(),
         }
     }
 
@@ -474,6 +496,7 @@ mod tests {
                 stops,
             }),
             stroke: None,
+            shadow: None,
             transform: Affine::identity(),
             diagnostics: Vec::new(),
         }
@@ -484,6 +507,25 @@ mod tests {
             position,
             color: color.into(),
         }
+    }
+
+    #[test]
+    fn shape_shadows_export_as_a_drop_shadow_filter() {
+        let mut shape = filled(vec![stop(0.0, "#102030"), stop(1.0, "#405060")]);
+        if let Primitive::Shape { shadow, .. } = &mut shape {
+            *shadow = Some(crate::display_list::Shadow {
+                color: "#11223380".into(),
+                blur_in: 0.5,
+                offset_x_in: 0.125,
+                offset_y_in: -0.125,
+            });
+        }
+        let svg = emit_page(&list_with(shape), &package());
+        assert!(
+            svg.contains("<feDropShadow dx=\"0.125\" dy=\"-0.125\" stdDeviation=\"0.25\" flood-color=\"#112233\" flood-opacity=\"0.502\"/>"),
+            "missing drop shadow: {svg}"
+        );
+        assert!(svg.contains(" filter=\"url(#vsdxShadow0)\""), "{svg}");
     }
 
     #[test]

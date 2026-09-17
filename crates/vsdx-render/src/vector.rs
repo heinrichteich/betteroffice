@@ -206,7 +206,7 @@ pub(crate) fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((width, height))
 }
 
-pub(crate) fn z_order(primitive: &Primitive) -> u32 {
+pub fn z_order(primitive: &Primitive) -> u32 {
     match primitive {
         Primitive::Shape { z_order, .. }
         | Primitive::Image { z_order, .. }
@@ -217,10 +217,7 @@ pub(crate) fn z_order(primitive: &Primitive) -> u32 {
 }
 
 /// Flattens groups depth-first, composing transforms, ordered back-to-front.
-pub(crate) fn collect_ordered<'b>(
-    primitive: &'b Primitive,
-    out: &mut Vec<(&'b Primitive, Affine)>,
-) {
+pub fn collect_ordered<'b>(primitive: &'b Primitive, out: &mut Vec<(&'b Primitive, Affine)>) {
     match primitive {
         Primitive::Group {
             primitives,

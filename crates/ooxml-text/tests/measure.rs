@@ -182,6 +182,152 @@ fn trailing_spaces_can_overhang_without_wrapping_the_word() {
 }
 
 #[test]
+fn trailing_ideographic_spaces_overhang_like_ascii_spaces() {
+    const W_IDEO: f64 = 16.0;
+    let value = measure(json!([{ "kind": "text", "text": "00\u{3000}" }]), 2.0 * W0).unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 3)]);
+    approx(
+        value["lines"][0]["width"].as_f64().unwrap(),
+        2.0 * W0 + W_IDEO,
+        "retained ideographic advance",
+    );
+    let value = measure(
+        json!([{ "kind": "text", "text": "00\u{3000}\u{3000}\u{3000}" }]),
+        2.0 * W0,
+    )
+    .unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 5)]);
+    approx(
+        value["lines"][0]["width"].as_f64().unwrap(),
+        2.0 * W0 + 3.0 * W_IDEO,
+        "retained ideographic advances",
+    );
+}
+
+#[test]
+fn ideographic_space_breaks_words_keeping_full_advance() {
+    const W_IDEO: f64 = 16.0;
+    let value = measure(
+        json!([{ "kind": "text", "text": "00\u{3000}00" }]),
+        2.0 * W0 + 1.0,
+    )
+    .unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 3), (0, 3, 0, 5)]);
+    let lines = value["lines"].as_array().unwrap();
+    approx(
+        lines[0]["width"].as_f64().unwrap(),
+        2.0 * W0 + W_IDEO,
+        "first line keeps the trailing ideographic advance",
+    );
+    approx(
+        lines[1]["width"].as_f64().unwrap(),
+        2.0 * W0,
+        "second line width",
+    );
+}
+
+#[test]
+fn justified_text_does_not_compress_ideographic_spaces() {
+    const W_IDEO: f64 = 16.0;
+    let natural = 12.0 * W0 + 3.0 * W_IDEO;
+    let minimum = natural - 0.25 * 3.0 * W_IDEO;
+    for (alignment, width, expected_lines) in [
+        ("justify", natural, 1),
+        ("justify", minimum, 2),
+        ("left", minimum, 2),
+    ] {
+        let input = json!({
+            "block":{"kind":"paragraph","runs":[{"kind":"text","text":"000\u{3000}000\u{3000}000\u{3000}000"}],"attrs":{"alignment":alignment}},
+            "maxWidth":width,"fontChains":{"liberation sans|0|0":[0]},
+            "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+        });
+        let measured: Value =
+            serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(
+            measured["lines"].as_array().unwrap().len(),
+            expected_lines,
+            "{alignment} at {width}"
+        );
+    }
+    let input = json!({
+        "block":{"kind":"paragraph","runs":[{"kind":"text","text":"000\u{3000}000\u{3000}000\u{3000}000"}]},
+        "maxWidth":natural,"fontChains":{"liberation sans|0|0":[0]},
+        "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+    });
+    let measured: Value =
+        serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+            .unwrap();
+    approx(
+        measured["lines"][0]["clusterAdvances"][3]["advance"]
+            .as_f64()
+            .unwrap(),
+        W_IDEO,
+        "ideographic advance uncompressed",
+    );
+}
+
+#[test]
+fn justified_mixed_ascii_and_trailing_ideographic_keeps_spaces_uncompressed() {
+    const W_IDEO: f64 = 16.0;
+    let natural = 12.0 * W0 + 3.0 * SP;
+    for trailing in ["\u{3000}", "\u{3000}\u{3000}"] {
+        let count = trailing.chars().count() as f64;
+        let text = format!("000 000 000 000{trailing}");
+        let input = json!({
+            "block":{"kind":"paragraph","runs":[{"kind":"text","text":text}],"attrs":{"alignment":"justify"}},
+            "maxWidth":natural,"fontChains":{"liberation sans|0|0":[0]},
+            "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+        });
+        let measured: Value =
+            serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(
+            measured["lines"].as_array().unwrap().len(),
+            1,
+            "trailing {count}"
+        );
+        let line = &measured["lines"][0];
+        approx(
+            line["width"].as_f64().unwrap(),
+            natural + count * W_IDEO,
+            "full width retained",
+        );
+        for idx in [3, 7, 11] {
+            approx(
+                line["clusterAdvances"][idx]["advance"].as_f64().unwrap(),
+                SP,
+                "ascii space uncompressed",
+            );
+        }
+        approx(
+            line["clusterAdvances"][0]["advance"].as_f64().unwrap(),
+            W0,
+            "unchanged glyph advance",
+        );
+        let base = 15;
+        for offset in 0..count as usize {
+            approx(
+                line["clusterAdvances"][base + offset]["advance"]
+                    .as_f64()
+                    .unwrap(),
+                W_IDEO,
+                "trailing ideographic advance",
+            );
+        }
+    }
+}
+
+#[test]
+fn ideographic_space_only_run_measures_like_empty_paragraph() {
+    for text in ["\u{3000}", "\u{3000}\u{3000}"] {
+        let v = measure(json!([{ "kind": "text", "text": text }]), 200.0).unwrap();
+        assert_eq!(spans(&v), vec![(0, 0, 0, 0)]);
+        assert_eq!(v["lines"][0]["width"].as_f64().unwrap(), 0.0);
+    }
+}
+
+#[test]
 fn justified_text_compresses_spaces_before_wrapping() {
     let natural = 12.0 * W0 + 3.0 * SP;
     let minimum = natural - 0.25 * 3.0 * SP;
@@ -1141,6 +1287,68 @@ fn tab_in_hanging_indent_lands_on_the_body_edge() {
     );
 }
 
+#[test]
+fn declared_tabs_before_the_indent_preserve_their_alignment() {
+    for (alignment, expected) in [
+        ("start", 40.0 + 2.0 * W0),
+        ("end", 40.0),
+        ("center", 40.0 + W0),
+    ] {
+        let v = measure_with(
+            json!({
+                "kind": "paragraph",
+                "runs": [{ "kind": "tab" }, { "kind": "text", "text": "00" }],
+                "attrs": {
+                    "indent": { "left": 64.0, "hanging": 64.0 },
+                    "tabs": [{ "val": alignment, "pos": 600.0 }]
+                }
+            }),
+            300.0,
+        )
+        .unwrap();
+        approx(
+            v["lines"][0]["width"].as_f64().unwrap(),
+            expected,
+            alignment,
+        );
+    }
+}
+
+#[test]
+fn hanging_indent_preserves_declared_tabs_before_the_body_edge() {
+    for label in ["", "(1)"] {
+        for explicit_body_stop in [false, true] {
+            let mut stops = vec![json!({ "val": "end", "pos": 595.0 })];
+            if explicit_body_stop {
+                stops.push(json!({ "val": "start", "pos": 879.0 }));
+            }
+            let v = measure_with(
+                json!({
+                    "kind": "paragraph",
+                    "runs": [
+                        { "kind": "tab" },
+                        { "kind": "text", "text": label },
+                        { "kind": "tab" },
+                        { "kind": "text", "text": "00000000" }
+                    ],
+                    "attrs": {
+                        "indent": { "left": 58.6, "hanging": 58.6 },
+                        "tabs": stops
+                    }
+                }),
+                139.0,
+            )
+            .unwrap();
+            assert_eq!(spans(&v), vec![(0, 0, 3, 8)]);
+            approx(
+                v["lines"][0]["width"].as_f64().unwrap(),
+                58.6 + 8.0 * W0,
+                "body text starts at the left indent after the label tab",
+            );
+        }
+    }
+}
+
 // 16. a tab's font contributes to line metrics
 #[test]
 fn tab_font_size_drives_line_metrics() {
@@ -1187,6 +1395,70 @@ fn field_measures_at_fallback_text() {
         v["lines"][0]["lineHeight"].as_f64().unwrap(),
         2.0 * LH,
         "24pt field line",
+    );
+}
+
+/// Pinned line rules never snap: the `exact` box is fixed regardless of
+/// content, so the 10px box keeps its height under an active 24px grid;
+/// the `atLeast` floor is author-set, so the 30px floor (above the 18.4px
+/// content) likewise keeps its resolved height instead of snapping to 48px,
+/// and a content-winning `atLeast` floor (10px, below the content) keeps
+/// the natural height instead of snapping to 24px. Only `auto`-ruled lines
+/// snap (see `grid_active_section_snaps_line_height_up`).
+#[test]
+fn pinned_line_rules_do_not_snap() {
+    let exact = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": {
+                "docGridPitchPx": 24.0,
+                "spacing": { "line": 10.0, "lineUnit": "px", "lineRule": "exact" }
+            }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        exact["lines"][0]["lineHeight"].as_f64().unwrap(),
+        10.0,
+        "exact lineHeight",
+    );
+    let at_least = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": {
+                "docGridPitchPx": 24.0,
+                "spacing": { "line": 30.0, "lineUnit": "px", "lineRule": "atLeast" }
+            }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        at_least["lines"][0]["lineHeight"].as_f64().unwrap(),
+        30.0,
+        "atLeast keeps its resolved height",
+    );
+    let at_least_content_wins = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": {
+                "docGridPitchPx": 24.0,
+                "spacing": { "line": 10.0, "lineUnit": "px", "lineRule": "atLeast" }
+            }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        at_least_content_wins["lines"][0]["lineHeight"]
+            .as_f64()
+            .unwrap(),
+        LH,
+        "content-winning atLeast keeps its natural height",
     );
 }
 
@@ -2578,4 +2850,96 @@ fn an_oversized_fallback_chain_measures_like_its_head() {
         ids.resize(len, 1);
         assert_eq!(short, measure_chain(ids), "chain of {len} ids");
     }
+}
+
+// 37. document-grid snap-to-grid (w:docGrid §17.6.5, w:snapToGrid §17.3.1/2)
+//
+// At 12pt the single-spacing line is LH = 18.3984375px; a 360-twips grid
+// pitch is 24px, so an active grid snaps the line to 24. Only an activating
+// grid type reaches measurement (the host withholds the pitch for `default`
+// or a bare linePitch), and either opt-out disables the snap.
+
+/// A grid-active section snaps the line up to the next pitch multiple.
+#[test]
+fn grid_active_section_snaps_line_height_up() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": { "docGridPitchPx": 24.0 }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        24.0,
+        "snapped lineHeight",
+    );
+    approx(
+        v["totalHeight"].as_f64().unwrap(),
+        24.0,
+        "snapped totalHeight",
+    );
+    // Ascent/descent stay put; the snap slack lands below the descent.
+    approx(v["lines"][0]["ascent"].as_f64().unwrap(), ASC, "ascent");
+    approx(v["lines"][0]["descent"].as_f64().unwrap(), DESC, "descent");
+}
+
+/// A `default`-type grid never reaches measurement (the host passes no
+/// pitch), so the line keeps its ruled height.
+#[test]
+fn default_type_grid_does_not_snap() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }]
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        LH,
+        "unsnapped lineHeight",
+    );
+}
+
+/// A paragraph-level opt-out (`w:snapToGrid` on pPr) disables the snap.
+#[test]
+fn paragraph_opt_out_does_not_snap() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": { "docGridPitchPx": 24.0, "snapToGrid": false }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        LH,
+        "opt-out lineHeight",
+    );
+}
+
+/// A run-level opt-out (`w:snapToGrid` on rPr) disables the snap for lines
+/// containing that run.
+#[test]
+fn run_opt_out_does_not_snap() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0", "snapToGrid": false }],
+            "attrs": { "docGridPitchPx": 24.0 }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        LH,
+        "opt-out lineHeight",
+    );
 }

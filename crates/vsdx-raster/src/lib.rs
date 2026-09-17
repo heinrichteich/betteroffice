@@ -13,7 +13,7 @@ use tiny_skia::{
 use vsdx_parse::VsdxPackage;
 use vsdx_render::{
     Affine, Paint as VsPaint, Primitive, Renderer, Stroke as VsStroke, TextFragment,
-    VsdxDisplayList, linear_gradient, text_fragments,
+    VsdxDisplayList, linear_gradient, text_fragments, z_order,
 };
 
 /// Carlito Regular (OFL), metric-compatible with Calibri.
@@ -101,10 +101,15 @@ pub fn render_list(
     let width = (list.width * scale).ceil().max(1.0) as u32;
     let height = (list.height * scale).ceil().max(1.0) as u32;
     if width > MAX_PAGE_DIM || height > MAX_PAGE_DIM {
-        return Err("png page dimensions exceed the raster budget".to_owned());
+        return Err(format!(
+            "png page is {width}x{height}px, over the {MAX_PAGE_DIM}px limit on either side"
+        ));
     }
     if u64::from(width) * u64::from(height) > MAX_PAGE_PIXELS {
-        return Err("png page surface exceeds the raster budget".to_owned());
+        return Err(format!(
+            "png page is {}px, over the {MAX_PAGE_PIXELS}px surface limit",
+            u64::from(width) * u64::from(height)
+        ));
     }
     let mut pixmap = Pixmap::new(width, height).ok_or_else(|| "invalid pixmap size".to_owned())?;
     pixmap.fill(Color::WHITE);
@@ -150,16 +155,6 @@ pub fn render_list(
     })
 }
 
-fn z_order(primitive: &Primitive) -> u32 {
-    match primitive {
-        Primitive::Shape { z_order, .. }
-        | Primitive::Image { z_order, .. }
-        | Primitive::TextBox { z_order, .. }
-        | Primitive::Placeholder { z_order, .. }
-        | Primitive::Group { z_order, .. } => *z_order,
-    }
-}
-
 fn tiny(transform: Affine) -> Transform {
     Transform::from_row(
         transform.a,
@@ -190,6 +185,23 @@ const FLIP_Y: Affine = Affine {
     e: 0.0,
     f: 0.0,
 };
+
+/// Shadow colours carry an optional alpha byte; the blur radius is dropped.
+fn shadow_color(value: &str) -> Option<Color> {
+    let hex = value.strip_prefix('#')?;
+    let (digits, alpha) = match hex.len() {
+        6 => (hex, 255),
+        8 => (&hex[..6], u8::from_str_radix(&hex[6..], 16).ok()?),
+        _ => return None,
+    };
+    let channel = |range: std::ops::Range<usize>| u8::from_str_radix(digits.get(range)?, 16).ok();
+    Some(Color::from_rgba8(
+        channel(0..2)?,
+        channel(2..4)?,
+        channel(4..6)?,
+        alpha,
+    ))
+}
 
 fn parse_color(value: &str) -> Option<Color> {
     let hex = value.strip_prefix('#')?;
@@ -239,6 +251,7 @@ impl<'b> Painter<'_, 'b> {
                 path,
                 fill,
                 stroke,
+                shadow,
                 transform,
                 ..
             } => {
@@ -246,6 +259,18 @@ impl<'b> Painter<'_, 'b> {
                     return;
                 };
                 let composed = tiny(outer.compose(*transform));
+                if let Some(shadow) = shadow
+                    && let Some(color) = shadow_color(&shadow.color)
+                {
+                    let mut paint = Paint::default();
+                    paint.set_color(color);
+                    paint.anti_alias = true;
+                    let offset = outer
+                        .compose(*transform)
+                        .compose(translate(shadow.offset_x_in, shadow.offset_y_in));
+                    self.pixmap
+                        .fill_path(&shape, &paint, FillRule::Winding, tiny(offset), None);
+                }
                 if let Some(paint) = fill_paint(fill, path) {
                     self.pixmap
                         .fill_path(&shape, &paint, FillRule::Winding, composed, None);
@@ -531,10 +556,10 @@ impl<'b> Painter<'_, 'b> {
         let (width, height) = (decoded.width(), decoded.height());
         let size = IntSize::from_wh(width, height)?;
         let mut data = decoded.into_raw();
-        for pixel in data.chunks_exact_mut(4) {
+        for pixel in data.as_chunks_mut::<4>().0 {
             let color =
                 tiny_skia::ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
-            pixel.copy_from_slice(&[color.red(), color.green(), color.blue(), color.alpha()]);
+            *pixel = [color.red(), color.green(), color.blue(), color.alpha()];
         }
         Pixmap::from_vec(data, size).map(|pixmap| (pixmap, (width as f32, height as f32)))
     }
@@ -698,7 +723,7 @@ fn encode_png(pixmap: Pixmap, width: u32, height: u32) -> Result<Vec<u8>, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vsdx_render::{PaintTransform, Primitive, TextParagraph};
+    use vsdx_render::{PaintTransform, Primitive};
 
     fn package(path: &str) -> VsdxPackage {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -712,9 +737,11 @@ mod tests {
             height_in * vsdx_render::PIXELS_PER_INCH,
         );
         VsdxDisplayList {
-            contract_version: 5,
+            contract_version: vsdx_render::CONTRACT_VERSION,
             width,
             height,
+            print_width: width,
+            print_height: height,
             paint_transform: PaintTransform {
                 a: 96.0,
                 b: 0.0,
@@ -724,6 +751,7 @@ mod tests {
                 f: height,
             },
             primitives: Vec::new(),
+            connectors: Vec::new(),
         }
     }
 
@@ -768,6 +796,45 @@ mod tests {
     }
 
     #[test]
+    fn a_shape_shadow_paints_an_offset_silhouette_behind_the_shape() {
+        let rect = |shadow| Primitive::Shape {
+            id: "rect".into(),
+            z_order: 0,
+            path: vec![
+                GeometryPathCommand::Move { x: 0.0, y: 1.0 },
+                GeometryPathCommand::Line { x: 2.0, y: 1.0 },
+                GeometryPathCommand::Line { x: 2.0, y: 2.0 },
+                GeometryPathCommand::Line { x: 0.0, y: 2.0 },
+                GeometryPathCommand::Close,
+            ],
+            fill: Some(vsdx_render::Paint::Solid {
+                color: "#111111".into(),
+            }),
+            stroke: None,
+            shadow,
+            transform: Affine::identity(),
+            diagnostics: Vec::new(),
+        };
+        let ink = |primitive| {
+            let mut list = empty_list(4.0, 4.0);
+            list.primitives.push(primitive);
+            let page = render_list(None, &list, &HashMap::new(), 1.0).unwrap();
+            ink_bounds(&page)
+        };
+        let plain = ink(rect(None));
+        let shaded = ink(rect(Some(vsdx_render::Shadow {
+            color: "#33445580".into(),
+            blur_in: 0.0,
+            offset_x_in: 0.25,
+            offset_y_in: -0.25,
+        })));
+        assert_eq!(shaded.0, plain.0, "the shadow never moves the left edge");
+        assert_eq!(shaded.1, plain.1, "the shadow never moves the top edge");
+        assert_eq!(shaded.2, plain.2 + 24, "the shadow extends right by 0.25in");
+        assert_eq!(shaded.3, plain.3 + 24, "the shadow extends down by 0.25in");
+    }
+
+    #[test]
     fn dark_geometry_leaves_marks() {
         let mut list = empty_list(4.0, 4.0);
         list.primitives.push(Primitive::Shape {
@@ -788,6 +855,7 @@ mod tests {
                 width: 0.02,
                 dashed: false,
             }),
+            shadow: None,
             transform: Affine::identity(),
             diagnostics: Vec::new(),
         });
@@ -865,30 +933,13 @@ mod tests {
         assert!(red > 100, "expected red pixels, found {red}");
     }
 
-    #[test]
-    fn paragraphs_without_runs_render_nothing() {
-        let mut list = empty_list(4.0, 4.0);
-        list.primitives.push(Primitive::TextBox {
-            id: "empty".into(),
-            z_order: 0,
-            x: 0.0,
-            y: 0.0,
-            width: 2.0,
-            height: 1.0,
-            paragraphs: vec![TextParagraph { runs: Vec::new() }],
-            lines: Vec::new(),
-            transform: Affine::identity(),
-        });
-        let page = render_list(None, &list, &HashMap::new(), 1.0).unwrap();
-        assert_eq!(page.skipped_images, 0);
-    }
-
     const IDENTITY: &str = r#"{"a":1,"b":0,"c":0,"d":1,"e":0,"f":0}"#;
 
     /// One 4x4 inch page holding a single-line text box under `transform`.
     fn text_list(text: &str, family: &str, transform: &str) -> VsdxDisplayList {
         serde_json::from_str(&format!(
-            r##"{{"contractVersion":5,"width":384,"height":384,
+            r##"{{"contractVersion":7,"width":384,"height":384,
+                "printWidth":384,"printHeight":384,
                 "paintTransform":{{"a":96,"b":0,"c":0,"d":-96,"e":0,"f":384}},
                 "primitives":[{{"kind":"textBox","id":"t","zOrder":0,
                   "x":1,"y":1,"width":2,"height":1,

@@ -23,7 +23,15 @@ pub fn paint(
     let mut diagnostics = Vec::new();
     let fill = if needs_fill && value(shape, "FillPattern").is_some_and(|v| v != "0") {
         match gradient(package, references, shape, shape_id) {
-            GradientOutcome::Painted(paint) => Some(paint),
+            GradientOutcome::Painted(paint, lossy) => {
+                if let Some(reason) = lossy {
+                    diagnostics.push(Diagnostic::for_code(
+                        "lossy-fill-gradient",
+                        format!("lossy fill gradient: {reason}"),
+                    ));
+                }
+                Some(paint)
+            }
             GradientOutcome::Unsupported => {
                 solid(package, references, shape, shape_id, &mut diagnostics)
             }
@@ -39,7 +47,9 @@ pub fn paint(
         None
     };
     let stroke = if needs_stroke && value(shape, "LinePattern").is_some_and(|v| v != "0") {
-        let width = number(shape, "LineWeight").unwrap_or(DEFAULT_STROKE_WIDTH) as f32;
+        let width = number(shape, "LineWeight")
+            .filter(|candidate| *candidate > 0.0)
+            .unwrap_or(DEFAULT_STROKE_WIDTH) as f32;
         let width = if width.is_finite() {
             width
         } else {
@@ -99,10 +109,14 @@ fn solid(
     Some(Paint::Solid { color })
 }
 enum GradientOutcome {
-    Painted(Paint),
+    /// The gradient, plus the reason it is a lossy rendering of the ShapeSheet.
+    Painted(Paint, Option<String>),
     Unsupported,
     Broken(String),
 }
+/// `FillGradientDir` 0 is Visio's linear gradient; every other direction is radial, rectangular or
+/// path, which the display list cannot express, so it degrades to the solid fill.
+const LINEAR_GRADIENT_DIR: f64 = 0.0;
 fn gradient(
     package: &VsdxPackage,
     references: Option<&PageShapeReferences>,
@@ -114,6 +128,11 @@ fn gradient(
     {
         return GradientOutcome::Unsupported;
     }
+    if let Some(dir) = resolved_number(package, references, shape, shape_id, "FillGradientDir")
+        && dir != LINEAR_GRADIENT_DIR
+    {
+        return GradientOutcome::Broken(format!("unsupported FillGradientDir {dir}"));
+    }
     let Some(radians) = resolved_number(package, references, shape, shape_id, "FillGradientAngle")
     else {
         return GradientOutcome::Unsupported;
@@ -124,25 +143,42 @@ fn gradient(
     let Some(section) = shape.sections.get("FillGradient") else {
         return GradientOutcome::Broken("missing FillGradient section".into());
     };
-    let mut stops = section
+    let mut lossy = None;
+    let mut stops = Vec::new();
+    for row in section
         .row_order
         .iter()
         .filter_map(|key| section.rows.get(key))
         .filter(|row| !row.deleted)
-        .filter_map(|row| stop(package, references, shape, shape_id, row))
-        .collect::<Vec<_>>();
-    stops.sort_by(|left, right| {
-        left.position
-            .partial_cmp(&right.position)
-            .unwrap_or_else(|| left.position.total_cmp(&right.position))
-    });
+    {
+        match stop(package, references, shape, shape_id, row) {
+            StopOutcome::Resolved(resolved) => stops.push(resolved),
+            StopOutcome::Opaqued(resolved, reason) => {
+                if lossy.is_none() {
+                    lossy = Some(reason);
+                }
+                stops.push(resolved);
+            }
+            StopOutcome::Broken(reason) => return GradientOutcome::Broken(reason),
+        }
+    }
+    stops.sort_by(|left, right| left.position.total_cmp(&right.position));
     if stops.len() < 2 {
         return GradientOutcome::Broken("fewer than two resolvable gradient stops".into());
     }
-    GradientOutcome::Painted(Paint::Gradient {
-        angle_deg: Some((radians * 180.0 / std::f64::consts::PI) as f32),
-        stops,
-    })
+    GradientOutcome::Painted(
+        Paint::Gradient {
+            angle_deg: Some((radians * 180.0 / std::f64::consts::PI) as f32),
+            stops,
+        },
+        lossy,
+    )
+}
+enum StopOutcome {
+    Resolved(GradientStop),
+    /// Visio paints this stop with transparency; the display list carries opaque colours only.
+    Opaqued(GradientStop, String),
+    Broken(String),
 }
 fn stop(
     package: &VsdxPackage,
@@ -150,9 +186,12 @@ fn stop(
     shape: &ResolvedShape,
     shape_id: u32,
     row: &vsdx_resolve::ResolvedRow,
-) -> Option<GradientStop> {
-    let color = row_cell(row, "GradientStopColor")
-        .and_then(|cell| stop_colour(package, references, shape, shape_id, cell))?;
+) -> StopOutcome {
+    let Some(color) = row_cell(row, "GradientStopColor")
+        .and_then(|cell| stop_colour(package, references, shape, shape_id, cell))
+    else {
+        return StopOutcome::Broken("unresolvable GradientStopColor".into());
+    };
     let position = row_cell(row, "GradientStopPosition").and_then(|cell| {
         stop_number(
             package,
@@ -162,27 +201,34 @@ fn stop(
             "GradientStopPosition",
             cell,
         )
-    })?;
-    if !position.is_finite() {
-        return None;
-    }
-    if let Some(cell) = row_cell(row, "GradientStopColorTrans") {
-        let transparent = stop_number(
-            package,
-            references,
-            shape,
-            shape_id,
-            "GradientStopColorTrans",
-            cell,
-        );
-        if !transparent.is_some_and(|value| value == 0.0) {
-            return None;
-        }
-    }
-    Some(GradientStop {
+    });
+    let Some(position) = position.filter(|position| position.is_finite()) else {
+        return StopOutcome::Broken("unresolvable GradientStopPosition".into());
+    };
+    let resolved = GradientStop {
         position: position.clamp(0.0, 1.0) as f32,
         color,
-    })
+    };
+    let Some(cell) = row_cell(row, "GradientStopColorTrans")
+        .filter(|cell| cell.formula.is_some() || cell.value.is_some())
+    else {
+        return StopOutcome::Resolved(resolved);
+    };
+    match stop_number(
+        package,
+        references,
+        shape,
+        shape_id,
+        "GradientStopColorTrans",
+        cell,
+    ) {
+        Some(0.0) => StopOutcome::Resolved(resolved),
+        Some(transparency) => StopOutcome::Opaqued(
+            resolved,
+            format!("GradientStopColorTrans {transparency} painted opaque"),
+        ),
+        None => StopOutcome::Broken("unresolvable GradientStopColorTrans".into()),
+    }
 }
 fn row_cell<'a>(row: &'a vsdx_resolve::ResolvedRow, name: &str) -> Option<&'a vsdx_parse::Cell> {
     match row.cells.get(name)? {
@@ -262,7 +308,7 @@ fn stop_number(
     }
     cell.value.as_deref()?.parse().ok()
 }
-fn resolved_number(
+pub(crate) fn resolved_number(
     package: &VsdxPackage,
     references: Option<&PageShapeReferences>,
     shape: &ResolvedShape,
@@ -306,7 +352,7 @@ fn value<'a>(shape: &'a ResolvedShape, name: &str) -> Option<&'a str> {
 fn default_colour(package: &VsdxPackage) -> String {
     crate::palette_colour(package, 0.0).unwrap_or_else(|| "#000000".into())
 }
-fn colour(
+pub(crate) fn colour(
     package: &VsdxPackage,
     references: Option<&PageShapeReferences>,
     shape: &ResolvedShape,

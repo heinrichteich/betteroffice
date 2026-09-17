@@ -10,7 +10,9 @@ pub use vsdx_resolve::{
     PROPERTY_SECTION, ShapeDataProperty, ShapeDataType, ShapeDataValue,
     shape_data as resolve_shape_data,
 };
-use vsdx_resolve::{PageConnectivity, ResolveError, ResolvedShape, Resolver, shape_data};
+use vsdx_resolve::{
+    PageConnectivity, PageContainers, ResolveError, ResolvedShape, Resolver, shape_data,
+};
 
 #[derive(Debug)]
 pub enum Error {
@@ -50,6 +52,12 @@ impl Diagram {
     }
     pub fn package(&self) -> &VsdxPackage {
         &self.package
+    }
+    /// Renders every diagram page to a vector PDF with selectable text.
+    pub fn export_pdf(&self) -> Result<Vec<u8>> {
+        vsdx_render::Renderer::default()
+            .export_pdf(&self.package)
+            .map_err(|error| Error::Render(error.to_string()))
     }
     /// Renders every diagram page to one SVG string per page, sized from the PageSheet.
     pub fn export_svg(&self) -> Result<Vec<String>> {
@@ -108,6 +116,7 @@ impl Diagram {
                         gesture: edit.gesture,
                         formula: Some(formula),
                         value,
+                        row_type: edit.row_type.clone(),
                     }
                 }
                 MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
@@ -379,7 +388,7 @@ impl MutationContext for PackageMutationContext<'_> {
                 Error::Policy(reason) => format!("cannot evaluate {lock}: {reason}"),
                 Error::Parse(error) => error.to_string(),
                 Error::Resolve(error) => error.to_string(),
-                Error::Render(error) => error,
+                Error::Render(reason) => reason,
             })?
             .ok_or_else(|| {
                 format!("cannot evaluate {lock}: it is outside the display evaluation profile")
@@ -453,6 +462,9 @@ impl<'a> Page<'a> {
     }
     pub fn connectivity(&self) -> Result<PageConnectivity> {
         Ok(Resolver::new(&self.diagram.package).resolve_page_connectivity(self.part)?)
+    }
+    pub fn containers(&self) -> Result<PageContainers> {
+        Ok(Resolver::new(&self.diagram.package).resolve_page_containers(self.part)?)
     }
 }
 

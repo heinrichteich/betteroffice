@@ -128,6 +128,7 @@ fn edit(
         gesture,
         formula: Some(formula.to_owned()),
         value: None,
+        row_type: None,
     }
 }
 
@@ -450,6 +451,7 @@ fn saves_a_semantic_cell_edit_without_source_spans() {
             gesture: MutationGesture::CellEdit,
             formula: Some("42".to_owned()),
             value: None,
+            row_type: None,
         }])
         .unwrap();
     let saved = Diagram::open(&saved).unwrap();
@@ -780,6 +782,7 @@ fn session_added_shapes_reach_the_saved_package() {
             &page,
             &ShapeDraft {
                 name: Some("Added".to_owned()),
+                master: None,
                 cells: vec![
                     draft_cell("Width", "5", None, None),
                     draft_cell("X", "2", Some("Geometry"), Some(CellRow::Index(0))),
@@ -826,6 +829,7 @@ fn added_shape_drafts_evaluate_against_their_own_cells() {
             &page,
             &ShapeDraft {
                 name: Some("Added".to_owned()),
+                master: None,
                 cells: vec![
                     draft_cell("Width", "5", None, None),
                     draft_cell("Height", "Width*2", None, None),
@@ -891,6 +895,21 @@ fn batched_edits_authorize_against_earlier_edits_in_the_batch() {
                 edit(page_id, 1, "Width", "2", MutationGesture::ResizeWidth),
             ])
             .is_err()
+    );
+}
+
+#[test]
+fn export_pdf_renders_a_vector_document_with_selectable_text() {
+    let source = include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx");
+    let diagram = Diagram::open(source).unwrap();
+    let pdf = diagram.export_pdf().unwrap();
+    assert!(pdf.starts_with(b"%PDF-1.4"));
+    assert!(pdf.ends_with(b"%%EOF"));
+    let text = String::from_utf8_lossy(&pdf);
+    assert!(text.contains("/Type /Page ") && text.contains("BT") && text.contains("Tj"));
+    assert_eq!(
+        text.match_indices("/Type /Page ").count(),
+        diagram.package().page_part_paths.len()
     );
 }
 

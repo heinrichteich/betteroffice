@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { PageDisplayList, ShapeSnapshot } from '@betteroffice/vsdx';
-import { GRID_SPACING_IN, collectSnapTargets, paintGrid, paintSmartGuides, snapRelease, snapThresholdModel } from './snap';
+import { collectSnapTargets, paintGrid, paintSmartGuides, snapRelease, snapThresholdModel } from './snap';
 
 const dragStart = { model: { x: 0, y: 0 }, pin: { x: 1, y: 1 }, locPin: { x: 0.5, y: 0.5 }, size: { width: 1, height: 1 } };
 
@@ -63,14 +63,12 @@ test('targets skip the dragged shape', () => {
   expect(targets.y).toEqual([4, 5, 6]);
 });
 
-test('grid spacing constant is a quarter inch', () => {
-  expect(GRID_SPACING_IN).toBe(0.25);
-});
-
 const frame = (): PageDisplayList => ({
-  contractVersion: 5,
+  contractVersion: 7,
   width: 816,
   height: 1056,
+  printWidth: 816,
+  printHeight: 1056,
   paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 },
   primitives: [],
 });

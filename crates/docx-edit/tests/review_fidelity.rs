@@ -42,6 +42,62 @@ fn layout(body: &str, columns: u32) -> Value {
 }
 
 #[test]
+fn universal_section_measures_match_canonical_twip_layout() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let render = |width, height, margin| {
+        let body = format!(
+            r#"{}<w:sectPr><w:pgSz w:w="{width}" w:h="{height}"/><w:pgMar w:top="{margin}" w:bottom="{margin}" w:left="{margin}" w:right="{margin}" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr>"#,
+            paragraph("Physical page dimensions").repeat(40)
+        );
+        let bytes = document(&body, "");
+        let parsed = docx_parse::parse_docx_s9_wire(&bytes, Default::default()).unwrap();
+        let engine = EngineSession::new(74290);
+        seed_from_docx(engine.doc(), &bytes).unwrap();
+        serde_json::from_str::<Value>(&engine.layout_document_with_regions_json(&json!({
+            "bodyStory":"body", "renderEnv":{}, "options":{},
+            "regions":{"sections":parsed.document.package.document.sections},
+            "measurement":{"fontChains":{"calibri|0|0":[font]},"defaults":{"fontFamily":"Calibri","fontSize":12}}
+        }).to_string()).unwrap()).unwrap()
+    };
+    let physical = render("21cm", "297mm", "10mm");
+    let canonical = render("11906", "16838", "567");
+    assert_eq!(physical["layout"], canonical["layout"]);
+    let pages = physical["layout"]["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 2);
+    for page in pages {
+        assert_eq!(page["size"]["w"], 11906.0 / 15.0);
+        assert_eq!(page["size"]["h"], 16838.0 / 15.0);
+        let fragment = &page["fragments"][0];
+        assert_eq!(fragment["x"], 567.0 / 15.0);
+        assert_eq!(fragment["y"], 567.0 / 15.0);
+        assert!((fragment["width"].as_f64().unwrap() - (11906.0 - 1134.0) / 15.0).abs() < 0.001);
+    }
+}
+
+#[test]
+fn literal_text_line_feeds_keep_authoritative_wrapping_and_pagination() {
+    let text = format!(
+        "Question\n\u{a0}\n{}",
+        "Long answers must wrap within the page and continue onto later pages. ".repeat(75)
+    );
+    let body = paragraph(&text);
+    let output = layout(&body, 1);
+    let normalized = layout(&body.replace('\n', " "), 1);
+    let lines = output["measured"][0]["measure"]["lines"]
+        .as_array()
+        .unwrap();
+    assert!(lines.len() > 1);
+    for line in lines {
+        assert_ne!(line["syntheticFallback"], true);
+        assert!(line["clusterAdvances"].as_array().is_some());
+        assert!(line["width"].as_f64().unwrap() <= 625.0);
+    }
+    assert!(output["layout"]["pages"].as_array().unwrap().len() > 1);
+    assert_eq!(output["measured"], normalized["measured"]);
+    assert_eq!(output["layout"], normalized["layout"]);
+}
+
+#[test]
 fn semantic_toc_styles_preserve_direct_and_custom_hyperlink_formatting() {
     let fixture: Value = serde_json::from_str(include_str!("fixtures/toc_styles.json")).unwrap();
     let body = fixture["paragraphStyles"]
@@ -1604,5 +1660,79 @@ fn line_unit_paragraph_spacing_clears_and_round_trips() {
                 0.0
             );
         }
+    }
+}
+
+#[test]
+fn shape_color_luminance_survives_import_and_reaches_display_paint() {
+    for color in [
+        r#"<a:schemeClr val="accent4"><a:lumMod val="40000"/><a:lumOff val="60000"/></a:schemeClr>"#,
+        r#"<a:srgbClr val="FFC000"><a:lumMod val="40000"/><a:lumOff val="60000"/></a:srgbClr>"#,
+    ] {
+        let shape = SHAPE.replace(r#"<a:srgbClr val="CCCCCC"/>"#, color);
+        let output = layout(&format!("<w:p>{shape}</w:p>"), 1);
+        let block = output["measured"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| &entry["block"])
+            .find(|block| block["kind"] == "shape")
+            .unwrap();
+        assert_eq!(block["fill"]["color"], "#FFE699");
+        let display: Value = serde_json::from_str(
+            &docx_layout::display_list::build_display_list_json(&output.to_string()).unwrap(),
+        )
+        .unwrap();
+        let shape = display["pages"][0]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["kind"] == "shape")
+            .unwrap();
+        assert_eq!(shape["fill"], "#FFE699");
+        assert_eq!(shape["fillPaint"]["color"], "#FFE699");
+    }
+}
+
+#[test]
+fn shape_text_cached_theme_color_survives_import_without_a_second_shade() {
+    let text_box = r#"<wps:txbx><w:txbxContent><w:p><w:r><w:rPr><w:color w:val="833C0B" w:themeColor="accent2" w:themeShade="80"/></w:rPr><w:t>Cached theme text</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/>"#;
+    for (fill, expected) in [
+        (
+            r#"<a:srgbClr val="204060"><a:shade val="50000"/></a:srgbClr>"#,
+            "#102030",
+        ),
+        (
+            r#"<a:schemeClr val="accent4"><a:tint val="40000"/></a:schemeClr>"#,
+            "#FFE699",
+        ),
+    ] {
+        let shape = SHAPE
+            .replace(r#"<a:srgbClr val="CCCCCC"/>"#, fill)
+            .replace("<wps:bodyPr/>", text_box);
+        let output = layout(&format!("<w:p>{shape}</w:p>"), 1);
+        let block = output["measured"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| &entry["block"])
+            .find(|block| block["kind"] == "shape")
+            .unwrap();
+        assert_eq!(block["innerText"][0]["runs"][0]["color"], "#833C0B");
+        assert_eq!(block["fill"]["color"], expected);
+        let display: Value = serde_json::from_str(
+            &docx_layout::display_list::build_display_list_json(&output.to_string()).unwrap(),
+        )
+        .unwrap();
+        let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+        assert!(primitives.iter().any(|primitive| {
+            matches!(primitive["kind"].as_str(), Some("text" | "glyphRun"))
+                && primitive["color"] == "#833C0B"
+        }));
+        assert!(
+            primitives
+                .iter()
+                .all(|primitive| primitive["color"] != "#421E06")
+        );
     }
 }
