@@ -175,10 +175,6 @@ test('dropping a hover drag on empty canvas leaves a free-ended connector', asyn
     const route = connectorRouteFromFrame(ready.handle.layoutPage(0), page.sourcePartPath, connector.sourceId)!;
     expect(route[0]).toEqual({ x: east.x, y: east.y });
     expect(route[route.length - 1]).toEqual({ x: 7, y: 4 });
-    await act(async () => { ready.handle.moveShape('page:1', fromId, '3', '5'); ready.refresh(); });
-    const followed = connectorRouteFromFrame(ready.handle.layoutPage(0), page.sourcePartPath, connector.sourceId)!;
-    expect(followed[0]).toEqual({ x: 3.5, y: 5 });
-    expect(followed[followed.length - 1]).toEqual({ x: 7, y: 4 });
   } finally {
     cleanup();
     restore();

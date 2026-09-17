@@ -50,6 +50,24 @@ describe('connector glue through the UI draft helpers', () => {
     } finally { diagram.dispose(); }
   });
 
+  test('the engine route and the overlay preview agree on a diagonal connector', () => {
+    const diagram = openDiagram(foundation, { clientId: 7104 });
+    try {
+      const rectangle = standardShapeById('rectangle')!;
+      const from = diagram.addShape('page:1', rectangle.draft(2, 2, 1, 1));
+      const to = diagram.addShape('page:1', rectangle.draft(5, 5, 1, 1));
+      const shapes = () => diagram.snapshot().pages[0].shapes;
+      const fromCentre = snapPoint(shapes(), from.shapeId, 'centre');
+      const toCentre = snapPoint(shapes(), to.shapeId, 'centre');
+      const receipt = diagram.addConnector('page:1', connectorDraft(fromCentre, toCentre), connectorGlue(from.shapeId, fromCentre), connectorGlue(to.shapeId, toCentre));
+      const part = diagram.snapshot().pages[0].sourcePartPath;
+      const connector = shapes().find((shape) => shape.id === receipt.shapeId)!;
+      const route = connectorRouteFromFrame(diagram.layoutPage(0), part, connector.sourceId)!;
+      expect(route).toHaveLength(3);
+      expect(route).toEqual(routeConnector(fromCentre, toCentre));
+    } finally { diagram.dispose(); }
+  });
+
   test('a point-glued connector stays pinned to its outline side while the shape moves', () => {
     const diagram = openDiagram(foundation, { clientId: 7102 });
     try {
@@ -69,7 +87,10 @@ describe('connector glue through the UI draft helpers', () => {
       const target = shapes().find((shape) => shape.id === to.shapeId)!;
       expect(pinOf(target, 'PinX')).toBe(7);
       expect(pinOf(target, 'PinY')).toBe(4);
-      expect(after[after.length - 1]).toEqual({ x: 7, y: 3.5 });
+      const movedSouth = snapPoint(shapes(), to.shapeId, 'south');
+      expect(movedSouth.y).toBeLessThan(4);
+      expect(after[after.length - 1].x).toBeCloseTo(movedSouth.x, 9);
+      expect(after[after.length - 1].y).toBeCloseTo(movedSouth.y, 9);
       expect(after[0]).toEqual(before[0]);
     } finally { diagram.dispose(); }
   });
@@ -96,7 +117,7 @@ describe('connector glue through the UI draft helpers', () => {
       const savedConnector = reopened.snapshot().pages[0].shapes.find((shape) => shape.name === 'Dynamic connector')!;
       expect(savedConnector.id).not.toBe(receipt.shapeId);
       expect(savedConnector.cells).toEqual(expect.arrayContaining([
-        expect.objectContaining({ name: 'RoutStyle', formula: '1' }),
+        expect.objectContaining({ name: 'ShapeRouteStyle', formula: '1' }),
         expect.objectContaining({ name: 'EndArrow', formula: '4' }),
       ]));
       reopened.deleteShape('page:1', savedConnector.id);

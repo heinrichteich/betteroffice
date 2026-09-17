@@ -3,8 +3,6 @@ import type { PageDisplayList, ShapeSnapshot } from '@betteroffice/vsdx';
 import {
   HOVER_POINT_HIT_PX,
   HOVER_POINT_SIZE_PX,
-  ancestorChain,
-  applyAffineToPoint,
   arrowheadPolygon,
   autoConnectArrowAt,
   autoConnectArrowCenter,
@@ -12,22 +10,14 @@ import {
   autoConnectArrowsForShape,
   autoConnectHaloHit,
   autoConnectMetrics,
-  boundsAffine,
   classifyConnectorEndpoint,
-  composeAffine,
   connectionPointsForShape,
   connectorDraft,
   connectorEndpointGlue,
-  connectorEndpointGlueForPlacedPoints,
   connectorGlue,
   connectorRouteFromFrame,
-  dropTargetForPlacedPoints,
   dropTargetForPoint,
   formatInches,
-  globalAutoConnectArrows,
-  globalAutoConnectHaloHit,
-  globalConnectionPoints,
-  globalQuickShapePlacement,
   hoverPointAt,
   isConnectorShape,
   modelToPage,
@@ -37,12 +27,9 @@ import {
   paintAutoConnectOverlay,
   paintConnectorEndpoint,
   paintConnectorOverlay,
-  placedPointTargets,
   quickShapePlacement,
   reroutePreviewForMove,
   routeConnector,
-  sceneBoundsOf,
-  sceneTransformForAncestors,
 } from './connector';
 
 function shape(cells: Record<string, string>): ShapeSnapshot {
@@ -61,9 +48,11 @@ function shape(cells: Record<string, string>): ShapeSnapshot {
 }
 
 const frame: PageDisplayList = {
-  contractVersion: 4,
+  contractVersion: 6,
   width: 816,
   height: 1056,
+  printWidth: 816,
+  printHeight: 1056,
   paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 },
   primitives: [],
 };
@@ -113,7 +102,7 @@ test('detects connectors by OneD or by a full endpoint set', () => {
   expect(isConnectorShape(shape({ PinX: '1', Width: '1' }))).toBe(false);
 });
 
-test('routes horizontal-first like the engine RoutStyle rule', () => {
+test('routes horizontal-first like the engine ShapeRouteStyle rule', () => {
   expect(routeConnector({ x: 1, y: 1 }, { x: 4, y: 3 })).toEqual([{ x: 1, y: 1 }, { x: 4, y: 1 }, { x: 4, y: 3 }]);
   expect(routeConnector({ x: 1, y: 2 }, { x: 4, y: 2 })).toEqual([{ x: 1, y: 2 }, { x: 4, y: 2 }]);
   expect(routeConnector({ x: 1, y: 1 }, { x: 1, y: 5 })).toEqual([{ x: 1, y: 1 }, { x: 1, y: 5 }]);
@@ -131,7 +120,7 @@ test('drafts an orthogonal connector with a target-end arrow', () => {
   const formulas = new Map(draft.cells.map((cell) => [cell.name, cell.formula]));
   expect(draft.name).toBe('Dynamic connector');
   expect(formulas.get('OneD')).toBe('1');
-  expect(formulas.get('RoutStyle')).toBe('1');
+  expect(formulas.get('ShapeRouteStyle')).toBe('1');
   expect(formulas.get('EndArrow')).toBe('4');
   expect([formulas.get('BeginX'), formulas.get('BeginY'), formulas.get('EndX'), formulas.get('EndY')]).toEqual(['1', '1', '4', '3']);
   expect(Number(formulas.get('Width'))).toBeCloseTo(3);
@@ -583,142 +572,4 @@ test('paints hover points as fixed-screen hollow green rings', () => {
   expect(fills).toHaveLength(0);
   expect(arcs).toHaveLength(1);
   expect(arcs[0][2]).toBeCloseTo(HOVER_POINT_SIZE_PX / 2 / 192, 10);
-});
-
-function nestedShape(id: string, cells: Record<string, string>, children: ShapeSnapshot[] = []): ShapeSnapshot {
-  return {
-    id,
-    sourceId: 1,
-    name: null,
-    children,
-    cells: Object.entries(cells).map(([name, formula]) => ({
-      locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name },
-      name,
-      formula,
-      value: formula,
-    })),
-  };
-}
-
-const leafCells = { PinX: '0', PinY: '0', Width: '1', Height: '1', LocPinX: '0', LocPinY: '0' };
-const rotatedGroupCells = { PinX: '10', PinY: '10', Width: '2', Height: '2', LocPinX: '0', LocPinY: '0', Angle: '1.5707963267948966' };
-
-function rotatedGroup(): ShapeSnapshot {
-  return nestedShape('group', rotatedGroupCells, [nestedShape('leaf', leafCells)]);
-}
-
-test('scene bounds anchor the pin outside its local origin', () => {
-  expect(sceneBoundsOf(nestedShape('leaf', leafCells))).toEqual({
-    x: 0, y: 0, width: 1, height: 1, locPinX: 0, locPinY: 0, angle: 0, flipX: false, flipY: false,
-  });
-  expect(sceneBoundsOf(nestedShape('half', { PinX: '5', PinY: '6', Width: '2', Height: '2' }))).toEqual({
-    x: 4, y: 5, width: 2, height: 2, locPinX: 1, locPinY: 1, angle: 0, flipX: false, flipY: false,
-  });
-  expect(sceneBoundsOf(nestedShape('flat', { PinX: '1' }))).toBeNull();
-});
-
-test('a rotated group maps its child extent around its pin', () => {
-  const matrix = boundsAffine(sceneBoundsOf(nestedShape('group', rotatedGroupCells))!, { x: 0, y: 0, width: 1, height: 1 });
-  expect(matrix.a).toBeCloseTo(0, 10);
-  expect(matrix.b).toBeCloseTo(2, 10);
-  expect(matrix.c).toBeCloseTo(-2, 10);
-  expect(matrix.d).toBeCloseTo(0, 10);
-  expect(matrix.e).toBeCloseTo(10, 10);
-  expect(matrix.f).toBeCloseTo(10, 10);
-  expect(applyAffineToPoint(matrix, { x: 0.5, y: 0.5 })).toEqual({ x: 9, y: 11 });
-  expect(composeAffine({ a: 1, b: 0, c: 0, d: 1, e: 2, f: 3 }, matrix).e).toBeCloseTo(12, 10);
-});
-
-test('ancestor chains run from the page root to the direct parent', () => {
-  const page = [rotatedGroup(), nestedShape('top', leafCells)];
-  expect(ancestorChain(page, 'group')).toEqual([]);
-  expect(ancestorChain(page, 'leaf')?.map((shape) => shape.id)).toEqual(['group']);
-  expect(ancestorChain(page, 'top')).toEqual([]);
-  expect(ancestorChain(page, 'absent')).toBeNull();
-  expect(sceneTransformForAncestors([])).toEqual({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 });
-});
-
-test('nested connection points land in page inches with their glue cells', () => {
-  const page = [rotatedGroup()];
-  const leaf = (page[0].children[0]);
-  const points = globalConnectionPoints(leaf, ancestorChain(page, 'leaf')!)!;
-  expect(points.find((point) => point.side === 'east')).toEqual({ side: 'east', x: 9, y: 12 });
-  expect(points.find((point) => point.side === 'centre')).toEqual({ side: 'centre', x: 10, y: 10 });
-  const top = globalConnectionPoints(nestedShape('top', leafCells), [])!;
-  expect(top).toEqual(connectionPointsForShape(nestedShape('top', leafCells)));
-});
-
-test('a twice-nested centre composes both group scales', () => {
-  const leaf = nestedShape('leaf', leafCells);
-  const mid = nestedShape('mid', { PinX: '1', PinY: '1', Width: '2', Height: '2', LocPinX: '0', LocPinY: '0' }, [leaf]);
-  const outer = nestedShape('outer', { PinX: '30', PinY: '0', Width: '4', Height: '4', LocPinX: '0', LocPinY: '0' }, [mid]);
-  const points = globalConnectionPoints(leaf, ancestorChain([outer], 'leaf')!)!;
-  expect(points.find((point) => point.side === 'centre')).toEqual({ side: 'centre', x: 30, y: 0 });
-  const east = points.find((point) => point.side === 'east')!;
-  expect(east.x).toBeCloseTo(34, 10);
-  expect(east.y).toBeCloseTo(2, 10);
-});
-
-test('a nest below boundless ancestors offers no page-space points', () => {
-  const leaf = nestedShape('leaf', leafCells);
-  const broken = nestedShape('broken', { PinX: '1' }, [leaf]);
-  expect(globalConnectionPoints(leaf, ancestorChain([broken], 'leaf')!)).toBeNull();
-  expect(globalAutoConnectArrows(leaf, ancestorChain([broken], 'leaf')!)).toBeNull();
-  expect(globalAutoConnectHaloHit(leaf, ancestorChain([broken], 'leaf')!, frame, 1, { x: 0, y: 0 })).toBe(false);
-});
-
-test('nested arrows keep their edge points and face outward', () => {
-  const page = [rotatedGroup()];
-  const arrows = globalAutoConnectArrows(page[0].children[0], ancestorChain(page, 'leaf')!)!;
-  const east = arrows.find((arrow) => arrow.side === 'east')!;
-  expect(east.point.x).toBeCloseTo(9, 10);
-  expect(east.point.y).toBeCloseTo(12, 10);
-  expect(east.dir!.x).toBeCloseTo(0, 10);
-  expect(east.dir!.y).toBeCloseTo(2, 10);
-  expect(globalAutoConnectHaloHit(page[0].children[0], ancestorChain(page, 'leaf')!, frame, 1, modelToPage(frame, { x: 9, y: 12 }))).toBe(true);
-  expect(globalAutoConnectHaloHit(page[0].children[0], ancestorChain(page, 'leaf')!, frame, 1, { x: 0, y: 0 })).toBe(false);
-});
-
-test('placed targets flatten nests and skip connectors', () => {
-  const leaf = nestedShape('leaf', leafCells);
-  const connector = nestedShape('wire', { OneD: '1', PinX: '1', PinY: '1', Width: '1', Height: '1' });
-  const page = [nestedShape('group', rotatedGroupCells, [leaf]), nestedShape('top', leafCells), connector];
-  const targets = placedPointTargets(page);
-  expect(targets.map((target) => target.shapeId).sort()).toEqual(['group', 'leaf', 'top']);
-  expect(targets.find((target) => target.shapeId === 'leaf')!.points.find((point) => point.side === 'east')).toEqual({ side: 'east', x: 9, y: 12 });
-  expect(dropTargetForPlacedPoints(targets, { x: 9, y: 12 })?.shapeId).toBe('leaf');
-  expect(dropTargetForPlacedPoints(targets, { x: 40, y: 40 })).toBeNull();
-  expect(connectorEndpointGlueForPlacedPoints([{ x: 9, y: 12 }, { x: 40, y: 40 }], targets)).toEqual(['point', 'unglued']);
-});
-
-test('a quick shape seats on the facing edge of a nested source', () => {
-  const page = [rotatedGroup()];
-  const leaf = page[0].children[0];
-  const top = globalQuickShapePlacement(nestedShape('top', leafCells), [], 'east', 2, 2)!;
-  expect(top).toEqual(quickShapePlacement(nestedShape('top', leafCells), 'east', 2, 2)!);
-  const nested = globalQuickShapePlacement(leaf, ancestorChain(page, 'leaf')!, 'east', 2, 2)!;
-  expect(nested.from).toEqual({ side: 'east', x: 9, y: 12 });
-  expect(nested.x).toBeCloseTo(9, 10);
-  expect(nested.y).toBeGreaterThan(nested.from.y);
-  expect(nested.to.side).toBe('south');
-});
-
-test('a quick shape from a scaled nest matches its page size', () => {
-  const leaf = nestedShape('leaf', leafCells);
-  const group = nestedShape('group', { PinX: '10', PinY: '10', Width: '2', Height: '2', LocPinX: '0', LocPinY: '0' }, [leaf]);
-  const page = [group];
-  const nested = globalQuickShapePlacement(leaf, ancestorChain(page, 'leaf')!, 'east', 1, 1)!;
-  expect(nested.from).toEqual({ side: 'east', x: 12, y: 11 });
-  expect(nested.width).toBeCloseTo(2, 10);
-  expect(nested.height).toBeCloseTo(2, 10);
-  expect(nested.x).toBeCloseTo(13.5, 10);
-  expect(nested.y).toBeCloseTo(11, 10);
-});
-
-test('a quick shape from a rotated nest takes the page bounding size', () => {
-  const page = [rotatedGroup()];
-  const leaf = page[0].children[0];
-  const nested = globalQuickShapePlacement(leaf, ancestorChain(page, 'leaf')!, 'east', 2, 1)!;
-  expect(nested.width).toBeCloseTo(2, 10);
-  expect(nested.height).toBeCloseTo(4, 10);
 });

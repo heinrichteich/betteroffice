@@ -134,6 +134,6 @@ write-once and immutable to remote updates. Do not add a code path that mutates 
 
 `apps/web/public/llms.txt`, `apps/web/app/content.ts` and `README.md` state what the
 product does. Every capability added must update them in the same commit; every
-capability removed likewise. Never claim: stencil picker,
+capability removed likewise. Never claim: stencil picker, connector-drag UI,
 resize-handle UI (resize is Shift-drag only), NURBS editing, data graphics, data
 record sets, containers/lists, validation rules, actions/events, or VBA.

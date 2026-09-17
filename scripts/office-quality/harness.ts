@@ -11,10 +11,11 @@ async function fontsFor(bytes: Uint8Array) {
   const zip = await JSZip.loadAsync(bytes);
   const families = new Set(['Arial', 'Calibri']);
   for (const entry of Object.values(zip.files)) {
-    if (!/^(?:ppt\/.*|xl\/styles)\.xml$/.test(entry.name)) continue;
+    if (!/^(?:ppt\/.*|xl\/styles|visio\/.*)\.xml$/.test(entry.name)) continue;
     const xml = new DOMParser().parseFromString(await entry.async('string'), 'text/xml');
-    for (const node of xml.querySelectorAll('latin, name')) {
-      const family = node.getAttribute('typeface') ?? node.getAttribute('val');
+    for (const node of xml.querySelectorAll('latin, name, FaceName')) {
+      const family =
+        node.getAttribute('typeface') ?? node.getAttribute('val') ?? node.getAttribute('Name');
       if (family && !family.startsWith('+')) families.add(family);
     }
   }
@@ -118,7 +119,7 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
   let pages: number;
   if (format === 'pptx') {
     const { initWasm, openPresentation, paintSlide, sizeCanvasForSlide, presentationImageBlob } = await import(
-      '@betteroffice/pptx'
+      'virtual:office-quality-renderer'
     );
     await initWasm();
     const handle = openPresentation(bytes, { fonts });
@@ -150,7 +151,7 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
     };
   } else if (format === 'xlsx') {
     const { initWasm, openWorkbook, paintDisplayList } = await import(
-      '@betteroffice/xlsx'
+      'virtual:office-quality-renderer'
     );
     await initWasm();
     const handle = openWorkbook(bytes);
@@ -238,6 +239,41 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
         context.drawImage(content, margin, margin);
       }
       return canvas.toDataURL('image/png');
+    };
+  } else if (format === 'vsdx') {
+    const { initWasm, openDiagram, paintPage, sizeCanvasForPage } = await import(
+      'virtual:office-quality-renderer'
+    );
+    await initWasm();
+    const handle = openDiagram(bytes, { fonts });
+    pages = handle.snapshot().pages.length;
+    capture = async (index) => {
+      const list = handle.layoutPage(index);
+      const canvas = document.createElement('canvas');
+      sizeCanvasForPage(canvas, list, 150 / 96, 1);
+      const images = new Map<string, ImageBitmap>();
+      try {
+        await paintPage(canvas.getContext('2d')!, list, 150 / 96, 1, {
+          resolveImage: async (assetId: string) => {
+            if (!images.has(assetId))
+              images.set(
+                assetId,
+                await createImageBitmap(new Blob([handle.mediaBytes(assetId).slice()]))
+              );
+            return images.get(assetId)!;
+          },
+        });
+        const opaque = document.createElement('canvas');
+        opaque.width = canvas.width;
+        opaque.height = canvas.height;
+        const target = opaque.getContext('2d')!;
+        target.fillStyle = '#fff';
+        target.fillRect(0, 0, opaque.width, opaque.height);
+        target.drawImage(canvas, 0, 0);
+        return opaque.toDataURL('image/png');
+      } finally {
+        for (const bitmap of images.values()) bitmap.close();
+      }
     };
   } else throw new Error('Unsupported capture format');
   if (!Number.isInteger(pages) || pages < 1 || pages > 100)
