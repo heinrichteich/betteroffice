@@ -76,6 +76,18 @@ struct SetCellFormulaArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SetControlHandleArgs {
+    page_id: String,
+    shape_id: String,
+    row: String,
+    #[serde(default)]
+    x_formula: Option<String>,
+    #[serde(default)]
+    y_formula: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MoveShapeArgs {
     page_id: String,
     shape_id: String,
@@ -94,13 +106,13 @@ struct ResizeShapeArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PlaceShapeArgs {
+struct SetShapeBoundsArgs {
     page_id: String,
     shape_id: String,
-    width_formula: String,
-    height_formula: String,
     x_formula: String,
     y_formula: String,
+    width_formula: String,
+    height_formula: String,
 }
 
 #[derive(Deserialize)]
@@ -130,6 +142,48 @@ struct AddShapeArgs {
 struct DeleteShapeArgs {
     page_id: String,
     shape_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetShapeTextArgs {
+    page_id: String,
+    shape_id: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShapeTextArgs {
+    page_id: String,
+    shape_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddConnectorArgs {
+    page_id: String,
+    draft: FormulaShapeDraft,
+    from: crate::ConnectorGlue,
+    to: crate::ConnectorGlue,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddFreeConnectorArgs {
+    page_id: String,
+    draft: FormulaShapeDraft,
+    from: crate::ConnectorGlue,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddConnectedShapeArgs {
+    page_id: String,
+    shape_draft: FormulaShapeDraft,
+    connector_draft: FormulaShapeDraft,
+    from: crate::ConnectorGlue,
+    to_cell: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -321,6 +375,11 @@ impl VsdxDocument {
         self.set_cell_formula_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = setControlHandleJson)]
+    pub fn set_control_handle_json(&self, args: &str) -> Result<String, JsValue> {
+        self.set_control_handle_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = moveShapeJson)]
     pub fn move_shape_json(&self, args: &str) -> Result<String, JsValue> {
         self.move_shape_json_inner(args).map_err(js_error)
@@ -331,9 +390,23 @@ impl VsdxDocument {
         self.resize_shape_json_inner(args).map_err(js_error)
     }
 
-    #[wasm_bindgen(js_name = placeShapeJson)]
-    pub fn place_shape_json(&self, args: &str) -> Result<String, JsValue> {
-        self.place_shape_json_inner(args).map_err(js_error)
+    #[wasm_bindgen(js_name = setShapeBoundsJson)]
+    pub fn set_shape_bounds_json(&self, args: &str) -> Result<String, JsValue> {
+        self.set_shape_bounds_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = resizeLocPin)]
+    pub fn resize_loc_pin(
+        &self,
+        page_id: &str,
+        shape_id: &str,
+        width: f64,
+        height: f64,
+    ) -> Result<Vec<f64>, JsValue> {
+        self.session
+            .resize_loc_pin(page_id, shape_id, width, height)
+            .map(Vec::from)
+            .map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = reorderShapeJson)]
@@ -354,6 +427,31 @@ impl VsdxDocument {
     #[wasm_bindgen(js_name = deleteShapeJson)]
     pub fn delete_shape_json(&self, args: &str) -> Result<String, JsValue> {
         self.delete_shape_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = addConnectorJson)]
+    pub fn add_connector_json(&self, args: &str) -> Result<String, JsValue> {
+        self.add_connector_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = addFreeConnectorJson)]
+    pub fn add_free_connector_json(&self, args: &str) -> Result<String, JsValue> {
+        self.add_free_connector_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = addConnectedShapeJson)]
+    pub fn add_connected_shape_json(&self, args: &str) -> Result<String, JsValue> {
+        self.add_connected_shape_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = setShapeTextJson)]
+    pub fn set_shape_text_json(&self, args: &str) -> Result<String, JsValue> {
+        self.set_shape_text_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = shapeTextJson)]
+    pub fn shape_text_json(&self, args: &str) -> Result<String, JsValue> {
+        self.shape_text_json_inner(args).map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = save)]
@@ -439,6 +537,21 @@ impl VsdxDocument {
             .and_then(json_inner)
     }
 
+    fn set_control_handle_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: SetControlHandleArgs = parse_args_inner(args)?;
+        self.session
+            .set_control_handle(
+                &local_context(),
+                &args.page_id,
+                &args.shape_id,
+                &args.row,
+                args.x_formula,
+                args.y_formula,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
     fn move_shape(&self, args: MoveShapeArgs) -> crate::EditResult<[crate::CellFormulaReceipt; 2]> {
         self.session.move_shape(
             &local_context(),
@@ -452,6 +565,24 @@ impl VsdxDocument {
     fn move_shape_json_inner(&self, args: &str) -> Result<String, String> {
         let args = parse_args_inner(args)?;
         self.move_shape(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn set_shape_bounds_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: SetShapeBoundsArgs = parse_args_inner(args)?;
+        self.session
+            .set_shape_bounds(
+                &local_context(),
+                &args.page_id,
+                &args.shape_id,
+                [
+                    args.x_formula,
+                    args.y_formula,
+                    args.width_formula,
+                    args.height_formula,
+                ],
+            )
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }
@@ -494,6 +625,63 @@ impl VsdxDocument {
             .and_then(json_inner)
     }
 
+    fn add_connector_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddConnectorArgs = parse_args_inner(args)?;
+        let draft = args.draft.try_into().map_err(str::to_owned)?;
+        self.session
+            .add_connector(
+                &local_context(),
+                &args.page_id,
+                &draft,
+                &args.from,
+                &args.to,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn add_free_connector_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddFreeConnectorArgs = parse_args_inner(args)?;
+        let draft = args.draft.try_into().map_err(str::to_owned)?;
+        self.session
+            .add_free_connector(&local_context(), &args.page_id, &draft, &args.from)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn add_connected_shape_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddConnectedShapeArgs = parse_args_inner(args)?;
+        let shape_draft = args.shape_draft.try_into().map_err(str::to_owned)?;
+        let connector_draft = args.connector_draft.try_into().map_err(str::to_owned)?;
+        self.session
+            .add_connected_shape(
+                &local_context(),
+                &args.page_id,
+                &shape_draft,
+                &connector_draft,
+                &args.from,
+                args.to_cell.as_deref(),
+            )
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn shape_text_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: ShapeTextArgs = parse_args_inner(args)?;
+        self.session
+            .shape_text(&args.page_id, &args.shape_id)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn set_shape_text_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: SetShapeTextArgs = parse_args_inner(args)?;
+        self.session
+            .set_shape_text(&local_context(), &args.page_id, &args.shape_id, args.text)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
     fn save_inner(&self) -> Result<Vec<u8>, String> {
         self.session.save().map_err(|error| error.to_string())
     }
@@ -514,30 +702,6 @@ impl VsdxDocument {
     fn resize_shape_json_inner(&self, args: &str) -> Result<String, String> {
         let args = parse_args_inner(args)?;
         self.resize_shape(args)
-            .map_err(|error| error.to_string())
-            .and_then(json_inner)
-    }
-
-    fn place_shape(
-        &self,
-        args: PlaceShapeArgs,
-    ) -> crate::EditResult<[crate::CellFormulaReceipt; 4]> {
-        self.session.place_shape(
-            &local_context(),
-            &args.page_id,
-            &args.shape_id,
-            crate::PlaceShapeFormulas {
-                width: args.width_formula,
-                height: args.height_formula,
-                x: args.x_formula,
-                y: args.y_formula,
-            },
-        )
-    }
-
-    fn place_shape_json_inner(&self, args: &str) -> Result<String, String> {
-        let args = parse_args_inner(args)?;
-        self.place_shape(args)
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }
@@ -584,7 +748,7 @@ mod tests {
     use crate::DiagramSession;
     use crate::diagram::MAX_SHAPE_NESTING;
     use crate::{MAX_SAFE_CLIENT_ID, PAGE_ORDER, PAGES, SHEETS};
-    use yrs::{Array, ArrayPrelim, Map, MapPrelim, Out, ReadTxn, Transact};
+    use yrs::{Array, ArrayPrelim, Map, MapPrelim, Out, ReadTxn, Transact, WriteTxn};
 
     fn document() -> VsdxDocument {
         VsdxDocument::open_collaborative(
@@ -749,6 +913,34 @@ mod tests {
         let snapshot = document.snapshot_json().unwrap();
         assert!(snapshot.contains(r#""name":"Width","formula":"SETATREF(Target)""#));
         assert!(snapshot.contains(r#""name":"Target","formula":"2""#));
+    }
+
+    #[test]
+    fn wasm_shape_bounds_json_is_atomic() {
+        let document = document();
+        for name in ["PinX", "PinY", "Width", "Height"] {
+            add_cell(&document, name, name, "1");
+        }
+        let args = r#"{"pageId":"page:1","shapeId":"page:1:shape:1","xFormula":"2","yFormula":"3","widthFormula":"4","heightFormula":"5"}"#;
+        let receipts: serde_json::Value =
+            serde_json::from_str(&document.set_shape_bounds_json(args).unwrap()).unwrap();
+        assert_eq!(
+            receipts
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|receipt| receipt["after"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["2", "3", "4", "5"]
+        );
+        add_cell(&document, "LockMoveY", "LockMoveY", "1");
+        let before = document.snapshot_json().unwrap();
+        assert!(
+            document
+                .set_shape_bounds_json_inner(&args.replace("\"4\"", "\"8\""))
+                .is_err()
+        );
+        assert_eq!(document.snapshot_json().unwrap(), before);
     }
 
     #[test]
@@ -1495,5 +1687,112 @@ mod tests {
             );
         }
         assert_eq!(document.drain_update_event(), vec![2]);
+    }
+
+    #[test]
+    fn set_shape_text_json_round_trips_through_save() {
+        let document = document();
+        let receipt: crate::TextReceipt = serde_json::from_str(
+            &document
+                .set_shape_text_json(
+                    r#"{"pageId":"page:1","shapeId":"page:1:shape:1","text":"Hello\nNew line"}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.page_id, "page:1");
+        assert_eq!(receipt.shape_id, "page:1:shape:1");
+        assert_eq!(
+            document
+                .shape_text_json_inner(r#"{"pageId":"page:1","shapeId":"page:1:shape:1"}"#)
+                .unwrap(),
+            "\"Hello\\nNew line\""
+        );
+        let saved = document.save_inner().unwrap();
+        let reopened = DiagramSession::open(&saved, 2).unwrap();
+        assert_eq!(
+            reopened.shape_text("page:1", "page:1:shape:1").unwrap(),
+            "Hello\nNew line"
+        );
+        let package = reopened.package().unwrap();
+        let part = package.page_part_paths.first().unwrap().clone();
+        let shape = package.page_contents[&part]
+            .shapes()
+            .find(|shape| shape.id == 1)
+            .unwrap();
+        assert_eq!(
+            shape.text(),
+            Some([vsdx_parse::TextToken::Literal("Hello\nNew line".to_owned())].as_slice())
+        );
+        assert_eq!(receipt.before, " AB\n\t C ");
+    }
+
+    #[test]
+    fn set_shape_text_json_refuses_locked_text() {
+        let document = document();
+        add_cell(&document, "LockTextEdit", "LockTextEdit", "1");
+        assert_eq!(
+            document
+                .set_shape_text_json_inner(
+                    r#"{"pageId":"page:1","shapeId":"page:1:shape:1","text":"blocked"}"#
+                )
+                .unwrap_err(),
+            "invalid diagram state: LockTextEdit protects this text-edit gesture"
+        );
+        assert_ne!(
+            document
+                .shape_text_json_inner(r#"{"pageId":"page:1","shapeId":"page:1:shape:1"}"#)
+                .unwrap(),
+            "\"blocked\""
+        );
+    }
+
+    #[test]
+    fn set_shape_text_json_rejects_forbidden_characters() {
+        assert_eq!(
+            document()
+                .set_shape_text_json_inner(
+                    r#"{"pageId":"page:1","shapeId":"page:1:shape:1","text":"bad\u0000"}"#
+                )
+                .unwrap_err(),
+            "invalid diagram state: shape text contains a character forbidden by XML 1.0"
+        );
+    }
+
+    #[test]
+    fn remote_text_edits_apply_but_locked_text_is_rejected() {
+        let live = document();
+        let peer = DiagramSession::open_from_update(&live.encode_state_as_update(), 2).unwrap();
+        peer.set_shape_text(
+            &crate::EditCtx::local("peer"),
+            "page:1",
+            "page:1:shape:1",
+            "from a peer",
+        )
+        .unwrap();
+        let update = peer.encode_diff_v1(&live.encode_state_vector()).unwrap();
+        live.apply_update_json_inner(&update).unwrap();
+        assert_eq!(
+            live.session()
+                .shape_text("page:1", "page:1:shape:1")
+                .unwrap(),
+            "from a peer"
+        );
+        let locked = document();
+        add_cell(&locked, "LockTextEdit", "LockTextEdit", "1");
+        let attacker =
+            DiagramSession::open_from_update(&locked.encode_state_as_update(), 3).unwrap();
+        {
+            let mut txn = attacker.yrs_doc().transact_mut();
+            txn.get_or_insert_map(crate::STORIES)
+                .insert(&mut txn, "page:1:shape:1", "smuggled");
+        }
+        let update = attacker
+            .encode_diff_v1(&locked.encode_state_vector())
+            .unwrap();
+        assert_eq!(
+            locked.apply_update_json_inner(&update).unwrap_err(),
+            "invalid diagram state: LockTextEdit protects this text-edit gesture"
+        );
     }
 }

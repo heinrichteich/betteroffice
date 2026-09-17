@@ -1,10 +1,12 @@
 import { canvasPointToModel, modelPointToCanvas } from '@betteroffice/vsdx';
-import type { Affine, ModelPoint } from '@betteroffice/vsdx';
+import type { Affine, ModelPoint, PageDisplayList, PagePrimitive, ShapeSnapshot, TextBoxPrimitive } from '@betteroffice/vsdx';
+import { GUARD_CALL } from './components/ribbon/commands';
 export type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 export const RESIZE_HANDLES: readonly ResizeHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 export type RotateHandle = 'rotate';
 interface FrameBounds { x: number; y: number; width: number; height: number; }
-export interface DragStart { canvas: ModelPoint; model: ModelPoint; resize: boolean; handle?: ResizeHandle; rotate?: boolean; pin: ModelPoint; locPin?: ModelPoint; size: { width: number; height: number }; parentTransforms?: readonly Affine[]; angle?: number; flipX?: boolean; flipY?: boolean; pointerId?: number; startX?: number; startY?: number; thresholdPassed?: boolean; }
+export interface ControlDrag { row: string; startLocal: ModelPoint; lockedX: boolean; lockedY: boolean; }
+export interface DragStart { canvas: ModelPoint; model: ModelPoint; resize: boolean; handle?: ResizeHandle; rotate?: boolean; control?: ControlDrag; pin: ModelPoint; locPin?: ModelPoint; locPinAtSize?: (width: number, height: number) => ModelPoint; size: { width: number; height: number }; parentTransforms?: readonly Affine[]; angle?: number; flipX?: boolean; flipY?: boolean; pointerId?: number; startX?: number; startY?: number; thresholdPassed?: boolean; }
 const MIN_SHAPE_INCHES = 0.01;
 /** Fluent 2 colorNeutralStrokeAccessible. */
 export const SELECTION_STROKE = '#616161';
@@ -13,6 +15,8 @@ export const SELECTION_HANDLE_CSS = 7;
 export const SELECTION_ROTATE_RADIUS_CSS = 5;
 export const SELECTION_ROTATE_OFFSET_CSS = 18;
 export const HANDLE_HIT_TOLERANCE_CSS = 6;
+export const CONTROL_HANDLE_FILL = '#ffeb00';
+export const CONTROL_HANDLE_CSS = 7;
 export const ROTATION_SNAP_STEP = Math.PI / 12;
 export const CANVAS_KEYBOARD_DPI = 96;
 export const CANVAS_KEYBOARD_NUDGE_MULTIPLIER = 10;
@@ -88,10 +92,18 @@ const yDownHandle = (handle: ResizeHandle): ResizeHandle => {
   return handle;
 };
 export const snapRotationAngle = (angle: number, snap: boolean): number => snap ? Math.round(angle / ROTATION_SNAP_STEP) * ROTATION_SNAP_STEP : angle;
-const locPinInches = (start: DragStart): { x: number; y: number } => ({
-  x: start.locPin?.x ?? start.size.width / 2,
-  y: start.locPin?.y ?? start.size.height / 2,
-});
+/** The engine refuses a LocPin it cannot evaluate; the stored value is what the renderer falls back to. */
+const probedLocPin = (start: DragStart, size: { width: number; height: number }): ModelPoint | undefined => {
+  if (!(size.width > 0) || !(size.height > 0)) return undefined;
+  try {
+    const probed = start.locPinAtSize?.(size.width, size.height);
+    return probed && Number.isFinite(probed.x) && Number.isFinite(probed.y) ? probed : undefined;
+  } catch { return undefined; }
+};
+const locPinInches = (start: DragStart, size = start.size): ModelPoint => probedLocPin(start, size) ?? {
+  x: start.locPin?.x ?? size.width / 2,
+  y: start.locPin?.y ?? size.height / 2,
+};
 export const resolveDragGeometry = (start: DragStart, release: ModelPoint): { x: number; y: number; width: number; height: number } => {
   const toParent = (point: ModelPoint) => (start.parentTransforms ?? []).reduce((local, transform) => canvasPointToModel(transform, local.x, local.y), point);
   const origin = toParent(start.model);
@@ -106,8 +118,6 @@ export const resolveDragGeometry = (start: DragStart, release: ModelPoint): { x:
     const localX = (cos * deltaX + sin * deltaY) * flipSignX;
     const localY = (-sin * deltaX + cos * deltaY) * flipSignY;
     const locPin = locPinInches(start);
-    const fx = start.size.width > 0 ? locPin.x / start.size.width : 0.5;
-    const fy = start.size.height > 0 ? locPin.y / start.size.height : 0.5;
     const visualHandle: ResizeHandle = start.handle;
     const localHandle: ResizeHandle = ((): ResizeHandle => {
       let mapped: ResizeHandle = visualHandle;
@@ -125,8 +135,7 @@ export const resolveDragGeometry = (start: DragStart, release: ModelPoint): { x:
     const boxY = start.pin.y - locPin.y;
     const box: FrameBounds = { x: boxX, y: boxY, width: start.size.width, height: start.size.height };
     const next = resizedBounds(box, yDownHandle(localHandle), { x: localX, y: localY }, MIN_SHAPE_INCHES);
-    const newLocPinX = start.locPin?.x === undefined ? fx * next.width : locPin.x;
-    const newLocPinY = start.locPin?.y === undefined ? fy * next.height : locPin.y;
+    const { x: newLocPinX, y: newLocPinY } = locPinInches(start, next);
     const shiftX = (next.x + newLocPinX) - (boxX + locPin.x);
     const shiftY = (next.y + newLocPinY) - (boxY + locPin.y);
     const unflippedX = shiftX * flipSignX;
@@ -162,11 +171,9 @@ export const previewOutline = (start: DragStart, release: ModelPoint, paintTrans
   const geometry = resolveDragGeometry(start, release);
   const angle = start.rotate ? resolveRotationAngle(start, release, snap) : (start.angle ?? 0);
   const cos = Math.cos(angle), sin = Math.sin(angle);
-  const locPin = locPinInches(start);
-  const oldFx = start.size.width > 0 ? locPin.x / start.size.width : 0.5;
-  const oldFy = start.size.height > 0 ? locPin.y / start.size.height : 0.5;
-  const effFx = start.locPin?.x === undefined ? oldFx : (geometry.width > 0 ? locPin.x / geometry.width : 0.5);
-  const effFy = start.locPin?.y === undefined ? oldFy : (geometry.height > 0 ? locPin.y / geometry.height : 0.5);
+  const locPin = locPinInches(start, geometry);
+  const effFx = geometry.width > 0 ? locPin.x / geometry.width : 0.5;
+  const effFy = geometry.height > 0 ? locPin.y / geometry.height : 0.5;
   const fvx = start.flipX ? 1 - effFx : effFx;
   const fvy = start.flipY ? 1 - effFy : effFy;
   const centreOffsetX = (0.5 - fvx) * geometry.width;
@@ -215,7 +222,7 @@ export const rotationGripPosition = (corners: readonly ModelPoint[], zoom: numbe
   const offset = SELECTION_ROTATE_OFFSET_CSS / Math.max(zoom, 1e-6);
   return { x: topCenter.x + (outX / length) * offset, y: topCenter.y + (outY / length) * offset };
 };
-export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: readonly ModelPoint[], dpr: number, scale: number, resizeHandles: readonly ResizeHandle[] = RESIZE_HANDLES): void => {
+export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: readonly ModelPoint[], dpr: number, scale: number, resizeHandles: readonly ResizeHandle[] = RESIZE_HANDLES, showRotate = true): void => {
   if (corners.length < 4) return;
   const zoom = Number.isFinite(scale) && scale > 0 ? scale : 1;
   const handleRadius = SELECTION_HANDLE_CSS / zoom / 2;
@@ -233,10 +240,12 @@ export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: 
     for (let index = 1; index < corners.length; index += 1) context.lineTo(corners[index].x, corners[index].y);
     context.closePath();
     context.stroke();
-    context.beginPath();
-    context.moveTo(topCenter.x, topCenter.y);
-    context.lineTo(grip.x, grip.y);
-    context.stroke();
+    if (showRotate) {
+      context.beginPath();
+      context.moveTo(topCenter.x, topCenter.y);
+      context.lineTo(grip.x, grip.y);
+      context.stroke();
+    }
     for (const key of resizeHandles) {
       const anchor = handles[key];
       context.beginPath();
@@ -245,6 +254,7 @@ export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: 
       context.fill();
       context.stroke();
     }
+    if (!showRotate) return;
     context.beginPath();
     context.arc(grip.x, grip.y, gripRadius, 0, Math.PI * 2);
     context.fillStyle = SELECTION_HANDLE_FILL;
@@ -283,4 +293,228 @@ export const hitTestSelection = (point: ModelPoint, corners: readonly ModelPoint
     if (tiny && (ranked[1].distance - ranked[0].distance) < 1.5 / safeZoom) return null;
   }
   return ranked[0].key;
+};
+
+export interface TextEditFont { family: string; sizePx: number; bold: boolean; italic: boolean; color: string; }
+export interface TextEditOverlay { width: number; height: number; matrix: Affine; font: TextEditFont; }
+interface TextEditTarget { x: number; y: number; width: number; height: number; transform: Affine; primitive: PagePrimitive; }
+
+const IDENTITY_AFFINE: Affine = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+const DEFAULT_TEXT_SIZE_IN = 10 / 72;
+
+export const isPrintableEntryKey = (event: CanvasKeyboardEventLike): boolean =>
+  event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey && !isEditableKeyboardTarget(event.target);
+
+const composeAffine = (outer: Affine, inner: Affine): Affine => ({
+  a: outer.a * inner.a + outer.c * inner.b,
+  b: outer.b * inner.a + outer.d * inner.b,
+  c: outer.a * inner.c + outer.c * inner.d,
+  d: outer.b * inner.c + outer.d * inner.d,
+  e: outer.a * inner.e + outer.c * inner.f + outer.e,
+  f: outer.b * inner.e + outer.d * inner.f + outer.f,
+});
+
+const primitiveTransform = (primitive: PagePrimitive): Affine => ('transform' in primitive ? primitive.transform : undefined) ?? IDENTITY_AFFINE;
+
+const localBounds = (primitive: PagePrimitive, depth = 0): FrameBounds | null => {
+  if (primitive.kind === 'textBox' || primitive.kind === 'image' || primitive.kind === 'placeholder') return primitive;
+  const points: ModelPoint[] = [];
+  if (primitive.kind === 'shape') {
+    for (const command of primitive.path) {
+      const record = command as unknown as Record<string, unknown>;
+      for (const [xKey, yKey] of [['x', 'y'], ['cpx', 'cpy'], ['cp1x', 'cp1y'], ['cp2x', 'cp2y']] as const) {
+        const x = record[xKey], y = record[yKey];
+        if (typeof x === 'number' && typeof y === 'number' && Number.isFinite(x) && Number.isFinite(y)) points.push({ x, y });
+      }
+    }
+  } else if (primitive.kind === 'group' && depth < 256) {
+    for (const child of primitive.primitives) {
+      const bounds = localBounds(child, depth + 1);
+      if (!bounds) continue;
+      const transform = primitiveTransform(child);
+      for (const [x, y] of [[bounds.x, bounds.y], [bounds.x + bounds.width, bounds.y], [bounds.x, bounds.y + bounds.height], [bounds.x + bounds.width, bounds.y + bounds.height]] as const) {
+        points.push({ x: transform.a * x + transform.c * y + transform.e, y: transform.b * x + transform.d * y + transform.f });
+      }
+    }
+  }
+  if (!points.length) return null;
+  const xs = points.map((point) => point.x), ys = points.map((point) => point.y);
+  const x = Math.min(...xs), y = Math.min(...ys);
+  return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
+};
+
+const textEditTargets = (primitives: readonly PagePrimitive[], id: string, parent: Affine, depth = 0): TextEditTarget[] => {
+  if (depth >= 256) return [];
+  const targets: TextEditTarget[] = [];
+  for (const primitive of primitives) {
+    const transform = composeAffine(parent, primitiveTransform(primitive));
+    if (primitive.id === id) {
+      const bounds = localBounds(primitive);
+      if (bounds) targets.push({ ...bounds, transform, primitive });
+    }
+    if (primitive.kind === 'group') targets.push(...textEditTargets(primitive.primitives, id, transform, depth + 1));
+  }
+  return targets;
+};
+
+export const withoutTextBox = (primitives: readonly PagePrimitive[], id: string, depth = 0): PagePrimitive[] => {
+  if (depth >= 256) return [...primitives];
+  const kept: PagePrimitive[] = [];
+  for (const primitive of primitives) {
+    if (primitive.kind === 'textBox' && primitive.id === id) continue;
+    kept.push(primitive.kind === 'group' ? { ...primitive, primitives: withoutTextBox(primitive.primitives, id, depth + 1) } : primitive);
+  }
+  return kept;
+};
+
+export const textEditOverlay = (frame: PageDisplayList, primitiveId: string, zoom: number): TextEditOverlay | null => {
+  const targets = textEditTargets(frame.primitives, primitiveId, IDENTITY_AFFINE);
+  const target = targets.find((candidate) => candidate.primitive.kind === 'textBox') ?? targets[0];
+  if (!target) return null;
+  const safeZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+  const toCanvas = composeAffine({ a: safeZoom, b: 0, c: 0, d: safeZoom, e: 0, f: 0 }, composeAffine(frame.paintTransform, target.transform));
+  const placed = composeAffine(toCanvas, { a: 1, b: 0, c: 0, d: -1, e: target.x, f: target.y + target.height });
+  const scale = Math.sqrt(Math.abs(placed.a * placed.d - placed.b * placed.c));
+  if (!Number.isFinite(scale) || scale <= 0) return null;
+  const box = target.primitive.kind === 'textBox' ? (target.primitive as TextBoxPrimitive) : null;
+  const runs = box?.paragraphs.flatMap((paragraph) => paragraph.runs) ?? [];
+  const run = runs.find((candidate) => candidate.text.length > 0) ?? runs[0];
+  return {
+    width: Math.max(1, target.width * scale),
+    height: Math.max(1, target.height * scale),
+    matrix: { a: placed.a / scale, b: placed.b / scale, c: placed.c / scale, d: placed.d / scale, e: placed.e, f: placed.f },
+    font: {
+      family: run?.family || 'Calibri',
+      sizePx: Math.max(1, (run?.sizeIn ?? DEFAULT_TEXT_SIZE_IN) * scale),
+      bold: run?.bold ?? false,
+      italic: run?.italic ?? false,
+      color: run?.color || '#000000',
+    },
+  };
+};
+export interface ControlHandle { row: string; x: number; y: number; xCon: number; yCon: number; }
+export interface ControlHandlePosition { row: string; canvas: ModelPoint; lockedX: boolean; lockedY: boolean; }
+/** A handle hides when either behaviour cell selects a hidden variant. */
+export const controlHandleHidden = (handle: Pick<ControlHandle, 'xCon' | 'yCon'>): boolean => handle.xCon >= 5 || handle.yCon >= 5;
+const controlAxisLocked = (behavior: number): boolean => Number.isFinite(behavior) && ((Math.round(behavior) % 5) + 5) % 5 === 1;
+/** A handle pins an axis when its behaviour cell selects a locked variant. */
+export const controlHandleLockedX = (handle: Pick<ControlHandle, 'xCon'>): boolean => controlAxisLocked(handle.xCon);
+/** A handle pins an axis when its behaviour cell selects a locked variant. */
+export const controlHandleLockedY = (handle: Pick<ControlHandle, 'yCon'>): boolean => controlAxisLocked(handle.yCon);
+const sectionCell = (shape: ShapeSnapshot, section: string, row: string, cell: string) =>
+  shape.cells.find((entry) => entry.locator.section === section && typeof entry.locator.row === 'object' && entry.locator.row !== null && 'name' in entry.locator.row && (entry.locator.row as { name: string }).name === row && (entry.locator.cellName === cell || entry.name === cell));
+const sectionNumber = (shape: ShapeSnapshot, section: string, row: string, cell: string): number | undefined => {
+  const found = sectionCell(shape, section, row, cell);
+  if (!found) return undefined;
+  const raw = (found.value ?? found.formula ?? '').trim();
+  if (!raw) return undefined;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+/** True when a Control X/Y write would be refused outright; a plain SETATREF redirect is not. */
+export const controlCellWriteBlocked = (shape: ShapeSnapshot, row: string, cell: 'X' | 'Y'): boolean => {
+  const formula = sectionCell(shape, 'Control', row, cell)?.formula ?? '';
+  return GUARD_CALL.test(formula) || /\bSETATREF(EXPR|EVAL)\s*\(/i.test(formula);
+};
+/** Resolves the draggable control handles of a shape from its snapshot cells. */
+export const controlHandlesForShape = (shape: ShapeSnapshot): ControlHandle[] => {
+  const rows: string[] = [];
+  for (const cell of shape.cells) {
+    if (cell.locator.section !== 'Control') continue;
+    const row = cell.locator.row;
+    if (typeof row !== 'object' || row === null || !('name' in row)) continue;
+    const name = (row as { name: string }).name;
+    if (name && !rows.includes(name)) rows.push(name);
+  }
+  const handles: ControlHandle[] = [];
+  for (const row of rows) {
+    const x = sectionNumber(shape, 'Control', row, 'X');
+    const y = sectionNumber(shape, 'Control', row, 'Y');
+    if (x === undefined || y === undefined || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+    handles.push({ row, x, y, xCon: sectionNumber(shape, 'Control', row, 'XCon') ?? 0, yCon: sectionNumber(shape, 'Control', row, 'YCon') ?? 0 });
+  }
+  return handles;
+};
+type ControlBase = Pick<DragStart, 'pin' | 'locPin' | 'size' | 'parentTransforms' | 'angle' | 'flipX' | 'flipY'>;
+const controlLocPin = (base: ControlBase): ModelPoint => base.locPin ?? { x: base.size.width / 2, y: base.size.height / 2 };
+const controlAffine = (base: ControlBase): { a: number; b: number; c: number; d: number; e: number; f: number } => {
+  const angle = base.angle ?? 0;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const fx = base.flipX ? -1 : 1;
+  const fy = base.flipY ? -1 : 1;
+  const locPin = controlLocPin(base);
+  return { a: cos * fx, b: sin * fx, c: -sin * fy, d: cos * fy, e: base.pin.x - cos * fx * locPin.x + sin * fy * locPin.y, f: base.pin.y - sin * fx * locPin.x - cos * fy * locPin.y };
+};
+/** Maps a shape-local Control position into page coordinates. */
+export const shapeLocalToPage = (base: ControlBase, local: ModelPoint): ModelPoint => {
+  const t = controlAffine(base);
+  const parent = { x: t.a * local.x + t.c * local.y + t.e, y: t.b * local.x + t.d * local.y + t.f };
+  return (base.parentTransforms ?? []).reduceRight((point, transform) => ({ x: transform.a * point.x + transform.c * point.y + transform.e, y: transform.b * point.x + transform.d * point.y + transform.f }), parent);
+};
+/** Maps a page position back into shape-local Control coordinates. */
+export const pageToShapeLocal = (base: ControlBase, page: ModelPoint): ModelPoint | null => {
+  let point = page;
+  try {
+    point = (base.parentTransforms ?? []).reduce((local, transform) => canvasPointToModel(transform, local.x, local.y), point);
+  } catch { return null; }
+  const t = controlAffine(base);
+  const determinant = t.a * t.d - t.b * t.c;
+  if (!Number.isFinite(determinant) || determinant === 0) return null;
+  const dx = point.x - t.e;
+  const dy = point.y - t.f;
+  return { x: (t.d * dx - t.c * dy) / determinant, y: (t.a * dy - t.b * dx) / determinant };
+};
+/** Canvas positions for the visible control handles of the selected shape. */
+export const controlHandleCanvasPositions = (shape: ShapeSnapshot, base: ControlBase, paintTransform: Affine): ControlHandlePosition[] => {
+  const positions: ControlHandlePosition[] = [];
+  for (const handle of controlHandlesForShape(shape)) {
+    if (controlHandleHidden(handle)) continue;
+    const page = shapeLocalToPage(base, { x: handle.x, y: handle.y });
+    positions.push({ row: handle.row, canvas: modelPointToCanvas(paintTransform, page.x, page.y), lockedX: controlHandleLockedX(handle), lockedY: controlHandleLockedY(handle) });
+  }
+  return positions;
+};
+/** Paints yellow diamonds for the visible control handles on the overlay canvas. */
+export const paintControlHandles = (context: CanvasRenderingContext2D, positions: readonly ControlHandlePosition[], dpr: number, scale: number): void => {
+  if (!positions.length) return;
+  const zoom = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  const radius = CONTROL_HANDLE_CSS / zoom / 2;
+  context.save();
+  try {
+    context.setTransform(dpr * zoom, 0, 0, dpr * zoom, 0, 0);
+    context.strokeStyle = SELECTION_STROKE;
+    context.lineWidth = 1 / zoom;
+    context.setLineDash([]);
+    for (const position of positions) {
+      context.beginPath();
+      context.moveTo(position.canvas.x, position.canvas.y - radius);
+      context.lineTo(position.canvas.x + radius, position.canvas.y);
+      context.lineTo(position.canvas.x, position.canvas.y + radius);
+      context.lineTo(position.canvas.x - radius, position.canvas.y);
+      context.closePath();
+      context.fillStyle = CONTROL_HANDLE_FILL;
+      context.fill();
+      context.stroke();
+    }
+  } finally { context.restore(); }
+};
+/** Returns the row name of the control handle under the pointer, if any. */
+export const hitTestControlHandles = (point: ModelPoint, positions: readonly ControlHandlePosition[], zoom: number, toleranceCss = HANDLE_HIT_TOLERANCE_CSS): string | null => {
+  if (!positions.length) return null;
+  const safeZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+  const radius = Math.max(toleranceCss / safeZoom, CONTROL_HANDLE_CSS / safeZoom / 2);
+  let best: string | null = null;
+  let bestDistance = Infinity;
+  for (const position of positions) {
+    const distance = Math.hypot(point.x - position.canvas.x, point.y - position.canvas.y);
+    if (distance <= radius && distance < bestDistance) { best = position.row; bestDistance = distance; }
+  }
+  return best;
+};
+/** Resolves a control drag to shape-local coordinates, keeping locked axes fixed. */
+export const resolveControlDrag = (base: ControlBase, startLocal: ModelPoint, releasePage: ModelPoint, lockedX: boolean, lockedY: boolean): ModelPoint => {
+  const releaseLocal = pageToShapeLocal(base, releasePage);
+  if (!releaseLocal || !Number.isFinite(releaseLocal.x) || !Number.isFinite(releaseLocal.y)) return startLocal;
+  return { x: lockedX ? startLocal.x : releaseLocal.x, y: lockedY ? startLocal.y : releaseLocal.y };
 };
