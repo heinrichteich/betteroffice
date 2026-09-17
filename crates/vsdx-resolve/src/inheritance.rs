@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use vsdx_parse::{
     Cell, Row, Section, Shape, ShapeChild, Sheet, SheetChild, TextToken, VsdxPackage,
@@ -11,6 +11,9 @@ use crate::{
 };
 
 const MAX_INHERITANCE_DEPTH: usize = 64;
+const GEOMETRY_SECTION_CONTROLS: [&str; 3] = ["NoFill", "NoLine", "NoShow"];
+/// Documented Geometry cells that steer editing gestures, not rendering.
+const GEOMETRY_SECTION_EDITING_CELLS: [&str; 2] = ["NoSnap", "NoQuickDrag"];
 
 pub struct Resolver<'a> {
     package: &'a VsdxPackage,
@@ -49,14 +52,14 @@ impl<'a> Resolver<'a> {
             .get(page_part)
             .and_then(|id| self.package.page_sheets.get(id))
             .unwrap_or(page_contents);
-        self.resolve_shape_ref(shape, page)
+        self.resolve_shape_ref(shape, page, page_contents)
     }
     pub fn resolve_shape_in_sheet(
         &self,
         shape: &Shape,
         sheet: &Sheet,
     ) -> Result<ResolvedShape, ResolveError> {
-        self.resolve_shape_ref(shape, sheet)
+        self.resolve_shape_ref(shape, sheet, sheet)
     }
     /// Resolves a page or document ShapeSheet with document-level inheritance.
     pub fn resolve_sheet(&self, sheet: &Sheet) -> Result<ResolvedShape, ResolveError> {
@@ -82,7 +85,7 @@ impl<'a> Resolver<'a> {
             del: false,
             other_attrs: Vec::new(),
         };
-        self.resolve_shape_ref(&shape, sheet)
+        self.resolve_shape_ref(&shape, sheet, sheet)
     }
     pub fn resolve_page_shapes(
         &self,
@@ -101,7 +104,7 @@ impl<'a> Resolver<'a> {
             .unwrap_or(page_contents);
         let mut shapes = BTreeMap::new();
         for shape in page_contents.shapes() {
-            self.resolve_page_shape_tree(shape, page, &mut shapes)?;
+            self.resolve_page_shape_tree(shape, page, page_contents, &mut shapes)?;
         }
         Ok(shapes)
     }
@@ -109,29 +112,23 @@ impl<'a> Resolver<'a> {
         &self,
         shape: &Shape,
         page: &Sheet,
+        lookup: &Sheet,
         shapes: &mut BTreeMap<u32, ResolvedShape>,
     ) -> Result<(), ResolveError> {
-        shapes.insert(shape.id, self.resolve_shape_ref(shape, page)?);
+        shapes.insert(shape.id, self.resolve_shape_ref(shape, page, lookup)?);
         for child in shape.shapes() {
-            self.resolve_page_shape_tree(child, page, shapes)?;
+            self.resolve_page_shape_tree(child, page, lookup, shapes)?;
         }
         Ok(())
     }
-    pub fn resolve_text(
-        &self,
-        shape: &Shape,
-        page: &Sheet,
-    ) -> Result<Vec<ResolvedTextToken>, ResolveError> {
-        let resolved = self.resolve_shape_ref(shape, page)?;
-        self.resolve_text_in_context(shape, page, &resolved)
-    }
+    /// `lookup` locates enclosing groups for `MasterShape=` resolution.
     pub fn resolve_text_in_context(
         &self,
         shape: &Shape,
-        page: &Sheet,
+        lookup: &Sheet,
         resolved: &ResolvedShape,
     ) -> Result<Vec<ResolvedTextToken>, ResolveError> {
-        let masters = self.master_chain(shape, page)?;
+        let masters = self.master_chain(shape, lookup)?;
         let tokens = shape
             .text()
             .or_else(|| masters.iter().find_map(|(_, master)| master.text()));
@@ -159,10 +156,12 @@ impl<'a> Resolver<'a> {
             })
             .collect())
     }
+    /// `page` supplies inherited cell values, `lookup` locates enclosing groups.
     fn resolve_shape_ref(
         &self,
         shape: &Shape,
         page: &Sheet,
+        lookup: &Sheet,
     ) -> Result<ResolvedShape, ResolveError> {
         if shape.del {
             return Ok(ResolvedShape {
@@ -170,7 +169,7 @@ impl<'a> Resolver<'a> {
                 ..Default::default()
             });
         }
-        let masters = self.master_chain(shape, page)?;
+        let masters = self.master_chain(shape, lookup)?;
         let styles = self.style_chains(shape, &masters)?;
         let mut names = HashSet::new();
         for source in std::iter::once(shape as &dyn HasCells)
@@ -228,14 +227,15 @@ impl<'a> Resolver<'a> {
         }
         Ok(out)
     }
+    /// `lookup` is the shape-lookup sheet holding `shape` for group traversal.
     fn master_chain(
         &self,
         shape: &Shape,
-        source_sheet: &'a Sheet,
+        lookup: &Sheet,
     ) -> Result<Vec<(Provenance, &'a Shape)>, ResolveError> {
         let mut out = Vec::new();
         let mut current = shape;
-        let mut current_sheet = source_sheet;
+        let mut current_sheet = lookup;
         let mut seen = HashSet::new();
         for depth in 0..MAX_INHERITANCE_DEPTH {
             let (master_id, master_shape, own_master) = match (current.master, current.master_shape)
@@ -462,12 +462,14 @@ impl<'a> Resolver<'a> {
                 }
             }
         }
+        let (controls, unsupported_controls) = resolve_geometry_controls(name, &sources);
         let mut out = ResolvedSection {
             name: name.into(),
             index: sources
                 .iter()
                 .find_map(|(_, section)| section.and_then(|section| section.index)),
-            unsupported_controls: unsupported_geometry_controls(name, &sources),
+            unsupported_controls,
+            controls,
             ..Default::default()
         };
         for key in keys {
@@ -552,15 +554,31 @@ impl<'a> Resolver<'a> {
     }
 }
 
-fn unsupported_geometry_controls(
+fn resolve_geometry_controls(
     name: &str,
     sources: &[(Provenance, Option<&Section>)],
-) -> Vec<String> {
+) -> (crate::GeometrySectionControls, Vec<String>) {
     if name != "Geometry" {
-        return Vec::new();
+        return (crate::GeometrySectionControls::default(), Vec::new());
     }
+    let names = sources
+        .iter()
+        .filter_map(|(_, section)| *section)
+        .flat_map(|section| &section.children)
+        .filter_map(|child| match child {
+            vsdx_parse::SectionChild::Unknown(cell)
+                if cell.name.rsplit(':').next() == Some("Cell") =>
+            {
+                cell.attributes
+                    .iter()
+                    .find_map(|(name, value)| (name == "N").then_some(value.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut active = [false; GEOMETRY_SECTION_CONTROLS.len()];
     let mut unsupported = Vec::new();
-    for control in ["NoFill", "NoLine", "NoShow"] {
+    for control in names {
         for (_, section) in sources {
             let Some(section) = section else { continue };
             let Some(cell) = section.children.iter().find_map(|child| match child {
@@ -588,26 +606,50 @@ fn unsupported_geometry_controls(
             if attribute("Del") == Some("1") {
                 break;
             }
-            let formula = attribute("F").or_else(|| attribute("V"));
-            let zero = formula.is_some_and(|formula| {
-                formula.eq_ignore_ascii_case("FALSE")
-                    || vsdx_formula::evaluate_number(
-                        formula,
-                        vsdx_formula::Limits {
-                            max_depth: 256,
-                            max_nodes: 8192,
-                            max_tokens: 16384,
-                        },
-                        &mut |_| None,
-                    ) == Some(0.0)
-            });
-            if !zero {
+            if let Some(index) = GEOMETRY_SECTION_CONTROLS
+                .iter()
+                .position(|name| *name == control)
+            {
+                match evaluate_control(attribute("F").or_else(|| attribute("V"))) {
+                    Some(value) => active[index] = value,
+                    None => unsupported.push(control.to_owned()),
+                }
+            } else if !GEOMETRY_SECTION_EDITING_CELLS.contains(&control) {
                 unsupported.push(control.to_owned());
             }
             break;
         }
     }
-    unsupported
+    let [no_fill, no_line, no_show] = active;
+    (
+        crate::GeometrySectionControls {
+            no_fill,
+            no_line,
+            no_show,
+        },
+        unsupported,
+    )
+}
+
+/// Evaluates a section control to active/inactive, or `None` when unevaluable.
+fn evaluate_control(formula: Option<&str>) -> Option<bool> {
+    let formula = formula?;
+    if formula.eq_ignore_ascii_case("FALSE") {
+        return Some(false);
+    }
+    if formula.eq_ignore_ascii_case("TRUE") {
+        return Some(true);
+    }
+    vsdx_formula::evaluate_number(
+        formula,
+        vsdx_formula::Limits {
+            max_depth: 256,
+            max_nodes: 8192,
+            max_tokens: 16384,
+        },
+        &mut |_| None,
+    )
+    .map(|value| value != 0.0)
 }
 
 /// Documented transform defaults: https://learn.microsoft.com/en-us/office/client-developer/visio/cells-visio-shapesheet-reference

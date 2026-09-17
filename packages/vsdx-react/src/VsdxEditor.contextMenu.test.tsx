@@ -259,48 +259,6 @@ test('the menu flips inside the viewport near an edge', () => {
   }
 });
 
-test('a submenu near the right edge opens to the left of its parent', () => {
-  const originalRect = HTMLElement.prototype.getBoundingClientRect;
-  HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
-    if (this.hasAttribute?.('data-submenu')) return { x: 900, y: 100, width: 220, height: 120, top: 100, left: 900, right: 1120, bottom: 220, toJSON: () => ({}) } as DOMRect;
-    return originalRect.call(this);
-  };
-  const { view } = renderMenu({ position: { top: 100, left: 100 } });
-  try {
-    const submenu = openSubmenu('bringToFront');
-    expect(submenu.style.right).toBe('100%');
-    expect(submenu.style.left).toBe('auto');
-  } finally {
-    HTMLElement.prototype.getBoundingClientRect = originalRect;
-    view.unmount();
-  }
-});
-
-test('a submenu with room on the right keeps its default opening side', () => {
-  const originalRect = HTMLElement.prototype.getBoundingClientRect;
-  HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
-    if (this.hasAttribute?.('data-submenu')) return { x: 100, y: 100, width: 220, height: 120, top: 100, left: 100, right: 320, bottom: 220, toJSON: () => ({}) } as DOMRect;
-    return originalRect.call(this);
-  };
-  const { view } = renderMenu({ position: { top: 100, left: 100 } });
-  try {
-    const submenu = openSubmenu('bringToFront');
-    expect(submenu.style.left).toBe('100%');
-    expect(submenu.style.right).toBe('');
-  } finally {
-    HTMLElement.prototype.getBoundingClientRect = originalRect;
-    view.unmount();
-  }
-});
-
-test('submenuSide keeps the submenu inside the viewport', async () => {
-  const { submenuSide } = await import('./components/ribbon/CommandMenu');
-  expect(submenuSide(100, 220, 1024)).toBe('right');
-  expect(submenuSide(800, 220, 1024)).toBe('right');
-  expect(submenuSide(801, 220, 1024)).toBe('left');
-  expect(submenuSide(900, 220, 1024)).toBe('left');
-});
-
 test('a locked shape disables its refused operation and focuses the first allowed entry', () => {
   const { view } = renderMenu({ cells: [cell('LockDelete', '1'), cell('Angle', 'GUARD(0)'), cell('FlipX', '0'), cell('FlipY', '0')] });
   try {
@@ -329,4 +287,21 @@ test('a submenu with no enabled child stays closed to keyboard and pointer', () 
   } finally {
     view.unmount();
   }
+});
+
+for (const nearRight of [false, true]) test(`z-order submenu ${nearRight ? 'flips left' : 'opens right'} and stays above the viewport bottom`, () => {
+  const originalRect = HTMLElement.prototype.getBoundingClientRect;
+  const left = nearRight ? window.innerWidth - 224 : 20;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    if (this.hasAttribute('data-submenu-id')) return { left, right: left + 220, top: window.innerHeight - 20, width: 220, height: 30 } as DOMRect;
+    if (this.hasAttribute('data-submenu')) return { left: 0, top: 0, width: 200, height: 80 } as DOMRect;
+    return originalRect.call(this);
+  };
+  try {
+    renderMenu();
+    const submenu = openSubmenu('bringToFront');
+    expect(submenu.style.position).toBe('fixed');
+    expect(Number.parseFloat(submenu.style.left)).toBe(nearRight ? left - 200 : left + 220);
+    expect(Number.parseFloat(submenu.style.top)).toBe(window.innerHeight - 84);
+  } finally { cleanup(); HTMLElement.prototype.getBoundingClientRect = originalRect; }
 });

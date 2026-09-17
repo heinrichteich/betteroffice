@@ -5,27 +5,30 @@ export type SnapshotCellRow = { index: number } | { name: string };
 export interface SnapshotCellLocator { sheet: SnapshotCellSheet; shapeId: number | null; section: string | null; sectionIndex?: number | null; row: SnapshotCellRow | null; cellName: string; }
 export interface CellSnapshot { locator: SnapshotCellLocator; name: string; formula: string | null; value: string | null; rowType?: string; }
 export interface ShapeSnapshot { id: string; sourceId: number; name: string | null; cells: CellSnapshot[]; children: ShapeSnapshot[]; }
+export interface PageLayer { index: number; name: string; visible: boolean; print: boolean; lock: boolean; active: boolean; color: string; status: string; }
 export interface PageSnapshot { id: string; sourcePartPath: string; name: string | null; shapes: ShapeSnapshot[]; }
 export interface DiagramSnapshot { pages: PageSnapshot[]; }
 export interface CellFormulaReceipt { pageId: string; shapeId: string; cellName: string; before: string | null; after: string; }
 export interface ShapeReceipt { pageId: string; shapeId: string; fromIndex: number | null; toIndex: number | null; }
+export interface TextReceipt { pageId: string; shapeId: string; before: string; after: string; }
 export interface FormulaShapeDraft { name?: string; cells: Array<{ locator: CellLocator & { rowType?: string }; name?: string; formula?: string }> }
+export interface ConnectorGlue { shapeId: string; toCell?: string; }
 export interface VsdxFontFace { family: string; bold?: boolean; italic?: boolean; bytes: Uint8Array; }
-export type Paint = { kind: 'solid'; color: string } | { kind: 'gradient'; stops: Array<{ position: number; color: string }> };
+export type Paint = { kind: 'solid'; color: string } | { kind: 'gradient'; angleDeg?: number; stops: Array<{ position: number; color: string }> };
 export interface Stroke { color: string; width: number; dashed?: boolean; }
 export interface GeometryPathCommand { type: string; [key: string]: number | string; }
 export interface TextDiagnostic { category: 'integrity' | 'fidelity'; code: string; detail: string; }
-export interface TextRun { text: string; family: string; sizeIn: number; bold: boolean; italic: boolean; underline: boolean; smallCaps: boolean; superscript: boolean; subscript: boolean; letterSpacing: number; color: string; diagnostics: TextDiagnostic[]; }
+export interface TextRun { text: string; family: string; sizeIn: number; bold: boolean; italic: boolean; underline: boolean; smallCaps: boolean; superscript: boolean; subscript: boolean; letterSpacing: number; color: string; diagnostics?: TextDiagnostic[]; }
 export interface TextParagraph { runs: TextRun[]; }
 export interface PositionedLine { x: number; y: number; width: number; height: number; start: number; end: number; caretStops: Array<{ position: number; x: number; y: number }>; }
 interface PrimitiveBase { id: string; zOrder: number; }
-export interface ShapePrimitive extends PrimitiveBase { kind: 'shape'; path: GeometryPathCommand[]; fill?: Paint; stroke?: Stroke; transform?: Affine; }
+export interface ShapePrimitive extends PrimitiveBase { kind: 'shape'; path: GeometryPathCommand[]; fill?: Paint; stroke?: Stroke; transform?: Affine; diagnostics?: TextDiagnostic[]; }
 export interface ImagePrimitive extends PrimitiveBase { kind: 'image'; assetId: string; x: number; y: number; width: number; height: number; transform?: Affine; }
 export interface TextBoxPrimitive extends PrimitiveBase { kind: 'textBox'; x: number; y: number; width: number; height: number; paragraphs: TextParagraph[]; lines: PositionedLine[]; transform?: Affine; }
 export interface PlaceholderPrimitive extends PrimitiveBase { kind: 'placeholder'; x: number; y: number; width: number; height: number; reason: string; }
 export interface GroupPrimitive extends PrimitiveBase { kind: 'group'; primitives: PagePrimitive[]; transform?: Affine; }
 export type PagePrimitive = ShapePrimitive | ImagePrimitive | TextBoxPrimitive | PlaceholderPrimitive | GroupPrimitive;
-export interface PageDisplayList { contractVersion: 4; width: number; height: number; paintTransform: Affine; primitives: PagePrimitive[]; }
+export interface PageDisplayList { contractVersion: 5; width: number; height: number; paintTransform: Affine; primitives: PagePrimitive[]; }
 export type HitTestResult = { kind: 'shape'; shapeId: string } | { kind: 'text'; shapeId: string; position: number };
 export interface HistoryResult { applied: boolean; snapshot: DiagramSnapshot; }
 export type CollaborationUpdateOrigin = 'local' | 'remote';

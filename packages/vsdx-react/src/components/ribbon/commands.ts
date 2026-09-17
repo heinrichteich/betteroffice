@@ -1,6 +1,6 @@
 import { createContext, createElement, useContext, useMemo } from 'react';
 import type { ReactNode } from 'react';
-import type { DiagramHandle, DiagramSnapshot, PageDisplayList, PagePrimitive, PageSnapshot, ShapeSnapshot } from '@betteroffice/vsdx';
+import type { DiagramHandle, DiagramSnapshot, PageDisplayList, PagePrimitive, PageSnapshot, ShapePrimitive, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { VsdxShapeSelection } from '../../VsdxEditor';
 import { standardShapeById } from '../shapes/shapeLibrary';
 
@@ -83,15 +83,10 @@ export function numberValue(value: string | undefined): number {
 /** Largest LinePattern index Visio documents. 0 clears the stroke, 1 is solid. */
 export const LINE_PATTERN_MAX = 23;
 
-export interface LinePatternOption { value: string; label: string; }
+/** Selectable dash pattern indexes. Only 0 and 1 have stable Visio-wide meanings. */
+export const LINE_PATTERN_VALUES: readonly string[] = Array.from({ length: LINE_PATTERN_MAX + 1 }, (_, index) => String(index));
 
-/** Selectable dash patterns. Only 0/1 have stable Visio-wide meanings. */
-export const LINE_PATTERN_OPTIONS: readonly LinePatternOption[] = Array.from(
-  { length: LINE_PATTERN_MAX + 1 },
-  (_, index) => ({ value: String(index), label: index === 0 ? 'None' : index === 1 ? 'Solid' : `Pattern ${index}` }),
-);
-
-const LINE_WEIGHT_PATTERN = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*(in|dl|cm|mm|pt|pica|ft|m)?$/i;
+const LINE_WEIGHT_PATTERN = /^(-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*(in|dl|cm|mm|pt|pica|ft|m)?$/i;
 
 /** Validated line weight, or null when the text is not a positive length. */
 export function parseLineWeightInput(raw: string): string | null {
@@ -158,11 +153,13 @@ export function isCellWriteBlocked(shape: ShapeSnapshot | null, cellName: string
   return cellIsGuarded(shape, cellName);
 }
 
-function findPrimitive(primitives: readonly PagePrimitive[], id: string): PagePrimitive | null {
+/** A shape's own geometry primitive; text boxes share its id, so kind is part of the match. */
+function findShapePrimitive(primitives: readonly PagePrimitive[], id: string, depth = 0): ShapePrimitive | null {
+  if (depth >= 256) return null;
   for (const primitive of primitives) {
-    if (primitive.id === id) return primitive;
+    if (primitive.kind === 'shape' && primitive.id === id) return primitive;
     if (primitive.kind === 'group') {
-      const nested = findPrimitive(primitive.primitives, id);
+      const nested = findShapePrimitive(primitive.primitives, id, depth + 1);
       if (nested) return nested;
     }
   }
@@ -176,8 +173,8 @@ export function frameSwatch(
   shape: ShapeSnapshot | null,
 ): { fill?: string; line?: string } {
   if (!frame || !page || !shape) return {};
-  const primitive = findPrimitive(frame.primitives, `${page.sourcePartPath}:${shape.sourceId}`);
-  if (!primitive || primitive.kind !== 'shape') return {};
+  const primitive = findShapePrimitive(frame.primitives, `${page.sourcePartPath}:${shape.sourceId}`);
+  if (!primitive) return {};
   const fill = primitive.fill?.kind === 'solid' && /^#[0-9a-f]{6}$/i.test(primitive.fill.color) ? primitive.fill.color : undefined;
   const line = primitive.stroke && /^#[0-9a-f]{6}$/i.test(primitive.stroke.color) ? primitive.stroke.color : undefined;
   return { fill, line };
@@ -254,7 +251,7 @@ export function createRibbonCommands(
         if (!page) throw new Error(`vsdx page ${pageId ?? ''} is no longer part of the diagram`);
         const rectangle = standardShapeById('rectangle');
         if (!rectangle) throw new Error('vsdx standard rectangle shape is unavailable');
-        currentHandle.addShape(page.id, rectangle.draft(1, 1, 1, 1));
+        currentHandle.addShape(page.id, rectangle.draft(1, 1, rectangle.defaultSize.width, rectangle.defaultSize.height));
       }),
     },
     download: { id: 'download', enabled: Boolean(handle), run: () => { if (!handle) return; try { onDownload(handle.save()); } catch (error) { onError(error); } } },

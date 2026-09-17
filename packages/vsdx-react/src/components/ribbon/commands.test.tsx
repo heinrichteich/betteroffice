@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 import type { DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
-import { LINE_PATTERN_OPTIONS, createRibbonCommands, findShapePlacement, frameSwatch, isFormulaChange, numericCellValue, parseLinePatternInput, parseLineWeightInput } from './commands';
+import { LINE_PATTERN_VALUES, createRibbonCommands, findShapePlacement, frameSwatch, isFormulaChange, numericCellValue, parseLinePatternInput, parseLineWeightInput } from './commands';
 
 function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
   return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ['one', 'two', 'three'].map((id) => ({ id, sourceId: 1, name: id, children: [], cells: Object.entries(cells).map(([name, value]) => ({ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: value, value })) })) }] };
@@ -117,8 +117,9 @@ test('adds a rectangle carrying geometry rows instead of a bodiless shape', () =
   const diagram = handle(snapshot());
   const commands = createRibbonCommands(diagram, null, 'page', () => {}, () => {}, () => {});
   commands.addShape.run();
-  const draft = (diagram.addShape as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][1] as { cells: Array<{ locator: { section?: string } }> };
+  const draft = (diagram.addShape as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][1] as { cells: Array<{ locator: { section?: string }; name: string; formula: string }> };
   expect(draft.cells.some((cell) => cell.locator.section === 'Geometry')).toBe(true);
+  expect(Number(draft.cells.find((cell) => cell.name === 'Width')?.formula)).toBeCloseTo(4 / 3, 10);
 });
 
 test('refuses to add a shape onto a page that is no longer present', () => {
@@ -149,13 +150,14 @@ test('rejects non-positive and non-numeric line weights', () => {
   expect(parseLineWeightInput('abc')).toBeNull();
   expect(parseLineWeightInput('')).toBeNull();
   expect(parseLineWeightInput('1e999')).toBeNull();
+  expect(parseLineWeightInput('+5')).toBeNull();
   expect(parseLineWeightInput('0.018')).toBe('0.018');
   expect(parseLineWeightInput('0.01 in')).toBe('0.01 in');
   expect(parseLineWeightInput('12pt')).toBe('12 pt');
 });
 
 test('bounds line patterns to the documented 0..23 range', () => {
-  expect(LINE_PATTERN_OPTIONS).toHaveLength(24);
+  expect(LINE_PATTERN_VALUES).toHaveLength(24);
   expect(parseLinePatternInput('999')).toBeNull();
   expect(parseLinePatternInput('abc')).toBeNull();
   expect(parseLinePatternInput('-1')).toBeNull();

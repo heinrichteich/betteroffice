@@ -29,8 +29,6 @@
 | [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | npm | drop-in React .docx editor |
 | [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) | PyPI | Python API for reading, editing, laying out, and rasterizing DOCX documents |
 
-DOCX layout omits hidden content by default. Set `showHiddenText: true` in `YrsRenderEnv` to reveal it without changing the document's hidden formatting.
-
 ### Spreadsheets — `.xlsx`
 
 | package | registry | what it does |
@@ -48,10 +46,6 @@ DOCX layout omits hidden content by default. Set `showHiddenText: true` in `YrsR
 | [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | npm | framework-free .pptx editor core — slide model, masters, and rendering in Rust through WebAssembly |
 | [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | npm | drop-in React .pptx editor |
 | [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) | PyPI | Python API for reading, editing, saving, and laying out PPTX presentations |
-
-The browser React editor renders supported bitmap-only WMF wrappers. Custom browser image loaders can use `presentationImageBlob(bytes)` from `@betteroffice/pptx` for the same limited WMF support.
-
-The source-available VSDX editor offers a focusable canvas with keyboard undo and redo, Delete, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus.
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
@@ -85,9 +79,9 @@ Use the [Office visual quality harness](scripts/office-quality/README.md) to exp
 
 | Format | Latest published version | SSIM | Scored/total | Latest commit | SSIM | Scored/total |
 | --- | --- | ---: | ---: | --- | ---: | ---: |
-| DOCX | [0.1.0](https://www.npmjs.com/package/@betteroffice/docx/v/0.1.0) | 0.7538 | 14/14 | [0c5c4fcf](https://github.com/openooxml/betteroffice/commit/0c5c4fcfc06947f12056ee04f0bf76dff9867eb9) | 0.8288 | 14/14 |
-| PPTX | [0.0.4](https://www.npmjs.com/package/@betteroffice/pptx/v/0.0.4) | 0.8478 | 9/9 | [0c5c4fcf](https://github.com/openooxml/betteroffice/commit/0c5c4fcfc06947f12056ee04f0bf76dff9867eb9) | 0.8769 | 9/9 |
-| XLSX | [0.1.0](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.1.0) | 0.7163 | 4/8 | [0c5c4fcf](https://github.com/openooxml/betteroffice/commit/0c5c4fcfc06947f12056ee04f0bf76dff9867eb9) | 0.7695 | 8/8 |
+| DOCX | [0.2.1](https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1) | 0.7538 | 64/64 | [3ab732f3](https://github.com/openooxml/betteroffice/commit/3ab732f3e5a1011ee26d4a9d7bce264dc4c60d47) | 0.7641 | 64/64 |
+| PPTX | [0.1.1](https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1) | 0.8769 | 9/9 | [3ab732f3](https://github.com/openooxml/betteroffice/commit/3ab732f3e5a1011ee26d4a9d7bce264dc4c60d47) | 0.8769 | 9/9 |
+| XLSX | [0.2.1](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1) | 0.7695 | 8/8 | [3ab732f3](https://github.com/openooxml/betteroffice/commit/3ab732f3e5a1011ee26d4a9d7bce264dc4c60d47) | 0.7695 | 8/8 |
 
 SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
 
