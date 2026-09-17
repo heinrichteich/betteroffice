@@ -35,7 +35,8 @@ file serves as the copy of the license for this derivation.
 `crates/xlsx-raster/assets/Carlito-Regular.ttf` is vendored unmodified from
 the google/fonts repository, `ofl/carlito` (https://github.com/google/fonts);
 upstream project https://github.com/googlefonts/carlito. The bytes are
-compiled into the `betteroffice-xlsx-raster` crate via `include_bytes!`.
+compiled into the `betteroffice-xlsx-raster` crate via `include_bytes!`, and
+shared unmodified by the `betteroffice-vsdx-raster` crate through the same path.
 
 Copyright 2013 The Carlito Project Authors, with Reserved Font Name "Carlito".
 
@@ -70,7 +71,9 @@ directory; those files are the authoritative copies for redistribution.
   upstream https://github.com/notofonts/arabic. `LICENSES/OFL-NotoArabic.txt`.
 - **Noto Sans Hebrew** (2 faces) — Copyright 2022 The Noto Project Authors.
   From https://github.com/notofonts/notofonts.github.io; upstream
-  https://github.com/notofonts/hebrew. `LICENSES/OFL-NotoSansHebrew.txt`.
+  https://github.com/notofonts/hebrew. `LICENSES/OFL-NotoSansHebrew.txt`. The
+  regular face is also compiled into the `betteroffice-vsdx-raster` tests via
+  `include_bytes!`.
 
 `packages/fonts-cjk/assets` — 5 faces:
 
@@ -81,3 +84,17 @@ directory; those files are the authoritative copies for redistribution.
 
 Both are static `SubsetOTF` Regulars from
 https://github.com/notofonts/noto-cjk. `LICENSES/OFL-NotoCJK.txt`.
+
+---
+
+## yrs (vendored copy for the macOS app)
+
+`apps/native-viewer/vendor/yrs` is the `yrs` 0.27.3 crate from crates.io
+(upstream https://github.com/y-crdt/y-crdt), byte-identical apart from three
+call sites that replace `from_utf8_unchecked` with checked decoding (see issue
+#224). `apps/native-viewer` substitutes it for the registry crate via
+`[patch.crates-io]`, so it is compiled into the macOS app only.
+
+Copyright (c) 2020 Bartosz Sypytkowski, Kevin Jahns.
+
+License: MIT (`apps/native-viewer/vendor/yrs/LICENSE`).

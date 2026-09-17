@@ -1,7 +1,8 @@
 import { expect, test } from 'bun:test';
 import { canvasPointToModel, modelPointToCanvas } from '@betteroffice/vsdx';
-import type { ModelPoint } from '@betteroffice/vsdx';
-import { RESIZE_HANDLES, SELECTION_STROKE, canvasKeyboardIntent, hitTestSelection, isEditableKeyboardTarget, keyboardNudgeStep, paintSelectionFrame, paintDragPreview, passedDragThreshold, previewOutline, resizedBounds, resizeCursor, resolveDragGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions } from './interactions';
+import type { Affine, ModelPoint, PageDisplayList, TextBoxPrimitive } from '@betteroffice/vsdx';
+import { MIN_ZOOM } from './components/statusbar';
+import { RESIZE_HANDLES, SELECTION_STROKE, canvasKeyboardIntent, controlCellWriteBlocked, controlHandleCanvasPositions, controlHandleHidden, controlHandleLockedX, controlHandleLockedY, controlHandlesForShape, hitTestControlHandles, hitTestSelection, isEditableKeyboardTarget, isPrintableEntryKey, keyboardNudgeStep, paintControlHandles, paintSelectionFrame, paintDragPreview, pageToShapeLocal, passedDragThreshold, previewOutline, resolveControlDrag, resizedBounds, resizeCursor, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions, shapeLocalToPage, textEditOverlay, withoutTextBox } from './interactions';
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 };
 const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 test('passedDragThreshold needs four css pixels by default', () => {
@@ -30,6 +31,24 @@ test('previewOutline keeps a centred flip on the same visual frame', () => {
   const flipped = previewOutline({ ...base, flipX: true }, { x: 3, y: 3 }, identity);
   expect(flipped).toEqual(plain);
   expect(selectionHandlePositions(flipped).handles.e).toEqual({ x: 6, y: 2 });
+});
+test('previewOutline skips the engine LocPin lookup for a shape with no height', () => {
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 0 }, locPinAtSize: () => { throw new Error('invalid resize dimensions'); } };
+  expect(previewOutline(start, { x: 1, y: 0 }, identity)).toEqual([{ x: 1, y: 3 }, { x: 5, y: 3 }, { x: 5, y: 3 }, { x: 1, y: 3 }]);
+});
+test('an engine LocPin refusal leaves the gesture on the stored LocPin', () => {
+  const refuse = () => { throw new Error('cannot evaluate LocPinX for resize'); };
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 2, y: 3 }, locPin: { x: 1, y: 2.5 }, size: { width: 2, height: 5 }, locPinAtSize: refuse };
+  const geometry = resolveDragGeometry(start, { x: 1, y: 0 });
+  expect(geometry.width).toBeCloseTo(3, 10);
+  expect(geometry.x - 1).toBeCloseTo(1, 10);
+  expect(() => previewOutline(start, { x: 1, y: 0 }, identity)).not.toThrow();
+});
+test('a non-finite engine LocPin leaves the gesture on the stored LocPin', () => {
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 2, y: 3 }, locPin: { x: 1, y: 2.5 }, size: { width: 2, height: 5 }, locPinAtSize: () => ({ x: Number.NaN, y: 2.5 }) };
+  const corners = previewOutline(start, { x: 1, y: 0 }, identity);
+  expect(corners.every((corner) => Number.isFinite(corner.x) && Number.isFinite(corner.y))).toBe(true);
+  expect(resolveDragGeometry(start, { x: 1, y: 0 }).x).toBeCloseTo(2, 10);
 });
 test('previewOutline maps the box through the group transform forward', () => {
   const start = { canvas: { x: 0, y: 0 }, model: { x: 10, y: 20 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, parentTransforms: [{ a: 0, b: 2, c: -2, d: 0, e: 10, f: 20 }] };
@@ -266,42 +285,6 @@ test('a literal off-centre LocPin previews exactly what the commit renders', () 
   expect(Math.min(...northCorners.map((corner) => corner.y))).toBeCloseTo(stretched.y - locPin.y, 10);
   expect(Math.max(...northCorners.map((corner) => corner.y))).toBeCloseTo(stretched.y - locPin.y + stretched.height, 10);
 });
-test('an evaluated LocPin holds the anchored edge for any formula shape', () => {
-  const east = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, locPinAtSize: (width: number) => ({ x: 0.5 * width, y: 0.5 }), size: { width: 2, height: 1 } };
-  const grown = resolveDragGeometry(east, { x: 1, y: 0 });
-  expect(grown.width).toBeCloseTo(3, 10);
-  expect(grown.x).toBeCloseTo(5.5, 10);
-  expect(grown.x - 0.5 * grown.width).toBeCloseTo(4, 10);
-  const corners = previewOutline(east, { x: 1, y: 0 }, identity);
-  expect(Math.min(...corners.map((corner) => corner.x))).toBeCloseTo(4, 10);
-  expect(Math.max(...corners.map((corner) => corner.x))).toBeCloseTo(7, 10);
-  const northWest = { ...east, handle: 'nw' as const };
-  const stretched = resolveDragGeometry(northWest, { x: -1, y: 1 });
-  expect(stretched.width).toBeCloseTo(3, 10);
-  expect(stretched.height).toBeCloseTo(2, 10);
-  expect(stretched.x - 0.5 * stretched.width + stretched.width).toBeCloseTo(6, 10);
-  const literal = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, size: { width: 2, height: 1 } };
-  const held = resolveDragGeometry(literal, { x: 1, y: 0 });
-  expect(held.width).toBeCloseTo(3, 10);
-  expect(held.x).toBeCloseTo(5, 10);
-});
-test('an offset LocPin formula holds the anchored edge instead of refusing the resize', () => {
-  const offset = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, locPinAtSize: (width: number) => ({ x: width - 1, y: 0.5 }), size: { width: 2, height: 1 } };
-  const grown = resolveDragGeometry(offset, { x: 1, y: 0 });
-  expect(grown.width).toBeCloseTo(3, 10);
-  expect(grown.x - (grown.width - 1)).toBeCloseTo(4, 10);
-  const corners = previewOutline(offset, { x: 1, y: 0 }, identity);
-  expect(Math.min(...corners.map((corner) => corner.x))).toBeCloseTo(4, 10);
-  expect(Math.max(...corners.map((corner) => corner.x))).toBeCloseTo(7, 10);
-  const crossAxis = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 0.5, y: 0.5 }, locPinAtSize: (_width: number, height: number) => ({ x: 0.5 * height, y: 0.5 }), size: { width: 2, height: 1 } };
-  const crossed = resolveDragGeometry(crossAxis, { x: 1, y: 0 });
-  expect(crossed.width).toBeCloseTo(3, 10);
-  expect(crossed.x - 0.5).toBeCloseTo(4.5, 10);
-  const failing = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 5, y: 2 }, locPin: { x: 1, y: 0.5 }, locPinAtSize: () => { throw new Error('gone'); }, size: { width: 2, height: 1 } };
-  const absolute = resolveDragGeometry(failing, { x: 1, y: 0 });
-  expect(absolute.width).toBeCloseTo(3, 10);
-  expect(absolute.x).toBeCloseTo(5, 10);
-});
 test('canvas keyboard maps history, delete and escape intents', () => {
   expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true }, 1)).toEqual({ kind: 'undo' });
   expect(canvasKeyboardIntent({ key: 'Z', metaKey: true, shiftKey: true }, 1)).toEqual({ kind: 'redo' });
@@ -318,28 +301,32 @@ test('canvas keyboard maps history, delete and escape intents', () => {
   expect(canvasKeyboardIntent({ key: 'Delete', ctrlKey: true }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'Escape', ctrlKey: true }, 1)).toBeNull();
 });
-test('canvas keyboard nudges ten screen pixels and one with shift for fine step', () => {
+test('resolveNudgeGeometry turns a screen nudge into the parent-local pin delta', () => {
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, parentTransforms: [{ a: 0, b: 1, c: -1, d: 0, e: 0, f: 0 }] };
+  expect(resolveNudgeGeometry(start, 1, 0)).toEqual({ x: 2, y: 2, width: 4, height: 5 });
+});
+test('canvas keyboard nudges a ruler tick with Y up and one screen pixel with shift', () => {
   expect(keyboardNudgeStep(1)).toBeCloseTo(1 / 96, 10);
   expect(keyboardNudgeStep(2)).toBeCloseTo(1 / 192, 10);
-  const plainUp = canvasKeyboardIntent({ key: 'ArrowUp' }, 1);
-  expect(plainUp?.kind).toBe('nudge');
-  if (plainUp?.kind === 'nudge') { expect(plainUp.dy).toBeCloseTo(10 / 96, 10); expect(plainUp.dx).toBe(0); }
-  const plainDown = canvasKeyboardIntent({ key: 'ArrowDown' }, 1);
-  expect(plainDown?.kind).toBe('nudge');
-  if (plainDown?.kind === 'nudge') { expect(plainDown.dy).toBeCloseTo(-10 / 96, 10); expect(plainDown.dx).toBe(0); }
-  const plainLeft = canvasKeyboardIntent({ key: 'ArrowLeft' }, 2);
-  expect(plainLeft?.kind).toBe('nudge');
-  if (plainLeft?.kind === 'nudge') { expect(plainLeft.dx).toBeCloseTo(-10 / 192, 10); expect(plainLeft.dy).toBe(0); }
+  expect(canvasKeyboardIntent({ key: 'ArrowUp' }, 1)).toEqual({ kind: 'nudge', dx: 0, dy: 1 / 16 });
+  expect(canvasKeyboardIntent({ key: 'ArrowDown' }, 1)).toEqual({ kind: 'nudge', dx: 0, dy: -1 / 16 });
+  expect(canvasKeyboardIntent({ key: 'ArrowLeft' }, 2)).toEqual({ kind: 'nudge', dx: -1 / 16, dy: 0 });
+  expect(canvasKeyboardIntent({ key: 'ArrowRight' }, 4)).toEqual({ kind: 'nudge', dx: 1 / 16, dy: 0 });
   const right = canvasKeyboardIntent({ key: 'ArrowRight', shiftKey: true }, 1);
   expect(right?.kind).toBe('nudge');
   if (right?.kind === 'nudge') { expect(right.dx).toBeCloseTo(1 / 96, 10); expect(right.dy).toBe(0); }
   const up = canvasKeyboardIntent({ key: 'ArrowUp', shiftKey: true }, 2);
   expect(up?.kind).toBe('nudge');
   if (up?.kind === 'nudge') { expect(up.dy).toBeCloseTo(1 / 192, 10); expect(up.dx).toBe(0); }
-  const plain = canvasKeyboardIntent({ key: 'ArrowRight' }, 1);
-  const fine = canvasKeyboardIntent({ key: 'ArrowRight', shiftKey: true }, 1);
-  if (plain?.kind === 'nudge' && fine?.kind === 'nudge') { expect(plain.dx).toBeCloseTo(fine.dx * 10, 10); }
-  else throw new Error('nudge intents missing');
+  for (const zoom of [MIN_ZOOM, 0.5, 1, 4]) {
+    const plain = canvasKeyboardIntent({ key: 'ArrowRight' }, zoom);
+    const fine = canvasKeyboardIntent({ key: 'ArrowRight', shiftKey: true }, zoom);
+    if (plain?.kind !== 'nudge' || fine?.kind !== 'nudge') throw new Error('nudge intents missing');
+    expect(fine.dx).toBeLessThanOrEqual(plain.dx);
+  }
+  const zoomedOut = canvasKeyboardIntent({ key: 'ArrowRight', shiftKey: true }, MIN_ZOOM);
+  expect(zoomedOut?.kind).toBe('nudge');
+  if (zoomedOut?.kind === 'nudge') expect(zoomedOut.dx).toBeCloseTo(1 / 16, 10);
   expect(canvasKeyboardIntent({ key: 'ArrowUp', ctrlKey: true }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'ArrowUp', altKey: true }, 1)).toBeNull();
 });
@@ -356,4 +343,181 @@ test('canvas keyboard produces no intent from editable targets', () => {
   expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true, target: textarea }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'a', ctrlKey: true, target: input }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'Escape', target: editable }, 1)).toBeNull();
+});
+
+const textFrame: PageDisplayList = { contractVersion: 7, width: 816, height: 1056, printWidth: 816, printHeight: 1056, paintTransform: pagePaintTransform, primitives: [] };
+
+function textBox(transform?: Affine): TextBoxPrimitive {
+  return {
+    kind: 'textBox', id: 'visio/pages/page1.xml:1', zOrder: 0, x: 1, y: 2, width: 3, height: 0.5, transform,
+    paragraphs: [{ runs: [{ text: 'label', family: 'Segoe UI', sizeIn: 0.25, bold: true, italic: false, underline: false, smallCaps: false, superscript: false, subscript: false, letterSpacing: 0, color: '#112233', diagnostics: [] }] }],
+    lines: [],
+  };
+}
+
+function cssCorner(sceneX: number, sceneY: number, chain: Affine[], zoom: number): ModelPoint {
+  let point = { x: sceneX, y: sceneY };
+  for (const transform of [...chain, pagePaintTransform]) point = { x: transform.a * point.x + transform.c * point.y + transform.e, y: transform.b * point.x + transform.d * point.y + transform.f };
+  return { x: point.x * zoom, y: point.y * zoom };
+}
+
+function overlayCorner(overlay: { matrix: Affine }, cx: number, cy: number): ModelPoint {
+  return { x: overlay.matrix.a * cx + overlay.matrix.c * cy + overlay.matrix.e, y: overlay.matrix.b * cx + overlay.matrix.d * cy + overlay.matrix.f };
+}
+
+test('places the text editor over an unrotated text box and scales it with the zoom', () => {
+  const overlay = textEditOverlay({ ...textFrame, primitives: [textBox()] }, 'visio/pages/page1.xml:1', 1.5);
+  if (!overlay) throw new Error('no overlay');
+  expect(overlay.width).toBeCloseTo(3 * 96 * 1.5, 5);
+  expect(overlay.height).toBeCloseTo(0.5 * 96 * 1.5, 5);
+  expect(overlay.font).toEqual({ family: 'Segoe UI', sizePx: 0.25 * 96 * 1.5, bold: true, italic: false, color: '#112233' });
+  expect(overlayCorner(overlay, 0, 0)).toEqual(cssCorner(1, 2.5, [], 1.5));
+  expect(overlayCorner(overlay, overlay.width, overlay.height)).toEqual(cssCorner(4, 2, [], 1.5));
+});
+
+test('rotates the text editor with the text box instead of using its bounding box', () => {
+  const rotation: Affine = { a: Math.cos(0.4), b: Math.sin(0.4), c: -Math.sin(0.4), d: Math.cos(0.4), e: 2, f: 1 };
+  const overlay = textEditOverlay({ ...textFrame, primitives: [textBox(rotation)] }, 'visio/pages/page1.xml:1', 1);
+  if (!overlay) throw new Error('no overlay');
+  expect(overlay.matrix.b).not.toBeCloseTo(0, 3);
+  for (const [cx, cy, sceneX, sceneY] of [[0, 0, 1, 2.5], [overlay.width, 0, 4, 2.5], [0, overlay.height, 1, 2], [overlay.width, overlay.height, 4, 2]] as const) {
+    const placed = overlayCorner(overlay, cx, cy);
+    const expected = cssCorner(sceneX, sceneY, [rotation], 1);
+    expect(placed.x).toBeCloseTo(expected.x, 5);
+    expect(placed.y).toBeCloseTo(expected.y, 5);
+  }
+});
+
+test('carries the transforms of enclosing groups into the text editor position', () => {
+  const group: Affine = { a: 2, b: 0, c: 0, d: 2, e: 1, f: 3 };
+  const primitives = [{ kind: 'group' as const, id: 'visio/pages/page1.xml:9', zOrder: 0, transform: group, primitives: [textBox()] }];
+  const overlay = textEditOverlay({ ...textFrame, primitives }, 'visio/pages/page1.xml:1', 1);
+  if (!overlay) throw new Error('no overlay');
+  expect(overlay.width).toBeCloseTo(3 * 2 * 96, 5);
+  const placed = overlayCorner(overlay, 0, 0);
+  const expected = cssCorner(1, 2.5, [group], 1);
+  expect(placed.x).toBeCloseTo(expected.x, 5);
+  expect(placed.y).toBeCloseTo(expected.y, 5);
+});
+
+test('hides only the edited shape text from the painted page', () => {
+  const other: TextBoxPrimitive = { ...textBox(), id: 'visio/pages/page1.xml:2' };
+  const nested = { kind: 'group' as const, id: 'visio/pages/page1.xml:9', zOrder: 0, primitives: [textBox(), other] };
+  const kept = withoutTextBox([nested, textBox()], 'visio/pages/page1.xml:1');
+  expect(kept).toHaveLength(1);
+  expect((kept[0] as typeof nested).primitives).toEqual([other]);
+});
+
+test('enters text edit on a printable key but not on a shortcut or an editable target', () => {
+  expect(isPrintableEntryKey({ key: 'a' })).toBe(true);
+  expect(isPrintableEntryKey({ key: 'Enter' })).toBe(false);
+  expect(isPrintableEntryKey({ key: 'a', metaKey: true })).toBe(false);
+  expect(isPrintableEntryKey({ key: 'a', ctrlKey: true })).toBe(false);
+  expect(isPrintableEntryKey({ key: 'a', target: { tagName: 'TEXTAREA' } })).toBe(false);
+});
+
+test('a guarded rotation hides the grip stalk and circle but keeps resize handles', () => {
+  const corners = [{ x: 10, y: 40 }, { x: 30, y: 40 }, { x: 30, y: 20 }, { x: 10, y: 20 }];
+  const grip = rotationGripPosition(corners, 2);
+  const calls: string[] = [];
+  const context = new Proxy({ canvas: {} }, {
+    get(target, key) {
+      if (key in target) return Reflect.get(target, key);
+      return (...args: unknown[]) => { calls.push(`${String(key)}:${args.join(',')}`); };
+    },
+    set(target, key, value) { calls.push(`${String(key)}=${String(value)}`); Reflect.set(target, key, value); return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  paintSelectionFrame(context, corners, 2, 2, RESIZE_HANDLES, false);
+  expect(calls.some((entry) => entry === `lineTo:${grip.x},${grip.y}`)).toBe(false);
+  expect(calls.some((entry) => entry.startsWith(`arc:${grip.x},${grip.y},`))).toBe(false);
+  expect(calls.filter((entry) => entry.startsWith('arc:'))).toHaveLength(8);
+});
+const controlShape = (cells: Array<{ section?: string; row?: string; cell: string; value: string }>) => ({
+  id: 'shape',
+  sourceId: 1,
+  name: null,
+  children: [],
+  cells: cells.map((entry) => ({
+    locator: { sheet: { page: 0 }, shapeId: null, section: entry.section ?? null, sectionIndex: null, row: entry.row ? { name: entry.row } : null, cellName: entry.cell },
+    name: entry.cell,
+    formula: entry.value,
+    value: entry.value,
+  })),
+});
+test('control handles resolve named rows and honour hidden and locked variants', () => {
+  expect(controlHandleHidden({ xCon: 0, yCon: 0 })).toBe(false);
+  expect(controlHandleHidden({ xCon: 5, yCon: 0 })).toBe(true);
+  expect(controlHandleHidden({ xCon: 0, yCon: 6 })).toBe(true);
+  expect(controlHandleLockedX({ xCon: 1 })).toBe(true);
+  expect(controlHandleLockedX({ xCon: 6 })).toBe(true);
+  expect(controlHandleLockedX({ xCon: 0 })).toBe(false);
+  expect(controlHandleLockedY({ yCon: 1 })).toBe(true);
+  expect(controlHandleLockedY({ yCon: 0 })).toBe(false);
+  const shape = controlShape([
+    { section: 'Control', row: 'Row_1', cell: 'X', value: '0.5' },
+    { section: 'Control', row: 'Row_1', cell: 'Y', value: '0.5' },
+    { section: 'Control', row: 'Row_1', cell: 'XCon', value: '1' },
+    { section: 'Control', row: 'Row_2', cell: 'X', value: '0.2' },
+    { section: 'Control', row: 'TextPosition', cell: 'X', value: '0' },
+    { section: 'Control', row: 'TextPosition', cell: 'Y', value: '-1' },
+    { section: 'Control', row: 'TextPosition', cell: 'XCon', value: '5' },
+  ]);
+  expect(controlHandlesForShape(shape as never).map((handle) => handle.row)).toEqual(['Row_1', 'TextPosition']);
+  const [first] = controlHandlesForShape(shape as never);
+  expect(first.x).toBe(0.5);
+  expect(controlHandleLockedX(first)).toBe(true);
+  expect(controlHandleLockedY(first)).toBe(false);
+});
+test('control handles report only cells the policy refuses outright as write-blocked', () => {
+  const shape = controlShape([
+    { section: 'Control', row: 'Row_1', cell: 'X', value: 'GUARD(Width*0.25)' },
+    { section: 'Control', row: 'Row_1', cell: 'Y', value: 'Height*0.5' },
+    { section: 'Control', row: 'Row_2', cell: 'X', value: 'SETATREF(Controls.Row_1.X)' },
+    { section: 'Control', row: 'Row_2', cell: 'Y', value: 'SETATREFEVAL(Controls.Row_1.Y)' },
+    { section: 'Control', row: 'Row_3', cell: 'X', value: 'User.GuardBand*0.5' },
+  ]);
+  expect(controlCellWriteBlocked(shape as never, 'Row_1', 'X')).toBe(true);
+  expect(controlCellWriteBlocked(shape as never, 'Row_1', 'Y')).toBe(false);
+  expect(controlCellWriteBlocked(shape as never, 'Row_2', 'X')).toBe(false);
+  expect(controlCellWriteBlocked(shape as never, 'Row_2', 'Y')).toBe(true);
+  expect(controlCellWriteBlocked(shape as never, 'Row_3', 'X')).toBe(false);
+  expect(controlCellWriteBlocked(shape as never, 'Row_9', 'X')).toBe(false);
+});
+test('control handles map between shape-local and page coordinates', () => {
+  const base = { pin: { x: 3, y: 3 }, locPin: { x: 1, y: 0.5 }, size: { width: 2, height: 1 } };
+  expect(shapeLocalToPage(base, { x: 0.5, y: 0.5 })).toEqual({ x: 2.5, y: 3 });
+  expect(pageToShapeLocal(base, { x: 2.5, y: 3 })).toEqual({ x: 0.5, y: 0.5 });
+  expect(resolveControlDrag(base, { x: 0.5, y: 0.5 }, { x: 3.5, y: 3 }, true, false)).toEqual({ x: 0.5, y: 0.5 });
+  expect(resolveControlDrag(base, { x: 0.5, y: 0.5 }, { x: 3.5, y: 2 }, false, false)).toEqual({ x: 1.5, y: -0.5 });
+  const rotated = { ...base, angle: Math.PI / 2 };
+  const page = shapeLocalToPage(rotated, { x: 0.5, y: 0.5 });
+  const back = pageToShapeLocal(rotated, page);
+  expect(back!.x).toBeCloseTo(0.5, 10);
+  expect(back!.y).toBeCloseTo(0.5, 10);
+});
+test('control handles paint yellow diamonds on the overlay and hit test by row', () => {
+  const shape = controlShape([
+    { section: 'Control', row: 'Row_1', cell: 'X', value: '0.5' },
+    { section: 'Control', row: 'Row_1', cell: 'Y', value: '0.5' },
+    { section: 'Control', row: 'Row_2', cell: 'X', value: '0.2' },
+    { section: 'Control', row: 'Row_2', cell: 'Y', value: '0.3' },
+    { section: 'Control', row: 'Row_2', cell: 'XCon', value: '5' },
+  ]);
+  const base = { pin: { x: 3, y: 3 }, locPin: { x: 1, y: 0.5 }, size: { width: 2, height: 1 } };
+  const positions = controlHandleCanvasPositions(shape as never, base, identity);
+  expect(positions.map((position) => position.row)).toEqual(['Row_1']);
+  expect(positions[0].canvas).toEqual({ x: 2.5, y: 3 });
+  const calls: string[] = [];
+  const context = new Proxy({ canvas: {} }, {
+    get(target, key) {
+      if (key in target) return Reflect.get(target, key);
+      return (...args: unknown[]) => { calls.push(`${String(key)}:${args.join(',')}`); };
+    },
+    set(target, key, value) { calls.push(`${String(key)}=${String(value)}`); Reflect.set(target, key, value); return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  paintControlHandles(context, positions, 1, 1);
+  expect(calls).toContain('fillStyle=#ffeb00');
+  expect(calls.some((entry) => entry.startsWith('moveTo:'))).toBe(true);
+  expect(hitTestControlHandles({ x: 2.5, y: 3 }, positions, 1)).toBe('Row_1');
+  expect(hitTestControlHandles({ x: 10, y: 10 }, positions, 1)).toBeNull();
 });

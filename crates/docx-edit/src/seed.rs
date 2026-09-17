@@ -67,6 +67,16 @@ struct LoweringContext {
     theme: Option<Value>,
     source_json: Arc<BTreeMap<String, String>>,
     plans: Vec<StoryPlan>,
+    compatibility_mode: u8,
+}
+
+fn compatibility_mode_from_package(package: Option<&Value>) -> u8 {
+    field(field(package, "settings"), "compatibilityFlags")
+        .and_then(|flags| field(Some(flags), "compatibilityMode"))
+        .and_then(|value| value.as_f64())
+        .filter(|value| value.is_finite() && (0.0..=255.0).contains(value))
+        .map(|value| value as u8)
+        .unwrap_or(12)
 }
 
 enum OrderedValue {
@@ -581,6 +591,20 @@ fn merge_paragraph_formatting(target: Option<&Value>, source: Option<&Value>) ->
         return target.cloned();
     };
     let mut result = object(target).cloned().unwrap_or_default();
+    if let Some(value) = source
+        .get("indentFirstLine")
+        .filter(|value| !value.is_null())
+    {
+        result.insert("indentFirstLine".to_owned(), value.clone());
+        match source.get("hangingIndent").filter(|value| !value.is_null()) {
+            Some(hanging) => {
+                result.insert("hangingIndent".to_owned(), hanging.clone());
+            }
+            None => {
+                result.remove("hangingIndent");
+            }
+        }
+    }
     for (key, value) in source {
         if key == "runProperties" {
             if let Some(merged) = merge_text_formatting(result.get(key), Some(value)) {
@@ -591,6 +615,8 @@ fn merge_paragraph_formatting(target: Option<&Value>, source: Option<&Value>) ->
                 key.clone(),
                 merge_plain(result.get(key), Some(value)).unwrap_or_else(|| value.clone()),
             );
+        } else if matches!(key.as_str(), "indentFirstLine" | "hangingIndent") {
+            continue;
         } else {
             result.insert(key.clone(), value.clone());
         }
@@ -825,6 +851,11 @@ fn formatting_to_marks(formatting: Option<&Value>) -> Vec<Mark> {
             marks.push(mark(name, vec![]));
         }
     }
+    // Document-grid opt-out (w:snapToGrid, default on): only an authored off
+    // becomes a mark, mirroring documentToYrs.
+    if formatting.get("snapToGrid") == Some(&Value::Bool(false)) {
+        marks.push(mark("snapToGrid", vec![]));
+    }
     if ["spacing", "position", "scale", "kerning"]
         .iter()
         .any(|key| formatting.contains_key(*key))
@@ -892,6 +923,8 @@ fn marks_to_attrs(marks: &[Mark]) -> JsonObject {
         }
         if boolean_marks.contains(&mark.name.as_str()) {
             attrs.insert(mark.name.clone(), Value::Bool(true));
+        } else if mark.name == "snapToGrid" {
+            attrs.insert("snapToGrid".to_owned(), Value::Bool(false));
         } else if mark.name == "highlight" {
             attrs.insert(
                 "highlight".to_owned(),
@@ -979,12 +1012,32 @@ fn embed_unit(
 
 fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolver) -> Vec<Mark> {
     let formatting = field(Some(run), "formatting");
-    let run_style = styles.run_style_own(
-        formatting.and_then(|formatting| string(field(Some(formatting), "styleId"))),
-    );
+    let style_id = string(field(formatting, "styleId"));
+    let run_style = styles.run_style_own(style_id);
     let inherited = merge_text_formatting(style_formatting, run_style.as_ref());
     let merged = merge_text_formatting(inherited.as_ref(), formatting);
-    formatting_to_marks(merged.as_ref())
+    let mut marks = formatting_to_marks(merged.as_ref());
+    let hyperlink_style = style_id.is_some_and(is_hyperlink_style_name)
+        || style_id
+            .and_then(|id| styles.style(id))
+            .and_then(|style| string(field(Some(style), "name")))
+            .is_some_and(is_hyperlink_style_name);
+    if hyperlink_style {
+        for (property, name) in [("color", "textColor"), ("underline", "underline")] {
+            if field(formatting, property).is_none()
+                && field(run_style.as_ref(), property).is_some()
+                && let Some(mark) = marks.iter_mut().find(|mark| mark.name == name)
+            {
+                mark.attrs
+                    .push(("inheritedHyperlink".to_owned(), Value::Bool(true)));
+            }
+        }
+    }
+    marks
+}
+
+fn is_hyperlink_style_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Hyperlink") || name.eq_ignore_ascii_case("FollowedHyperlink")
 }
 
 fn emu_to_pixels(value: f64) -> f64 {
@@ -1075,7 +1128,8 @@ fn image_payload(image: &Value) -> JsonObject {
         "distRight": number(field(wrap, "distR")).map(emu_to_pixels),
         "position": position.map(|_| json!({
             "horizontal": axis(horizontal),
-            "vertical": axis(vertical)
+            "vertical": axis(vertical),
+            "relativeHeight": nullish(field(position, "relativeHeight"))
         })),
         "borderWidth": border_width,
         "borderColor": border_color,
@@ -1086,6 +1140,7 @@ fn image_payload(image: &Value) -> JsonObject {
         "cropRight": nullish(field(field(Some(image), "crop"), "right")),
         "cropBottom": nullish(field(field(Some(image), "crop"), "bottom")),
         "cropLeft": nullish(field(field(Some(image), "crop"), "left")),
+        "shapeType": nullish(field(Some(image), "shapeType")),
         "opacity": nullish(field(Some(image), "opacity")),
         "effectExtentTop": number(field(field(Some(image), "padding"), "top"))
             .filter(|value| *value != 0.0)
@@ -1316,6 +1371,13 @@ fn run_content_to_units(
             image_payload(field(Some(content), "image").unwrap_or(&Value::Null)),
             hidden_marks(marks),
             None,
+            1,
+        )],
+        "horizontalRule" => vec![embed_unit(
+            "horizontalRule",
+            map_from_value(json!({"rule": field(Some(content), "rule")})),
+            marks,
+            comment_id,
             1,
         )],
         "shape" => vec![embed_unit(
@@ -1682,13 +1744,7 @@ fn note_ref_mark_types(run: &Value) -> Vec<Value> {
         .collect()
 }
 
-fn run_boundary(
-    run: &Value,
-    style_formatting: Option<&Value>,
-    styles: &StyleResolver,
-    source: &BTreeMap<String, String>,
-) -> Option<Value> {
-    let units = run_to_units(run, style_formatting, styles, None, &[], source);
+fn run_boundary(run: &Value, units: &[InlineUnit]) -> Option<Value> {
     if units
         .iter()
         .any(|unit| matches!(&unit.content, UnitContent::Embed { kind, .. } if kind != "noteRef"))
@@ -1748,15 +1804,17 @@ fn paragraph_attrs(
     let formatting = field(Some(paragraph), "formatting");
     let style_id = string(field(formatting, "styleId"));
     let list = field(Some(paragraph), "listRendering");
-    let direct_first =
-        field(formatting, "indentFirstLine").filter(|value| number(Some(value)) != Some(0.0));
-    let first_line = direct_first
-        .or_else(|| field(list, "indentFirstLine"))
-        .or_else(|| field(formatting, "indentFirstLine"));
-    let hanging = if direct_first.is_none() && field(list, "indentFirstLine").is_some() {
-        field(list, "hangingIndent")
+    let direct_value = field(formatting, "indentFirstLine");
+    let direct_nonzero = direct_value.filter(|value| number(Some(value)) != Some(0.0));
+    let list_value = field(list, "indentFirstLine");
+    let (selected_first, selected_hanging) = if let Some(value) = direct_nonzero {
+        (Some(value), field(formatting, "hangingIndent"))
+    } else if let Some(value) = list_value {
+        (Some(value), field(list, "hangingIndent"))
+    } else if let Some(value) = direct_value {
+        (Some(value), field(formatting, "hangingIndent"))
     } else {
-        field(formatting, "hangingIndent").or_else(|| field(list, "hangingIndent"))
+        (None, None)
     };
     let mut attrs = map_from_value(json!({
         "paraId": nullish(field(Some(paragraph), "paraId")),
@@ -1770,6 +1828,9 @@ fn paragraph_attrs(
         "listMarkerHidden": truthy(field(list, "markerHidden")).then(|| field(list, "markerHidden").cloned()).flatten(),
         "listMarkerFontFamily": string(field(list, "markerFontFamily")).filter(|value| !value.is_empty()),
         "listMarkerFontSize": number(field(list, "markerFontSize")).filter(|value| *value != 0.0),
+        "listMarkerBold": nullish(field(list, "markerBold")),
+        "listMarkerItalic": nullish(field(list, "markerItalic")),
+        "listMarkerColor": nullish(field(list, "markerColor")),
         "listMarkerSuffix": string(field(list, "markerSuffix")).filter(|value| !value.is_empty()),
         "listLevelNumFmts": truthy(field(list, "levelNumFmts")).then(|| field(list, "levelNumFmts").cloned()).flatten(),
         "listAbstractNumId": nullish(field(list, "abstractNumId")),
@@ -1783,6 +1844,10 @@ fn paragraph_attrs(
             "alignment",
             "spaceBefore",
             "spaceAfter",
+            "spaceBeforeLines",
+            "spaceAfterLines",
+            "beforeAutospacing",
+            "afterAutospacing",
             "lineSpacing",
             "lineSpacingRule",
             "indentRight",
@@ -1794,6 +1859,7 @@ fn paragraph_attrs(
             "keepLines",
             "widowControl",
             "contextualSpacing",
+            "snapToGrid",
             "outlineLevel",
             "bidi",
         ] {
@@ -1825,25 +1891,27 @@ fn paragraph_attrs(
         );
         attrs.insert(
             "indentFirstLine".to_owned(),
-            first_line
-                .or_else(|| {
-                    (!numbering_removed)
-                        .then(|| field(style_ppr_ref, "indentFirstLine"))
-                        .flatten()
-                })
-                .cloned()
-                .unwrap_or(Value::Null),
+            if selected_first.is_some() {
+                selected_first
+            } else if numbering_removed {
+                None
+            } else {
+                field(style_ppr_ref, "indentFirstLine")
+            }
+            .cloned()
+            .unwrap_or(Value::Null),
         );
         attrs.insert(
             "hangingIndent".to_owned(),
-            hanging
-                .or_else(|| {
-                    (!numbering_removed)
-                        .then(|| field(style_ppr_ref, "hangingIndent"))
-                        .flatten()
-                })
-                .cloned()
-                .unwrap_or(Value::Bool(false)),
+            if selected_first.is_some() {
+                selected_hanging
+            } else if numbering_removed {
+                None
+            } else {
+                field(style_ppr_ref, "hangingIndent")
+            }
+            .cloned()
+            .unwrap_or(Value::Bool(false)),
         );
         let default_character = styles
             .default_style("character")
@@ -1871,6 +1939,10 @@ fn paragraph_attrs(
             "alignment",
             "spaceBefore",
             "spaceAfter",
+            "spaceBeforeLines",
+            "spaceAfterLines",
+            "beforeAutospacing",
+            "afterAutospacing",
             "lineSpacing",
             "lineSpacingRule",
             "indentRight",
@@ -1881,6 +1953,7 @@ fn paragraph_attrs(
             "keepNext",
             "keepLines",
             "widowControl",
+            "snapToGrid",
             "outlineLevel",
             "bidi",
         ] {
@@ -1905,11 +1978,11 @@ fn paragraph_attrs(
         );
         attrs.insert(
             "indentFirstLine".to_owned(),
-            first_line.cloned().unwrap_or(Value::Null),
+            selected_first.cloned().unwrap_or(Value::Null),
         );
         attrs.insert(
             "hangingIndent".to_owned(),
-            hanging.cloned().unwrap_or(Value::Bool(false)),
+            selected_hanging.cloned().unwrap_or(Value::Bool(false)),
         );
         attrs.insert(
             "defaultTextFormatting".to_owned(),
@@ -2056,20 +2129,22 @@ fn paragraph_units(
                 }
             }
             "run" => {
-                let boundary = run_boundary(content, style_formatting.as_ref(), styles, source);
-                if let (Some(boundaries), Some(boundary)) = (&mut boundaries, boundary) {
-                    boundaries.push(boundary);
-                } else {
-                    boundaries = None;
-                }
-                units.extend(run_to_units(
+                let run_units = run_to_units(
                     content,
                     style_formatting.as_ref(),
                     styles,
                     comment_id,
                     &[],
                     source,
-                ));
+                );
+                if let Some(run_boundaries) = &mut boundaries {
+                    if let Some(boundary) = run_boundary(content, &run_units) {
+                        run_boundaries.push(boundary);
+                    } else {
+                        boundaries = None;
+                    }
+                }
+                units.extend(run_units);
             }
             "hyperlink" => {
                 boundaries = None;
@@ -2795,7 +2870,12 @@ fn project_row(
     }
 }
 
-fn project_table(table: &Value, styles: &StyleResolver, theme: Option<&Value>) -> ProjectedTable {
+fn project_table(
+    table: &Value,
+    styles: &StyleResolver,
+    theme: Option<&Value>,
+    compatibility_mode: u8,
+) -> ProjectedTable {
     let formatting = field(Some(table), "formatting");
     let default_style = styles.default_style("table");
     let style_id = string(field(formatting, "styleId"));
@@ -2870,6 +2950,11 @@ fn project_table(table: &Value, styles: &StyleResolver, theme: Option<&Value>) -
         "cellMargins": default_margins,
         "look": nullish(field(formatting, "look")),
         "bidi": truthy(field(formatting, "bidi")).then_some(true),
+        "compatibilityMode": if compatibility_mode == 12 {
+            Value::Null
+        } else {
+            json!(compatibility_mode as f64)
+        },
         "_originalFormatting": Value::Object(original_formatting)
     }));
     if !array(field(Some(table), "propertyChanges")).is_empty() {
@@ -2950,19 +3035,21 @@ fn visit_story(
         units: Vec::new(),
         comment_coverage: Vec::new(),
     });
+    let empty_story;
     let blocks = if source_blocks.is_empty() {
-        vec![json!({ "type": "paragraph", "content": [] })]
+        empty_story = [json!({ "type": "paragraph", "content": [] })];
+        &empty_story[..]
     } else {
-        source_blocks.to_vec()
+        source_blocks
     };
     let mut table_index = 0usize;
     let mut sdt_index = 0usize;
     let mut paragraph_index = 0usize;
     let mut last_kind = None;
     for block in blocks {
-        match string(field(Some(&block), "type")).unwrap_or_default() {
+        match string(field(Some(block), "type")).unwrap_or_default() {
             "paragraph" => {
-                let (leading_breaks, trailing_breaks) = paragraph_flow_breaks(&block);
+                let (leading_breaks, trailing_breaks) = paragraph_flow_breaks(block);
                 if options.include_page_breaks {
                     for kind in leading_breaks {
                         context.plans[plan_index].units.push(embed_unit(
@@ -2975,12 +3062,12 @@ fn visit_story(
                     }
                 }
                 let (units, mut ppr) =
-                    paragraph_units(&block, &context.styles, None, &context.source_json);
+                    paragraph_units(block, &context.styles, None, &context.source_json);
                 let fallback = format!("{story_id}:p{paragraph_index}");
                 ppr.insert(
                     "paraId".to_owned(),
                     Value::String(
-                        string(field(Some(&block), "paraId"))
+                        string(field(Some(block), "paraId"))
                             .filter(|value| !value.is_empty())
                             .unwrap_or(&fallback)
                             .to_owned(),
@@ -3007,7 +3094,12 @@ fn visit_story(
             "table" => {
                 let current_table = table_index;
                 table_index += 1;
-                let table = project_table(&block, &context.styles, context.theme.as_ref());
+                let table = project_table(
+                    block,
+                    &context.styles,
+                    context.theme.as_ref(),
+                    context.compatibility_mode,
+                );
                 let rows: Vec<Value> = table
                     .rows
                     .iter()
@@ -3075,7 +3167,7 @@ fn visit_story(
                 sdt_index += 1;
                 let child_story = format!("{story_id}:sdt{current_sdt}");
                 let mut properties = sdt_properties_attrs(
-                    field(Some(&block), "properties").unwrap_or(&Value::Null),
+                    field(Some(block), "properties").unwrap_or(&Value::Null),
                     &context.source_json,
                 );
                 properties.insert("story".to_owned(), Value::String(child_story.clone()));
@@ -3089,7 +3181,7 @@ fn visit_story(
                 visit_story(
                     context,
                     child_story,
-                    array(field(Some(&block), "content")),
+                    array(field(Some(block), "content")),
                     StoryOptions {
                         include_page_breaks: options.include_page_breaks,
                         append_body_tail: false,
@@ -3287,8 +3379,9 @@ pub(crate) fn referenced_fonts(
 
 pub(crate) fn seed_parsed_docx(
     document: &EditingDoc,
-    envelope: docx_parse::S9WireEnvelope,
+    mut envelope: docx_parse::S9WireEnvelope,
 ) -> Result<Vec<String>, String> {
+    envelope.document.package.media_entries.clear();
     let mut referenced_fonts = BTreeSet::new();
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
@@ -3307,11 +3400,13 @@ pub(crate) fn seed_parsed_docx(
     drop(envelope);
     let package =
         field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
+    let compatibility_mode = compatibility_mode_from_package(Some(package));
     let mut context = LoweringContext {
         styles: StyleResolver::new(field(Some(package), "styles")),
         theme: field(Some(package), "theme").cloned(),
         source_json: Arc::new(source_json),
         plans: Vec::new(),
+        compatibility_mode,
     };
     visit_story(
         &mut context,
@@ -3420,6 +3515,7 @@ mod tests {
                 theme: None,
                 source_json: Arc::new(BTreeMap::new()),
                 plans: Vec::new(),
+                compatibility_mode: 12,
             };
             visit_story(
                 &mut context,
@@ -3537,6 +3633,7 @@ mod tests {
             theme: None,
             source_json: Arc::new(BTreeMap::new()),
             plans: Vec::new(),
+            compatibility_mode: 12,
         };
         visit_story(
             &mut context,
@@ -3618,7 +3715,274 @@ mod tests {
         }
     }
 
+    #[test]
+    fn first_line_value_and_kind_share_one_source() {
+        let hanging_styles = StyleResolver::new(Some(
+            &json!({"styles":[{"styleId":"Normal","type":"paragraph","default":true,"pPr":{"indentLeft":1450,"indentFirstLine":-730,"hangingIndent":true}}]}),
+        ));
+        let first_styles = StyleResolver::new(Some(
+            &json!({"styles":[{"styleId":"Normal","type":"paragraph","default":true,"pPr":{"indentLeft":1450,"indentFirstLine":720}}]}),
+        ));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentLeft":2160,"indentFirstLine":720},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentLeft"], json!(2160));
+        assert_eq!(properties["indentFirstLine"], json!(720));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentLeft":720,"indentFirstLine":0},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(0));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentLeft":1425},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentLeft"], json!(1425));
+        assert_eq!(properties["indentFirstLine"], json!(-730));
+        assert_eq!(properties["hangingIndent"], json!(true));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentLeft":2160,"indentFirstLine":-720,"hangingIndent":true},"content":[]}),
+            &first_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(-720));
+        assert_eq!(properties["hangingIndent"], json!(true));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentFirstLine":720},"listRendering":{"indentLeft":1440,"indentFirstLine":-360,"hangingIndent":true},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(720));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{},"listRendering":{"indentLeft":1440,"indentFirstLine":300},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(300));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentFirstLine":0},"listRendering":{"indentLeft":1440,"indentFirstLine":-360,"hangingIndent":true},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(-360));
+        assert_eq!(properties["hangingIndent"], json!(true));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentFirstLine":-720,"hangingIndent":true},"listRendering":{"indentLeft":2145},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentLeft"], json!(2145));
+        assert_eq!(properties["indentFirstLine"], json!(-720));
+        assert_eq!(properties["hangingIndent"], json!(true));
+    }
+
+    #[test]
+    fn derived_first_line_without_flag_clears_base_hanging() {
+        let styles = StyleResolver::new(Some(
+            &json!({"docDefaults":{"pPr":{"indentFirstLine":-730,"hangingIndent":true}},"styles":[{"styleId":"Derived","type":"paragraph","pPr":{"indentFirstLine":200}}]}),
+        ));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"styleId":"Derived"},"content":[]}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(200));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let styles = StyleResolver::new(Some(
+            &json!({"docDefaults":{"pPr":{"indentFirstLine":-730,"hangingIndent":true}},"styles":[{"styleId":"Derived","type":"paragraph","pPr":{"indentFirstLine":0}}]}),
+        ));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"styleId":"Derived"},"content":[]}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(0));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let styles = StyleResolver::new(Some(
+            &json!({"docDefaults":{"pPr":{"indentFirstLine":200}},"styles":[{"styleId":"Derived","type":"paragraph","pPr":{"indentFirstLine":-360,"hangingIndent":true}}]}),
+        ));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"styleId":"Derived"},"content":[]}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(-360));
+        assert_eq!(properties["hangingIndent"], json!(true));
+    }
+
+    #[test]
+    fn indent_kind_pairs_merge_atomically_including_zero() {
+        let base = json!({"indentFirstLine":-730,"hangingIndent":true});
+        let derived = json!({"indentFirstLine":200});
+        let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
+        assert_eq!(merged["indentFirstLine"], json!(200));
+        assert!(merged.get("hangingIndent").is_none());
+        let derived = json!({"indentFirstLine":0});
+        let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
+        assert_eq!(merged["indentFirstLine"], json!(0));
+        assert!(merged.get("hangingIndent").is_none());
+        let base = json!({"indentFirstLine":200});
+        let derived = json!({"hangingIndent":true});
+        let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
+        assert_eq!(merged["indentFirstLine"], json!(200));
+        assert!(merged.get("hangingIndent").is_none());
+        let base = json!({"indentFirstLine":-730,"hangingIndent":true});
+        let derived = json!({"indentLeft":720});
+        let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
+        assert_eq!(merged["indentFirstLine"], json!(-730));
+        assert_eq!(merged["hangingIndent"], json!(true));
+    }
+
+    #[test]
+    fn parsed_indent_xml_seeds_matching_attrs() {
+        fn ppr(xml: &str) -> Value {
+            let limits = docx_parse::xml::ParseLimits::default();
+            let mut budget = docx_parse::xml::ParseBudget::new(&limits);
+            let root = docx_parse::xml::parse_xml(xml.as_bytes(), "formatting.xml", &mut budget)
+                .unwrap()
+                .root()
+                .unwrap()
+                .clone();
+            serde_json::to_value(docx_parse::parse_paragraph_properties(Some(&root), None).unwrap())
+                .unwrap()
+        }
+        let style_ppr = ppr(r#"<w:pPr><w:ind w:left="1450" w:hanging="730"/></w:pPr>"#);
+        assert_eq!(style_ppr["indentFirstLine"], json!(-730.0));
+        assert_eq!(style_ppr["hangingIndent"], json!(true));
+        let direct_ppr = ppr(r#"<w:pPr><w:ind w:left="2160" w:firstLine="720"/></w:pPr>"#);
+        assert_eq!(direct_ppr["indentFirstLine"], json!(720.0));
+        assert!(direct_ppr.get("hangingIndent").is_none());
+        let styles = StyleResolver::new(Some(
+            &json!({"styles":[{"styleId":"Normal","type":"paragraph","default":true,"pPr":style_ppr}]}),
+        ));
+        let properties = paragraph_attrs(
+            &json!({"formatting": direct_ppr, "content": []}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentLeft"], json!(2160.0));
+        assert_eq!(properties["indentFirstLine"], json!(720.0));
+        assert_eq!(properties["hangingIndent"], json!(false));
+    }
+
+    #[test]
+    fn numbering_level_marker_format_preserves_explicit_off() {
+        let styles = StyleResolver::new(None);
+        let properties = paragraph_attrs(
+            &json!({"formatting":{},"listRendering":{"marker":"1.","numFmt":"decimal","markerBold":false,"markerItalic":false,"markerColor":{"rgb":"000000"},"markerFontFamily":"Times New Roman","markerFontSize":12.0},"content":[]}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["listMarker"], json!("1."));
+        assert_eq!(properties["listMarkerBold"], json!(false));
+        assert_eq!(properties["listMarkerItalic"], json!(false));
+        assert_eq!(properties["listMarkerColor"], json!({"rgb":"000000"}));
+        assert_eq!(properties["listMarkerFontFamily"], json!("Times New Roman"));
+        assert_eq!(properties["listMarkerFontSize"], json!(12.0));
+    }
+
     use super::*;
+
+    #[test]
+    fn resolved_images_and_fonts_survive_media_projection() {
+        let src = "data:image/png;base64,AQID";
+        for with_field in [false, true] {
+            let mut envelope = parse_docx_for_edit(include_bytes!(
+                "../../../apps/demo/public/betteroffice-demo.docx"
+            ))
+            .unwrap();
+            let mut content = vec![json!({
+                "type": "run",
+                "formatting": {"fontFamily": {"ascii": "Image Caption"}},
+                "content": [{"type": "drawing", "image": {
+                    "type": "image", "rId": "rIdImage", "src": src,
+                    "size": {"width": 914400, "height": 457200},
+                    "wrap": {"type": "inline"}
+                }}]
+            })];
+            if with_field {
+                content.push(json!({
+                    "type": "simpleField", "instruction": " PAGE ", "fieldType": "PAGE",
+                    "content": [{"type": "run", "content": [{"type": "text", "text": "1"}]}]
+                }));
+            }
+            envelope.document.package.document.content = serde_json::from_value(json!([{
+                "type": "paragraph", "paraId": "image", "content": content
+            }]))
+            .unwrap();
+            envelope.document.package.media_entries = vec![(
+                "word/media/image.png".to_owned(),
+                docx_parse::media::MediaFile {
+                    path: "word/media/image.png".to_owned(),
+                    filename: Some("image.png".to_owned()),
+                    mime_type: "image/png".to_owned(),
+                    base64: "AQID".to_owned(),
+                    data_url: src.to_owned(),
+                },
+            )];
+            let mut without_media = envelope.clone();
+            without_media.document.package.media_entries.clear();
+            let with_media_doc = EditingDoc::new(7);
+            let without_media_doc = EditingDoc::new(7);
+            let fonts = seed_parsed_docx(&with_media_doc, envelope).unwrap();
+            assert_eq!(
+                fonts,
+                seed_parsed_docx(&without_media_doc, without_media).unwrap()
+            );
+            assert!(fonts.iter().any(|font| font == "Image Caption"));
+            assert_eq!(
+                with_media_doc.encode_state_as_update_v1(),
+                without_media_doc.encode_state_as_update_v1()
+            );
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+                &with_media_doc,
+                "body",
+                &crate::bridge::RenderEnv::default(),
+            )
+            .unwrap();
+            let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!("image paragraph must remain a paragraph");
+            };
+            assert!(paragraph.runs.iter().any(|run| {
+                matches!(run, docx_layout::types::Run::Image(image)
+                    if image.src == src && image.width == 96.0 && image.height == 48.0)
+            }));
+        }
+    }
 
     #[test]
     fn source_json_preserves_wire_order_with_js_number_formatting() {
@@ -3657,6 +4021,54 @@ mod tests {
         )
         .get("widowControl")
         .cloned()
+    }
+
+    fn snap_grid_styles() -> Value {
+        json!({
+            "docDefaults": { "pPr": {} },
+            "styles": [
+                { "styleId": "Normal", "type": "paragraph", "default": true, "pPr": {} },
+                { "styleId": "Body", "type": "paragraph", "pPr": { "snapToGrid": false } },
+                { "styleId": "Quote", "type": "paragraph", "pPr": { "snapToGrid": true } }
+            ]
+        })
+    }
+
+    fn seeded_snap_to_grid(styles: &StyleResolver, formatting: Value) -> Option<Value> {
+        paragraph_attrs(
+            &json!({ "formatting": formatting, "content": [] }),
+            styles,
+            &[],
+            &[],
+            None,
+        )
+        .get("snapToGrid")
+        .cloned()
+    }
+
+    #[test]
+    fn snap_to_grid_is_seeded_from_the_style_and_direct_formatting() {
+        let styles = StyleResolver::new(Some(&snap_grid_styles()));
+
+        assert_eq!(seeded_snap_to_grid(&styles, json!({})), Some(Value::Null));
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Body" })),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Quote" })),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Body", "snapToGrid": true })),
+            Some(Value::Bool(true)),
+            "a direct on overrides a style that opts out"
+        );
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Quote", "snapToGrid": false })),
+            Some(Value::Bool(false)),
+            "a direct off overrides a style that turns the toggle back on"
+        );
     }
 
     #[test]
@@ -3702,14 +4114,47 @@ mod tests {
                 "formatting": { "styleId": "FootnoteReference" },
                 "content": [{ "type": content_type }, { "type": content_type }],
             });
-            assert!(run_to_units(&run, None, &styles, None, &[], &BTreeMap::new()).is_empty());
-            let boundary = run_boundary(&run, None, &styles, &BTreeMap::new()).unwrap();
+            let units = run_to_units(&run, None, &styles, None, &[], &BTreeMap::new());
+            assert!(units.is_empty());
+            let boundary = run_boundary(&run, &units).unwrap();
             assert_eq!(
                 boundary.get("noteMarks"),
                 Some(&json!([note_type, note_type]))
             );
             assert_eq!(boundary.get("text"), Some(&Value::String(String::new())));
         }
+    }
+
+    #[test]
+    fn reused_run_units_keep_comments_out_of_saved_boundaries() {
+        let (units, ppr) = paragraph_units(
+            &json!({"content": [
+                {"type": "commentRangeStart", "id": 7},
+                {"type": "run", "formatting": {"bold": true}, "content": [
+                    {"type": "text", "text": "A"},
+                    {"type": "tab"},
+                    {"type": "softHyphen"}
+                ]},
+                {"type": "commentRangeEnd", "id": 7},
+                {"type": "run", "content": [{"type": "footnoteRef", "id": 12}]}
+            ]}),
+            &StyleResolver::new(None),
+            None,
+            &BTreeMap::new(),
+        );
+        assert_eq!(units.len(), 4);
+        assert!(
+            units[..3]
+                .iter()
+                .all(|unit| unit.comment_id.as_deref() == Some("7"))
+        );
+        assert!(units[3].comment_id.is_none());
+        assert_eq!(units[3].pm_size, 1);
+        let boundaries = ppr["_originalRunBoundaries"].as_array().unwrap();
+        assert_eq!(boundaries.len(), 2);
+        assert_eq!(boundaries[0]["text"], "A\t\u{00ad}");
+        assert_eq!(boundaries[0]["marksKey"], "bold:{}");
+        assert_eq!(boundaries[1]["text"], "12");
     }
 
     #[test]

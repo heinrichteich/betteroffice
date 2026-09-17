@@ -580,19 +580,17 @@ pub(crate) fn parse_xml_strict(
                         part: part.to_owned(),
                     });
                 }
-                append_element(
-                    decode_element(&reader, start, part, budget)?,
-                    &mut stack,
-                    &mut roots,
-                    part,
-                )?;
+                let mut element = decode_element(&reader, start, part, budget)?;
+                retain_drawing_namespace_aliases(&mut element, &stack, part, budget)?;
+                append_element(element, &mut stack, &mut roots, part)?;
             }
             Event::End(_) => {
-                let element = stack.pop().ok_or_else(|| ParseError::MalformedXml {
+                let mut element = stack.pop().ok_or_else(|| ParseError::MalformedXml {
                     part: part.to_owned(),
                     offset: reader.buffer_position(),
                     message: "unexpected closing element".to_owned(),
                 })?;
+                retain_drawing_namespace_aliases(&mut element, &stack, part, budget)?;
                 append_element(element, &mut stack, &mut roots, part)?;
             }
             Event::Text(text) => {
@@ -671,6 +669,118 @@ pub(crate) fn parse_xml_strict(
         });
     }
     Ok(XmlDocument { roots })
+}
+
+fn canonical_namespace(prefix: &str) -> Option<&'static str> {
+    if !crate::serializer::parts::is_story_root_prefix(prefix) {
+        return None;
+    }
+    match prefix {
+        "w" => Some(namespaces::W),
+        "v" => Some(namespaces::V),
+        "o" => Some(namespaces::O),
+        "a" => Some(namespaces::A),
+        "r" => Some(namespaces::R),
+        "wp" => Some(namespaces::WP),
+        "wp14" => Some(namespaces::WP14),
+        "wps" => Some(namespaces::WPS),
+        "wpc" => Some(namespaces::WPC),
+        "wpg" => Some(namespaces::WPG),
+        "pic" => Some(namespaces::PIC),
+        "m" => Some(namespaces::M),
+        "mc" => Some(namespaces::MC),
+        "w14" => Some(namespaces::W14),
+        "w15" => Some(namespaces::W15),
+        "w10" => Some("urn:schemas-microsoft-com:office:word"),
+        "w16se" => Some("http://schemas.microsoft.com/office/word/2015/wordml/symex"),
+        "w16cid" => Some("http://schemas.microsoft.com/office/word/2016/wordml/cid"),
+        "w16" => Some("http://schemas.microsoft.com/office/word/2018/wordml"),
+        "w16cex" => Some("http://schemas.microsoft.com/office/word/2018/wordml/cex"),
+        "w16sdtdh" => Some("http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash"),
+        "wne" => Some("http://schemas.microsoft.com/office/word/2006/wordml"),
+        _ => None,
+    }
+}
+
+fn retain_drawing_namespace_aliases(
+    element: &mut XmlElement,
+    ancestors: &[XmlElement],
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), ParseError> {
+    if !matches!(element.local_name(), "pict" | "object") {
+        return Ok(());
+    }
+    let mut bindings = IndexMap::new();
+    for ancestor in ancestors {
+        for (name, value) in &ancestor.attributes {
+            if name == "xmlns" || name.starts_with("xmlns:") {
+                let prefix = name.strip_prefix("xmlns:").unwrap_or("");
+                if canonical_namespace(prefix) == Some(value.as_str()) {
+                    bindings.shift_remove(name.as_str());
+                } else {
+                    bindings.insert(name.as_str(), value.as_str());
+                }
+            }
+        }
+    }
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    let mut used_prefixes = std::collections::HashSet::new();
+    let mut pending = vec![&*element];
+    while let Some(node) = pending.pop() {
+        used_prefixes.insert(node.namespace_prefix().unwrap_or("").to_owned());
+        for (name, value) in &node.attributes {
+            if matches!(
+                local_name(name),
+                "Ignorable"
+                    | "MustUnderstand"
+                    | "Requires"
+                    | "ProcessContent"
+                    | "PreserveElements"
+                    | "PreserveAttributes"
+            ) {
+                for token in value.split_whitespace() {
+                    used_prefixes.insert(
+                        token
+                            .split_once(':')
+                            .map_or(token, |(prefix, _)| prefix)
+                            .to_owned(),
+                    );
+                }
+            }
+            if let Some((prefix, _)) = name.split_once(':')
+                && prefix != "xmlns"
+            {
+                used_prefixes.insert(prefix.to_owned());
+            }
+        }
+        pending.extend(node.child_elements());
+    }
+    let mut attribute_bytes: usize = element
+        .attributes
+        .iter()
+        .map(|(key, value)| key.len() + value.len())
+        .sum();
+    for (name, value) in bindings {
+        let prefix = name.strip_prefix("xmlns:").unwrap_or("");
+        if !used_prefixes.contains(prefix) || element.attributes.contains_key(name) {
+            continue;
+        }
+        attribute_bytes += name.len() + value.len();
+        if element.attributes.len() >= budget.limits.max_attributes_per_element
+            || attribute_bytes > budget.limits.max_attribute_bytes
+        {
+            return Err(ParseError::ResourceLimit {
+                kind: "drawingNamespaceAliases",
+                part: part.to_owned(),
+            });
+        }
+        budget.charge_text(name.len() + value.len(), part)?;
+        element.attributes.insert(name.to_owned(), value.to_owned());
+    }
+    Ok(())
 }
 
 fn decode_element(
@@ -861,6 +971,49 @@ pub fn namespace_prefix(name: &str) -> Option<&str> {
     name.split_once(':').map(|(prefix, _)| prefix)
 }
 
+/// Parse integer twips or an OOXML universal measure into whole twips.
+pub(crate) fn parse_twips_measure(value: &str, signed: bool) -> Option<f64> {
+    let value = value.trim_matches([' ', '\t', '\r', '\n']);
+    let unit = [
+        ("mm", 1440.0 / 25.4),
+        ("cm", 1440.0 / 2.54),
+        ("in", 1440.0),
+        ("pt", 20.0),
+        ("pc", 240.0),
+        ("pi", 240.0),
+    ]
+    .into_iter()
+    .find_map(|(suffix, scale)| value.strip_suffix(suffix).map(|number| (number, scale)));
+    let Some((number, scale)) = unit else {
+        let digits = value.strip_prefix(['+', '-']).unwrap_or(value);
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        return if signed {
+            value.parse::<f64>().ok().filter(|value| value.is_finite())
+        } else {
+            value.parse::<u64>().ok().map(|value| value as f64)
+        };
+    };
+    let digits = if signed {
+        number.strip_prefix('-').unwrap_or(number)
+    } else {
+        number
+    };
+    let (integer, fraction) = digits
+        .split_once('.')
+        .map_or((digits, None), |(a, b)| (a, Some(b)));
+    if integer.is_empty()
+        || !integer.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction
+            .is_some_and(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    let twips = number.parse::<f64>().ok()? * scale;
+    twips.is_finite().then(|| twips.round())
+}
+
 pub(crate) fn parse_javascript_integer_prefix(value: &str) -> Option<f64> {
     let value = value.trim_start();
     let bytes = value.as_bytes();
@@ -905,6 +1058,55 @@ fn escape_attribute(value: &str, output: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn twips_measures_convert_supported_units_and_validate_the_entire_value() {
+        for value in ["25.4mm", "2.54cm", "1in", "72pt", "6pc", "6pi"] {
+            assert_eq!(parse_twips_measure(value, false), Some(1440.0), "{value}");
+            assert_eq!(
+                parse_twips_measure(&format!("-{value}"), true),
+                Some(-1440.0)
+            );
+            assert_eq!(parse_twips_measure(&format!("-{value}"), false), None);
+        }
+        for (value, expected) in [
+            ("1440", 1440.0),
+            ("+1440", 1440.0),
+            (" \t1440\r\n", 1440.0),
+            (" 10mm ", 567.0),
+            ("0.5pt", 10.0),
+            ("0mm", 0.0),
+        ] {
+            assert_eq!(parse_twips_measure(value, false), Some(expected), "{value}");
+        }
+        assert_eq!(parse_twips_measure("-720", true), Some(-720.0));
+        assert_eq!(parse_twips_measure("-720", false), None);
+        assert_eq!(parse_twips_measure("-1.25cm", true), Some(-709.0));
+        for value in [
+            "",
+            "mm",
+            ".5pt",
+            "1.pt",
+            "1.2.3pt",
+            "+1pt",
+            "1e2pt",
+            "10px",
+            "10PT",
+            "10mmjunk",
+            "10 mm",
+            "0.5",
+            "NaN",
+            "Infinity",
+            "--1pt",
+            "18446744073709551616",
+        ] {
+            assert_eq!(parse_twips_measure(value, false), None, "{value}");
+        }
+        assert_eq!(
+            parse_twips_measure(&format!("{}in", "9".repeat(310)), true),
+            None
+        );
+    }
 
     fn parse(input: &str) -> Result<XmlDocument, ParseError> {
         let limits = ParseLimits::default();

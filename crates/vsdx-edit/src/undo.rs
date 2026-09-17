@@ -4,7 +4,7 @@ use std::sync::Arc;
 use yrs::sync::time::Clock;
 use yrs::{Doc, Origin, ReadTxn, Transact};
 
-use crate::{EditError, EditResult, META, PAGE_ORDER, PAGES, SHEETS, STORIES};
+use crate::{CONNECTS, EditError, EditResult, META, PAGE_ORDER, PAGES, SHEETS, STORIES};
 
 const CAPTURE_TIMEOUT_MS: u64 = 500;
 
@@ -23,6 +23,7 @@ impl DiagramUndoManager {
                 txn.get_map(META),
                 txn.get_map(PAGES),
                 txn.get_map(SHEETS),
+                txn.get_map(CONNECTS),
                 txn.get_map(STORIES),
             ];
             (order, roots)
@@ -56,6 +57,10 @@ impl DiagramUndoManager {
     }
     pub fn can_redo(&self) -> bool {
         self.inner.can_redo()
+    }
+    #[cfg(test)]
+    pub(crate) fn undo_depth(&self) -> usize {
+        self.inner.undo_stack().len()
     }
     pub fn add_undo_barrier(&mut self) {
         self.inner.reset();

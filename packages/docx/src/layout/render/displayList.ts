@@ -343,6 +343,8 @@ export interface DocAttrs {
   clipGroup?: DisplayClipGroupMetadata;
   /** Enclosing table-fragment identity and accessibility semantics. */
   table?: DisplayTableMetadata;
+  /** Inline native-shape atom; true only for paragraph-inline shapes. */
+  inlineShapeAtom?: boolean;
 }
 
 export interface TextRunPrimitive extends DocAttrs {
@@ -532,6 +534,7 @@ export interface PageBorderPrimitive {
 
 export interface ImagePrimitive extends DocAttrs {
   kind: 'image';
+  shapeType?: string;
   relId: string;
   x: number;
   y: number;
