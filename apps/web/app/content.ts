@@ -40,9 +40,9 @@ export const ECOSYSTEMS = [
 
 export const SUITE = {
   label: "Suite",
-  heading: "One suite, three editors",
+  heading: "One suite, four editors",
   prose:
-    "DOCX, XLSX and PPTX editors are published on npm and render inside your app.",
+    "DOCX, XLSX and PPTX editors are published on npm and render inside your app. The VSDX diagram editor is available from source.",
 };
 
 export const EDITORS = [
@@ -63,6 +63,12 @@ export const EDITORS = [
     format: "pptx",
     desc: "Slide model, masters and shape editing, with browser rendering of supported bitmap-only WMF images.",
     status: "available",
+  },
+  {
+    name: "Diagrams",
+    format: "vsdx",
+    desc: "Source-preview diagram editor: scroll and pan around a work surface with the page centred, with space- or middle-drag panning and ctrl+wheel zoom anchored under the pointer.",
+    status: "source preview",
   },
 ];
 

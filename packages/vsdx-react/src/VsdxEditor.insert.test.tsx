@@ -44,9 +44,15 @@ async function editor(cssScale = 1, file = foundation) {
   const view = render(<VsdxEditor file={file} fonts={[]} onReady={(api) => { ready = api; }} />);
   await waitFor(() => expect(ready).toBeDefined());
   await act(async () => { ready!.refresh(); });
+  const zoomIn = view.getByLabelText('Zoom in');
+  const zoomOut = view.getByLabelText('Zoom out');
+  if (cssScale > 1) { await act(async () => { fireEvent.click(zoomIn); }); await act(async () => { fireEvent.click(zoomIn); }); }
+  if (cssScale < 1) { await act(async () => { fireEvent.click(zoomOut); }); await act(async () => { fireEvent.click(zoomOut); }); }
   const main = drawingCanvases(view.container)[0];
-  main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: PAGE_WIDTH * cssScale, height: PAGE_HEIGHT * cssScale, right: PAGE_WIDTH * cssScale, bottom: PAGE_HEIGHT * cssScale, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
-  return { view, main, handle: ready!.handle, frame: main.parentElement as HTMLElement };
+  const rectWidth = PAGE_WIDTH * cssScale;
+  const rectHeight = PAGE_HEIGHT * cssScale;
+  main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: rectWidth, height: rectHeight, right: rectWidth, bottom: rectHeight, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+  return { view, main, handle: ready!.handle, frame: main };
 }
 
 function stencilDrag(shapeId: string) {

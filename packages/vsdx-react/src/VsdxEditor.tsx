@@ -134,6 +134,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const marqueeFrameRef = useRef<number | null>(null);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
+  const effectiveDprRef = useRef(1);
+  const spaceHeldRef = useRef(false);
+  const centredPageRef = useRef<string | null>(null);
+  const panRef = useRef<{ pointerId: number; startX: number; startY: number; startLeft: number; startTop: number } | null>(null);
   const [connectorMode, setConnectorMode] = useState(false);
   const connectorModeRef = useRef(connectorMode);
   connectorModeRef.current = connectorMode;
@@ -232,7 +236,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     let handle: DiagramHandle | null = null;
     let stopUpdates = () => {};
     let stopResync = () => {};
-    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection([]); setContextMenu(null); setClipboard(null); setEditing(null); setDraft(''); modelRef.current = { snapshot: null, pageIndex: 0, frame: null, layers: [] }; setModel(modelRef.current); setError(null); setDirty(false); setDocumentStencil({ loaded: false, masters: [] }); setActiveStencilId('standard');
+    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection([]); setContextMenu(null); setClipboard(null); setEditing(null); setDraft(''); modelRef.current = { snapshot: null, pageIndex: 0, frame: null, layers: [] }; setModel(modelRef.current); setError(null); setDirty(false); setDocumentStencil({ loaded: false, masters: [] }); setActiveStencilId('standard'); centredPageRef.current = null; panRef.current = null; spaceHeldRef.current = false;
     if (!file) { setLoading(false); return; }
     setLoading(true);
     const openingFonts = fontsRef.current;
@@ -319,7 +323,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const context = canvas.getContext('2d'); if (!context) return;
     const controller = new AbortController();
     const originHandle = handleRef.current;
-    const dpr = window.devicePixelRatio || 1; sizeCanvasForPage(canvas, frame, dpr, zoom);
+    const dpr = sizeCanvasForPage(canvas, frame, window.devicePixelRatio || 1, zoom);
     void paintPage(context, frame, dpr, zoom, {
       signal: controller.signal,
       resolveImage: async (assetId) => {
@@ -335,7 +339,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const canvas = overlayCanvasRef.current; const frame = model.frame;
     if (!canvas || !frame) return;
     const context = canvas.getContext('2d'); if (!context) return;
-    const dpr = window.devicePixelRatio || 1; sizeCanvasForPage(canvas, frame, dpr, zoom); context.clearRect(0, 0, canvas.width, canvas.height);
+    const dpr = sizeCanvasForPage(canvas, frame, window.devicePixelRatio || 1, zoom); effectiveDprRef.current = dpr; context.clearRect(0, 0, canvas.width, canvas.height);
     if (showGrid) {
       try { paintGrid(context, frame, dpr, zoom); } catch { void 0; }
     }
@@ -366,6 +370,96 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     }
     try { paintSmartGuides(context, frame, dpr, zoom, guidesRef.current); } catch { void 0; }
   }, [model.frame, model.snapshot, model.pageIndex, model.layers, selection, zoom, connectorMode, showGrid]);
+
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const current = modelRef.current;
+    const frame = current.frame;
+    if (!frame) return;
+    const key = viewportCentreKey(current.snapshot, current.pageIndex);
+    if (centredPageRef.current === key) return;
+    centredPageRef.current = key;
+    const target = centredPageScroll(frame.width, frame.height, zoomRef.current, workspace.clientWidth, workspace.clientHeight);
+    workspace.scrollLeft = target.left;
+    workspace.scrollTop = target.top;
+  }, [model.frame, model.pageIndex]);
+
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const onWheelNative = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        const oldZoom = zoomRef.current;
+        const next = zoomForWheelDelta(oldZoom, event.deltaY, event.deltaMode);
+        if (next === oldZoom) return;
+        const canvas = mainCanvasRef.current;
+        const frame = modelRef.current.frame;
+        if (!canvas || !frame) { setZoom(next); return; }
+        const rect = canvas.getBoundingClientRect();
+        const cssX = event.clientX - rect.left;
+        const cssY = event.clientY - rect.top;
+        const target = anchoredZoomScroll(workspace.scrollLeft, workspace.scrollTop, cssX, cssY, oldZoom, next);
+        const surface = surfaceSize(frame.width, frame.height, next);
+        const clamped = clampScrollToSurface(target.left, target.top, surface.width, surface.height, workspace.clientWidth, workspace.clientHeight);
+        const left = clamped.left;
+        const top = clamped.top;
+        setZoom(next);
+        requestAnimationFrame(() => {
+          const live = workspaceRef.current;
+          if (!live) return;
+          live.scrollLeft = left;
+          live.scrollTop = top;
+        });
+        return;
+      }
+      if (event.shiftKey) {
+        event.preventDefault();
+        workspace.scrollLeft += event.deltaY !== 0 ? event.deltaY : event.deltaX;
+      }
+    };
+    workspace.addEventListener('wheel', onWheelNative, { passive: false });
+    return () => workspace.removeEventListener('wheel', onWheelNative);
+  }, []);
+
+  useEffect(() => {
+    const resetSpacePan = () => {
+      spaceHeldRef.current = false;
+      panRef.current = null;
+      const canvas = mainCanvasRef.current;
+      if (canvas) canvas.style.cursor = '';
+    };
+    const onVisibility = () => { if (document.hidden) resetSpacePan(); };
+    const onKeyUp = (event: globalThis.KeyboardEvent) => {
+      if (event.key === ' ' || event.key === 'Spacebar') {
+        spaceHeldRef.current = false;
+        const canvas = mainCanvasRef.current;
+        if (canvas && !panRef.current) canvas.style.cursor = '';
+      }
+    };
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape' && panRef.current) {
+        const pan = panRef.current;
+        panRef.current = null;
+        spaceHeldRef.current = false;
+        const canvas = mainCanvasRef.current;
+        if (canvas) {
+          canvas.style.cursor = '';
+          try {
+            if (typeof canvas.hasPointerCapture !== 'function' || canvas.hasPointerCapture(pan.pointerId)) canvas.releasePointerCapture(pan.pointerId);
+          } catch { void 0; }
+        }
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('blur', resetSpacePan);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => { window.removeEventListener('keyup', onKeyUp); window.removeEventListener('keydown', onKeyDown, true); window.removeEventListener('blur', resetSpacePan); document.removeEventListener('visibilitychange', onVisibility); };
+  }, []);
 
   useEffect(() => {
     if (!editing) return;
@@ -416,7 +510,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const marquee = marqueeRef.current; const overlay = overlayCanvasRef.current;
     if (!marquee || !overlay || !marquee.thresholdPassed) return;
     const context = overlay.getContext('2d'); if (!context) return;
-    try { paintMarquee(context, normalizeMarquee(marquee.startCanvas, marquee.currentCanvas), window.devicePixelRatio || 1, zoomRef.current); } catch { void 0; }
+    try { paintMarquee(context, normalizeMarquee(marquee.startCanvas, marquee.currentCanvas), effectiveDprRef.current, zoomRef.current); } catch { void 0; }
   };
 
   const repaintOverlaySelection = () => {
@@ -425,7 +519,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const context = overlay.getContext('2d'); if (!context) return;
     const currentSelection = selectionRef.current;
     const page = current.snapshot?.pages[current.pageIndex];
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = effectiveDprRef.current;
     const zoom = zoomRef.current;
     context.clearRect(0, 0, overlay.width, overlay.height);
     if (showGridRef.current) {
@@ -440,10 +534,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           const placement = findShapePlacement(page.shapes, item.shapeId);
           const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
           const rotationBlocked = placement ? isRotateBlocked(placement.shape) : false;
-          if (corners) paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current, blocked ? [] : undefined, !rotationBlocked);
-          if (placement && currentSelection.length === 1) paintControlHandles(context, controlHandleCanvasPositions(placement.shape, shapeDragStart(page, placement.shape, frame), frame.paintTransform), window.devicePixelRatio || 1, zoomRef.current);
+          if (corners) paintSelectionFrame(context, corners, dpr, zoom, blocked ? [] : undefined, !rotationBlocked);
+          if (placement && currentSelection.length === 1) paintControlHandles(context, controlHandleCanvasPositions(placement.shape, shapeDragStart(page, placement.shape, frame), frame.paintTransform), dpr, zoom);
         } catch { void 0; }
-        if (currentSelection.length === 1) paintSelectedConnector(context, frame, page, item, segmentDragRef.current, window.devicePixelRatio || 1, zoomRef.current);
+        if (currentSelection.length === 1) paintSelectedConnector(context, frame, page, item, segmentDragRef.current, dpr, zoom);
       }
     }
     try { paintSmartGuides(context, frame, dpr, zoom, guidesRef.current); } catch { void 0; }
@@ -513,7 +607,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   };
 
   const paintConnectorLayer = (context: CanvasRenderingContext2D, frame: PageDisplayList) => {
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = effectiveDprRef.current;
     try { paintConnectorOverlay(context, frame, dpr, zoomRef.current, connectorScene(frame)); } catch { void 0; }
     if (connectorModeRef.current || connectorDragRef.current || !autoHoverRef.current) return;
     const page = modelRef.current.snapshot?.pages[modelRef.current.pageIndex];
@@ -609,7 +703,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const page = current.snapshot?.pages[current.pageIndex];
     if (!handle || !frame || !page) return;
     try {
-      const point = canvasPointerPosition(event, frame);
+      const point = canvasPointerPosition(event, frame, zoomRef.current);
       const drag = connectorDragRef.current;
       if (drag) {
         drag.current = point.model;
@@ -626,7 +720,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
 
   /** Coalesces AutoConnect hover to one hit-test per frame; a pointer move alone never calls wasm. */
   const scheduleAutoConnectHover = (event: PointerEvent<HTMLCanvasElement>, frame: PageDisplayList) => {
-    autoMoveRef.current = canvasPointerPosition(event, frame);
+    autoMoveRef.current = canvasPointerPosition(event, frame, zoomRef.current);
     if (connectorFrameRef.current !== null) return;
     connectorFrameRef.current = requestAnimationFrame(() => {
       connectorFrameRef.current = null;
@@ -694,11 +788,20 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
     if (!handle || !frame || !page) return;
     if (event.button === 2) return;
-    if (pointerRef.current || marqueeRef.current) return;
+    if (pointerRef.current || marqueeRef.current || panRef.current) return;
+    const workspace = workspaceRef.current;
+    if (workspace && (event.button === 1 || (spaceHeldRef.current && event.button === 0))) {
+      panRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startLeft: workspace.scrollLeft, startTop: workspace.scrollTop };
+      capturePointer(event);
+      event.currentTarget.style.cursor = 'grabbing';
+      event.preventDefault();
+      return;
+    }
+    if (spaceHeldRef.current) return;
     pointerRef.current = null; dragPreviewRef.current = null; dragShapeRef.current = null; segmentDragRef.current = null; marqueeRef.current = null;
     if (connectorModeRef.current) {
       try {
-        const point = canvasPointerPosition(event, frame);
+        const point = canvasPointerPosition(event, frame, zoomRef.current);
         const target = connectorTargetForPoint(page.shapes, handle, point.canvas, point.model);
         if (target) {
           connectorDragRef.current = { pageId: page.id, from: target, current: point.model, snap: target };
@@ -714,7 +817,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       return;
     }
     try {
-      const point = canvasPointerPosition(event, frame);
+      const point = canvasPointerPosition(event, frame, zoomRef.current);
       for (const active of selectionRef.current) {
         if (active.pageId !== page.id || selectionHiddenByLayers(page, modelRef.current.layers, active)) continue;
         try {
@@ -817,7 +920,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       setSelection([next]);
       if (!selectionHiddenByLayers(page, modelRef.current.layers, next)) {
         const chrome = selectedConnectorChrome(frame, page, next);
-        const segment = chrome?.draggable ? hitSegmentDot(chrome, point.model, grabTolerance(event.currentTarget, frame)) : null;
+        const segment = chrome?.draggable ? hitSegmentDot(chrome, point.model, grabTolerance(event.currentTarget, frame, zoomRef.current)) : null;
         if (chrome?.draggable && segment) {
           segmentDragRef.current = {
             selection: next,
@@ -846,6 +949,16 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     } catch (value) { reportError(value); }
   };
   const onPointerMove = (event: PointerEvent<HTMLCanvasElement>) => {
+    const pan = panRef.current;
+    if (pan) {
+      if (pan.pointerId !== event.pointerId) return;
+      const workspace = workspaceRef.current;
+      if (workspace) {
+        workspace.scrollLeft = pan.startLeft - (event.clientX - pan.startX);
+        workspace.scrollTop = pan.startTop - (event.clientY - pan.startY);
+      }
+      return;
+    }
     const marquee = marqueeRef.current;
     if (marquee) {
       if (marquee.pointerId !== undefined && marquee.pointerId !== event.pointerId) return;
@@ -856,7 +969,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       const marqueeFrame = modelRef.current.frame;
       if (!marqueeFrame) return;
       try {
-        marquee.currentCanvas = canvasPointerPosition(event, marqueeFrame).canvas;
+        marquee.currentCanvas = canvasPointerPosition(event, marqueeFrame, zoomRef.current).canvas;
         if (marqueeFrameRef.current !== null) return;
         marqueeFrameRef.current = requestAnimationFrame(() => {
           marqueeFrameRef.current = null;
@@ -871,7 +984,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       try {
         const liveFrame = modelRef.current.frame;
         if (!liveFrame) return;
-        const point = canvasPointerPosition(event, liveFrame);
+        const point = canvasPointerPosition(event, liveFrame, zoomRef.current);
         drag.preview = dragSegmentRoute(drag.vertices, drag.segment, { x: drag.anchor.x + drag.grab.x, y: drag.anchor.y + drag.grab.y }, point.model);
         event.currentTarget.style.cursor = 'grabbing';
         repaintOverlaySelection();
@@ -890,15 +1003,16 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       if (showRulersRef.current) {
         try {
           const hoverFrame = modelRef.current.frame;
-          if (hoverFrame) markRulerPointer(canvasPointerPosition(event, hoverFrame).canvas);
+          if (hoverFrame) markRulerPointer(canvasPointerPosition(event, hoverFrame, zoomRef.current).canvas);
         } catch { void 0; }
       }
       try {
         const current = modelRef.current; const frame = current.frame;
         const page = current.snapshot?.pages[current.pageIndex];
         const selected = selectionRef.current;
+        if (spaceHeldRef.current) { event.currentTarget.style.cursor = panRef.current ? 'grabbing' : 'grab'; return; }
         if (!frame || !page || selected.length === 0) { event.currentTarget.style.cursor = ''; return; }
-        const point = canvasPointerPosition(event, frame);
+        const point = canvasPointerPosition(event, frame, zoomRef.current);
         for (const active of selected) {
           if (active.pageId !== page.id || selectionHiddenByLayers(page, current.layers, active)) continue;
           const placement = selected.length === 1 ? findShapePlacement(page.shapes, active.shapeId) : null;
@@ -919,7 +1033,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           if (target) { event.currentTarget.style.cursor = target === 'rotate' ? 'grab' : resizeCursor(target); return; }
           if (selected.length === 1) {
             const chrome = selectedConnectorChrome(frame, page, active);
-            const hover = chrome?.draggable ? hitSegmentDot(chrome, point.model, grabTolerance(event.currentTarget, frame)) : null;
+            const hover = chrome?.draggable ? hitSegmentDot(chrome, point.model, grabTolerance(event.currentTarget, frame, zoomRef.current)) : null;
             if (hover) { event.currentTarget.style.cursor = 'grab'; return; }
           }
         }
@@ -935,7 +1049,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const frame = modelRef.current.frame;
     if (!frame) return;
     try {
-      const point = canvasPointerPosition(event, frame);
+      const point = canvasPointerPosition(event, frame, zoomRef.current);
       if (showRulersRef.current) markRulerPointer(point.canvas);
       if (snappableDrag(start)) {
         const snapped = snapDragPoint(start, point.model, event.altKey);
@@ -962,7 +1076,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
             const livePlacement = findShapePlacement(livePage.shapes, liveSelection.shapeId);
             const corners = selectionCorners(livePage, liveFrame, liveSelection);
             context.clearRect(0, 0, overlay.width, overlay.height);
-            if (corners) paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current);
+            if (corners) paintSelectionFrame(context, corners, effectiveDprRef.current, zoomRef.current);
             if (livePlacement) {
               const positions = controlHandleCanvasPositions(livePlacement.shape, liveStart, liveFrame.paintTransform).map((position) => {
                 if (position.row !== liveStart.control!.row) return position;
@@ -970,7 +1084,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
                 const page = shapeLocalToPage(liveStart, next);
                 return { ...position, canvas: modelPointToCanvas(liveFrame.paintTransform, page.x, page.y) };
               });
-              paintControlHandles(context, positions, window.devicePixelRatio || 1, zoomRef.current);
+              paintControlHandles(context, positions, effectiveDprRef.current, zoomRef.current);
             }
             return;
           }
@@ -978,12 +1092,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           reroutePreviewRef.current = gluedReroutePreview(liveStart, release);
           context.clearRect(0, 0, overlay.width, overlay.height);
           if (showGridRef.current) {
-            try { paintGrid(context, liveFrame, window.devicePixelRatio || 1, zoomRef.current); } catch { void 0; }
+            try { paintGrid(context, liveFrame, effectiveDprRef.current, zoomRef.current); } catch { void 0; }
           }
           paintConnectorLayer(context, liveFrame);
-          paintDragPreview(context, corners, window.devicePixelRatio || 1, zoomRef.current);
-          paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current);
-          try { paintSmartGuides(context, liveFrame, window.devicePixelRatio || 1, zoomRef.current, guidesRef.current); } catch { void 0; }
+          paintDragPreview(context, corners, effectiveDprRef.current, zoomRef.current);
+          paintSelectionFrame(context, corners, effectiveDprRef.current, zoomRef.current);
+          try { paintSmartGuides(context, liveFrame, effectiveDprRef.current, zoomRef.current, guidesRef.current); } catch { void 0; }
         } catch (value) { reportError(value); }
       });
     } catch (value) { reportError(value); }
@@ -997,12 +1111,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       if (!drag || !handle || !frame || !page) return;
       let end = drag.snap;
       try {
-        const point = canvasPointerPosition(event, frame);
+        const point = canvasPointerPosition(event, frame, zoomRef.current);
         end = connectorTargetForPoint(page.shapes, handle, point.canvas, point.model) ?? drag.snap;
       } catch { end = drag.snap; }
       if (!end && !connectorModeRef.current) {
         let drop: ModelPoint | null = null;
-        try { drop = canvasPointerPosition(event, frame).model; } catch { drop = null; }
+        try { drop = canvasPointerPosition(event, frame, zoomRef.current).model; } catch { drop = null; }
         if (!drop || Math.hypot(drop.x - drag.from.point.x, drop.y - drag.from.point.y) < HOVER_FREE_DRAG_INCHES) return;
         const receipt = handle.addFreeConnector(drag.pageId, connectorDraft(drag.from.point, drop), connectorGlue(drag.from.shapeId, drag.from.point));
         refresh(undefined, true);
@@ -1023,6 +1137,16 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
 
   const onPointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
     if (connectorDragRef.current) { commitConnectorDrag(event); return; }
+    const pan = panRef.current;
+    if (pan) {
+      if (pan.pointerId !== event.pointerId) return;
+      panRef.current = null;
+      event.currentTarget.style.cursor = spaceHeldRef.current ? 'grab' : '';
+      try {
+        if (typeof event.currentTarget.hasPointerCapture !== 'function' || event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+      } catch { void 0; }
+      return;
+    }
     const marquee = marqueeRef.current;
     if (marquee) {
       if (marquee.pointerId !== undefined && marquee.pointerId !== event.pointerId) return;
@@ -1069,7 +1193,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     dragShapeRef.current = null;
     if (!handle || !selected || !frame) return;
     try {
-      const point = canvasPointerPosition(event, frame);
+      const point = canvasPointerPosition(event, frame, zoomRef.current);
       if (!pointer.thresholdPassed && !hadPreview && pointer.startX !== undefined && pointer.startY !== undefined && !passedDragThreshold(pointer.startX, pointer.startY, event.clientX, event.clientY)) return;
       if (!pointer.thresholdPassed && !hadPreview && Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) return;
       if (pointer.control) {
@@ -1130,6 +1254,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (abandonConnectorDrag()) return;
     if (cancelSegmentDrag(event)) return;
     if (clearMarquee(event)) return;
+    const pan = panRef.current;
+    if (pan && pan.pointerId === event.pointerId) {
+      panRef.current = null;
+      event.currentTarget.style.cursor = spaceHeldRef.current ? 'grab' : '';
+      return;
+    }
     const pointer = pointerRef.current;
     if (!pointer) return;
     if (pointer.pointerId !== undefined && pointer.pointerId !== event.pointerId) return;
@@ -1139,6 +1269,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (abandonConnectorDrag()) return;
     if (cancelSegmentDrag(event)) return;
     if (clearMarquee(event)) return;
+    const pan = panRef.current;
+    if (pan && pan.pointerId === event.pointerId) {
+      panRef.current = null;
+      event.currentTarget.style.cursor = spaceHeldRef.current ? 'grab' : '';
+      return;
+    }
     const pointer = pointerRef.current;
     if (!pointer) return;
     if (pointer.pointerId !== undefined && pointer.pointerId !== event.pointerId) return;
@@ -1151,7 +1287,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
     if (!handle || !frame || !page) return;
     try {
-      const point = canvasPointerPosition(event, frame);
+      const point = canvasPointerPosition(event, frame, zoomRef.current);
       handle.layoutPage(model.pageIndex);
       const hit = handle.hitTest(point.canvas.x, point.canvas.y);
       const next = hit ? selectionForHit(page, hit) : null;
@@ -1164,9 +1300,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     event.preventDefault();
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
     if (!handle || !frame || !page) return;
-    if (pointerRef.current || marqueeRef.current) return;
+    if (pointerRef.current || marqueeRef.current || panRef.current) return;
     try {
-      const point = canvasPointerPosition(event, frame);
+      const point = canvasPointerPosition(event, frame, zoomRef.current);
       handle.layoutPage(model.pageIndex);
       const hit = handle.hitTest(point.canvas.x, point.canvas.y);
       const next = hit ? selectionForHit(page, hit) : null;
@@ -1182,6 +1318,19 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   };
   const commandsRef = useRef<RibbonCommands | null>(null);
   const cancelActiveDrag = () => {
+    const pan = panRef.current;
+    if (pan) {
+      panRef.current = null;
+      spaceHeldRef.current = false;
+      const canvas = mainCanvasRef.current;
+      if (canvas) {
+        canvas.style.cursor = '';
+        try {
+          if (typeof canvas.hasPointerCapture !== 'function' || canvas.hasPointerCapture(pan.pointerId)) canvas.releasePointerCapture(pan.pointerId);
+        } catch { void 0; }
+      }
+      return true;
+    }
     const pointer = pointerRef.current;
     const marquee = marqueeRef.current;
     if (!pointer && !marquee) return false;
@@ -1286,6 +1435,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     } catch (value) { reportError(value); }
   }, [selection, refresh, reportError]);
   const onCanvasKeyDown = (event: KeyboardEvent<HTMLCanvasElement>) => {
+    if (event.key === ' ' || event.key === 'Spacebar') {
+      spaceHeldRef.current = true;
+      event.currentTarget.style.cursor = panRef.current ? 'grabbing' : 'grab';
+      event.preventDefault();
+      return;
+    }
     if (event.altKey && event.key === '3') { event.preventDefault(); toggleConnector(); return; }
     const selected = selectionRef.current.length === 1 ? selectionRef.current[0] : null;
     if (!editingRef.current && (event.ctrlKey || event.metaKey) && !event.altKey) {
@@ -1321,7 +1476,13 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (isOwnedBrowserShortcut(event)) event.preventDefault();
   };
   const onCanvasFocus = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = '2px solid #0f6cbd'; event.currentTarget.style.outlineOffset = '2px'; };
-  const onCanvasBlur = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = ''; event.currentTarget.style.outlineOffset = ''; };
+  const onCanvasBlur = (event: FocusEvent<HTMLCanvasElement>) => { event.currentTarget.style.outline = ''; event.currentTarget.style.outlineOffset = ''; spaceHeldRef.current = false; if (!panRef.current) event.currentTarget.style.cursor = ''; };
+  const onCanvasKeyUp = (event: KeyboardEvent<HTMLCanvasElement>) => {
+    if (event.key === ' ' || event.key === 'Spacebar') {
+      spaceHeldRef.current = false;
+      if (!panRef.current) event.currentTarget.style.cursor = '';
+    }
+  };
   const toggleView = useCallback((key: ViewToggleKey) => {
     if (key === 'grid') setShowGrid((value) => !value);
     else if (key === 'snap') setSnapEnabled((value) => !value);
@@ -1364,19 +1525,19 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     insertShapeAt(shape, centreInsertPoint(canvasPointToModel(frame.paintTransform, frame.width / 2, frame.height / 2), cascade));
   }, [insertShapeAt]);
   const droppedShape = useCallback((id: string) => stencils.flatMap((stencil) => stencil.shapes).find((shape) => shape.id === id), [stencils]);
-  const onCanvasDragOver = (event: DragEvent<HTMLDivElement>) => {
+  const onCanvasDragOver = (event: DragEvent<HTMLCanvasElement>) => {
     if (!handleRef.current || !modelRef.current.frame) return;
     if (!event.dataTransfer.types.includes(STENCIL_DRAG_MIME)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
   };
-  const onCanvasDrop = (event: DragEvent<HTMLDivElement>) => {
+  const onCanvasDrop = (event: DragEvent<HTMLCanvasElement>) => {
     const frame = modelRef.current.frame; const canvas = mainCanvasRef.current;
     if (!frame || !canvas) return;
     const shape = droppedShape(event.dataTransfer.getData(STENCIL_DRAG_MIME).trim());
     if (!shape) return;
     event.preventDefault();
-    insertShapeAt(shape, clientPointToModel(frame, canvas.getBoundingClientRect(), event.clientX, event.clientY).model);
+    insertShapeAt(shape, clientPointToModel(frame, canvas.getBoundingClientRect(), event.clientX, event.clientY, zoomRef.current).model);
     canvas.focus();
   };
   const reorderPage = useCallback((pageId: string, toIndex: number) => {
@@ -1416,10 +1577,21 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const frame = modelRef.current.frame; const workspace = workspaceRef.current;
     if (!frame || !workspace || frame.width <= 0 || frame.height <= 0) return;
     const rect = workspace.getBoundingClientRect();
-    setZoom(clampZoom(Math.min((rect.width - WORKSPACE_MARGIN) / frame.width, (rect.height - WORKSPACE_MARGIN) / frame.height)));
+    const next = clampZoom(Math.min((rect.width - WORKSPACE_MARGIN) / frame.width, (rect.height - WORKSPACE_MARGIN) / frame.height));
+    setZoom(next);
+    requestAnimationFrame(() => {
+      const live = workspaceRef.current;
+      if (!live) return;
+      const target = centredPageScroll(frame.width, frame.height, next, live.clientWidth, live.clientHeight);
+      live.scrollLeft = target.left;
+      live.scrollTop = target.top;
+    });
   }, []);
   const download = useCallback((bytes: Uint8Array) => { const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer; const url = URL.createObjectURL(new Blob([buffer], { type: 'application/vnd.visio' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'diagram.vsdx'; anchor.click(); URL.revokeObjectURL(url); setDirty(false); }, []);
   const editOverlay = editing && model.frame && editedTextId ? textEditOverlay(model.frame, editedTextId, zoom) : null;
+  const surfaceExtent = model.frame ? surfaceSize(model.frame.width, model.frame.height, zoom) : null;
+  const pageCssWidth = model.frame ? model.frame.width * zoom : 0;
+  const pageCssHeight = model.frame ? model.frame.height * zoom : 0;
   const integrity = diagnostics.filter((diagnostic) => diagnostic.category === 'integrity');
   const fidelity = diagnostics.filter((diagnostic) => diagnostic.category === 'fidelity');
   return <div ref={editorRootRef} className={className} style={styles.root} aria-label={t('editor.appLabel')} onKeyDown={onEditorKeyDown}>
@@ -1439,16 +1611,18 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     <main ref={workspaceRef} style={styles.workspace}>
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
-      <div style={showRulers ? styles.sheet : styles.sheetPlain}>
+      {model.frame && surfaceExtent && <div style={showRulers ? styles.sheet : styles.sheetPlain}>
         {showRulers && <div style={styles.corner} />}
-        {showRulers && <div style={styles.rulerTop}>{model.frame && <RulerTop frame={model.frame} zoom={zoom} marker={rulerMark} />}</div>}
-        {showRulers && <div style={styles.rulerLeft}>{model.frame && <RulerLeft frame={model.frame} zoom={zoom} marker={rulerMark} />}</div>}
-        <div style={styles.canvasFrame} onDragOver={onCanvasDragOver} onDrop={onCanvasDrop}>
-          <canvas ref={mainCanvasRef} tabIndex={0} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={onPointerLeave} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onDoubleClick={onCanvasDoubleClick} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={canvasLabel(t, model.pageIndex, model.snapshot?.pages.length ?? 0, selection)} style={connectorMode ? { ...styles.canvas, cursor: 'crosshair' } : styles.canvas} />
+        {showRulers && <div style={styles.rulerTop}><div style={{ marginLeft: SCROLL_MARGIN }}><RulerTop frame={model.frame} zoom={zoom} marker={rulerMark} /></div></div>}
+        {showRulers && <div style={styles.rulerLeft}><div style={{ marginTop: SCROLL_MARGIN }}><RulerLeft frame={model.frame} zoom={zoom} marker={rulerMark} /></div></div>}
+        <div style={{ ...styles.surface, width: surfaceExtent.width, height: surfaceExtent.height }}>
+          <canvas ref={mainCanvasRef} tabIndex={0} onDragOver={onCanvasDragOver} onDrop={onCanvasDrop} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={onPointerLeave} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onLostPointerCapture={onLostPointerCapture} onDoubleClick={onCanvasDoubleClick} onContextMenu={onCanvasContextMenu} onKeyDown={onCanvasKeyDown} onKeyUp={onCanvasKeyUp} onFocus={onCanvasFocus} onBlur={onCanvasBlur} aria-label={canvasLabel(t, model.pageIndex, model.snapshot?.pages.length ?? 0, selection)} style={connectorMode ? { ...styles.canvas, ...canvasGeometry(pageCssWidth, pageCssHeight), cursor: 'crosshair' } : { ...styles.canvas, ...canvasGeometry(pageCssWidth, pageCssHeight) }} />
+          <div style={{ ...styles.pageLayer, left: SCROLL_MARGIN, top: SCROLL_MARGIN, width: pageCssWidth, height: pageCssHeight }}>
           {showPageBreaks && model.frame && <PageBreakGrid frame={model.frame} zoom={zoom} />}
           <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
+          </div>
           {quickMenu && model.frame && (
-            <div ref={quickMenuNodeRef} role="menu" aria-label={t('shapesPanel.quickShapes')} style={{ ...styles.quickMenu, left: Math.max(4, Math.min(quickMenu.x + 16, model.frame.width * zoom - 44)), top: Math.max(100, Math.min(quickMenu.y, model.frame.height * zoom - 100)) }} onMouseLeave={() => { autoArrowRef.current = null; setQuickMenu(null); repaintOverlaySelection(); }}>
+            <div ref={quickMenuNodeRef} role="menu" aria-label={t('shapesPanel.quickShapes')} style={{ ...styles.quickMenu, left: SCROLL_MARGIN + Math.max(4, Math.min(quickMenu.x + 16, model.frame.width * zoom - 44)), top: SCROLL_MARGIN + Math.max(100, Math.min(quickMenu.y, model.frame.height * zoom - 100)) }} onMouseLeave={() => { autoArrowRef.current = null; setQuickMenu(null); repaintOverlaySelection(); }}>
               {quickMenuShapes.map((shape) => (
                 <button key={shape.id} type="button" role="menuitem" aria-label={t(shape.nameKey)} title={t(shape.nameKey)} onClick={() => insertQuickShape(shape, quickMenu.shapeId, quickMenu.side)} style={styles.quickShape}>
                   <svg aria-hidden="true" viewBox="0 0 1 1" preserveAspectRatio="xMidYMid meet" style={styles.quickPreview}><path d={shape.preview} /></svg>
@@ -1457,7 +1631,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
             </div>
           )}
           {editing && editOverlay && (
-            <div ref={editWrapRef} style={{ ...styles.textEditWrap, width: editOverlay.width, height: editOverlay.height, transform: `matrix(${editOverlay.matrix.a}, ${editOverlay.matrix.b}, ${editOverlay.matrix.c}, ${editOverlay.matrix.d}, ${editOverlay.matrix.e}, ${editOverlay.matrix.f})` }}>
+            <div ref={editWrapRef} style={{ ...styles.textEditWrap, width: editOverlay.width, height: editOverlay.height, transform: `matrix(${editOverlay.matrix.a}, ${editOverlay.matrix.b}, ${editOverlay.matrix.c}, ${editOverlay.matrix.d}, ${editOverlay.matrix.e + SCROLL_MARGIN}, ${editOverlay.matrix.f + SCROLL_MARGIN})` }}>
               <textarea
                 ref={editBoxRef}
                 value={draft}
@@ -1477,7 +1651,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
             </div>
           )}
         </div>
-      </div>
+      </div>}
       {contextMenu?.kind === 'shape' && selection.length > 0 && <ShapeContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
       {contextMenu?.kind === 'canvas' && <CanvasContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
       {integrity.length > 0 && <section role="alert" style={styles.integrity}><strong>{t('diagnostics.integrityHeading')}</strong>{integrity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</section>}
@@ -1554,8 +1728,15 @@ export function PageBreakGrid({ frame, zoom }: { frame: PageBreakFrame; zoom: nu
 
 interface ClientRectLike { left: number; top: number; width: number; height: number; }
 
-/** Map a client point onto canvas pixels and Y-up inches, dividing out zoom once through the rendered rect. */
-export function clientPointToModel(frame: PageDisplayList, rect: ClientRectLike, clientX: number, clientY: number): { canvas: ModelPoint; model: ModelPoint } {
+/** Map a client point onto canvas pixels and Y-up inches, dividing out zoom once. */
+export function clientPointToModel(frame: PageDisplayList, rect: ClientRectLike, clientX: number, clientY: number, zoom?: number): { canvas: ModelPoint; model: ModelPoint } {
+  if (zoom !== undefined) {
+    const safeZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+    const bleedX = Math.max(0, (rect.width - frame.width * safeZoom) / 2);
+    const bleedY = Math.max(0, (rect.height - frame.height * safeZoom) / 2);
+    const canvas = { x: (clientX - rect.left - bleedX) / safeZoom, y: (clientY - rect.top - bleedY) / safeZoom };
+    return { canvas, model: canvasPointToModel(frame.paintTransform, canvas.x, canvas.y) };
+  }
   const canvas = {
     x: (clientX - rect.left) * frame.width / Math.max(rect.width, 1),
     y: (clientY - rect.top) * frame.height / Math.max(rect.height, 1),
@@ -1565,8 +1746,57 @@ export function clientPointToModel(frame: PageDisplayList, rect: ClientRectLike,
 
 const HOVER_PROBE_DIRS: ReadonlyArray<readonly [number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
 
-export function canvasPointerPosition(event: PointerEvent<HTMLCanvasElement> | MouseEvent<HTMLCanvasElement>, frame: PageDisplayList): { canvas: ModelPoint; model: ModelPoint } {
-  return clientPointToModel(frame, event.currentTarget.getBoundingClientRect(), event.clientX, event.clientY);
+/** Surface pointer mapped onto scale-1 page coordinates, then Y-up model inches. */
+export function canvasPointerPosition(event: PointerEvent<HTMLCanvasElement> | MouseEvent<HTMLCanvasElement>, frame: PageDisplayList, zoom?: number): { canvas: ModelPoint; model: ModelPoint } {
+  return clientPointToModel(frame, event.currentTarget.getBoundingClientRect(), event.clientX, event.clientY, zoom);
+}
+
+/** Park room around the page inside the scroll surface, in CSS pixels. */
+export const SCROLL_MARGIN = 2000;
+
+/** CSS size of the scrollable surface for a page extent and zoom. */
+export function surfaceSize(frameWidth: number, frameHeight: number, zoom: number, margin = SCROLL_MARGIN): { width: number; height: number } {
+  return { width: frameWidth * zoom + margin * 2, height: frameHeight * zoom + margin * 2 };
+}
+
+/** Scroll origin that centres the page extent inside its workspace. */
+export function centredPageScroll(frameWidth: number, frameHeight: number, zoom: number, clientWidth: number, clientHeight: number, margin = SCROLL_MARGIN): { left: number; top: number } {
+  return {
+    left: Math.max(0, margin + (frameWidth * zoom) / 2 - clientWidth / 2),
+    top: Math.max(0, margin + (frameHeight * zoom) / 2 - clientHeight / 2),
+  };
+}
+
+/** Identity a viewport-centring pass has already served; refreshes reuse the same key. */
+export function viewportCentreKey(snapshot: DiagramSnapshot | null, pageIndex: number): string {
+  return snapshot?.pages[pageIndex]?.id ?? `index:${pageIndex}`;
+}
+
+/** Scroll adjustment keeping the page point under the pointer stable across zoom. */
+export function anchoredZoomScroll(scrollLeft: number, scrollTop: number, cssX: number, cssY: number, oldZoom: number, newZoom: number, bleed = 0): { left: number; top: number } {
+  const safeOld = Number.isFinite(oldZoom) && oldZoom > 0 ? oldZoom : 1;
+  const pageX = (cssX - bleed) / safeOld;
+  const pageY = (cssY - bleed) / safeOld;
+  return { left: scrollLeft + pageX * newZoom + bleed - cssX, top: scrollTop + pageY * newZoom + bleed - cssY };
+}
+
+/** Multiplicative zoom step for a ctrl+wheel delta. */
+export function zoomForWheelDelta(zoom: number, deltaY: number, deltaMode = 0): number {
+  const unit = deltaMode === 1 ? 16 : deltaMode === 2 ? 512 : 1;
+  return clampZoom(zoom * Math.exp(-deltaY * unit / 300));
+}
+
+/** Clamp a scroll target to the scrollable range, fixing anchor drift at a surface edge. */
+export function clampScrollToSurface(left: number, top: number, surfaceWidth: number, surfaceHeight: number, clientWidth: number, clientHeight: number): { left: number; top: number } {
+  return {
+    left: Math.max(0, Math.min(left, Math.max(0, surfaceWidth - clientWidth))),
+    top: Math.max(0, Math.min(top, Math.max(0, surfaceHeight - clientHeight))),
+  };
+}
+
+/** CSS geometry of the page canvas inside the scroll surface. */
+function canvasGeometry(pageWidth: number, pageHeight: number): CSSProperties {
+  return { position: 'absolute', left: SCROLL_MARGIN, top: SCROLL_MARGIN, width: pageWidth, height: pageHeight };
 }
 
 export function inchFormula(value: number): string {
@@ -1578,11 +1808,12 @@ export function inchFormula(value: number): string {
 export interface SegmentDrag { selection: VsdxShapeSelection; vertices: ChromePoint[]; segment: number; anchor: ChromePoint; grab: ChromePoint; pointerId: number; preview: ChromePoint[] | null; }
 
 /** Pointer-grab radius for a segment dot, in model units. */
-export function grabTolerance(canvas: HTMLCanvasElement, frame: PageDisplayList): number {
+export function grabTolerance(canvas: HTMLCanvasElement, frame: PageDisplayList, zoom?: number): number {
   const rect = canvas.getBoundingClientRect();
   const scale = Math.hypot(frame.paintTransform.a, frame.paintTransform.b);
   if (!Number.isFinite(scale) || scale <= 0) return 0;
-  return 12 * frame.width / (scale * Math.max(rect.width, 1));
+  const cssWidth = zoom === undefined ? Math.max(rect.width, 1) : Math.max(frame.width * (Number.isFinite(zoom) && zoom > 0 ? zoom : 1), 1);
+  return 12 * frame.width / (scale * cssWidth);
 }
 
 export function sameRoutePoints(left: readonly ChromePoint[], right: readonly ChromePoint[]): boolean {
@@ -1763,7 +1994,7 @@ function fontFaceEqual(left: VsdxFontFace, right: VsdxFontFace): boolean { retur
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean { return left === right || (left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index])); }
 function resolveImage(assetId: string, handle: DiagramHandle | null, cache: { current: Map<string, Promise<CanvasImageSource | null>> }, message: string): Promise<CanvasImageSource | null> { const existing = cache.current.get(assetId); if (existing) return existing; const pending = decodeImage(handle?.mediaBytes(assetId), message); cache.current.set(assetId, pending); return pending; }
 async function decodeImage(bytes: Uint8Array | undefined, message: string): Promise<CanvasImageSource | null> { if (!bytes) return null; const blob = new Blob([bytes.slice()]); if (typeof createImageBitmap === 'function') return createImageBitmap(blob); const url = URL.createObjectURL(blob); try { return await new Promise<HTMLImageElement>((resolve, reject) => { const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(new Error(message)); image.src = url; }); } finally { URL.revokeObjectURL(url); } }
-const styles: Record<string, CSSProperties> = { root: { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 480, color: '#172033', background: '#f3f5f8', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }, titleBar: { display: 'flex', alignItems: 'center', gap: 12, minHeight: 32, padding: '0 14px', background: '#f8fafc', borderBottom: '1px solid #d8dee9', fontSize: 13 }, contentRow: { display: 'flex', flex: 1, minHeight: 0 }, leftColumn: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }, rightColumn: { display: 'flex', height: '100%', minHeight: 0 }, shapesWrap: { display: 'flex', flex: '1 1 auto', minHeight: 0 }, workspace: { position: 'relative', display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', overflow: 'auto' }, canvasFrame: { position: 'relative', flex: '0 0 auto' }, canvas: { display: 'block', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' }, overlay: { position: 'absolute', inset: 0, pointerEvents: 'none' }, pageBreakLine: { position: 'absolute', pointerEvents: 'none', background: '#c3ccd9' }, quickMenu: { position: 'absolute', zIndex: 3, display: 'flex', flexDirection: 'column', gap: 4, padding: 4, background: '#fff', border: '1px solid #d8dee9', borderRadius: 6, boxShadow: '0 8px 24px rgba(27, 39, 61, 0.18)', transform: 'translateY(-50%)' }, quickShape: { appearance: 'none', display: 'grid', placeItems: 'center', width: 32, height: 32, padding: 3, border: '1px solid transparent', borderRadius: 4, background: 'transparent', cursor: 'pointer' }, quickPreview: { width: 24, height: 24, overflow: 'visible', fill: '#fff', stroke: '#172033', strokeWidth: 0.05 }, textEditWrap: { position: 'absolute', left: 0, top: 0, transformOrigin: '0 0', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'visible', background: 'transparent', border: '1px dashed #1d4ed8', zIndex: 2 }, textEditBox: { width: '100%', background: 'transparent', border: 'none', outline: 'none', resize: 'none', overflow: 'visible', textAlign: 'center', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', wordBreak: 'break-word', lineHeight: 1.2, padding: 0, margin: 0 }, integrity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 12, color: '#7f1d1d', background: '#fef2f2', border: '1px solid #fca5a5' }, fidelity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 8, color: '#475569', background: '#fff', fontSize: 12 }, error: { position: 'absolute', left: 14, right: 14, bottom: 14, display: 'flex', alignItems: 'center', gap: 8, padding: 10, color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0' },
+const styles: Record<string, CSSProperties> = { root: { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 480, color: '#172033', background: '#f3f5f8', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }, titleBar: { display: 'flex', alignItems: 'center', gap: 12, minHeight: 32, padding: '0 14px', background: '#f8fafc', borderBottom: '1px solid #d8dee9', fontSize: 13 }, contentRow: { display: 'flex', flex: 1, minHeight: 0 }, leftColumn: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }, rightColumn: { display: 'flex', height: '100%', minHeight: 0 }, shapesWrap: { display: 'flex', flex: '1 1 auto', minHeight: 0 }, workspace: { position: 'relative', display: 'block', flex: 1, minHeight: 0, overflow: 'auto' }, surface: { position: 'relative' }, canvas: { display: 'block', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' }, pageLayer: { position: 'absolute', pointerEvents: 'none' }, overlay: { position: 'absolute', inset: 0, pointerEvents: 'none' }, pageBreakLine: { position: 'absolute', pointerEvents: 'none', background: '#c3ccd9' }, quickMenu: { position: 'absolute', zIndex: 3, display: 'flex', flexDirection: 'column', gap: 4, padding: 4, background: '#fff', border: '1px solid #d8dee9', borderRadius: 6, boxShadow: '0 8px 24px rgba(27, 39, 61, 0.18)', transform: 'translateY(-50%)' }, quickShape: { appearance: 'none', display: 'grid', placeItems: 'center', width: 32, height: 32, padding: 3, border: '1px solid transparent', borderRadius: 4, background: 'transparent', cursor: 'pointer' }, quickPreview: { width: 24, height: 24, overflow: 'visible', fill: '#fff', stroke: '#172033', strokeWidth: 0.05 }, textEditWrap: { position: 'absolute', left: 0, top: 0, transformOrigin: '0 0', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'visible', background: 'transparent', border: '1px dashed #1d4ed8', zIndex: 2 }, textEditBox: { width: '100%', background: 'transparent', border: 'none', outline: 'none', resize: 'none', overflow: 'visible', textAlign: 'center', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', wordBreak: 'break-word', lineHeight: 1.2, padding: 0, margin: 0 }, integrity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 12, color: '#7f1d1d', background: '#fef2f2', border: '1px solid #fca5a5' }, fidelity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 8, color: '#475569', background: '#fff', fontSize: 12 }, error: { position: 'absolute', left: 14, right: 14, bottom: 14, display: 'flex', alignItems: 'center', gap: 8, padding: 10, color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0' },
   errorText: { flex: '1 1 auto' },
   errorDismiss: { flex: '0 0 auto', appearance: 'none', width: 28, height: 28, padding: 0, border: 0, borderRadius: 4, background: 'transparent', color: 'inherit', fontSize: 16, lineHeight: '28px', cursor: 'pointer' },
   sheet: { display: 'grid', gridTemplateColumns: `${RULER_SIZE}px auto`, gridTemplateRows: `${RULER_SIZE}px auto`, width: 'max-content', margin: 'auto' },
