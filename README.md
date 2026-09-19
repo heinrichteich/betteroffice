@@ -76,7 +76,7 @@
 
 ### Diagrams (`.vsdx`, source preview)
 
-VSDX support is available from source and is not yet published. Scroll and pan around a centred page, with Space- or middle-drag panning and Ctrl+wheel zoom anchored under the pointer.
+VSDX support is available from source and is not yet published. Scroll and pan around a centred page, with Space- or middle-drag panning and Ctrl+wheel zoom anchored under the pointer. Batch shape-data editing validates every row before applying a change, with per-row receipts and undo.
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),

@@ -26,6 +26,10 @@ The DOCX and PPTX React editors render TIFF images in the browser (PPTX addition
 
 There is no Vue package. React and framework-free JavaScript are the supported entry points.
 
+## VSDX source preview
+
+VSDX support is available from source and is not yet published. Batch shape-data editing validates every row before applying a change, with per-row receipts and undo.
+
 ## Rust crates
 
 DOCX, XLSX and PPTX crates are published to crates.io, Apache-2.0. Use a format facade unless you need a single layer of the pipeline.

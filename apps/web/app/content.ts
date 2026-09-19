@@ -67,7 +67,7 @@ export const EDITORS = [
   {
     name: "Diagrams",
     format: "vsdx",
-    desc: "Source preview: edit diagrams with a scrollable workspace, drag to pan, and zoom around the pointer.",
+    desc: "Source preview: edit diagrams, pan and zoom around the page, and update shape data in validated batches.",
     status: "source preview",
   },
 ];
