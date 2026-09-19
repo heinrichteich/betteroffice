@@ -308,8 +308,21 @@ pub struct EmitGradientStop<'a> {
 /// Fill over neutral inputs; unparseable colours degrade to no fill.
 pub enum Fill<'a> {
     NoFill,
-    Solid { hex: &'a str },
-    Gradient { stops: &'a [EmitGradientStop<'a>] },
+    Solid {
+        hex: &'a str,
+    },
+    Gradient {
+        stops: &'a [EmitGradientStop<'a>],
+        /// Degrees clockwise from the positive x-axis; 90 when absent.
+        angle_deg: Option<f32>,
+    },
+}
+
+/// DrawingML `ang`, in 60000ths of a degree clockwise from the positive x-axis.
+fn gradient_angle(angle_deg: Option<f32>) -> i64 {
+    let degrees = angle_deg.filter(|value| value.is_finite()).unwrap_or(90.0);
+    let units = (f64::from(degrees) * 60_000.0).round() as i64;
+    units.rem_euclid(21_600_000)
 }
 
 /// Renders a fill element (`a:solidFill`, `a:gradFill` or `a:noFill`).
@@ -320,7 +333,7 @@ pub fn fill_xml(fill: &Fill) -> String {
             Some(hex) => format!("<a:solidFill><a:srgbClr val=\"{hex}\"/></a:solidFill>"),
             None => "<a:noFill/>".to_owned(),
         },
-        Fill::Gradient { stops } => {
+        Fill::Gradient { stops, angle_deg } => {
             let mut list = String::new();
             for stop in stops.iter() {
                 let Some(hex) = srgb_hex(stop.color) else {
@@ -337,7 +350,8 @@ pub fn fill_xml(fill: &Fill) -> String {
                 return "<a:noFill/>".to_owned();
             }
             format!(
-                "<a:gradFill><a:gsLst>{list}</a:gsLst><a:lin ang=\"5400000\" scaled=\"0\"/></a:gradFill>"
+                "<a:gradFill><a:gsLst>{list}</a:gsLst><a:lin ang=\"{}\" scaled=\"0\"/></a:gradFill>",
+                gradient_angle(*angle_deg)
             )
         }
     }
@@ -594,8 +608,40 @@ mod tests {
                 color: "#0000FF",
             },
         ];
-        let xml = fill_xml(&Fill::Gradient { stops: &stops });
+        let xml = fill_xml(&Fill::Gradient {
+            stops: &stops,
+            angle_deg: None,
+        });
         assert!(xml.contains("<a:gradFill>"), "{xml}");
         assert!(xml.contains("val=\"FF0000\""), "{xml}");
+        assert!(xml.contains("ang=\"5400000\""), "{xml}");
+    }
+
+    #[test]
+    fn gradient_carries_its_angle() {
+        let stops = [EmitGradientStop {
+            position: 0.0,
+            color: "#FF0000",
+        }];
+        for (degrees, units) in [(0.0, 0), (45.0, 2_700_000), (270.0, 16_200_000)] {
+            let xml = fill_xml(&Fill::Gradient {
+                stops: &stops,
+                angle_deg: Some(degrees),
+            });
+            assert!(
+                xml.contains(&format!("ang=\"{units}\"")),
+                "{degrees}: {xml}"
+            );
+        }
+        let wrapped = fill_xml(&Fill::Gradient {
+            stops: &stops,
+            angle_deg: Some(-90.0),
+        });
+        assert!(wrapped.contains("ang=\"16200000\""), "{wrapped}");
+        let invalid = fill_xml(&Fill::Gradient {
+            stops: &stops,
+            angle_deg: Some(f32::NAN),
+        });
+        assert!(invalid.contains("ang=\"5400000\""), "{invalid}");
     }
 }

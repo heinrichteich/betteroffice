@@ -352,7 +352,7 @@ pub fn fill_string(fill: &Option<Paint>) -> String {
     match fill {
         None => fill_xml(&Fill::NoFill),
         Some(Paint::Solid { color }) => fill_xml(&Fill::Solid { hex: color }),
-        Some(Paint::Gradient { stops }) => {
+        Some(Paint::Gradient { stops, angle_deg }) => {
             let stops: Vec<EmitGradientStop> = stops
                 .iter()
                 .map(|stop| EmitGradientStop {
@@ -360,7 +360,10 @@ pub fn fill_string(fill: &Option<Paint>) -> String {
                     color: stop.color.as_str(),
                 })
                 .collect();
-            fill_xml(&Fill::Gradient { stops: &stops })
+            fill_xml(&Fill::Gradient {
+                stops: &stops,
+                angle_deg: *angle_deg,
+            })
         }
     }
 }
