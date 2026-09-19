@@ -16,6 +16,12 @@ export interface ValidationIssue { id: string; rule: string; severity: Validatio
 export interface PageSnapshot { id: string; sourcePartPath: string; name: string | null; shapes: ShapeSnapshot[]; }
 export interface DiagramSnapshot { pages: PageSnapshot[]; }
 export interface CellFormulaReceipt { pageId: string; shapeId: string; cellName: string; before: string | null; after: string; }
+/** The user action a probe asks about; the cell name picks one when absent. */
+export type MutationGesture = 'cellEdit' | 'moveX' | 'moveY' | 'resizeWidth' | 'resizeHeight' | 'resizeAspect' | 'rotate' | 'textEdit' | 'format' | 'delete';
+/** One cell to probe, with the gesture to probe it as. */
+export interface CellWriteQuery extends CellLocator { gesture?: MutationGesture; }
+/** What the engine's mutation policy would do with a write to one cell, without writing it. */
+export interface CellWriteProbe { cellName: string; allowed: boolean; targetCellName: string | null; reason: string | null; }
 export interface ShapeReceipt { pageId: string; shapeId: string; fromIndex: number | null; toIndex: number | null; }
 export interface TextReceipt { pageId: string; shapeId: string; before: string; after: string; }
 export interface ConnectedShapeReceipt { shape: ShapeReceipt; connector: ShapeReceipt; }

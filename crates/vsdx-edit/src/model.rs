@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
-use vsdx_parse::{CellLocator, CellRow, CellSheet};
+use vsdx_parse::{CellLocator, CellRow, CellSheet, MutationGesture};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +110,24 @@ pub struct CellFormulaWrite {
     pub shape_id: String,
     pub cell_name: String,
     pub formula: String,
+}
+
+/// One cell to probe, with the gesture to probe it as; the cell name picks one when absent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellWriteQuery {
+    pub locator: CellLocator,
+    pub gesture: Option<MutationGesture>,
+}
+
+/// What the mutation policy would do with a write to one cell, without writing it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellWriteProbe {
+    pub cell_name: String,
+    pub allowed: bool,
+    /// Cell the write would land on after SETATREF redirection; absent when refused.
+    pub target_cell_name: Option<String>,
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
