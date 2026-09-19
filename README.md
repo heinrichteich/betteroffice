@@ -18,6 +18,33 @@
   <a href="https://openooxml.org"><img src="https://betteroffice.dev/api/badge?label=&amp;message=openooxml.org&amp;color=0a0a0a" alt="openooxml.org"></a>
 </p>
 
+## Features
+
+- **Documents, spreadsheets, and slides.** Open, edit, render, and save DOCX,
+  XLSX and PPTX files with high fidelity. Native OOXML editing preserves untouched
+  file parts losslessly when round-tripping.
+
+- **Agent editing with human review.** Review attributed agent edits through
+  tracked changes, inline diffs, and before-and-after previews. Accept or
+  reject changes directly in the editor.
+
+- **Real-time collaboration.** People and agents edit the same file together,
+  with live cursors and selections. Concurrent changes merge automatically,
+  and offline edits sync when peers reconnect.
+
+- **Undo and redo.** Navigate editing history and undo accepted agent
+  proposals as a single step.
+
+- **Embed or automate.** Drop React editors into your app, build on the
+  framework-free JavaScript cores, or use Rust and Python APIs for headless
+  processing and agent workflows.
+
+- **Open source and self-hostable.** Apache-2.0 licensed, with control over
+  your document storage, deployment, and collaboration infrastructure.
+
+[Try it out](https://demo.betteroffice.dev), or
+[explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
+
 ## Packages
 
 ### Documents — `.docx`
@@ -46,6 +73,10 @@
 | [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | npm | framework-free .pptx editor core — slide model, masters, image insertion, shape ordering, and rendering in Rust through WebAssembly |
 | [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | npm | drop-in React .pptx editor |
 | [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) | PyPI | Python API for reading, editing, saving, and laying out PPTX presentations |
+
+### Diagrams (`.vsdx`, source preview)
+
+VSDX support is available from source and is not yet published. Batch shape-data editing validates every row before applying a change, with per-row receipts and undo.
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
@@ -80,9 +111,9 @@ Use the [Office visual quality harness](scripts/office-quality/README.md) to exp
 
 | Format | Latest published version | SSIM | Scored/total | Latest commit | SSIM | Scored/total |
 | --- | --- | ---: | ---: | --- | ---: | ---: |
-| DOCX | [0.2.1](https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1) | 0.7540 | 63/63 | [adb3af81](https://github.com/openooxml/betteroffice/commit/adb3af81aa12b98ae2c04807e5437cdc059ccfac) | 0.7742 | 63/63 |
-| PPTX | [0.1.1](https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1) | 0.8769 | 9/9 | [adb3af81](https://github.com/openooxml/betteroffice/commit/adb3af81aa12b98ae2c04807e5437cdc059ccfac) | 0.8769 | 9/9 |
-| XLSX | [0.2.1](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1) | 0.7695 | 8/8 | [adb3af81](https://github.com/openooxml/betteroffice/commit/adb3af81aa12b98ae2c04807e5437cdc059ccfac) | 0.7695 | 8/8 |
+| DOCX | [0.2.1](https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1) | 0.7540 | 63/63 | [9b2fe7b7](https://github.com/openooxml/betteroffice/commit/9b2fe7b7af95e961fc9d6c38b52ee20e49c4ce7c) | 0.8128 | 63/63 |
+| PPTX | [0.1.1](https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1) | 0.8769 | 9/9 | [9b2fe7b7](https://github.com/openooxml/betteroffice/commit/9b2fe7b7af95e961fc9d6c38b52ee20e49c4ce7c) | 0.8778 | 9/9 |
+| XLSX | [0.2.1](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1) | 0.7695 | 8/8 | [9b2fe7b7](https://github.com/openooxml/betteroffice/commit/9b2fe7b7af95e961fc9d6c38b52ee20e49c4ce7c) | 0.7695 | 8/8 |
 
 SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
 

@@ -79,13 +79,14 @@
 //! An inline image adds its declared width to the line advance and grows the
 //! line box by its declared height, ignoring wrap distances. One wider than the
 //! column keeps that height, overflows the margin the way Word's own rasters
-//! do, and never wraps off an empty line. Alone on a line it takes a descent
-//! buffer above and below; flowing with text it seats on the baseline. A
+//! do, and never wraps off an empty line. Alone on a line its box is exactly
+//! the image; flowing with text it seats on the baseline. A
 //! `topAndBottom` or block image takes its own line at its declared height plus
 //! wrap distances (default 6px), adds no width, and opens a fresh line after
 //! it. An anchored floating image is positioned by the host, so it contributes
 //! neither width nor height — but its declared width still counts toward the
-//! following-runs width after a tab.
+//! following-runs width after a tab, and a line left carrying only floats
+//! keeps the paragraph mark's own line height.
 //!
 //! A visible list marker narrows the first line by its footprint, and only
 //! when the paragraph's hanging indent is exactly zero.
@@ -93,7 +94,9 @@
 //! # Float exclusion zones
 //!
 //! `floatingZones` and `paragraphYOffset` place the paragraph in the float
-//! group's coordinate space. Intersecting zones are resolved per line at the
+//! group's coordinate space; `paragraphYOffset` is the paragraph's top, so
+//! `spacing.before` lies inside that space and is tested with the first line.
+//! Intersecting zones are resolved per line at the
 //! running Y with a fixed probe height of `pt_to_px(defaults.fontSize)` —
 //! never the line's own fonts, which are unknown until the line closes. That
 //! running Y advances by each finalized line's *text* height, so image
@@ -413,6 +416,21 @@ pub fn measure_paragraph_typed(
 
     let prepared = prepare::prepare_runs(store, request)?;
 
+    // The paragraph mark sizes any line that ends up with no font-bearing
+    // run — a float-only line, a trailing break, a hidden-only run.
+    let mark_size_pt = attrs
+        .and_then(|a| a.default_font_size)
+        .unwrap_or(request.defaults.font_size);
+    let mark_font = input::validate_pt_size(mark_size_pt, "attrs.defaultFontSize")
+        .ok()
+        .and_then(|()| {
+            let family = attrs
+                .and_then(|a| a.default_font_family.as_deref())
+                .unwrap_or(&request.defaults.font_family);
+            regular_chain_head(store, request, family).ok()
+        })
+        .map(|font| (font, mark_size_pt));
+
     // Left and right indents shrink both edges; first-line offset affects only the first line.
     let indent = attrs.and_then(|a| a.indent.as_ref());
     let indent_left = indent.and_then(|i| i.left).unwrap_or(0.0);
@@ -440,6 +458,7 @@ pub fn measure_paragraph_typed(
         body_width,
         first_line_width,
         default_font_size_pt: request.defaults.font_size,
+        mark_font,
         compat: &request.compat,
         tabs: attrs.and_then(|a| a.tabs.as_deref()).unwrap_or(&[]),
         indent_left_px: indent_left,

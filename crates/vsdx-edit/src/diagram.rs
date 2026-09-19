@@ -1579,10 +1579,7 @@ impl DiagramSession {
         Ok(receipts)
     }
 
-    /// Writes a batch of `Property` row values for one shape as a single undo entry.
-    ///
-    /// Every row is decided before anything is written, so a refusal anywhere leaves the
-    /// document untouched and the caller still learns per row why.
+    /// Atomically writes shape-data values as one undo entry.
     pub fn set_shape_data(
         &self,
         context: &EditCtx,
@@ -1595,8 +1592,10 @@ impl DiagramSession {
         }
         let mut txn = self.transact_for(context);
         let policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
-        let mut receipts = Vec::with_capacity(writes.len());
+        let mut receipts: Vec<ShapeDataReceipt> = Vec::with_capacity(writes.len());
         let mut pending = Vec::with_capacity(writes.len());
+        let mut targets: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for write in writes {
             let locator = policy.locator(shape_data_locator(&write.row, write.section_index));
             let before = policy.current_formula(&locator).ok().flatten();
@@ -1616,7 +1615,11 @@ impl DiagramSession {
                 after: None,
                 refusal: None,
             };
-            if let Some(reason) = shape_data_refusal(&policy, write, before.as_deref()) {
+            let refusal = cell_map(&mut txn, page_id, shape_id, &locator)
+                .err()
+                .map(|error| error.to_string())
+                .or_else(|| shape_data_refusal(&policy, write, before.as_deref()));
+            if let Some(reason) = refusal {
                 receipt.refusal = Some(reason);
                 receipts.push(receipt);
                 continue;
@@ -1628,9 +1631,24 @@ impl DiagramSession {
                 write.formula.clone(),
                 &ParseLimits::default(),
             ) {
-                MutationOutcome::Allowed { target, .. } => {
-                    receipt.after = Some(write.formula.clone());
-                    pending.push((target, write.formula.clone(), receipts.len()));
+                MutationOutcome::Allowed { target, formula } => {
+                    match cell_map(&mut txn, page_id, shape_id, &target) {
+                        Ok(cell) => {
+                            let key = locator_key(&target);
+                            if let Some(&previous) = targets.get(&key) {
+                                let reason =
+                                    "shape-data writes converge on the same cell".to_owned();
+                                receipts[previous].refusal = Some(reason.clone());
+                                receipt.refusal = Some(reason);
+                            } else {
+                                targets.insert(key, receipts.len());
+                                receipt.before = map_string(&cell, &txn, "formula");
+                                receipt.after = Some(formula.clone());
+                                pending.push((cell, formula, receipts.len()));
+                            }
+                        }
+                        Err(error) => receipt.refusal = Some(error.to_string()),
+                    }
                 }
                 MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
                     receipt.refusal = Some(reason);
@@ -1644,11 +1662,10 @@ impl DiagramSession {
             }
             return Ok(receipts);
         }
-        for (target, formula, index) in pending {
-            let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
-            let before = map_string(&cell, &txn, "formula");
-            cell.insert(&mut txn, "formula", formula.as_str());
-            receipts[index].before = before;
+        for (cell, formula, index) in pending {
+            if receipts[index].before.as_deref() != Some(formula.as_str()) {
+                cell.insert(&mut txn, "formula", formula.as_str());
+            }
         }
         Ok(receipts)
     }
@@ -4946,7 +4963,6 @@ impl CrdtMutationContext {
         locator
     }
 
-    /// A cell's cached value, falling back to its formula.
     fn current_text(&self, locator: &CellLocator) -> Option<String> {
         let key = locator_key(locator);
         self.values
@@ -4978,6 +4994,9 @@ impl MutationContext for CrdtMutationContext {
         }
         Ok(CellLocator {
             cell_name: reference.to_owned(),
+            section: None,
+            section_index: None,
+            row: None,
             ..from.clone()
         })
     }
@@ -5042,10 +5061,8 @@ fn validate_story_text(text: &str) -> EditResult<()> {
     Ok(())
 }
 
-/// The `Property` row cell a shape-data write targets.
 const SHAPE_DATA_CELL: &str = "Value";
 
-/// Locator for a `Property` row's `Value`, left unbound to a sheet.
 fn shape_data_locator(row: &CellRow, section_index: Option<u32>) -> CellLocator {
     CellLocator {
         sheet: CellSheet::Page(0),
@@ -5057,7 +5074,6 @@ fn shape_data_locator(row: &CellRow, section_index: Option<u32>) -> CellLocator 
     }
 }
 
-/// Visio `Property` row types whose value this op cannot encode back without losing meaning.
 fn shape_data_type_refusal(type_code: Option<&str>) -> Option<&'static str> {
     match type_code
         .map(str::trim)
@@ -5071,11 +5087,17 @@ fn shape_data_type_refusal(type_code: Option<&str>) -> Option<&'static str> {
 }
 
 fn is_numeric_literal(formula: &str) -> bool {
-    let trimmed = formula.trim().trim_start_matches('=').trim();
-    !trimmed.is_empty() && trimmed.parse::<f64>().is_ok()
+    let trimmed = formula.trim();
+    let formula = trimmed.strip_prefix('=').unwrap_or(trimmed);
+    let Ok(mut expression) = vsdx_eval::parse(formula, &ParseLimits::default()) else {
+        return false;
+    };
+    while let Expr::Unary(inner) = expression {
+        expression = *inner;
+    }
+    matches!(expression, Expr::Number(number, vsdx_eval::Unit::Number) if number.is_finite())
 }
 
-/// Refusals this op owns, ahead of the shared mutation policy.
 fn shape_data_refusal(
     policy: &CrdtMutationContext,
     write: &ShapeDataWrite,

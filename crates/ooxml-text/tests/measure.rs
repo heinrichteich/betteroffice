@@ -398,7 +398,7 @@ fn soft_return_forces_new_line() {
     .unwrap();
     assert_eq!(spans(&v), vec![(0, 0, 1, 0), (2, 0, 2, 1)]);
 
-    // A trailing soft return uses the fontless 0.8/0.2 em fallback.
+    // A trailing soft return takes the paragraph mark's own face.
     let v = measure(
         json!([{ "kind": "text", "text": "0" }, { "kind": "lineBreak" }]),
         200.0,
@@ -406,21 +406,9 @@ fn soft_return_forces_new_line() {
     .unwrap();
     assert_eq!(spans(&v), vec![(0, 0, 1, 0), (2, 0, 2, 0)]);
     let last = &v["lines"][1];
-    approx(
-        last["ascent"].as_f64().unwrap(),
-        16.0 * 0.8,
-        "fallback ascent",
-    );
-    approx(
-        last["descent"].as_f64().unwrap(),
-        16.0 * 0.2,
-        "fallback descent",
-    );
-    approx(
-        last["lineHeight"].as_f64().unwrap(),
-        16.0 * 1.15,
-        "fallback lineHeight",
-    );
+    approx(last["ascent"].as_f64().unwrap(), ASC, "mark ascent");
+    approx(last["descent"].as_f64().unwrap(), DESC, "mark descent");
+    approx(last["lineHeight"].as_f64().unwrap(), LH, "mark lineHeight");
 }
 
 // 5. multi-run line: metrics follow the largest font on the line
@@ -1102,6 +1090,34 @@ fn automatic_tabs_resume_on_grid_multiples_after_custom_stops() {
     }
 }
 
+// An `end` stop parks the pen exactly on itself; the hanging indent's implicit
+// stop is the next one past it, not the default grid an inch further right.
+#[test]
+fn a_tab_after_an_end_stop_lands_on_the_hanging_indent() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [
+                { "kind": "tab" },
+                { "kind": "text", "text": "0" },
+                { "kind": "tab" },
+                { "kind": "text", "text": "0" }
+            ],
+            "attrs": {
+                "tabs": [{ "val": "end", "pos": 1531.0 }],
+                "indent": { "left": 109.6, "hanging": 109.6 }
+            }
+        }),
+        400.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        109.6 + W0,
+        "second tab lands on the hanging indent, not the default grid",
+    );
+}
+
 #[test]
 fn paragraph_indent_does_not_shift_the_automatic_tab_grid() {
     let v = measure_with(
@@ -1222,6 +1238,129 @@ fn right_aligned_tab_clamps_to_line_edge() {
     .unwrap();
     assert_eq!(spans(&v), vec![(0, 0, 1, 1)]);
     approx(v["lines"][0]["width"].as_f64().unwrap(), 100.0, "clamped");
+}
+
+/// Measured against Word's `bo-corpus-4` reference PDF: a `start` stop at
+/// 362.3pt under a 396.4pt line limit leaves 34.1pt, and Word takes the tab and
+/// the 36.68pt word after it to the next line together rather than stranding
+/// that word at the paragraph indent. Scaled here onto the 48px grid.
+#[test]
+fn a_start_tab_wraps_with_the_word_it_cannot_fit() {
+    let v = measure(
+        json!([
+            { "kind": "text", "text": "0".repeat(7) },
+            { "kind": "tab" },
+            { "kind": "text", "text": "0".repeat(5) }
+        ]),
+        110.0,
+    )
+    .unwrap();
+    // 7 zeros end at 62.29; the 96px stop leaves 14px and the word needs 44.49
+    assert_eq!(spans(&v), vec![(0, 0, 0, 7), (1, 0, 2, 5)]);
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        7.0 * W0,
+        "the tab leaves the line it could not serve",
+    );
+    approx(
+        v["lines"][1]["width"].as_f64().unwrap(),
+        48.0 + 5.0 * W0,
+        "the wrapped tab takes its word to the 48px stop",
+    );
+}
+
+/// The same rule costs a line when no stop can hold the word: it follows the
+/// tab onto a third line instead of riding the first.
+#[test]
+fn a_stranding_start_tab_costs_a_line() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [
+                { "kind": "text", "text": "0".repeat(5) },
+                { "kind": "tab" },
+                { "kind": "text", "text": "0".repeat(2) }
+            ],
+            "attrs": { "tabs": [{ "val": "start", "pos": 1500.0 }] }
+        }),
+        110.0,
+    )
+    .unwrap();
+    assert_eq!(
+        spans(&v),
+        vec![(0, 0, 0, 5), (1, 0, 1, 1), (2, 0, 2, 2)],
+        "the 100px stop plus a 17.8px word overruns the 110px line"
+    );
+}
+
+/// The wrap serves the word that would otherwise be stranded, so a tab holds
+/// its line for anything it cannot strand: an own-line image opens a line of
+/// its own, a floating image carries no line width, and content wider than the
+/// whole line gains nothing from the break. Each case keeps the tab on the
+/// 96px stop, as it did before the wrap rule existed.
+#[test]
+fn a_start_tab_holds_its_line_for_content_it_cannot_strand() {
+    for width in [400.0, 20.0] {
+        for image in [
+            json!({ "kind": "image", "width": width, "height": 20.0, "wrapType": "topAndBottom" }),
+            json!({ "kind": "image", "width": width, "height": 20.0, "displayMode": "block" }),
+            json!({ "kind": "image", "width": width, "height": 20.0,
+                    "displayMode": "float", "position": { "x": 0.0, "y": 0.0 } }),
+            json!({ "kind": "image", "width": width, "height": 20.0,
+                    "wrapType": "square", "position": { "x": 0.0, "y": 0.0 } }),
+        ] {
+            let v = measure(
+                json!([
+                    { "kind": "text", "text": "0".repeat(7) },
+                    { "kind": "tab" },
+                    image.clone()
+                ]),
+                110.0,
+            )
+            .unwrap();
+            approx(
+                v["lines"][0]["width"].as_f64().unwrap(),
+                96.0,
+                &format!("{width}px {image}"),
+            );
+        }
+    }
+    // An image too wide for any line is not worth a break either.
+    let v = measure(
+        json!([
+            { "kind": "text", "text": "0".repeat(7) },
+            { "kind": "tab" },
+            { "kind": "image", "width": 400.0, "height": 20.0 }
+        ]),
+        110.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        96.0,
+        "inline image wider than the line",
+    );
+}
+
+/// An inline image does share the tab's line, so it strands like a word.
+#[test]
+fn a_start_tab_wraps_with_an_inline_image_it_cannot_fit() {
+    let v = measure(
+        json!([
+            { "kind": "text", "text": "0".repeat(7) },
+            { "kind": "tab" },
+            { "kind": "image", "width": 20.0, "height": 20.0 }
+        ]),
+        110.0,
+    )
+    .unwrap();
+    assert_eq!(spans(&v), vec![(0, 0, 0, 7), (1, 0, 2, 1)]);
+    approx(v["lines"][0]["width"].as_f64().unwrap(), 7.0 * W0, "text");
+    approx(
+        v["lines"][1]["width"].as_f64().unwrap(),
+        48.0 + 20.0,
+        "the tab takes the image to the 48px stop",
+    );
 }
 
 #[test]
@@ -1673,11 +1812,11 @@ fn inline_image_grows_the_line_box() {
     approx(line["width"].as_f64().unwrap(), 50.0, "image width");
     approx(
         line["lineHeight"].as_f64().unwrap(),
-        103.2,
-        "alone: image height plus descent",
+        100.0,
+        "alone: exactly the image",
     );
     approx(line["ascent"].as_f64().unwrap(), 100.0, "alone ascent");
-    approx(line["descent"].as_f64().unwrap(), 3.2, "alone descent");
+    approx(line["descent"].as_f64().unwrap(), 0.0, "alone descent");
 
     // image flowing with text: baseline-seated, text descent below only
     let v = measure(
@@ -1783,7 +1922,7 @@ fn inline_image_wrapping_keeps_the_declared_box() {
     assert_eq!(spans(&v), vec![(0, 0, 0, 22), (1, 0, 1, 1)]);
     approx(
         v["lines"][1]["lineHeight"].as_f64().unwrap(),
-        30.0 + 3.2,
+        30.0,
         "wrapped image line",
     );
 
@@ -1796,7 +1935,7 @@ fn inline_image_wrapping_keeps_the_declared_box() {
     assert_eq!(spans(&v), vec![(0, 0, 0, 1)]);
     approx(
         v["lines"][0]["lineHeight"].as_f64().unwrap(),
-        100.0 + 3.2,
+        100.0,
         "declared height reserved",
     );
     approx(
@@ -1882,27 +2021,27 @@ fn own_line_image_takes_its_own_line() {
             0.0,
             "own-line image adds no width",
         );
-        // maxImageHeightPx = 100 + 6 + 6 = 112; alone → + 2 × 3.2 descent
+        // maxImageHeightPx = 100 + 6 + 6 = 112; alone → + 2 × mark descent
         approx(
             img["lineHeight"].as_f64().unwrap(),
-            112.0 + 2.0 * 3.2,
+            112.0 + 2.0 * DESC,
             "own-line height",
         );
         approx(
             img["ascent"].as_f64().unwrap(),
-            112.0 + 3.2,
+            112.0 + DESC,
             "own-line ascent",
         );
-        approx(img["descent"].as_f64().unwrap(), 3.2, "fallback descent");
-        // trailing empty line at the metrics-less fallback height
+        approx(img["descent"].as_f64().unwrap(), DESC, "mark descent");
+        // trailing empty line at the paragraph mark's height
         approx(
             v["lines"][1]["lineHeight"].as_f64().unwrap(),
-            16.0 * 1.15,
+            LH,
             "trailing empty line",
         );
         approx(
             v["totalHeight"].as_f64().unwrap(),
-            112.0 + 2.0 * 3.2 + 16.0 * 1.15,
+            112.0 + 2.0 * DESC + LH,
             "total height",
         );
     }
@@ -1929,10 +2068,10 @@ fn own_line_image_finishes_the_current_line_first() {
         LH,
         "text line kept",
     );
-    // image alone: 80 + 2 × 3.2 (no distances), no width advance
+    // image alone: 80 + 2 × mark descent (no distances), no width advance
     approx(
         v["lines"][1]["lineHeight"].as_f64().unwrap(),
-        80.0 + 2.0 * 3.2,
+        80.0 + 2.0 * DESC,
         "image line height",
     );
     approx(
@@ -1942,7 +2081,7 @@ fn own_line_image_finishes_the_current_line_first() {
     );
     approx(
         v["lines"][2]["lineHeight"].as_f64().unwrap(),
-        16.0 * 1.15,
+        LH,
         "trailing empty line",
     );
 }
@@ -1972,6 +2111,41 @@ fn own_line_image_width_counts_after_a_tab() {
     );
 }
 
+// 24d′. a paragraph carrying only an anchored float keeps the paragraph
+// mark's line height, the way an empty paragraph does.
+#[test]
+fn float_only_paragraph_keeps_the_mark_line_height() {
+    let v = measure(
+        json!([{
+            "kind": "image",
+            "width": 50.0,
+            "height": 400.0,
+            "wrapType": "square",
+            "displayMode": "float",
+            "position": {}
+        }]),
+        200.0,
+    )
+    .unwrap();
+    assert_eq!(spans(&v), vec![(0, 0, 0, 1)]);
+    approx(v["lines"][0]["width"].as_f64().unwrap(), 0.0, "no width");
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        LH,
+        "mark height",
+    );
+    approx(
+        v["lines"][0]["ascent"].as_f64().unwrap(),
+        ASC,
+        "mark ascent",
+    );
+    approx(
+        v["lines"][0]["descent"].as_f64().unwrap(),
+        DESC,
+        "mark descent",
+    );
+}
+
 // 24d. a dimensionless image measures as zero size
 #[test]
 fn dimensionless_image_is_zero_size() {
@@ -1981,8 +2155,8 @@ fn dimensionless_image_is_zero_size() {
     approx(v["lines"][0]["width"].as_f64().unwrap(), 0.0, "zero width");
     approx(
         v["lines"][0]["lineHeight"].as_f64().unwrap(),
-        16.0 * 1.15,
-        "no growth (fallback height)",
+        LH,
+        "no growth (mark height)",
     );
 
     // inline after text: contributes nothing to the line width or height

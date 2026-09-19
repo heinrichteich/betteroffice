@@ -120,7 +120,7 @@ pub struct ShapeDataWrite {
     pub formula: String,
 }
 
-/// Per-row outcome of a shape-data batch; `refusal` is set when the row was not written.
+/// Per-row decision; `after` is present only when the batch succeeds.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeDataReceipt {

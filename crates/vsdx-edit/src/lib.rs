@@ -2465,6 +2465,131 @@ mod tests {
     }
 
     #[test]
+    fn shape_data_refuses_missing_cells_without_partial_writes() {
+        for missing in ["Absent", "LabelOnly"] {
+            let session = session();
+            let valid = property_row(&session, "Device", None, "\"Amp\"", "Amp");
+            let row = CellRow::Name(missing.to_owned());
+            add_cell_at(
+                &session,
+                "Label",
+                Some("Property"),
+                Some(CellRow::Name("LabelOnly".to_owned())),
+                None,
+                Some("Label only"),
+            );
+            let before = session.encode_state_vector_v1();
+            let depth = session.undo_depth();
+            let receipts = session
+                .set_shape_data(
+                    &EditCtx::local("a"),
+                    "page:1",
+                    "page:1:shape:1",
+                    &[data_write(&valid, "\"Mixer\""), data_write(&row, "\"new\"")],
+                )
+                .unwrap();
+            assert_eq!(receipts.len(), 2);
+            assert!(receipts[1].refused());
+            assert!(receipts.iter().all(|receipt| receipt.after.is_none()));
+            assert_eq!(session.encode_state_vector_v1(), before);
+            assert_eq!(session.undo_depth(), depth);
+        }
+    }
+
+    #[test]
+    fn shape_data_refuses_duplicate_and_redirected_targets() {
+        for redirected in [false, true] {
+            let session = session();
+            let first = property_row(
+                &session,
+                "First",
+                None,
+                if redirected { "SETATREF(Target)" } else { "1" },
+                "1",
+            );
+            let second = if redirected {
+                add_cell(&session, "Target", Some("1"), Some("1"));
+                property_row(&session, "Second", None, "SETATREF(Target)", "1")
+            } else {
+                first.clone()
+            };
+            let before = session.encode_state_vector_v1();
+            let depth = session.undo_depth();
+            let receipts = session
+                .set_shape_data(
+                    &EditCtx::local("a"),
+                    "page:1",
+                    "page:1:shape:1",
+                    &[data_write(&first, "2"), data_write(&second, "3")],
+                )
+                .unwrap();
+            assert_eq!(receipts.len(), 2);
+            assert!(
+                receipts.iter().all(|receipt| receipt
+                    .refusal
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("converge"))),
+                "{receipts:?}"
+            );
+            assert!(receipts.iter().all(|receipt| receipt.after.is_none()));
+            assert_eq!(session.encode_state_vector_v1(), before);
+            assert_eq!(session.undo_depth(), depth);
+        }
+    }
+
+    #[test]
+    fn shape_data_number_literals_follow_shapesheet_grammar() {
+        let session = session();
+        let row = property_row(&session, "Count", Some("2"), "4", "4");
+        for formula in [
+            "NaN", "inf", "-inf", "1e400", "==7", "3in", "1+2", "+3", "\"7\"",
+        ] {
+            let before = session.encode_state_vector_v1();
+            let receipts = session
+                .set_shape_data(
+                    &EditCtx::local("a"),
+                    "page:1",
+                    "page:1:shape:1",
+                    &[data_write(&row, formula)],
+                )
+                .unwrap();
+            assert!(receipts[0].refused(), "{formula}: {receipts:?}");
+            assert_eq!(session.encode_state_vector_v1(), before);
+        }
+        for formula in ["-2.5", "=7", "1e2"] {
+            let receipts = session
+                .set_shape_data(
+                    &EditCtx::local("a"),
+                    "page:1",
+                    "page:1:shape:1",
+                    &[data_write(&row, formula)],
+                )
+                .unwrap();
+            assert!(!receipts[0].refused(), "{formula}: {receipts:?}");
+            assert_eq!(value_formula(&session, &row).as_deref(), Some(formula));
+        }
+    }
+
+    #[test]
+    fn unchanged_shape_data_does_not_create_history() {
+        let session = session();
+        let row = property_row(&session, "Device", None, "\"Amp\"", "Amp");
+        let before = session.encode_state_vector_v1();
+        let depth = session.undo_depth();
+        let receipts = session
+            .set_shape_data(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                &[data_write(&row, "\"Amp\"")],
+            )
+            .unwrap();
+        assert!(!receipts[0].refused());
+        assert_eq!(session.encode_state_vector_v1(), before);
+        assert_eq!(session.undo_depth(), depth);
+    }
+
+    #[test]
     fn an_empty_formula_is_rejected() {
         let session = session();
         let row = property_row(&session, "Device", None, "\"Amp\"", "Amp");

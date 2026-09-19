@@ -2590,8 +2590,6 @@ pub(crate) struct LineIn {
     #[serde(default)]
     ascent: f64,
     #[serde(default)]
-    descent: f64,
-    #[serde(default)]
     line_height: f64,
     #[serde(default)]
     synthetic_fallback: bool,
@@ -5949,9 +5947,9 @@ fn emit_line(
 
     let mut pen_x = geom.frag_x + pad_left + text_indent + left_offset + align_shift;
     let line_bottom = geom.line_top + line.line_height;
-    // baseline from the measured metrics with CSS half-leading centering
-    let half_leading = ((line.line_height - line.ascent - line.descent) / 2.0).max(0.0);
-    let baseline = geom.line_top + half_leading + line.ascent;
+    // Word hangs the baseline off the box top: whatever the spacing rule adds
+    // beyond ascent + descent is leading below the descent, never centered.
+    let baseline = geom.line_top + line.ascent;
 
     // Numbering is not part of the story text, so materialize the precomputed
     // marker as its own first-line primitive. The hanging-indent slot is its
@@ -7736,6 +7734,14 @@ fn emit_paragraph_floating_images(
     }
 }
 
+/// Word clamps a text-wrapping float into its page and leaves `wrapNone` free.
+fn clamp_wrapped_float_y(y: f64, height: f64, wrap: Option<&str>, page_height: f64) -> f64 {
+    if !matches!(wrap, Some("square" | "tight" | "through" | "topAndBottom")) {
+        return y;
+    }
+    y.min(page_height - height).max(0.0)
+}
+
 fn emit_floating_image(
     prims: &mut Vec<Primitive>,
     block: &ParagraphBlockIn,
@@ -7746,12 +7752,17 @@ fn emit_floating_image(
     let block_ref = BlockRef::of(&block.id);
     let (x, y) = resolve_anchored_position(imr, frag_y - geom.margin_top, geom);
     let page_x = geom.margin_left + x;
-    let page_y = geom.margin_top + y;
     let rot = imr
         .rotation_deg
         .unwrap_or_else(|| rotation_degrees(imr.transform.as_deref()));
     let layout_width = image_layout_width(imr);
     let layout_height = image_layout_height(imr);
+    let page_y = clamp_wrapped_float_y(
+        geom.margin_top + y,
+        layout_height,
+        imr.wrap_type.as_deref(),
+        geom.page_height,
+    );
     let mut attrs = block_ref.attrs();
     attrs.doc_start = imr.pm_start;
     attrs.doc_end = imr.pm_end;
@@ -10412,6 +10423,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_wrapping_float_is_clamped_to_the_page_and_wrap_none_is_not() {
+        // Word 16.112 on a 792 pt page, 100 pt float: a wrapSquare anchor at
+        // 720.4 / 775.6 / 830.8 all render at 692; wrapNone renders where the
+        // anchor puts it and vanishes once it clears the sheet.
+        for square in [720.38, 775.57, 830.8] {
+            assert_eq!(
+                clamp_wrapped_float_y(square, 100.0, Some("square"), 792.0),
+                692.0
+            );
+            assert_eq!(
+                clamp_wrapped_float_y(square, 100.0, Some("inFront"), 792.0),
+                square
+            );
+        }
+        assert_eq!(
+            clamp_wrapped_float_y(665.18, 100.0, Some("square"), 792.0),
+            665.18
+        );
+        assert_eq!(
+            clamp_wrapped_float_y(-34.8, 100.0, Some("square"), 792.0),
+            0.0
+        );
+        assert_eq!(
+            clamp_wrapped_float_y(665.18, 900.0, Some("square"), 792.0),
+            0.0
+        );
+    }
+
+    #[test]
     fn resident_adapter_normalizes_integral_json_numbers() {
         let mut value = serde_json::json!({
             "pmStart": 16.0,
@@ -10761,9 +10801,9 @@ mod tests {
     #[test]
     fn header_footer_spacing_collapses_and_short_footers_anchor_to_their_height() {
         for (kind, height, spacings, expected) in [
-            ("header", 59.0, [(5.0, 8.0), (4.0, 6.0)], vec![59.0, 87.0]),
-            ("footer", 59.0, [(5.0, 8.0), (4.0, 6.0)], vec![420.0, 448.0]),
-            ("footer", 20.0, [(0.0, 0.0), (0.0, 0.0)], vec![454.0]),
+            ("header", 59.0, [(5.0, 8.0), (4.0, 6.0)], vec![56.0, 84.0]),
+            ("footer", 59.0, [(5.0, 8.0), (4.0, 6.0)], vec![417.0, 445.0]),
+            ("footer", 20.0, [(0.0, 0.0), (0.0, 0.0)], vec![451.0]),
         ] {
             let count = expected.len();
             let measured: Vec<Value> = spacings.into_iter().take(count).enumerate().map(|(i,(before,after))|json!({

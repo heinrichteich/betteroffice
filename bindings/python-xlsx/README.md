@@ -225,9 +225,9 @@ converting them needs the workbook's date system, which is not exposed yet, and
 stringifying them would write text that only looks like a date. Pass the Excel
 serial number as a float if you need a date today.
 
-Strings are interpreted the way Excel interprets typed input: a leading `=` is a
-formula, `TRUE`/`FALSE` become booleans, and numeric text becomes a number.
-Prefix with an apostrophe to force text.
+General cells interpret strings like Excel: a leading `=` is a formula,
+`TRUE`/`FALSE` become booleans, and numeric text becomes a number. Text (`@`)
+cells preserve input as text. Prefix with an apostrophe to force text in any format.
 
 ```python
 sheet["A1"] = "'=1+1"   # the text "=1+1"

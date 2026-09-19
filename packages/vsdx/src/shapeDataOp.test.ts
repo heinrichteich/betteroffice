@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import * as vsdx from '@betteroffice/vsdx';
+import * as vsdx from './index';
 import { shapeDataRows } from './shapeData';
 
 const root = resolve(import.meta.dir, '../../..');
@@ -48,5 +48,25 @@ test('one rejected row leaves every other row in the batch unwritten', async () 
     expect(receipts[1].refusal).toContain('empty formula');
     expect(receipts[0].after).toBeNull();
     expect(named.map((rowName) => valueOf(handle, 0, rowName))).toEqual(before);
+  } finally { handle.dispose(); }
+});
+
+test('missing and duplicate rows return refusals without changing the batch', async () => {
+  const handle = await openFixture();
+  try {
+    const page = handle.snapshot().pages[0];
+    const shape = page.shapes[0];
+    const rowName = shapeDataRows(shape).find((row) => row.rowName !== null)!.rowName!;
+    const before = handle.snapshot();
+    for (const second of ['missing-row', rowName]) {
+      const receipts = handle.setShapeData(page.id, shape.id, [
+        { rowName, formula: '"first"' },
+        { rowName: second, formula: '"second"' },
+      ]);
+      expect(receipts).toHaveLength(2);
+      expect(receipts[1].refusal).not.toBeNull();
+      expect(receipts.every((receipt) => receipt.after === null)).toBe(true);
+      expect(handle.snapshot()).toEqual(before);
+    }
   } finally { handle.dispose(); }
 });
