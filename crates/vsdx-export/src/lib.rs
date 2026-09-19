@@ -46,10 +46,13 @@ pub struct ExportReport {
 impl ExportReport {
     /// Counts every shape that degraded or was skipped.
     pub fn degraded_shapes(&self) -> usize {
-        self.bbox_fallbacks.len()
-            + self.empty_geometry.len()
-            + self.unsupported_images.len()
-            + self.skipped.len()
+        self.bbox_fallbacks
+            .iter()
+            .chain(&self.empty_geometry)
+            .chain(&self.unsupported_images)
+            .chain(&self.skipped)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
     }
 
     /// One-line caller-facing summary, empty when nothing degraded.
@@ -132,6 +135,7 @@ pub fn export_docx_with_report(package: &VsdxPackage) -> Result<ExportOutcome, E
 }
 
 pub(crate) struct Page {
+    pub part: String,
     pub name: String,
     pub width_in: f64,
     pub height_in: f64,
@@ -151,6 +155,7 @@ fn display_lists(package: &VsdxPackage) -> Result<Vec<Page>, ExportError> {
         let width_in = f64::from(list.width) / 96.0;
         let height_in = f64::from(list.height) / 96.0;
         pages.push(Page {
+            part: part.clone(),
             name: metadata::page_name_for(package, part),
             width_in,
             height_in,

@@ -22,6 +22,15 @@ pub(crate) fn nested_table_float_offset(position: Option<&FloatingTablePosition>
     .filter(|offset| offset.is_finite() && *offset >= 0.0)
 }
 
+/// Whether a cell anchor only paints, reserving no row height.
+pub(crate) fn cell_overlay_drawing(positioned: bool, wrap_type: Option<&str>) -> bool {
+    positioned
+        && !matches!(
+            wrap_type,
+            Some("square" | "tight" | "through" | "topAndBottom")
+        )
+}
+
 /// Leading-edge shift for `w:tblInd` under pre-2013 compatibility.
 ///
 /// Word 2013 changed what `w:tblInd` is measured to: in compatibilityMode <= 14
@@ -169,6 +178,10 @@ pub fn layout_cell_content(
             line_tops.push(Vec::new());
             flat_bottoms.push(bottom);
             prev_after = 0.0;
+        } else if let Some(LayoutBlock::Shape(shape)) = block
+            && cell_overlay_drawing(shape.position.is_some(), shape.wrap_type.as_deref())
+        {
+            line_tops.push(Vec::new());
         } else if let Some(total_height) = extent_total_height(measure) {
             // Nested table / non-paragraph: one atomic block (break only at its bottom).
             y += prev_after;

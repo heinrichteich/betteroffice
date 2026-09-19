@@ -4,6 +4,7 @@ use vsdx_resolve::{Lookup, Resolver};
 use crate::ExportError;
 
 pub struct ShapeDatum {
+    pub page_part: String,
     pub page: String,
     pub shape_id: u32,
     pub shape: String,
@@ -42,6 +43,7 @@ pub fn shape_data(package: &VsdxPackage) -> Result<Vec<ShapeDatum>, ExportError>
                 match (label, value) {
                     (Some(label), Some(value)) if !(label.is_empty() && value.is_empty()) => {
                         data.push(ShapeDatum {
+                            page_part: part.clone(),
                             page: name.clone(),
                             shape_id: id,
                             shape: shape_name(package, part, id),

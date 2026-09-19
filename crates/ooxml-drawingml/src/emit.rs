@@ -98,7 +98,12 @@ pub fn place_rect(
     {
         return None;
     }
-    if width < 0.0 || height < 0.0 || !width.is_finite() || !height.is_finite() {
+    if width < 0.0
+        || height < 0.0
+        || !width.is_finite()
+        || !height.is_finite()
+        || !page_height_in.is_finite()
+    {
         return None;
     }
     if let Some((rotation, flip_h, flip_v)) = affine_placement(matrix) {
@@ -158,23 +163,22 @@ fn affine_placement(matrix: Matrix) -> Option<(i64, bool, bool)> {
     if matrix.b.abs() <= EPSILON && matrix.c.abs() <= EPSILON {
         return Some((0, matrix.a < -EPSILON, matrix.d < -EPSILON));
     }
-    let scale = (f64::from(matrix.a) * f64::from(matrix.a)
-        + f64::from(matrix.b) * f64::from(matrix.b))
-    .sqrt();
-    if scale <= f64::from(EPSILON) {
+    let x_scale = f64::from(matrix.a).hypot(f64::from(matrix.b));
+    let y_scale = f64::from(matrix.c).hypot(f64::from(matrix.d));
+    if x_scale <= f64::from(EPSILON) || y_scale <= f64::from(EPSILON) {
         return None;
     }
-    let cos = f64::from(matrix.a) / scale;
-    let sin = f64::from(matrix.b) / scale;
-    let matches = (f64::from(matrix.c) + sin * scale).abs() <= f64::from(EPSILON) * scale
-        && (f64::from(matrix.d) - cos * scale).abs() <= f64::from(EPSILON) * scale;
-    if !matches {
+    let cos = f64::from(matrix.a) / x_scale;
+    let sin = f64::from(matrix.b) / x_scale;
+    let y_x = f64::from(matrix.c) / y_scale;
+    let y_y = f64::from(matrix.d) / y_scale;
+    if (cos * y_x + sin * y_y).abs() > f64::from(EPSILON) {
         return None;
     }
     Some((
         (-sin.atan2(cos).to_degrees() * EMU_PER_DEGREE).round() as i64,
-        matrix.a * matrix.d - matrix.b * matrix.c < -EPSILON,
         false,
+        cos * y_y - sin * y_x < 0.0,
     ))
 }
 
@@ -321,7 +325,7 @@ pub enum Fill<'a> {
 /// DrawingML `ang`, in 60000ths of a degree clockwise from the positive x-axis.
 fn gradient_angle(angle_deg: Option<f32>) -> i64 {
     let degrees = angle_deg.filter(|value| value.is_finite()).unwrap_or(90.0);
-    let units = (f64::from(degrees) * 60_000.0).round() as i64;
+    let units = (f64::from(degrees).rem_euclid(360.0) * 60_000.0).round() as i64;
     units.rem_euclid(21_600_000)
 }
 
@@ -335,7 +339,7 @@ pub fn fill_xml(fill: &Fill) -> String {
         },
         Fill::Gradient { stops, angle_deg } => {
             let mut list = String::new();
-            for stop in stops.iter() {
+            for stop in stops.iter().filter(|stop| stop.position.is_finite()) {
                 let Some(hex) = srgb_hex(stop.color) else {
                     continue;
                 };
@@ -426,8 +430,7 @@ fn run_props(run: &EmitRun) -> String {
     }
     if run.superscript {
         props.push_str(" baseline=\"30000\"");
-    }
-    if run.subscript {
+    } else if run.subscript {
         props.push_str(" baseline=\"-25000\"");
     }
     if run.small_caps {
@@ -558,6 +561,49 @@ mod tests {
         assert!(placed.degraded);
         assert_eq!(placed.rot, 0);
         assert_eq!((placed.w, placed.h), (emu(1.0), emu(1.5)));
+    }
+
+    #[test]
+    fn rotated_nonuniform_scale_and_reflection_stay_native() {
+        for (c, reflected) in [(-3.0, false), (3.0, true)] {
+            let placed = place_rect(
+                0.0,
+                0.0,
+                2.0,
+                1.0,
+                Matrix {
+                    a: 0.0,
+                    b: 2.0,
+                    c,
+                    d: 0.0,
+                    e: 0.0,
+                    f: 0.0,
+                },
+                8.0,
+            )
+            .unwrap();
+            assert!(!placed.degraded);
+            assert_eq!((placed.w, placed.h), (emu(4.0), emu(3.0)));
+            assert_eq!(placed.rot, -5_400_000);
+            assert!(!placed.flip_h);
+            assert_eq!(placed.flip_v, reflected);
+        }
+    }
+
+    #[test]
+    fn invalid_gradient_positions_do_not_emit_invalid_xml() {
+        let stops = [EmitGradientStop {
+            position: f32::NAN,
+            color: "#FF0000",
+        }];
+        assert_eq!(
+            fill_xml(&Fill::Gradient {
+                stops: &stops,
+                angle_deg: None
+            }),
+            "<a:noFill/>"
+        );
+        assert!((0..21_600_000).contains(&gradient_angle(Some(f32::MAX))));
     }
 
     #[test]

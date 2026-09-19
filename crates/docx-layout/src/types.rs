@@ -577,6 +577,9 @@ pub struct ParagraphAttrs {
     pub widow_control: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_break_before: Option<bool>,
+    /// Opens with a hard `w:br w:type="page"` run rather than `w:pageBreakBefore`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_break_before_run: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2113,6 +2116,51 @@ impl Fragment {
                 f.x = x;
                 f.y = y;
             }
+        }
+    }
+
+    /// `(y, height, lead)` for a flow-placed fragment, `None` for a float.
+    /// `lead` approximates the first row or line — the unit Word relocates
+    /// whole — as the fragment's mean; per-row heights are not carried here.
+    pub fn flow_box(&self) -> Option<(f64, f64, f64)> {
+        let share = |height: f64, units: usize| height / units.max(1) as f64;
+        match self {
+            Fragment::Paragraph(f) => Some((
+                f.y,
+                f.height,
+                share(f.height, f.to_line.saturating_sub(f.from_line)),
+            )),
+            Fragment::Table(f) => (f.is_floating != Some(true)).then(|| {
+                (
+                    f.y,
+                    f.height,
+                    share(f.height, f.row_end.saturating_sub(f.row_start)),
+                )
+            }),
+            Fragment::Image(f) => {
+                (f.is_anchored != Some(true)).then_some((f.y, f.height, f.height))
+            }
+            Fragment::Shape(f) => {
+                (f.is_anchored != Some(true)).then_some((f.y, f.height, f.height))
+            }
+            Fragment::Chart(f) => {
+                (f.is_anchored != Some(true)).then_some((f.y, f.height, f.height))
+            }
+            Fragment::TextBox(f) => {
+                (f.is_floating != Some(true)).then_some((f.y, f.height, f.height))
+            }
+        }
+    }
+
+    /// Moves the fragment down the page.
+    pub fn shift_y(&mut self, delta: f64) {
+        match self {
+            Fragment::Paragraph(f) => f.y += delta,
+            Fragment::Table(f) => f.y += delta,
+            Fragment::Image(f) => f.y += delta,
+            Fragment::Shape(f) => f.y += delta,
+            Fragment::Chart(f) => f.y += delta,
+            Fragment::TextBox(f) => f.y += delta,
         }
     }
 }

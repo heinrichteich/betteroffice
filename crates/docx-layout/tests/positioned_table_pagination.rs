@@ -113,3 +113,36 @@ fn parity_aligned_floats_keep_their_existing_placement() {
         assert!(fragments[0]["carriedToNext"].is_null());
     }
 }
+
+/// A band opening above the pen still costs the page its height, and the flow
+/// already emitted into it stays put — Word instead moves that flow below the
+/// band, which a single forward pass cannot do.
+#[test]
+fn a_page_anchored_band_above_the_pen_costs_the_page_its_height() {
+    let mut table = table(180, 10);
+    table["block"]["floating"]["vertAnchor"] = json!("page");
+    let output = layout(50, table);
+    let placed = |id: &str| {
+        output["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .flat_map(|(index, page)| {
+                page["fragments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(move |fragment| (index, fragment))
+            })
+            .find(|(_, fragment)| fragment["blockId"] == id)
+            .map(|(index, fragment)| (index, fragment["y"].as_f64().unwrap()))
+            .unwrap()
+    };
+    let band = &output["pages"][0]["fragments"][1];
+    assert_eq!(band["y"], 10);
+    assert_eq!(band["height"], 60);
+    assert_eq!(placed("after"), (1, 10.0));
+    // Residue: `before` occupies 10..60, inside the 10..70 band.
+    assert_eq!(placed("before"), (0, 10.0));
+}

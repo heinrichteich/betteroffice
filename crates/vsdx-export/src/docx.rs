@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use ooxml_drawingml::{cust_geom, emu, escape_xml, place_rect, srgb_hex, xfrm_xml};
+use ooxml_drawingml::{Placed, cust_geom, emu, escape_xml, place_rect, srgb_hex, xfrm_xml};
 use vsdx_parse::VsdxPackage;
 use vsdx_render::Primitive;
 
@@ -14,6 +14,7 @@ use crate::shared::{
 };
 
 const CONTENT_WIDTH_IN: f64 = 6.5;
+const CONTENT_HEIGHT_IN: f64 = 8.0;
 
 pub fn build(
     pages: &[Page],
@@ -54,7 +55,9 @@ pub fn build(
 }
 
 fn fit_scale(page: &Page) -> f64 {
-    (CONTENT_WIDTH_IN / page.width_in).min(1.0)
+    (CONTENT_WIDTH_IN / page.width_in)
+        .min(CONTENT_HEIGHT_IN / page.height_in)
+        .min(1.0)
 }
 
 fn document_xml(
@@ -84,7 +87,7 @@ fn document_xml(
         ));
         let rows: Vec<&crate::ShapeDatum> = data
             .iter()
-            .filter(|datum| datum.page == page.name)
+            .filter(|datum| datum.page_part == page.part)
             .collect();
         if !rows.is_empty() {
             let title = escape_xml(&page.name);
@@ -190,10 +193,6 @@ fn member_xml(
             transform,
             ..
         } => {
-            let Some(media_index) = index_by_asset.get(asset_id) else {
-                report.unsupported_images.push(id.clone());
-                return image_placeholder(id, *x, *y, *width, *height, page_height);
-            };
             let Some(placed) = place_rect(
                 *x,
                 *y,
@@ -208,6 +207,10 @@ fn member_xml(
             if placed.degraded {
                 report.bbox_fallbacks.push(id.clone());
             }
+            let Some(media_index) = index_by_asset.get(asset_id) else {
+                report.unsupported_images.push(id.clone());
+                return image_placeholder(id, &placed);
+            };
             let name = escape_xml(id);
             let embed = format!("rId{}", media_index + 2);
             format!(
@@ -219,21 +222,11 @@ fn member_xml(
     }
 }
 
-fn image_placeholder(
-    id: &str,
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-    page_height: f64,
-) -> String {
+fn image_placeholder(id: &str, placed: &Placed) -> String {
     let name = escape_xml(id);
     format!(
-        "<wps:wsp><wps:cNvSpPr txBox=\"1\"/><wps:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln w=\"12700\"><a:prstDash val=\"dash\"/></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>Unsupported image: {name}</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>",
-        emu(f64::from(x)),
-        emu(page_height - f64::from(y) - f64::from(height)),
-        emu(f64::from(width)).max(1),
-        emu(f64::from(height)).max(1)
+        "<wps:wsp><wps:cNvSpPr txBox=\"1\"/><wps:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln w=\"12700\"><a:prstDash val=\"dash\"/></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>Unsupported image: {name}</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>",
+        xfrm_xml(placed)
     )
 }
 
@@ -269,8 +262,7 @@ fn wml_runs(paragraphs: &[vsdx_render::TextParagraph]) -> String {
             }
             if run.superscript {
                 out.push_str("<w:vertAlign w:val=\"superscript\"/>");
-            }
-            if run.subscript {
+            } else if run.subscript {
                 out.push_str("<w:vertAlign w:val=\"subscript\"/>");
             }
             out.push_str("</w:rPr>");
@@ -403,5 +395,53 @@ mod tests {
         assert!(xml.contains("<pic:pic>"));
         assert!(xml.contains("x=\"5486400\""));
         assert!(report.summary().is_empty());
+        let mut report = crate::ExportReport::default();
+        let placeholder = member_xml(&image, 8.0, &BTreeMap::new(), &mut report);
+        assert!(placeholder.contains("Unsupported image: image"));
+        assert!(placeholder.contains("x=\"5486400\""));
+        assert_eq!(report.unsupported_images, ["image"]);
+    }
+
+    #[test]
+    fn unsupported_images_keep_rotation_and_reflection() {
+        for transform in [
+            Affine {
+                a: 0.0,
+                b: 2.0,
+                c: -3.0,
+                d: 0.0,
+                e: 5.0,
+                f: 2.0,
+            },
+            Affine {
+                a: 0.0,
+                b: 2.0,
+                c: 3.0,
+                d: 0.0,
+                e: 5.0,
+                f: 2.0,
+            },
+            Affine {
+                b: 0.5,
+                ..Affine::identity()
+            },
+        ] {
+            let image = Primitive::Image {
+                id: "image".into(),
+                z_order: 0,
+                asset_id: "asset".into(),
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+                transform,
+            };
+            let placed = place_rect(1.0, 2.0, 3.0, 4.0, emit_matrix(transform), 20.0).unwrap();
+            let mut report = ExportReport::default();
+            let xml = member_xml(&image, 20.0, &BTreeMap::new(), &mut report);
+            assert!(xml.contains(&xfrm_xml(&placed)));
+            assert_eq!(report.bbox_fallbacks.len(), usize::from(placed.degraded));
+            assert_eq!(report.degraded_shapes(), 1);
+        }
     }
 }

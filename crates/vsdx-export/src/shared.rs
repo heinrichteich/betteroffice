@@ -245,14 +245,9 @@ pub fn translate_primitives(primitives: &mut [Primitive], dx: f32, dy: f32) {
                 *x += dx;
                 *y += dy;
             }
-            Primitive::Group {
-                primitives,
-                transform,
-                ..
-            } => {
+            Primitive::Group { transform, .. } => {
                 transform.e += dx;
                 transform.f += dy;
-                translate_primitives(primitives, dx, dy);
             }
         }
     }
@@ -554,7 +549,7 @@ mod tests {
 
     #[test]
     fn flat_composes_group_transforms() {
-        let primitives = vec![Primitive::Group {
+        let mut primitives = vec![Primitive::Group {
             id: "group".into(),
             z_order: 0,
             transform: Affine {
@@ -582,6 +577,12 @@ mod tests {
             panic!("text expected");
         };
         assert_eq!(transform.apply_point(1.0, 2.0), (2.0, 6.0));
+        translate_primitives(&mut primitives, 0.5, 1.0);
+        let flattened = flat(&primitives);
+        let [Primitive::TextBox { transform, .. }] = flattened.as_slice() else {
+            panic!("text expected");
+        };
+        assert_eq!(transform.apply_point(1.0, 2.0), (2.5, 7.0));
     }
 
     #[test]

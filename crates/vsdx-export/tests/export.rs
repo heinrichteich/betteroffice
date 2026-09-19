@@ -342,6 +342,52 @@ fn shape_data_lists_property_rows() {
 }
 
 #[test]
+fn docx_keeps_metadata_separate_when_pages_share_a_name() {
+    let mut diagram = package(vec![rect_shape(1, "2", "2")]);
+    diagram.page_part_paths.push("second".into());
+    diagram.page_part_ids.insert("second".into(), 2);
+    diagram
+        .page_sheets
+        .insert(2, diagram.page_sheets[&1].clone());
+    diagram
+        .page_contents
+        .insert("second".into(), diagram.page_contents["page"].clone());
+    diagram.page_names.insert(1, "Same name".into());
+    diagram.page_names.insert(2, "Same name".into());
+    let bytes = export_docx(&diagram).unwrap();
+    let parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+    let xml = std::str::from_utf8(
+        &parts
+            .iter()
+            .find(|(path, _)| path == "word/document.xml")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    assert_eq!(xml.matches("<w:tbl>").count(), 2);
+    assert_eq!(xml.matches(">42</w:t>").count(), 2);
+}
+
+#[test]
+fn docx_fits_tall_pages_inside_the_printable_height() {
+    let diagram = vsdx_parse::parse_vsdx(include_bytes!(
+        "../../vsdx-parse/tests/fixtures/export-mixed-pages.vsdx"
+    ))
+    .unwrap();
+    let bytes = export_docx(&diagram).unwrap();
+    let parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+    let xml = std::str::from_utf8(
+        &parts
+            .iter()
+            .find(|(path, _)| path == "word/document.xml")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    assert!(xml.contains("<wp:extent cx=\"2438400\" cy=\"7315200\"/>"));
+}
+
+#[test]
 fn docx_round_trips_through_engine() {
     let diagram = package(vec![rect_shape(1, "2", "2"), text_shape()]);
     let bytes = export_docx(&diagram).unwrap();
