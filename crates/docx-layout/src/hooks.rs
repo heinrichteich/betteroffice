@@ -27,7 +27,9 @@ fn unsupported(feature: &str) -> LayoutError {
 // `prescan`/`place` keep importing them from the hooks seam
 pub use crate::keep_together::{KeepWithNextGroup, KeepWithNextScan};
 
-pub fn breaks_before_block(block: &LayoutBlock) -> Result<bool, LayoutError> {
+pub fn breaks_before_block(
+    block: &LayoutBlock,
+) -> Result<Option<break_policy::AuthoredBreak>, LayoutError> {
     Ok(break_policy::breaks_before_block(block))
 }
 
@@ -574,8 +576,24 @@ pub fn layout_floating_table(
     paginator.push_fragment_direct(fragment);
 
     if full_width {
-        let advance_to = y + measure.total_height + finite(floating.bottom_from_text);
-        if advance_to > paginator.state(state_idx).pen_y {
+        let band_bottom = y + measure.total_height + finite(floating.bottom_from_text);
+        let current = paginator.state(state_idx);
+        let reflowable = vertical == "page"
+            && floating.tblp_y.is_some_and(f64::is_finite)
+            && y >= current.content_top
+            && band_bottom <= current.content_limit;
+        if reflowable
+            && paginator
+                .clear_float_band(state_idx, y, band_bottom)
+                .is_some()
+        {
+            return Ok(());
+        }
+        // Charges the band to the page even when it opens above the pen; flow
+        // already emitted into it keeps its place.
+        let pen_y = paginator.state(state_idx).pen_y;
+        let advance_to = pen_y.max(y) + measure.total_height + finite(floating.bottom_from_text);
+        if advance_to > pen_y {
             paginator.set_pen_y(state_idx, advance_to);
         }
     }

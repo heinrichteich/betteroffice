@@ -120,7 +120,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [activeStencilId, setActiveStencilId] = useState(shapeStencils[0].id);
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [contextMenu, setContextMenu] = useState<{ top: number; left: number; kind: 'shape' | 'canvas' } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ top: number; left: number; kind: 'shape'; pageId: string; shapeId: string } | { top: number; left: number; kind: 'canvas' } | null>(null);
   const contextMenuRef = useRef(contextMenu);
   contextMenuRef.current = contextMenu;
   const pointerRef = useRef<DragStart | null>(null);
@@ -381,9 +381,13 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   }, [model.frame, model.snapshot, model.pageIndex, model.layers, selection, zoom, connectorMode, showGrid]);
 
   useEffect(() => {
+    setContextMenu((menu) => (menu?.kind === 'shape' && !selection.some((item) => item.pageId === menu.pageId && item.shapeId === menu.shapeId) ? null : menu));
+  }, [selection]);
+
+  useEffect(() => {
     if (!editing || textRefusedRef.current) return;
-    if (selection.length !== 1 || selection[0].pageId !== editing.pageId || selection[0].shapeId !== editing.shapeId) setEditing(null);
-  }, [editing, selection]);
+    if (selection.length !== 1 || selection[0].pageId !== editing.pageId || selection[0].shapeId !== editing.shapeId) closeTextEdit();
+  }, [editing, selection, closeTextEdit]);
 
   useEffect(() => {
     if (editing && !hasEditOverlay) closeTextEdit();
@@ -406,14 +410,21 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
 
   useEffect(() => {
     if (!editing) return;
+    let refocus: ReturnType<typeof setTimeout> | undefined;
     const onDown = (event: globalThis.PointerEvent) => {
       if (editWrapRef.current?.contains(event.target as Node)) return;
       if (commitTextEdit()) return;
       if (!workspaceRef.current?.contains(event.target as Node)) return;
-      setTimeout(() => editBoxRef.current?.focus(), 0);
+      clearTimeout(refocus);
+      refocus = setTimeout(() => {
+        if (editingRef.current === editing) editBoxRef.current?.focus();
+      }, 0);
     };
     document.addEventListener('pointerdown', onDown, true);
-    return () => document.removeEventListener('pointerdown', onDown, true);
+    return () => {
+      document.removeEventListener('pointerdown', onDown, true);
+      clearTimeout(refocus);
+    };
   }, [editing, commitTextEdit]);
 
   useEffect(() => () => {
@@ -1196,7 +1207,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       }
       const active = selectionRef.current;
       if (!active.some((item) => item.pageId === next.pageId && item.shapeId === next.shapeId)) setSelection([next]);
-      setContextMenu({ top: event.clientY, left: event.clientX, kind: 'shape' });
+      setContextMenu({ top: event.clientY, left: event.clientX, kind: 'shape', pageId: next.pageId, shapeId: next.shapeId });
     } catch (value) { reportError(value); }
   };
   const commandsRef = useRef<RibbonCommands | null>(null);
@@ -1496,7 +1507,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           )}
         </div>
       </div>
-      {contextMenu?.kind === 'shape' && selection.length > 0 && <ShapeContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
+      {contextMenu?.kind === 'shape' && selection.some((item) => item.pageId === contextMenu.pageId && item.shapeId === contextMenu.shapeId) && <ShapeContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
       {contextMenu?.kind === 'canvas' && <CanvasContextMenu t={t} position={contextMenu} onClose={closeContextMenu} onCloseAndFocus={closeContextMenuAndFocus} />}
       {integrity.length > 0 && <section role="alert" style={styles.integrity}><strong>{t('diagnostics.integrityHeading')}</strong>{integrity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</section>}
       {fidelity.length > 0 && <details style={styles.fidelity}><summary>{t('diagnostics.fidelityHeading')}</summary>{fidelity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</details>}

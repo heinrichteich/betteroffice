@@ -78,6 +78,7 @@ test('clicking away from a refused text commit keeps the draft', async () => {
     expect(kept).not.toBeNull();
     expect(kept!.value).toBe('locked text edited');
     expect(handle.shapeText(pageId, shapeId)).toBe('locked text');
+    await waitFor(() => expect(document.activeElement).toBe(kept));
 
     await act(async () => { fireEvent.keyDown(kept!, { key: 'Escape' }); });
     expect(view.container.querySelector('textarea')).toBeNull();
@@ -114,13 +115,10 @@ test('a refused edit does not survive the shape becoming unreachable', async () 
     const other = handle.snapshot().pages[0].shapes.find(shape => shape.id !== shapeId)!;
     expect(other).toBeDefined();
 
-    // The edited shape goes away underneath the refused editor.
     handle.deleteShape(pageId, shapeId);
     await act(async () => { ready!.refresh(); });
     expect(view.container.querySelector('textarea')).toBeNull();
 
-    // The stranded session must not block a new one: without clearing `editing`,
-    // onCanvasDoubleClick returns early forever and no editor can open again.
     handle.hitTest = (() => ({ kind: 'shape', shapeId: other.id })) as unknown as DiagramHandle['hitTest'];
     await act(async () => { fireEvent.doubleClick(main, { clientX: 100, clientY: 100 }); });
     const reopened = view.container.querySelector('textarea') as HTMLTextAreaElement | null;
@@ -156,8 +154,6 @@ test('a refused edit does not survive its layer being hidden', async () => {
     await act(async () => { fireEvent.keyDown(box!, { key: 'Escape' }); });
     expect(view.container.querySelector('textarea')).not.toBeNull();
 
-    // The shape stays in the snapshot but leaves the display list, so the overlay
-    // goes away while `editedTextId` still resolves. Closing on the id misses this.
     handle.setLayerVisible(page.sourcePartPath, 0, false);
     await act(async () => { ready!.refresh(); });
     expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === shapeId)).toBe(true);
