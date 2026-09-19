@@ -40,9 +40,9 @@ export const ECOSYSTEMS = [
 
 export const SUITE = {
   label: "Suite",
-  heading: "One suite, three editors",
+  heading: "One suite, four editors",
   prose:
-    "DOCX, XLSX and PPTX editors are published on npm and render inside your app. VSDX support is available from source. The headless Rust exporter creates editable PowerPoint slides and Word diagrams, with shape-data tables and export reports.",
+    "DOCX, XLSX and PPTX editors are published on npm and render inside your app. The VSDX diagram editor is available from source.",
 };
 
 export const EDITORS = [
@@ -63,6 +63,12 @@ export const EDITORS = [
     format: "pptx",
     desc: "Slide model, masters and shape editing on the same shared core.",
     status: "available",
+  },
+  {
+    name: "Diagrams",
+    format: "vsdx",
+    desc: "Source preview: edit diagrams with pan and zoom, update shape data in batches, and export to Word or PowerPoint through Rust.",
+    status: "source preview",
   },
 ];
 

@@ -1994,3 +1994,41 @@ test('Delete waits out an open context menu', async () => {
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
+
+test('pans from the workspace margin and cancels only the active pointer', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  try {
+    let ready: { handle: DiagramHandle } | undefined;
+    const view = render(<VsdxEditor file={foundation} fonts={[]} onReady={(api) => { ready = api; }} />);
+    await waitFor(() => expect(ready).toBeDefined());
+    const canvas = drawingCanvas(view.container)!;
+    const workspace = view.container.querySelector('main')!;
+    const surface = canvas.parentElement!;
+    const captured = new Set<number>();
+    workspace.setPointerCapture = (id) => { captured.add(id); };
+    workspace.hasPointerCapture = (id) => captured.has(id);
+    workspace.releasePointerCapture = (id) => { captured.delete(id); };
+    const before = ready!.handle.snapshot();
+    workspace.scrollLeft = 500; workspace.scrollTop = 600;
+    fireEvent.pointerDown(surface, { button: 1, pointerId: 7, clientX: 100, clientY: 100 });
+    expect(captured.has(7)).toBe(true);
+    fireEvent.pointerMove(workspace, { pointerId: 8, clientX: 200, clientY: 200 });
+    expect(workspace.scrollLeft).toBe(500);
+    fireEvent.pointerMove(workspace, { pointerId: 7, clientX: 130, clientY: 150 });
+    expect([workspace.scrollLeft, workspace.scrollTop]).toEqual([470, 550]);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(captured.size).toBe(0);
+    fireEvent.pointerMove(workspace, { pointerId: 7, clientX: 200, clientY: 200 });
+    expect([workspace.scrollLeft, workspace.scrollTop]).toEqual([470, 550]);
+    fireEvent.keyDown(canvas, { key: ' ' });
+    fireEvent.pointerDown(surface, { button: 0, pointerId: 9, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(workspace, { pointerId: 9, clientX: 110, clientY: 120 });
+    expect([workspace.scrollLeft, workspace.scrollTop]).toEqual([460, 530]);
+    fireEvent.blur(window);
+    expect(captured.size).toBe(0);
+    expect(workspace.style.cursor).toBe('');
+    expect(ready!.handle.snapshot()).toEqual(before);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});

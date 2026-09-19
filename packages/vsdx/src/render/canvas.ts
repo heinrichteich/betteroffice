@@ -3,9 +3,25 @@ import type { Affine, PageDisplayList, PagePrimitive, Paint, PlaceholderPrimitiv
 export type CanvasImageResolver = (assetId: string) => CanvasImageSource | Promise<CanvasImageSource | null> | null;
 export interface PaintPageOptions { resolveImage?: CanvasImageResolver; signal?: AbortSignal; }
 export interface PageCanvasLike { width: number; height: number; style: { width: string; height: string }; }
-export function sizeCanvasForPage(canvas: PageCanvasLike, list: Pick<PageDisplayList, 'width' | 'height'>, dpr: number, scale = 1): void {
-  canvas.width = Math.round(list.width * scale * dpr); canvas.height = Math.round(list.height * scale * dpr);
-  canvas.style.width = `${list.width * scale}px`; canvas.style.height = `${list.height * scale}px`;
+export function sizeCanvasForPage(canvas: PageCanvasLike, list: Pick<PageDisplayList, 'width' | 'height'>, dpr: number, scale = 1): number {
+  const cssWidth = list.width * scale, cssHeight = list.height * scale;
+  const effective = effectiveDprForSurface(cssWidth, cssHeight, dpr);
+  canvas.width = Math.max(1, Math.floor(cssWidth * effective)); canvas.height = Math.max(1, Math.floor(cssHeight * effective));
+  canvas.style.width = `${cssWidth}px`; canvas.style.height = `${cssHeight}px`;
+  return effective;
+}
+/** Conservative backing-store side limit. */
+export const MAX_CANVAS_DIMENSION = 8192;
+/** 128 MiB RGBA budget per canvas. */
+export const MAX_CANVAS_AREA = MAX_CANVAS_DIMENSION * 4096;
+/** Clamp DPR to the backing-store budgets. */
+export function effectiveDprForSurface(cssWidth: number, cssHeight: number, dpr: number): number {
+  const requested = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  if (!Number.isFinite(cssWidth) || !Number.isFinite(cssHeight) || cssWidth <= 0 || cssHeight <= 0) {
+    throw new RangeError('Canvas dimensions must be finite and positive');
+  }
+  const bySide = Math.min(MAX_CANVAS_DIMENSION / cssWidth, MAX_CANVAS_DIMENSION / cssHeight);
+  return Math.min(requested, bySide, Math.sqrt(MAX_CANVAS_AREA / cssWidth / cssHeight));
 }
 export interface ModelPoint { x: number; y: number; }
 export function canvasPointToModel(paintTransform: Affine, x: number, y: number, scale = 1): ModelPoint {

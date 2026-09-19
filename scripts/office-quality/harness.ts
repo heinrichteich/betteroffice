@@ -241,7 +241,7 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
       return canvas.toDataURL('image/png');
     };
   } else if (format === 'vsdx') {
-    const { initWasm, openDiagram, paintPage, sizeCanvasForPage } = await import(
+    const { initWasm, openDiagram, paintPage } = await import(
       'virtual:office-quality-renderer'
     );
     await initWasm();
@@ -250,10 +250,12 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
     capture = async (index) => {
       const list = handle.layoutPage(index);
       const canvas = document.createElement('canvas');
-      sizeCanvasForPage(canvas, list, 150 / 96, 1);
+      const dpr = 150 / 96;
+      canvas.width = Math.round(list.width * dpr);
+      canvas.height = Math.round(list.height * dpr);
       const images = new Map<string, ImageBitmap>();
       try {
-        await paintPage(canvas.getContext('2d')!, list, 150 / 96, 1, {
+        await paintPage(canvas.getContext('2d')!, list, dpr, 1, {
           resolveImage: async (assetId: string) => {
             if (!images.has(assetId))
               images.set(

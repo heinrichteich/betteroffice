@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { canvasPointToModel, modelPointToCanvas, paintPage } from './canvas';
+import { MAX_CANVAS_AREA, MAX_CANVAS_DIMENSION, canvasPointToModel, effectiveDprForSurface, modelPointToCanvas, paintPage, sizeCanvasForPage } from './canvas';
 import type { PageDisplayList, ShapePrimitive } from '../types';
 
 function context(log: string[]): CanvasRenderingContext2D {
@@ -57,6 +57,43 @@ test('replays positioned text runs at their line caret positions', async () => {
   expect(log).toContain('textBaseline=top');
   expect(log.filter(entry => entry.startsWith('fillText:'))).toEqual(['fillText:left,30,20', 'fillText:right,60,45']);
   expect(log.some(entry => entry.startsWith('clip'))).toBe(false);
+});
+
+test('a Letter page at zoom 4 clamps its backing store instead of its CSS size', () => {
+  const canvas = { width: 0, height: 0, style: { width: '', height: '' } };
+  const effective = sizeCanvasForPage(canvas, { width: 816, height: 1056 }, 2, 4);
+  expect(effective).toBe(effectiveDprForSurface(816 * 4, 1056 * 4, 2));
+  expect(effective).toBeLessThan(2);
+  expect(canvas.style.width).toBe('3264px');
+  expect(canvas.style.height).toBe('4224px');
+  expect(canvas.width).toBeLessThanOrEqual(MAX_CANVAS_DIMENSION);
+  expect(canvas.height).toBeLessThanOrEqual(MAX_CANVAS_DIMENSION);
+  expect(canvas.width * canvas.height).toBeLessThanOrEqual(MAX_CANVAS_AREA);
+});
+
+test('the area budget keeps a zoomed page near 128 MiB per canvas', () => {
+  const canvas = { width: 0, height: 0, style: { width: '', height: '' } };
+  sizeCanvasForPage(canvas, { width: 816, height: 1056 }, 2, 4);
+  expect((canvas.width * canvas.height * 4) / 1048576).toBeLessThanOrEqual(128);
+});
+
+test('a normal page at zoom 1 keeps its full backing store', () => {
+  const canvas = { width: 0, height: 0, style: { width: '', height: '' } };
+  const effective = sizeCanvasForPage(canvas, { width: 816, height: 1056 }, 2, 1);
+  expect(effective).toBe(2);
+  expect(canvas.width).toBe(1632);
+  expect(canvas.height).toBe(2112);
+  expect(canvas.style.width).toBe('816px');
+  expect(canvas.style.height).toBe('1056px');
+});
+
+test('canvas sizing refuses invalid dimensions before changing the backing store', () => {
+  for (const width of [0, -1, NaN, Infinity]) {
+    const canvas = { width: 100, height: 200, style: { width: '100px', height: '200px' } };
+    expect(() => sizeCanvasForPage(canvas, { width, height: 200 }, 2)).toThrow(RangeError);
+    expect(canvas.width).toBe(100);
+    expect(canvas.height).toBe(200);
+  }
 });
 
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 768 };

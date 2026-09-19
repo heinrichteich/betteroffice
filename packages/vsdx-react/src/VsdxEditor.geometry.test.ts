@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { DiagramSnapshot, PageDisplayList, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { MAX_PAGE_BREAK_LINES, canvasPointerPosition, centreInsertPoint, clientPointToModel, connectorTargetForPoint, inchFormula, marqueeEnclosedShapes, pageBreakLines, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
+import { MAX_PAGE_BREAK_LINES, SCROLL_MARGIN, anchoredZoomScroll, canvasPointerPosition, centredPageScroll, centreInsertPoint, clampScrollToSurface, clientPointToModel, connectorTargetForPoint, inchFormula, marqueeEnclosedShapes, pageBreakLines, resolveDragGeometry, selectionCorners, stillSelectable, surfaceSize, viewportCentreKey, zoomForWheelDelta } from './VsdxEditor';
 import { normalizeMarquee, previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
 import { modelToPage } from './connector';
 
@@ -326,4 +326,73 @@ test('a marquee encloses rotated and flipped shapes through the selection corner
   expect(rotatedClipped).toEqual([]);
   const flipped = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 70, y: 570 }, { x: 130, y: 630 }));
   expect(flipped.map((item) => item.shapeId)).toEqual(['shape4']);
+});
+
+function pageCanvasPointerAt(clientX: number, clientY: number, zoom: number, left = 0, top = 0): PointerEvent<HTMLCanvasElement> {
+  return {
+    clientX,
+    clientY,
+    currentTarget: { getBoundingClientRect: () => ({ left, top, width: frame.width * zoom, height: frame.height * zoom }) },
+  } as unknown as PointerEvent<HTMLCanvasElement>;
+}
+
+test('the page canvas keeps the model point stable across zoom', () => {
+  for (const zoom of [0.5, 1, 1.5, 4]) {
+    const point = canvasPointerPosition(pageCanvasPointerAt(192 * zoom, 864 * zoom, zoom), frame, zoom);
+    expect(point.canvas.x).toBeCloseTo(192, 9);
+    expect(point.canvas.y).toBeCloseTo(864, 9);
+    expect(point.model.x).toBeCloseTo(2, 9);
+    expect(point.model.y).toBeCloseTo(2, 9);
+  }
+});
+
+test('a pointer past the page edge maps to a point outside it', () => {
+  const outside = canvasPointerPosition(pageCanvasPointerAt(-192, -192, 1), frame, 1);
+  expect(outside.canvas).toEqual({ x: -192, y: -192 });
+  expect(outside.model.x).toBeCloseTo(-2, 9);
+  const origin = canvasPointerPosition(pageCanvasPointerAt(0, 0, 1), frame, 1);
+  expect(origin.canvas).toEqual({ x: 0, y: 0 });
+});
+
+test('the pointer mapping ignores element offset and scroll position', () => {
+  const offset = canvasPointerPosition(pageCanvasPointerAt(137 + 192, 91 + 864, 1, 137, 91), frame, 1);
+  expect(offset.model.x).toBeCloseTo(2, 9);
+  expect(offset.model.y).toBeCloseTo(2, 9);
+  const zoomed = canvasPointerPosition(pageCanvasPointerAt(4000 + 192 * 2, 91 + 864 * 2, 2, 4000, 91), frame, 2);
+  expect(zoomed.model.x).toBeCloseTo(2, 9);
+  expect(zoomed.model.y).toBeCloseTo(2, 9);
+});
+
+test('the scroll surface pads the page extent and centres it in the viewport', () => {
+  const surface = surfaceSize(frame.width, frame.height, 1);
+  expect(surface).toEqual({ width: frame.width + SCROLL_MARGIN * 2, height: frame.height + SCROLL_MARGIN * 2 });
+  const centred = centredPageScroll(frame.width, frame.height, 1, 1200, 800);
+  expect(centred).toEqual({ left: SCROLL_MARGIN + frame.width / 2 - 600, top: SCROLL_MARGIN + frame.height / 2 - 400 });
+  expect(viewportCentreKey({ pages: [{ id: 'p1' }] } as never, 0)).toBe('p1');
+  expect(viewportCentreKey(null, 2)).toBe('index:2');
+});
+
+test('a pointer-anchored zoom keeps the page point under the cursor', () => {
+  for (const [oldZoom, newZoom] of [[1, 1.5], [1.5, 1], [1, 0.5], [0.5, 1], [1, 4], [4, 1]] as const) {
+    const cssX = 192 * oldZoom;
+    const cssY = 192 * oldZoom;
+    const target = anchoredZoomScroll(2000, 2000, cssX, cssY, oldZoom, newZoom);
+    expect((cssX / oldZoom) * newZoom - (target.left - 2000)).toBeCloseTo(cssX, 8);
+    expect((cssY / oldZoom) * newZoom - (target.top - 2000)).toBeCloseTo(cssY, 8);
+  }
+});
+
+test('the zoom anchor clamps to the scrollable range at a surface edge', () => {
+  const surface = surfaceSize(frame.width, frame.height, 1);
+  expect(clampScrollToSurface(-50, 1e9, surface.width, surface.height, 1200, 800)).toEqual({ left: 0, top: surface.height - 800 });
+  expect(clampScrollToSurface(2000, 2000, surface.width, surface.height, 1200, 800)).toEqual({ left: 2000, top: 2000 });
+  expect(clampScrollToSurface(10, 10, 400, 300, 1200, 800)).toEqual({ left: 0, top: 0 });
+});
+
+test('ctrl+wheel steps the zoom multiplicatively in both directions', () => {
+  expect(zoomForWheelDelta(1, -100)).toBeGreaterThan(1);
+  expect(zoomForWheelDelta(1, 100)).toBeLessThan(1);
+  expect(zoomForWheelDelta(1, 0)).toBeCloseTo(1, 10);
+  expect(zoomForWheelDelta(1, -1000)).toBe(4);
+  expect(zoomForWheelDelta(1, 1000)).toBe(0.1);
 });
