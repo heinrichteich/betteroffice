@@ -10,16 +10,18 @@ export function sizeCanvasForPage(canvas: PageCanvasLike, list: Pick<PageDisplay
   canvas.style.width = `${cssWidth}px`; canvas.style.height = `${cssHeight}px`;
   return effective;
 }
-/** Largest canvas side browsers accept, in backing pixels. */
+/** Conservative backing-store side limit. */
 export const MAX_CANVAS_DIMENSION = 8192;
-/** Backing-pixel budget per canvas, 8192x4096, holding one canvas near 128 MiB. */
+/** 128 MiB RGBA budget per canvas. */
 export const MAX_CANVAS_AREA = MAX_CANVAS_DIMENSION * 4096;
-/** Device pixel ratio reduced to keep a canvas within both the side limit and the area budget. */
+/** Clamp DPR to the backing-store budgets. */
 export function effectiveDprForSurface(cssWidth: number, cssHeight: number, dpr: number): number {
   const requested = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
-  if (!(cssWidth > 0) || !(cssHeight > 0)) return Math.min(requested, 1);
+  if (!Number.isFinite(cssWidth) || !Number.isFinite(cssHeight) || cssWidth <= 0 || cssHeight <= 0) {
+    throw new RangeError('Canvas dimensions must be finite and positive');
+  }
   const bySide = Math.min(MAX_CANVAS_DIMENSION / cssWidth, MAX_CANVAS_DIMENSION / cssHeight);
-  return Math.min(requested, bySide, Math.sqrt(MAX_CANVAS_AREA / (cssWidth * cssHeight)));
+  return Math.min(requested, bySide, Math.sqrt(MAX_CANVAS_AREA / cssWidth / cssHeight));
 }
 export interface ModelPoint { x: number; y: number; }
 export function canvasPointToModel(paintTransform: Affine, x: number, y: number, scale = 1): ModelPoint {

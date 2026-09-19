@@ -87,6 +87,15 @@ test('a normal page at zoom 1 keeps its full backing store', () => {
   expect(canvas.style.height).toBe('1056px');
 });
 
+test('canvas sizing refuses invalid dimensions before changing the backing store', () => {
+  for (const width of [0, -1, NaN, Infinity]) {
+    const canvas = { width: 100, height: 200, style: { width: '100px', height: '200px' } };
+    expect(() => sizeCanvasForPage(canvas, { width, height: 200 }, 2)).toThrow(RangeError);
+    expect(canvas.width).toBe(100);
+    expect(canvas.height).toBe(200);
+  }
+});
+
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 768 };
 
 test('canvasPointToModel inverts the page paint transform onto Y-up inches', () => {
