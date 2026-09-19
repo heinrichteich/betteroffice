@@ -116,6 +116,13 @@ jobs:
           node scripts/office-quality/run.mjs
           cat .source/office-quality/ci/section.md >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Measure VSDX engine coverage
+        env:
+          QUALITY_OUTPUT: .source/office-quality/vsdx-coverage
+        run: |
+          node scripts/office-quality/vsdx-survey.mjs
+          cat .source/office-quality/vsdx-coverage/coverage.md >> "$GITHUB_STEP_SUMMARY"
+
       - name: Publish the commit renders
         if: inputs.publish_renders && github.repository == 'openooxml/betteroffice'
         continue-on-error: true
@@ -149,6 +156,8 @@ jobs:
           path: |
             .source/office-quality/ci/report.json
             .source/office-quality/ci/section.md
+            .source/office-quality/vsdx-coverage/coverage.json
+            .source/office-quality/vsdx-coverage/coverage.md
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
