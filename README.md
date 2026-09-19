@@ -74,6 +74,10 @@
 | [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | npm | drop-in React .pptx editor |
 | [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) | PyPI | Python API for reading, editing, saving, and laying out PPTX presentations |
 
+### Diagrams (`.vsdx`, source preview)
+
+VSDX support is available from source and is not yet published. Scroll and pan around a centred page, with Space- or middle-drag panning and Ctrl+wheel zoom anchored under the pointer.
+
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
 [crates.io](https://docs.betteroffice.dev/docs/rust),

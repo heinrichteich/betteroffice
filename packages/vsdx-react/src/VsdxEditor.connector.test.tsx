@@ -92,6 +92,9 @@ test('a reviewer drag from shape A to shape B creates a connector that follows m
     const canvas = document.querySelector('canvas[aria-label]') as HTMLCanvasElement;
     expect(canvas).not.toBeNull();
     for (const scale of [1, 1.5, 0.5]) {
+      await act(async () => { fireEvent.click(view.getByLabelText('Reset zoom to 100%')); });
+      if (scale > 1) await act(async () => { fireEvent.click(view.getByLabelText('Zoom in')); });
+      if (scale < 1) { await act(async () => { fireEvent.click(view.getByLabelText('Zoom out')); }); await act(async () => { fireEvent.click(view.getByLabelText('Zoom out')); }); }
       const frame = ready!.handle.layoutPage(0);
       stubCanvasRect(canvas, frame.width * scale, frame.height * scale);
       const from = centreOf(ready!.handle, fromId);

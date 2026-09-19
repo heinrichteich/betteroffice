@@ -2,7 +2,7 @@
 
 > BetterOffice is an Apache-2.0 office suite from the OpenOOXML project: Word-faithful DOCX, Excel-faithful XLSX, and PowerPoint-faithful PPTX editors and viewers. The OOXML engines are written in Rust, in-house, and ship three ways — compiled to WebAssembly for the browser packages, published to crates.io as native crates for servers, and compiled into Python wheels on PyPI. Files are edited in their own format, with no conversion to an intermediate model on open or save. Real-time collaboration is a Yrs CRDT inside the engine rather than a server-side merge, and every engine also runs headless for server-side and agent pipelines.
 
-DOCX, XLSX, and PPTX are available today as full editors or read-only viewers.
+DOCX, XLSX, and PPTX are available today as full editors or read-only viewers. VSDX diagram editing is available from source and not yet published: its React editor scrolls and pans around a work surface with the page centred, with Space- or middle-drag panning and Ctrl+wheel zoom anchored under the pointer.
 
 For current versions, use the linked registries and [release notes](https://github.com/openooxml/betteroffice/releases). Versions differ by format and registry; package changelogs record shipped changes.
 
