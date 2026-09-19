@@ -418,6 +418,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-vsdx-survey"
+version = "0.2.0"
+dependencies = [
+ "betteroffice-vsdx",
+ "betteroffice-vsdx-eval",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-render",
+ "betteroffice-vsdx-resolve",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "betteroffice-vsdx-validate"
 version = "0.2.0"
 dependencies = [
