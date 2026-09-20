@@ -3,7 +3,6 @@ import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { selectSamples } from './samples.mjs';
 import { summarizeError } from './results.mjs';
 
 export const COVERAGE_SCHEMA_VERSION = 1;
@@ -35,16 +34,11 @@ export async function listCorpusDirFixtures(directory) {
     .map((name) => ({ name: name.slice(0, -5), path: resolve(directory, name) }));
 }
 
-export async function collectSurveyInputs(environment = process.env, download) {
+export async function collectSurveyInputs(environment = process.env) {
   const corpusDir = environment.VSDX_CORPUS_DIR?.trim() || environment.VSDX_EXPLORE_DIR?.trim();
   if (corpusDir) return listCorpusDirFixtures(corpusDir);
   if (environment.VSDX_SURVEY_DIR?.trim())
     return listCorpusDirFixtures(resolve(environment.VSDX_SURVEY_DIR.trim()));
-  if (environment.QUALITY_SAMPLES?.trim() || environment.QUALITY_COLLECTION?.trim()) {
-    if (!download) throw new Error('A corpus download function is required');
-    const ids = await selectSamples(environment, download);
-    return ids.map((id) => ({ name: id, corpus: id }));
-  }
   return listSyntheticFixtures();
 }
 
@@ -153,35 +147,20 @@ export async function measureCoverage(inputs, survey = surveyWithBinary, log = (
 
 export async function runCoverage({
   environment = process.env,
-  download,
   survey,
   outputDir,
   log = console.log,
 } = {}) {
-  const inputs = await collectSurveyInputs(environment, download);
+  const inputs = await collectSurveyInputs(environment);
   const commit = (
     await execute('git', ['log', '-1', '--format=%H'], { cwd: root })
   ).stdout.trim();
-  const files = await measureCoverage(
-    inputs.filter((input) => input.path),
-    survey,
-    log
-  );
-  const failures = [];
-  for (const input of inputs.filter((input) => !input.path)) failures.push(input);
+  const files = await measureCoverage(inputs, survey, log);
   const report = {
     schema_version: COVERAGE_SCHEMA_VERSION,
     commit,
     totals_note: 'Engine coverage only; visual fidelity needs Visio references.',
-    files: [
-      ...files,
-      ...failures.map((input) => ({
-        file: input.name,
-        name: input.name,
-        status: 'failed',
-        error: 'Corpus VSDX download is not wired into this run',
-      })),
-    ],
+    files,
   };
   const directory = resolve(outputDir ?? environment.QUALITY_OUTPUT ?? join(root, '.source', 'office-quality', 'vsdx-coverage'));
   await mkdir(directory, { recursive: true });
@@ -191,6 +170,5 @@ export async function runCoverage({
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const { download } = await import('./download.mjs').catch(() => ({}));
-  await runCoverage({ download: download?.download });
+  await runCoverage();
 }

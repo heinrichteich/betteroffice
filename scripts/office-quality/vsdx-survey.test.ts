@@ -33,14 +33,9 @@ test('synthetic fixtures run with an empty environment', async () => {
   expect(inputs.every((input) => input.path?.endsWith('.vsdx'))).toBe(true);
 });
 
-test('corpus selection reuses the shared sample selector', async () => {
-  const inputs = await collectSurveyInputs(
-    { QUALITY_SAMPLES: '["demo-vsdx"]' },
-    async () => {
-      throw new Error('Unexpected download');
-    }
-  );
-  expect(inputs).toEqual([{ name: 'demo-vsdx', corpus: 'demo-vsdx' }]);
+test('a shared-corpus selection is ignored, since the survey reads local files only', async () => {
+  const inputs = await collectSurveyInputs({ QUALITY_SAMPLES: '["demo-vsdx"]' });
+  expect(inputs.every((input) => typeof input.path === 'string')).toBe(true);
 });
 
 test('totals use the complete histogram before truncating the view', () => {
