@@ -65,3 +65,23 @@ test('a refusal is announced as an alert and names the rows', () => {
     expect(alert.textContent).toContain('Nothing was written');
   } finally { cleanup(); }
 });
+
+test('an empty bind says nothing was written rather than reporting success', () => {
+  const outcome: BindOutcome = { receipts: [], refusals: [], applied: false };
+  const view = render(<DataBindingPanel table={table} shape={shape} onImport={() => {}} onBind={() => outcome} t={t} />);
+  try {
+    fireEvent.click(view.getAllByText(en.dataBinding.bind)[0]);
+    expect(view.getByRole('status').textContent).toBe(en.dataBinding.nothingToBind);
+  } finally { cleanup(); }
+});
+
+test('the bind result does not follow the user to another shape', () => {
+  const outcome: BindOutcome = { receipts: [{ pageId: 'p', shapeId: 's', rowName: 'Device', rowIndex: null, sectionIndex: null, before: null, after: '"Mixer"', refusal: null }], refusals: [], applied: true };
+  const view = render(<DataBindingPanel table={table} shape={shape} onImport={() => {}} onBind={() => outcome} t={t} />);
+  try {
+    fireEvent.click(view.getAllByText(en.dataBinding.bind)[0]);
+    expect(view.queryByRole('status')).not.toBeNull();
+    view.rerender(<DataBindingPanel table={table} shape={{ ...shape, id: 'other' }} onImport={() => {}} onBind={() => outcome} t={t} />);
+    expect(view.queryByRole('status')).toBeNull();
+  } finally { cleanup(); }
+});

@@ -26,17 +26,23 @@ export interface BindOutcome {
  */
 export function matchColumnsToRows(table: ImportedTable, shape: ShapeSnapshot | null): ColumnBinding[] {
   const rows = shapeDataRows(shape);
-  const byLabel = new Map<string, string>();
+  // null marks a name two rows answer to: binding it would silently pick one of them.
+  const byLabel = new Map<string, string | null>();
+  const claim = (key: string, rowName: string) => {
+    const held = byLabel.get(key);
+    if (held === undefined) byLabel.set(key, rowName);
+    else if (held !== rowName) byLabel.set(key, null);
+  };
   for (const row of rows) {
     if (row.rowName === null || !isShapeDataValueEditable(row)) continue;
-    byLabel.set(normalize(row.label), row.rowName);
-    byLabel.set(normalize(row.rowName), row.rowName);
+    claim(normalize(row.label), row.rowName);
+    claim(normalize(row.rowName), row.rowName);
   }
   const bindings: ColumnBinding[] = [];
   const used = new Set<string>();
   table.headers.forEach((header, column) => {
     const rowName = byLabel.get(normalize(header));
-    if (rowName === undefined || used.has(rowName)) return;
+    if (rowName === undefined || rowName === null || used.has(rowName)) return;
     used.add(rowName);
     bindings.push({ column, rowName });
   });

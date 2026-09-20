@@ -41,6 +41,17 @@ test('columns match shape-data rows by label or row name, case and spacing aside
   } finally { handle.dispose(); }
 });
 
+test('a header two rows answer to binds nothing, rather than picking one of them', () => {
+  const handle = vsdx.openDiagram(fixture);
+  try {
+    const ambiguous = handle.snapshot().pages[0].shapes[1];
+    // 'Owner' and 'owner ' are two distinct rows with the same normalized label.
+    expect(matchColumnsToRows({ headers: ['Owner'], rows: [] }, ambiguous)).toEqual([]);
+    // An unambiguous header on the same shape still binds.
+    expect(matchColumnsToRows({ headers: ['Site'], rows: [] }, ambiguous)).toEqual([{ column: 0, rowName: 'Site' }]);
+  } finally { handle.dispose(); }
+});
+
 test('a row the engine would refuse is never offered as a binding', () => {
   const { handle } = open();
   try {

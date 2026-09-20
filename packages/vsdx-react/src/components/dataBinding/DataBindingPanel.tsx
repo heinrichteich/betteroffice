@@ -1,6 +1,6 @@
 import type { ShapeSnapshot } from '@betteroffice/vsdx';
 import type { TFunction } from '@betteroffice/vsdx-i18n';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { matchColumnsToRows, type BindOutcome, type ImportedTable } from './bindTable';
 
@@ -29,6 +29,7 @@ const styles: Record<string, CSSProperties> = {
 export function DataBindingPanel({ table, shape, onImport, onBind, t, className }: DataBindingPanelProps) {
   const [status, setStatus] = useState<{ text: string; refused: boolean } | null>(null);
   const bindings = useMemo(() => (table ? matchColumnsToRows(table, shape) : []), [table, shape]);
+  useEffect(() => { setStatus(null); }, [table, shape]);
 
   const bind = (rowIndex: number) => {
     const outcome = onBind(rowIndex);
@@ -36,6 +37,10 @@ export function DataBindingPanel({ table, shape, onImport, onBind, t, className 
     if (outcome.refusals.length > 0) {
       const rows = outcome.refusals.map((receipt) => receipt.rowName ?? String(receipt.rowIndex ?? '')).join(', ');
       setStatus({ text: t('dataBinding.refused', { rows }), refused: true });
+      return;
+    }
+    if (!outcome.applied) {
+      setStatus({ text: t('dataBinding.nothingToBind'), refused: false });
       return;
     }
     setStatus({ text: t('dataBinding.bound', { count: outcome.receipts.length }), refused: false });
