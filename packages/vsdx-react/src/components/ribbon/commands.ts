@@ -30,6 +30,7 @@ export interface RibbonCommandsProviderProps {
   onError: (error: unknown) => void;
   onDownload: (bytes: Uint8Array) => void;
   pageBreaks?: PageBreakToggle;
+  probes?: ReadonlyMap<string, ShapeWriteProbes>;
   children: ReactNode;
 }
 
@@ -146,7 +147,7 @@ export function lockCellEnabled(shape: ShapeSnapshot | null, name: string): bool
   return Number(cellValue(shape, name)) === 1;
 }
 
-/** The engine's verdict per cell for one shape, keyed by the cell it was asked about. */
+/** The engine's verdict per cell for one shape. */
 export type ShapeWriteProbes = ReadonlyMap<string, CellWriteProbe>;
 
 /** What the editor gates a control on, probed together per shape. */
@@ -313,6 +314,7 @@ export function createRibbonCommands(
   onClipboardChange: (next: VsdxClipboardEntry | null) => void = () => {},
   onSelectShape: (selection: VsdxShapeSelection) => void = () => {},
   pageBreaks?: PageBreakToggle,
+  probes: ReadonlyMap<string, ShapeWriteProbes> = selectionWriteProbes(handle, selection),
 ): RibbonCommands {
   const execute = (operation: (current: DiagramHandle, selected: readonly VsdxShapeSelection[]) => void, needsSelection = false) => () => {
     if (!handle || (needsSelection && selection.length === 0)) return;
@@ -324,7 +326,6 @@ export function createRibbonCommands(
   const single = placements.length === 1 ? placements[0] : null;
   const shape = first?.placement.shape ?? null;
   const selected = placements.length > 0;
-  const probes = selectionWriteProbes(handle, selection);
   const probesFor = (entry: { selection: VsdxShapeSelection }) => probes.get(probeKey(entry.selection.pageId, entry.selection.shapeId)) ?? null;
   const activePage = first ? pages.find((page) => page.id === first.selection.pageId) ?? null : null;
   const swatch = frameSwatch(frame, activePage, shape);
@@ -446,8 +447,8 @@ export function createRibbonCommands(
   return commands;
 }
 
-export function RibbonCommandsProvider({ handle, snapshot, pageId, selection, frame, clipboard = null, onClipboardChange = () => {}, onSelectShape = () => {}, onMutation, onError, onDownload, pageBreaks, children }: RibbonCommandsProviderProps) {
-  const commands = useMemo(() => createRibbonCommands(handle, selection, pageId, onMutation, onError, onDownload, frame, clipboard, onClipboardChange, onSelectShape, pageBreaks), [handle, snapshot, pageId, selection, frame, clipboard, onClipboardChange, onSelectShape, onMutation, onError, onDownload, pageBreaks]);
+export function RibbonCommandsProvider({ handle, snapshot, pageId, selection, frame, clipboard = null, onClipboardChange = () => {}, onSelectShape = () => {}, onMutation, onError, onDownload, pageBreaks, probes, children }: RibbonCommandsProviderProps) {
+  const commands = useMemo(() => createRibbonCommands(handle, selection, pageId, onMutation, onError, onDownload, frame, clipboard, onClipboardChange, onSelectShape, pageBreaks, probes), [handle, snapshot, pageId, selection, frame, clipboard, onClipboardChange, onSelectShape, onMutation, onError, onDownload, pageBreaks, probes]);
   return createElement(RibbonCommandsContext.Provider, { value: commands }, children);
 }
 

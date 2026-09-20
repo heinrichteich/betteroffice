@@ -1671,11 +1671,7 @@ impl DiagramSession {
         Ok(receipts)
     }
 
-    /// Asks the mutation policy what a write to each locator would do, writing nothing.
-    ///
-    /// The refusal decision never reads the incoming formula, so the probe can answer
-    /// before the UI has one. This is the authority on whether a control should be
-    /// offered at all; re-deriving it in a client drifts from the engine.
+    /// What the mutation policy would do with a write to each locator, writing nothing.
     pub fn probe_cell_writes(
         &self,
         page_id: &str,
