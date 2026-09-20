@@ -85,3 +85,15 @@ test('the bind result does not follow the user to another shape', () => {
     expect(view.queryByRole('status')).toBeNull();
   } finally { cleanup(); }
 });
+
+test('the bind result survives the refresh the bind itself causes', () => {
+  const outcome: BindOutcome = { receipts: [{ pageId: 'p', shapeId: 's', rowName: 'Device', rowIndex: null, sectionIndex: null, before: null, after: '"Mixer"', refusal: null }], refusals: [], applied: true };
+  const view = render(<DataBindingPanel table={table} shape={shape} onImport={() => {}} onBind={() => outcome} t={t} />);
+  try {
+    fireEvent.click(view.getAllByText(en.dataBinding.bind)[0]);
+    expect(view.getByRole('status').textContent).toBe('Bound 1 rows.');
+    // A refresh hands back a fresh object for the same shape; the message must stay.
+    view.rerender(<DataBindingPanel table={table} shape={{ ...shape }} onImport={() => {}} onBind={() => outcome} t={t} />);
+    expect(view.getByRole('status').textContent).toBe('Bound 1 rows.');
+  } finally { cleanup(); }
+});

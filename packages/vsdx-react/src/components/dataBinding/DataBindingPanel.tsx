@@ -29,7 +29,7 @@ const styles: Record<string, CSSProperties> = {
 export function DataBindingPanel({ table, shape, onImport, onBind, t, className }: DataBindingPanelProps) {
   const [status, setStatus] = useState<{ text: string; refused: boolean } | null>(null);
   const bindings = useMemo(() => (table ? matchColumnsToRows(table, shape) : []), [table, shape]);
-  useEffect(() => { setStatus(null); }, [table, shape]);
+  useEffect(() => { setStatus(null); }, [table, shape?.id]);
 
   const bind = (rowIndex: number) => {
     const outcome = onBind(rowIndex);
